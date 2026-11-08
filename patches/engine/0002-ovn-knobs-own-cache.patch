@@ -1,32 +1,16 @@
-From 32989e34f5802d88fae21121adc3fb3b83276914 Mon Sep 17 00:00:00 2001
-From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
-Date: Fri, 30 Oct 2026 02:53:08 +0000
-Subject: [PATCH] cuda: ovn knobs each keep their own cache (the first read
- answered for all)
-
-The cache struct inside text(comptime name) captured nothing, so every
-knob shared one type and one pair of statics: the first knob read
-decided the value of every other knob. Each knob now has its own cache
-type (it captures its key). The new test fails on the old helper.
-Every TF_GLM_OVN arm measured on ovn1 and ovn2 is void.
----
- zig/src/cuda/ovn.zig | 31 ++++++++++++++++++++++---------
- 1 file changed, 22 insertions(+), 9 deletions(-)
-
 diff --git a/zig/src/cuda/ovn.zig b/zig/src/cuda/ovn.zig
-index 2ccf70c98..9c7d902dd 100644
+index 7b2896777..762497f51 100644
 --- a/zig/src/cuda/ovn.zig
 +++ b/zig/src/cuda/ovn.zig
-@@ -2,20 +2,23 @@
- //! Every rank runs with the same environment, so every rank sees the same value.
+@@ -1,20 +1,22 @@
+ //! Speed-hunt knobs (`TF_GLM_OVN_<NAME>`): environment-read once a process, default off, same on every rank.
  const std = @import("std");
  
 -fn raw(comptime name: []const u8) ?[]const u8 {
 -    const v = std.c.getenv("TF_GLM_OVN_" ++ name) orelse return null;
 -    const s = std.mem.span(v);
 -    return if (s.len == 0) null else s;
-+/// One knob's cache: `key` captures `name`, so every knob gets its own type and its own statics (a struct that
-+/// captured nothing would be one type for every name, and the first knob read would answer for all of them).
++/// One knob's cache: `key` captures `name`, giving every knob its own type and statics.
 +fn Cache(comptime name: []const u8) type {
 +    return struct {
 +        const key = "TF_GLM_OVN_" ++ name;
@@ -50,7 +34,7 @@ index 2ccf70c98..9c7d902dd 100644
          S.read = true;
      }
      return S.value;
-@@ -37,3 +40,13 @@ test "ovn: an unset knob is off and takes its default" {
+@@ -36,3 +38,13 @@ test "ovn: an unset knob is off and takes its default" {
      try std.testing.expect(!on("NO_SUCH_KNOB_FOR_TESTS"));
      try std.testing.expectEqual(@as(u64, 7), try int("NO_SUCH_KNOB_FOR_TESTS", 7));
  }
@@ -64,6 +48,3 @@ index 2ccf70c98..9c7d902dd 100644
 +    try std.testing.expect(!on("TEST_B"));
 +    try std.testing.expect(on("TEST_A"));
 +}
--- 
-2.52.0.windows.1
-

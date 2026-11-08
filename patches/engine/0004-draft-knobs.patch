@@ -32,42 +32,8 @@ index df1d1ff2b..9743f16d1 100644
 +// Tile 2 with fp32 out: the GLM drafter's 4-bit down K slices (TF_GLM_OVN_DRAFT_DOWN4 with a split MLP), gathered.
 +template __global__ void tf_qmm_group::group_kernel<64, 16, 64, 1, 4, 8, true, false, false, false>(
 +    const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
-diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
-index 72041dca4..f09db0018 100644
---- a/zig/src/families/glm/cuda.zig
-+++ b/zig/src/families/glm/cuda.zig
-@@ -95,6 +95,7 @@ test {
-     _ = @import("cuda_mtp_chance.zig");
-     _ = @import("cuda_tile.zig");
-     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them
-+    _ = @import("dflash_ovn.zig");
- }
- 
- pub const dflash = @import("dflash.zig");
-diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index 1290beb98..cb6f8fa03 100644
---- a/zig/src/families/glm/cuda_engine.zig
-+++ b/zig/src/families/glm/cuda_engine.zig
-@@ -344,7 +344,7 @@ pub const Engine = struct {
-         const r = from orelse return 0;
-         if (r.at == 0 or r.at >= len or r.at % fw.prefill_rows != 0) return error.BadResume;
-         try e.restoreState(r.id);
--        if (e.drafter) |dr| try dr.restart(e.slot, r.at); // the rows before it were never tapped
-+        if (e.drafter) |dr| try snapshots.resumeDrafter(e, dr, r); // KEEPWIN's kept window, else a fresh start at r.at
-         return r.at;
-     }
- 
-@@ -470,7 +470,7 @@ pub const Engine = struct {
-     /// DFlash2's round (every rank, the same `reqs`): each stream's kept rows into its context, then the block pass.
-     pub fn draftBlock(e: *Engine, reqs: []dflash.Req) !void {
-         const dr = e.drafter orelse return error.NoDrafter;
--        for (reqs) |*q| q.pos = @intCast((e.seqs.items[q.slot] orelse return error.UnknownSlot).st.pos);
-+        for (reqs) |*q| q.* = dflash.located(q.*, e.seqs.items[q.slot] orelse return error.UnknownSlot);
-         try dr.draft(e, reqs);
-     }
- 
 diff --git a/zig/src/families/glm/cuda_engine_types.zig b/zig/src/families/glm/cuda_engine_types.zig
-index 125a6ee1e..0a7db0586 100644
+index 125a6ee1e..44995357d 100644
 --- a/zig/src/families/glm/cuda_engine_types.zig
 +++ b/zig/src/families/glm/cuda_engine_types.zig
 @@ -21,7 +21,7 @@ pub const Seq = struct {
@@ -79,434 +45,29 @@ index 125a6ee1e..0a7db0586 100644
  
  /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a multiple of the chunk rows.
  pub const Resume = struct { id: u64, at: usize };
-@@ -31,7 +31,8 @@ pub const Marks = struct {
-     at: []const u32,
+@@ -32,6 +32,8 @@ pub const Marks = struct {
      ctx: *anyopaque,
      call: *const fn (ctx: *anyopaque, at: u32) void,
--    interrupted: ?*const fn (ctx: *anyopaque, at: u32) void = null,
-+    interrupted: ?*const fn (ctx: *anyopaque, at: u32) void = null,    win_from: ?i64 = null, // KEEPWIN: the drafter ring's first row this state carries
+     interrupted: ?*const fn (ctx: *anyopaque, at: u32) void = null,
++    win_from: ?i64 = null, // KEEPWIN: the drafter ring's first row this state carries
 +
  };
  
  const ranks = @import("cuda_ranks.zig");
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
-index 66e67ee90..53b4ba431 100644
+index 66e67ee90..a180752c9 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
-@@ -1,4 +1,5 @@
- //! GLM-5.3-Flash's CUDA lane backend (as nemotron/cuda_lanes.zig): a slot per stream, shared verify, chunked prompts.
-+
- const std = @import("std");
- const lanes = @import("lanes");
- const engine = @import("cuda_engine.zig");
-@@ -6,33 +7,44 @@ const follow = @import("cuda_follow.zig");
- const fw = @import("cuda_forward.zig");
- const dflash = @import("dflash.zig");
- const prompt_lp = @import("cuda_prompt_logprobs.zig");
--const share_mod = @import("cuda_share.zig");
- const cuda = @import("cuda");
-+
- const be = lanes.backend;
-+
- /// First tokens a handle names.
- const ring = 1024;
-+
- /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
- pub const max_rows = fw.window_rows;
- const mtp_rows = 1 + engine.max_drafts;
- const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
--const copy_policy = @import("cuda_copy_policy.zig");
-+
-+/// With DFlash2: a window's ms by rows on two GB10s (EXL3, TF_GLM_PROF: 86 to 107 ms at 5 to 8), shared as glm_cuda's.
-+const gb10_window_costs = costTable(max_rows, 52.0, 6.8);
-+const gb10_shared_costs = costTable(engine.shared_rows, 76.0, 4.1);
-+
-+fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.config.Cost {
-+    var c: [n]lanes.config.Cost = undefined;
-+    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
-+    return c;
-+}
-+
- /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
- const Lane = struct {
-     slot: u32,
-     pending_rows: ?usize = null,
-     held: [max_held]u32 = undefined,
--    chances: [max_held]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
-+    chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
-     held_n: usize = 0,
-     first: ?u64 = null,
-     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
--    marks: []const u32 = &.{}, // TF_KV_SHARE: where the shared prompt store keeps this stream's pass (owned)
- };
-+
- pub const Lanes = struct {
-     x: follow.Leader,
-     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
-+    together: bool = true, // stepped: short prompts admitted in one pass (TF_GLM_PROMPT_MANY=0: one a round)
-     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
--    mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
--    copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
-     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
-     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
-     drawn: [ring]u32 = undefined,
-@@ -42,8 +54,6 @@ pub const Lanes = struct {
- 
-     pub fn deinit(self: *Lanes) void {
-         if (self.bits) |*b| b.free();
--        var it = self.lanes.valueIterator();
--        while (it.next()) |l| self.x.e.gpa.free(l.marks);
-         self.lanes.deinit(self.x.e.gpa);
-     }
- 
-@@ -63,7 +73,7 @@ pub const Lanes = struct {
-     }
- 
-     pub fn backend(self: *Lanes) be.Backend {
--        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else &steps_vt };
-+        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else if (self.together) &steps_many_vt else &steps_vt };
-     }
- 
-     const whole_vt: be.Backend.VTable = .{
-@@ -76,7 +86,6 @@ pub const Lanes = struct {
-         .keep = keepFn,
-         .draft = draftFn,
-         .probabilities = chancesFn,
--        .tree = copy_policy.held,
-         .release = releaseFn,
-         .first_masked = firstMaskedFn,
-         .held = heldFn,
-@@ -90,6 +99,12 @@ pub const Lanes = struct {
-         v.many_rows = 0;
-         break :vt v;
-     };
-+    const steps_many_vt: be.Backend.VTable = vt: { // long, image and resumed prompts still fill by steps (open.batchable)
-+        var v = steps_vt;
-+        v.prefill_many = prefillManyFn;
-+        v.many_rows = @intCast(engine.prompt_rows);
-+        break :vt v;
-+    };
- 
-     /// Round loop facts: copies up to max_rows, head chains to mtp_rows, shared windows unless TF_GLM_SHARED=0.
-     pub fn facts(self: *const Lanes) lanes.Model {
-@@ -97,7 +112,6 @@ pub const Lanes = struct {
-         const block = self.x.e.drafter != null;
-         const sharing = drafting and !self.alone;
-         return .{
--            .allocate_shared_drafts = drafting,
-             .exact_width = if (drafting) max_rows else 1,
-             .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
-             .gpu_tokens = false,
-@@ -107,22 +121,15 @@ pub const Lanes = struct {
-             .drafts = if (block) max_held else engine.max_drafts,
-             .draft_streams = block, // one block pass drafts every stream of the round
-             .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
--            .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
--            .draft_confidence = if (block) null else self.mtp_confidence,
--            .window_costs = if (block) &copy_policy.window_costs else &.{},
--            .shared_costs = if (block) &copy_policy.shared_costs else &.{},
-+            .draft_probabilities = block, // the selector's chances size each window against the costs below
-+            .window_costs = if (block) &gb10_window_costs else &.{},
-+            .shared_costs = if (block) &gb10_shared_costs else &.{},
-             .hidden_rows = sharing,
-             .batch_rows = if (sharing) engine.shared_rows else 0,
-             .max_streams = if (sharing) engine.max_shared else 1,
-         };
-     }
- 
--    /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
--    pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
--        self.copy_confidence = enabled and self.x.e.mtp;
--        return copy_policy.apply(self.facts(), enabled);
--    }
--
-     fn of(ptr: *anyopaque) *Lanes {
-         return @ptrCast(@alignCast(ptr));
-     }
-@@ -174,6 +181,13 @@ pub const Lanes = struct {
-         return l;
-     }
- 
-+    /// Whether a stream besides `s` is past its prompt pass: a paired prompt step would hold up its rounds.
-+    pub fn othersDecode(self: *const Lanes, s: *const lanes.Stream) bool {
-+        var it = self.lanes.iterator();
-+        while (it.next()) |kv| if (kv.key_ptr.* != s and kv.value_ptr.fill == null) return true;
-+        return false;
-+    }
-+
-     fn cancelled(ptr: ?*anyopaque) bool {
-         return @as(*lanes.Stream, @ptrCast(@alignCast(ptr.?))).isCancelled();
-     }
-@@ -188,14 +202,13 @@ pub const Lanes = struct {
-         try sink.prepare();
-         self.x.e.prompt_logprobs = sink.want();
-         defer self.x.e.prompt_logprobs = null;
--        var keeps: share_mod.Keeps = undefined;
--        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
-+        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
-         self.lanes.getPtr(s).?.first = self.take(first);
-     }
- 
-     fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
-         const self = of(ptr);
--        if (!self.x.e.m.tiled or ss.len > engine.max_together or share_mod.of(self.x.e) != null) return false; // the store keeps a pass alone
-+        if (!self.x.e.m.tiled or ss.len > engine.max_together) return false;
-         for (ss) |s| if (!canBatch(s)) return false;
-         var opened: usize = 0;
-         errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
-@@ -218,17 +231,14 @@ pub const Lanes = struct {
-         return true;
-     }
- 
--    pub fn many(self: anytype, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
-+    fn many(self: *Lanes, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
-         try self.x.prefillMany(parts, firsts);
--        for (ss) |s| lanes.prefill_widths.completed(self.x.e.gpa, s, s.prompt_len);
-         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
-     }
- 
-     /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
--    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
--        return prefillStep(of(ptr), s);
--    }
--    pub fn prefillStep(self: anytype, s: *lanes.Stream) !bool {
-+    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
-+        const self = of(ptr);
-         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
-         const from = if (going == null) try self.opening(s) else null;
-         if (going == null) try self.images(s, from);
-@@ -240,19 +250,14 @@ pub const Lanes = struct {
-         try sink.prepare();
-         self.x.e.prompt_logprobs = sink.want();
-         defer self.x.e.prompt_logprobs = null;
--        var keeps: share_mod.Keeps = undefined;
--        const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
-+        const step = try self.x.chunk(s.prompt(), at, !self.othersDecode(s), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
-         if (step.first) |first| {
--            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
-             l.first = self.take(first);
-             l.fill = null;
-             return true;
-         }
--        l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
--        if (s.settle_step) { // its tail would land in the next decode round's time
--            try self.x.e.stream.synchronize();
--            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
--        }
-+        l.fill = at + step.rows;
-+        if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
-         return false;
-     }
- 
-@@ -262,8 +267,7 @@ pub const Lanes = struct {
-         const at = l.fill orelse return;
-         if (at <= s.cached or s.reuse.hook == null) return;
-         try self.x.bind(l.slot);
--        var keeps: share_mod.Keeps = undefined;
--        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, self.marksOf(s, &keeps)) catch |err| {
-+        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, marksOf(s)) catch |err| {
-             if (err == error.Cancelled) return;
-             return err;
-         };
-@@ -278,47 +282,21 @@ pub const Lanes = struct {
-     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
-         const ids = s.prompt();
-         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
--        const gpa = self.x.e.gpa;
--        const share = self.cached(s);
--        var owner: share_mod.Owner = .{};
--        var adopt: std.ArrayList(u32) = .empty;
--        defer adopt.deinit(gpa);
--        // TF_KV_SHARE: the deepest kept state's pages, held for this call until the seat takes them
--        const marks: []const u32 = if (share) (try share_mod.begin(self.x.e, s, &owner, &adopt)).marks else &.{};
--        var held = true;
--        errdefer if (held) gpa.free(marks);
--        const pages = try self.seat(s, ids.len, s.max_new, adopt.items);
-+        const pages = try self.seat(s, ids.len, s.max_new);
-         errdefer {
-             self.x.e.release(self.lanes.get(s).?.slot);
-             _ = self.lanes.remove(s);
-         }
-         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
--        try self.x.beginOn(s.sampling, pages, adopt.items.len);
-+        try self.x.beginOn(s.sampling, pages);
-         s.cached = 0;
-         s.prompt_rows.clearRetainingCapacity();
--        const l = self.lanes.getPtr(s).?;
--        gpa.free(l.marks);
--        l.marks = marks;
--        held = false;
--        if (share) {
--            const k = owner.pending orelse return null;
--            s.cached = k.at;
--            return .{ .id = k.id, .at = k.at };
--        }
-         return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
-     }
- 
--    /// Whether the shared prompt store keeps this content-keyed pass, with no prompt logprob rows asked.
--    fn cached(self: *const Lanes, s: *const lanes.Stream) bool {
--        return share_mod.of(self.x.e) != null and share_mod.cacheable(s);
--    }
--
--    /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
--    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
--        const l = self.claim(s) catch |err| {
--            if (self.x.e.pages) |p| p.give(adopted);
--            return err;
--        };
-+    /// The stream's slot, its pages, then its sequence: a slot past the paged ones waits before binding makes a window.
-+    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize) ![]const u32 {
-+        const l = try self.claim(s);
-         l.pending_rows = null;
-         l.held_n = 0;
-         l.fill = null;
-@@ -327,20 +305,17 @@ pub const Lanes = struct {
-             if (self.x.e.pages) |p| p.close(l.slot);
-             _ = self.lanes.remove(s);
-         }
--        const pages = try self.pagesFor(l.slot, prompt, max_new, adopted);
-+        const pages = try self.pagesFor(l.slot, prompt, max_new);
-         try self.x.bind(l.slot);
-         return pages;
-     }
- 
-     /// A slot's pages for a prompt and its reply (none without a pool); LaneMemory: the pool lacks them now.
--    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
-+    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize) ![]const u32 {
-         const p = self.x.e.pages orelse return &.{};
--        if (!p.paged(slot)) { // every paged sequence is taken
--            p.give(adopted);
--            return error.LaneMemory;
--        }
-+        if (!p.paged(slot)) return error.LaneMemory; // every paged sequence is taken
-         p.close(slot); // a stream that opens again gives its earlier pages back first
--        return p.openWith(slot, prompt, max_new, adopted);
-+        return p.open(slot, prompt, max_new);
-     }
- 
-     /// The lane host's admission: with a pool, a paged sequence and the request's pages are free.
-@@ -358,11 +333,7 @@ pub const Lanes = struct {
-     }
-     const Sink = @import("cuda_prompt_sink.zig").Sink;
- 
--    fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *share_mod.Keeps) ?engine.Marks {
--        if (self.cached(s)) {
--            const l = self.lanes.getPtr(s) orelse return null;
--            return share_mod.marks(self.x.e, l.slot, s, l.marks, keeps);
--        }
-+    fn marksOf(s: *lanes.Stream) ?engine.Marks {
-         return if (s.reuse.hook == null) null else .{
-             .at = s.reuse.marks,
-             .ctx = s,
-@@ -371,13 +342,13 @@ pub const Lanes = struct {
-         };
-     }
- 
--    /// The stream's kept state, where its prompt pass starts (null: none, off the chunk grid, or no longer held).
-+    /// The stream's kept state, where its prompt pass starts (null: none, not this prompt's prefix, or no longer held).
-     fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
-         const saved = s.reuse.saved orelse return null;
-         const k: *const engine.Kept = @ptrCast(@alignCast(saved));
--        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or k.at % fw.prefill_rows != 0 or !self.x.e.holds(k.id)) {
-+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or !self.x.e.holds(k.id)) {
-             s.reuse_failed = true;
--            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or k.at % fw.prefill_rows != 0) error.SnapshotOutOfStep else error.SnapshotStale;
-+            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at) error.SnapshotOutOfStep else error.SnapshotStale;
-             return null;
-         }
-         s.cached = k.at;
-@@ -437,6 +408,12 @@ pub const Lanes = struct {
-     /// Each window in its own forward on its stream's sequence (the core sends one when no forward is shared).
-     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
-         const self = of(ptr);
-+        // TF_GLM_LANES_LOG: how many streams' windows actually arrive in one call (the batching question)
-+        if (std.c.getenv("TF_GLM_LANES_LOG") != null) {
-+            var rows: usize = 0;
-+            for (windows) |w| rows += w.rows();
-+            std.log.info("glm lanes: {d} window(s), {d} row(s) in one verify", .{ windows.len, rows });
-+        }
-         if (windows.len > 1) return self.verifyShared(windows, out);
-         for (windows, out) |w, *o| {
-             if (w.parents != null) return error.TreesNotBuilt;
-@@ -517,13 +494,12 @@ pub const Lanes = struct {
-             if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
-             if (r.lanes != null) return error.TreesNotBuilt;
-             const depth = @min(r.depth, engine.max_drafts);
--            const chances: ?[]f64 = if (self.mtp_confidence != null) l.chances[0..depth] else null;
-             if (r.rows) |rows| {
-                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
--                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held, chances);
-+                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held);
-             } else {
-                 const first = self.value(r.first orelse return error.NoFirstToken);
--                try self.x.draft(true, &.{first}, depth, &l.held, chances);
-+                try self.x.draft(true, &.{first}, depth, &l.held);
-             }
-             l.held_n = depth;
-         }
-@@ -544,11 +520,12 @@ pub const Lanes = struct {
-                 n = rows.len;
-                 break :a r.follow[rows.len - 1];
-             } else self.value(r.first orelse return error.NoFirstToken);
--            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .propose = r.depth > 0, .out = &l.held, .probs = &l.chances };
-+            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .out = &l.held, .probs = &l.chances };
+@@ -548,7 +548,8 @@ pub const Lanes = struct {
              held[i] = l;
          }
          try self.x.block(reqs[0..requests.len]);
 -        const cut = dflash.confidence();
 +        const cuts = self.x.e.drafter.?.knobs.cuts; // TF_GLM_OVN_DRAFT_CUTS: the cut by streams in this pass
-+        const cut = (if (cuts) |c| c.at(requests.len) else null) orelse confidence();
++        const cut = (if (cuts) |c| c.at(requests.len) else null) orelse dflash.confidence();
          for (requests, held[0..requests.len]) |r, l| {
              l.held_n = @min(r.depth, max_held);
              var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
-@@ -560,10 +537,16 @@ pub const Lanes = struct {
-         }
-     }
- 
--    /// Each held draft's chance, DFlash2's or the MTP head's under --mtp-confidence (else the per-depth rates stand).
-+    /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
-+    fn confidence() f64 {
-+        const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
-+        return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
-+    }
-+
-+    /// DFlash2's chance for each held draft (the MTP head gives none: the lane core's per-depth rates stand).
-     fn chancesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
-         const self = of(ptr);
--        if (self.x.e.drafter == null and self.mtp_confidence == null) return false;
-+        if (self.x.e.drafter == null) return false;
-         const l = self.lanes.getPtr(s) orelse return false;
-         if (l.held_n == 0) return false;
-         const n = @min(out.len, l.held_n);
-@@ -572,7 +555,6 @@ pub const Lanes = struct {
-             chain *= p;
-             c.* = chain;
-         }
--        if (self.mtp_confidence != null and self.copy_confidence and self.x.e.drafter == null) copy_policy.confidence(self.mtp_confidence, out[0..n]);
-         for (out[n..]) |*c| c.* = 0;
-         return true;
-     }
-@@ -581,7 +563,6 @@ pub const Lanes = struct {
-     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
-         const self = of(ptr);
-         const kv = self.lanes.fetchRemove(s) orelse return;
--        self.x.e.gpa.free(kv.value.marks);
-         self.x.release(kv.value.slot) catch |err| std.log.err("releasing slot {d}: {s}", .{ kv.value.slot, @errorName(err) });
-         if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
-     }
-@@ -591,7 +572,9 @@ comptime {
-     std.debug.assert(max_rows <= fw.window_rows);
- }
- 
--/// Eligibility for the maintained fresh-prompt batching path.
-+/// Eligibility for the maintained fresh-prompt batching path: one pass that fires no mark, so none may fall inside.
- pub fn canBatch(s: anytype) bool {
--    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows;
-+    if (s.prompt_logprobs != null or s.images.len != 0 or s.reuse.saved != null or s.prompt_len > engine.prompt_rows) return false;
-+    for (s.reuse.marks) |m| if (m > 0 and m < s.prompt_len) return false; // a kept state the batch would skip
-+    return true;
- }
 diff --git a/zig/src/families/glm/cuda_q4.zig b/zig/src/families/glm/cuda_q4.zig
 index 382ca2932..2f141843a 100644
 --- a/zig/src/families/glm/cuda_q4.zig
@@ -705,6 +266,184 @@ index 3eb62010b..9c8f5ad52 100644
  }
  
  pub fn restore(e: anytype, id: u64) !void {
+diff --git a/zig/src/families/glm/dflash.zig b/zig/src/families/glm/dflash.zig
+index c25a5a303..f70fdf758 100644
+--- a/zig/src/families/glm/dflash.zig
++++ b/zig/src/families/glm/dflash.zig
+@@ -62,6 +62,7 @@ pub const Kernels = struct {
+     attn_part: cuda.Function,
+     attn_merge: cuda.Function,
+     sum2: cuda.Function,
++    sumw: cuda.Function, // TF_GLM_OVN_DRAFT_MLPSPLIT's rank-ordered sum (looked up, launched only with the knob)
+     top16_part: cuda.Function,
+     top16_merge: cuda.Function,
+     gsum: cuda.Function,
+@@ -76,8 +77,8 @@ pub const Kernels = struct {
+ /// A drafter linear: 4 bits (--drafter-bits 4, the default; they only propose) or bf16 tiled for glm_mm.
+ pub const Lin = union(enum) { q4: q4.Q4, bf16: mm.Tiled };
+ 
+-/// down and the selector's projection stay bf16 (their fp32 outputs are gathered or read on the host).
+-pub const LayerW = struct { in_norm: u64, post_norm: u64, qn: u64, kn: u64, a_base: u64, m_base: u64, qkv: Lin, kv: Lin, o: Lin, gu: Lin, down: mm.Tiled, a_proj: Lin, m_proj: Lin };
++/// The selector's projection stays bf16 (read on the host), down too unless DOWN4; sgu, sdown: MLPSPLIT's rank slices.
++pub const LayerW = struct { in_norm: u64, post_norm: u64, qn: u64, kn: u64, a_base: u64, m_base: u64, qkv: Lin, kv: Lin, o: Lin, gu: Lin, down: Lin, a_proj: Lin, m_proj: Lin, sgu: Lin, sdown: Lin };
+ 
+ /// A stream's drafter state by slot: its ring, where its context starts, and its last verify's tap rows.
+ pub const Slot = struct {
+@@ -87,10 +88,20 @@ pub const Slot = struct {
+     v_row0: usize = 0,
+     v_rows: usize = 0,
+     v_pos0: i64 = 0,
++    lo: i64 = 0, // TF_GLM_OVN_DRAFT_KEEPWIN: [lo, hi), the positions the ring holds for this sequence, in order
++    hi: i64 = 0,
+ };
+ 
+ /// One stream's request: `n` rows of its last verify into its context first (0: none), the anchor, rank 0's `out`.
+-pub const Req = struct { slot: u32, pos: i64, n: usize, anchor: u32, propose: bool = true, out: ?[]u32 = null, probs: ?[]f64 = null };
++pub const Req = struct { slot: u32, pos: i64, n: usize, anchor: u32, propose: bool = true, out: ?[]u32 = null, probs: ?[]f64 = null, sampling: ?@import("lanes").Sampling = null };
++
++/// `q` at its sequence's position, with the sequence's sampling rule (TF_GLM_OVN_DRAFT_NOISE's pick reads it).
++pub fn located(q: Req, seq: anytype) Req {
++    var r = q;
++    r.pos = @intCast(seq.st.pos);
++    r.sampling = seq.sampling;
++    return r;
++}
+ 
+ /// Context runs: `n` tap rows at `taps` (consecutive), positions pos0.., into `ring`.
+ pub const Run = struct { ring: u64, taps: u64, n: usize, pos0: i64 };
+@@ -115,6 +126,10 @@ pub const Drafter = struct {
+     world: usize,
+     temp: f64 = 1.0, // the selector's softmax temperature for the drafts' chances
+     tap_rows: usize = MAX_CTX, // taps_prefill's rows (tapRows of the engine's prompt buffers)
++    win: i64 = WIN, // TF_GLM_DFLASH2_WIN: the context positions a draft attends to at most (drafts only, never replies)
++    knobs: @import("dflash_ovn.zig").Knobs = .{}, // TF_GLM_OVN_DRAFT_*: unset, the drafter as it runs without them
++    sff: usize = 0, // MLPSPLIT: the MLP width of this rank's slice (sgu, sdown); 0: no slices
++    wide4: ?cuda.Function = null, // DOWN4 on a split MLP: the fp32-out 4-bit tile for down's K slices
+     scratch: cuda.DeviceBuffer = undefined,
+     slots: std.ArrayList(Slot) = .empty,
+     verifies: u64 = 0, // verifies so far: a slot's rows are still in taps_step while its v_step is the latest
+@@ -142,7 +157,7 @@ pub const Drafter = struct {
+     logits: u64 = 0,
+     part: u64 = 0, // the linears' K-slice partials
+     gs: u64 = 0, // a 4-bit linear's input group sums [MAX_CTX][5 * D / 64]
+-    sums: u64 = 0, // the split down's gathered fp32 partials [2][MAX_M][D]
++    sums: u64 = 0, // the split down's gathered fp32 partials [2, or world with MLPSPLIT][MAX_M][D]
+     cin: u64 = 0,
+     c1: u64 = 0,
+     ctx: u64 = 0,
+@@ -215,13 +230,45 @@ pub const Drafter = struct {
+         const s = try dr.slot(i);
+         s.from = @intCast(from);
+         s.v_rows = 0;
++        if (dr.knobs.keepwin) {
++            s.lo = s.from;
++            s.hi = s.from;
++        }
++    }
++
++    /// KEEPWIN: slot `i` resumed at `at` with its kept window, rows [from, at) back in its ring.
++    pub fn restartKept(dr: *Drafter, i: u32, from: i64, at: usize) !void {
++        const s = try dr.slot(i);
++        s.* = .{ .ring = s.ring, .from = from, .lo = from, .hi = @intCast(at) };
++    }
++
++    /// KEEPWIN: slot `i`'s ring and the first row a state kept at `at` carries (null: no rows ending at `at`).
++    pub fn window(dr: *const Drafter, i: u32, at: usize) ?struct { ring: u64, from: i64 } {
++        if (!dr.knobs.keepwin or i >= dr.slots.items.len) return null;
++        const s = dr.slots.items[i];
++        const ring = s.ring orelse return null;
++        if (s.hi != @as(i64, @intCast(at)) or s.hi <= s.lo) return null;
++        return .{ .ring = ring.ptr, .from = @max(@max(s.lo, s.from), s.hi - WIN) };
++    }
++
++    /// KEEPWIN: slot `i`'s ring (made if it has none).
++    pub fn ringOf(dr: *Drafter, i: u32) !u64 {
++        return (try dr.slot(i)).ring.?.ptr;
++    }
++
++    /// KEEPWIN: a run ingested into its slot's ring: the held span grows, or restarts at a gap.
++    fn noteRun(dr: *Drafter, r: Run) void {
++        for (dr.slots.items) |*s| if (s.ring != null and s.ring.?.ptr == r.ring) {
++            if (r.pos0 < s.lo or r.pos0 > s.hi) s.lo = r.pos0;
++            s.hi = r.pos0 + @as(i64, @intCast(r.n));
++        };
+     }
+ 
+     /// A verify on slot `i` wrote `rows` tap rows at row `row0` of taps_step, for positions pos0...
+     pub fn noteVerify(dr: *Drafter, i: u32, row0: usize, rows: usize, pos0: usize, first: bool) !void {
+         if (first) dr.verifies += 1; // a shared verify's parts share one
+         const s = try dr.slot(i);
+-        s.* = .{ .ring = s.ring, .from = s.from, .v_step = dr.verifies, .v_row0 = row0, .v_rows = rows, .v_pos0 = @intCast(pos0) };
++        s.* = .{ .ring = s.ring, .from = s.from, .v_step = dr.verifies, .v_row0 = row0, .v_rows = rows, .v_pos0 = @intCast(pos0), .lo = s.lo, .hi = s.hi };
+     }
+ 
+     /// A prompt chunk on slot `i` (rows start.. of a `len`-id prompt): its rows within the last window into the ring.
+@@ -240,6 +287,7 @@ pub const Drafter = struct {
+         if (N > MAX_CTX) return error.DrafterContextTooWide;
+         var row: usize = 0;
+         for (runs) |r| {
++            if (dr.knobs.keepwin) dr.noteRun(r);
+             try block.copy(e, dr.cin + row * TAP_ROW, r.taps, r.n * TAP_ROW);
+             for (0..r.n) |j| {
+                 dr.h_cpos[row + j] = r.pos0 + @as(i64, @intCast(j));
+@@ -264,6 +312,10 @@ pub const Drafter = struct {
+             if (q.n == 0) continue;
+             if (s.v_step != dr.verifies or q.n > s.v_rows or s.v_pos0 + @as(i64, @intCast(q.n)) != q.pos) {
+                 s.from = q.pos; // its verify rows were overwritten (or never written): its context restarts here
++                if (dr.knobs.keepwin) {
++                    s.lo = q.pos;
++                    s.hi = q.pos;
++                }
+                 dr.lost += 1;
+                 continue;
+             }
+@@ -280,7 +332,7 @@ pub const Drafter = struct {
+             const s = &dr.slots.items[q.slot];
+             dr.h_rings[i] = s.ring.?.ptr;
+             dr.h_starts[i] = q.pos;
+-            dr.h_froms[i] = s.from;
++            dr.h_froms[i] = windowFrom(s.from, q.pos, dr.win);
+             for (0..BLOCK) |t| {
+                 dr.h_ids[i * BLOCK + t] = @intCast(if (t == 0) q.anchor else MASK);
+                 dr.h_bpos[i * BLOCK + t] = @intCast(q.pos + @as(i64, @intCast(t)));
+@@ -313,6 +365,37 @@ pub const Drafter = struct {
+     }
+ };
+ 
++/// The first context position a draft at `pos` attends to: the stream's own start, or `win` positions back if later.
++pub fn windowFrom(from: i64, pos: i64, win: i64) i64 {
++    return @max(from, pos - win);
++}
++
++/// TF_GLM_DFLASH2_WIN: unset (WIN), else a count of positions from 0 to WIN; anything else is refused.
++pub fn parseWin(text: ?[]const u8) !i64 {
++    const t = text orelse return WIN;
++    const v = std.fmt.parseInt(i64, std.mem.trim(u8, t, " "), 10) catch return error.BadDrafterWindow;
++    if (v < 0 or v > WIN) return error.BadDrafterWindow;
++    return v;
++}
++
++test "the drafter's window bounds its context from below and never reaches before the stream's start" {
++    try std.testing.expectEqual(@as(i64, 0), windowFrom(0, 100, WIN)); // the whole default window
++    try std.testing.expectEqual(@as(i64, 68), windowFrom(0, 100, 32));
++    try std.testing.expectEqual(@as(i64, 90), windowFrom(90, 100, 32)); // a resumed stream's own start wins
++    try std.testing.expectEqual(@as(i64, 100), windowFrom(0, 100, 0)); // no context: the block's own keys only
++    try std.testing.expectEqual(WIN, try parseWin(null));
++    try std.testing.expectEqual(@as(i64, 256), try parseWin("256"));
++    try std.testing.expectEqual(@as(i64, 0), try parseWin("0"));
++    try std.testing.expectError(error.BadDrafterWindow, parseWin("4096"));
++    try std.testing.expectError(error.BadDrafterWindow, parseWin("-1"));
++    try std.testing.expectError(error.BadDrafterWindow, parseWin("half"));
++}
++
++/// Whether prompt rows [start, start + rows) of a len-id prompt end before the window the drafter keeps.
++pub fn ingestsNone(start: usize, rows: usize, len: usize) bool {
++    return start + rows <= len -| @as(usize, @intCast(WIN));
++}
++
+ /// Prompt context retained in the window; row0 is a tap-buffer offset, not a position; cap is that buffer's rows.
+ pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, row0: usize, cap: usize) !?Run {
+     if (start > len or rows > len - start) return error.BadPromptContext;
 diff --git a/zig/src/families/glm/dflash_block.zig b/zig/src/families/glm/dflash_block.zig
 index 4d2366f6f..1f3f98504 100644
 --- a/zig/src/families/glm/dflash_block.zig
@@ -819,7 +558,7 @@ index 4d2366f6f..1f3f98504 100644
          try q4.matmul(&e.m.q4, e.stream, dr.hn + r0 * D * 2, D, dr.xs + r0 * (D / 64) * 4, head, dr.logits + r0 * head.n * 2, rows);
      }
 diff --git a/zig/src/families/glm/dflash_load.zig b/zig/src/families/glm/dflash_load.zig
-index 79b136ebb..d7193c325 100644
+index 79b136ebb..a4815ec9a 100644
 --- a/zig/src/families/glm/dflash_load.zig
 +++ b/zig/src/families/glm/dflash_load.zig
 @@ -1,7 +1,6 @@
@@ -985,7 +724,7 @@ index 79b136ebb..d7193c325 100644
      std.log.info("dflash2: drafter from {s} (CC BY-NC-ND 4.0: non-commercial use only), linears at {d} bits, {d:.2} GiB on the device", .{ dir, if (bits == 0) 16 else bits, @as(f64, @floatFromInt(l.at)) / (1 << 30) });
      return dr;
  }
-@@ -233,21 +278,21 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
+@@ -233,19 +278,19 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
      const chunks: u64 = (head_n + 4095) / 4096;
      var part: u64 = 16;
      for (dr.layers) |l| {
@@ -1006,11 +745,8 @@ index 79b136ebb..d7193c325 100644
 -        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", 2 * M * D * 4 },          .{ "cin", C * df.TAP_ROW },
 +        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", ranks * M * D * 4 },      .{ "cin", C * df.TAP_ROW },
          .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },         .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
--        .{ "taps_prefill", dr.tap_rows * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
-+        .{ "taps_prefill", df.TAP_ROWS * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
+         .{ "taps_prefill", dr.tap_rows * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
          .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                  .{ "crings", C * 8 },
-         .{ "gtk", @import("dflash_candidates.zig").Layout.init(dr.world, M, df.CW).device * 4 }, .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 }, .{ "pm", M * df.QH * df.CH * 4 },
-         .{ "pl", M * df.QH * df.CH * 4 },                                                        .{ "pacc", M * df.QH * df.CH * df.HD * 4 },
 @@ -284,30 +329,3 @@ pub fn checkConfig(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
      if (taps.len != taps_mod.layers.len) return error.DrafterConfigUnexpected;
      for (taps, taps_mod.layers) |t, w| if (t.integer != w) return error.DrafterConfigUnexpected;

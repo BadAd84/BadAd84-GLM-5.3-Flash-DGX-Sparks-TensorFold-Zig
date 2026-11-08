@@ -1,24 +1,10 @@
-From c60ce5fd181de2ea0d167a42afda3eeda081a85b Mon Sep 17 00:00:00 2001
-From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
-Date: Thu, 29 Oct 2026 23:55:07 +0000
-Subject: [PATCH] cuda: ovn knob helper, TF_GLM_OVN_<NAME> read once per
- process
-
-The speed-hunt branches each add default-off knobs; this is the one place that reads them.
----
- zig/src/cuda/ovn.zig  | 39 +++++++++++++++++++++++++++++++++++++++
- zig/src/cuda/root.zig |  1 +
- 2 files changed, 40 insertions(+)
- create mode 100644 zig/src/cuda/ovn.zig
-
 diff --git a/zig/src/cuda/ovn.zig b/zig/src/cuda/ovn.zig
 new file mode 100644
-index 000000000..2ccf70c98
+index 000000000..7b2896777
 --- /dev/null
 +++ b/zig/src/cuda/ovn.zig
-@@ -0,0 +1,39 @@
-+//! Speed-hunt knobs (`TF_GLM_OVN_<NAME>`): read from the environment once per process, default off.
-+//! Every rank runs with the same environment, so every rank sees the same value.
+@@ -0,0 +1,38 @@
++//! Speed-hunt knobs (`TF_GLM_OVN_<NAME>`): environment-read once a process, default off, same on every rank.
 +const std = @import("std");
 +
 +fn raw(comptime name: []const u8) ?[]const u8 {
@@ -57,10 +43,10 @@ index 000000000..2ccf70c98
 +    try std.testing.expectEqual(@as(u64, 7), try int("NO_SUCH_KNOB_FOR_TESTS", 7));
 +}
 diff --git a/zig/src/cuda/root.zig b/zig/src/cuda/root.zig
-index 5489b019b..82184c7b1 100644
+index b2f9242a8..f37c26e89 100644
 --- a/zig/src/cuda/root.zig
 +++ b/zig/src/cuda/root.zig
-@@ -40,6 +40,7 @@ pub const nvfp4 = @import("nvfp4.zig");
+@@ -44,6 +44,7 @@ pub const nvfp4 = @import("nvfp4.zig");
  pub const segments = @import("segments.zig");
  pub const grouped = @import("grouped.zig");
  pub const qlinear = @import("qlinear.zig");
@@ -68,6 +54,3 @@ index 5489b019b..82184c7b1 100644
  pub const w4a8 = @import("w4a8.zig");
  pub const norms = @import("norms.zig");
  pub const embed_rows = @import("embed_rows.zig");
--- 
-2.52.0.windows.1
-
