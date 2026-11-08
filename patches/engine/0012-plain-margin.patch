@@ -1,0 +1,56 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] lanes: TF_GLM_OVN_PLAIN_MARGIN, the draft-over-plain margin as a knob
+
+ai-engine 59604d959 applied onto the pin stack (two conflicts, both unions). The
+core's Config gains `plain_margin` (unset: the core's 1.05, asserted by the source's
+own test), and GLM's facts() reads TF_GLM_OVN_PLAIN_MARGIN in hundredths, so a
+drafted depth must beat plain rounds' tokens a ms by that much. Knob unset: the value
+is 0 and the core's constant stands, so every launch and every decision is unchanged.
+
+The source commit also carried a TF_GLM_OVN_DRAFT_FIXED arm in the same facts()
+block; that knob is a separate lever and is left out here, so the pin's
+draft_confidence line stands unchanged.
+
+Gates on pin+0001..0012: check-native-cuda-host green, test-lane-api-host green,
+whole-tree fmt green, lean base-vs-head 0 new.
+diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
+index 4d13462c1..dc3e9f5db 100644
+--- a/zig/src/core/lanes/config.zig
++++ b/zig/src/core/lanes/config.zig
+@@ -27,6 +27,7 @@ pub const Model = struct {
+     speculate_early: bool = true, // draft every row's first draft behind the verify
+     draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
+     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
++    plain_margin: f64 = 0, // how much a drafted depth must beat plain rounds' tokens a ms by (0: the core's 1.05)
+     plain_guard: bool = false, // plain rounds compete with drafted depths
+     draft_confidence: ?f64 = null,
+     drafts: u32 = 1, // head drafts a round at most
+@@ -181,6 +182,7 @@ pub const Config = struct {
+                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
+                 .copy_first = m.copy_first and !m.context_copies,
+                 .hold_costs = m.hold_costs,
++                .plain_margin = if (m.plain_margin > 0) m.plain_margin else (Constants{}).plain_margin,
+             },
+             .draft_step_ms = m.draft_step_ms,
+         };
+@@ -203,6 +205,7 @@ test "setup derives widths like Python" {
+     try std.testing.expectEqual(@as(u32, 4), c.most_drafts);
+     try std.testing.expect(c.family_mtp and c.family_streams);
+     try std.testing.expectEqual(@as(f64, 0.15), c.k.depth_rate);
++    try std.testing.expectEqual(@as(f64, 1.05), c.k.plain_margin); // unset: the core's
+     var steady = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .depth_rate = 0.08 }, 16, 15);
+     defer steady.deinit(gpa);
+     try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index e1df5e7d1..91d8f09db 100644
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -111,6 +111,8 @@ pub const Lanes = struct {
+             .draft_confidence = if (block) null else self.mtp_confidence,
+             .window_costs = if (block) &copy_policy.window_costs else &.{},
+             .shared_costs = if (block) &copy_policy.shared_costs else &.{},
++            // TF_GLM_OVN_PLAIN_MARGIN: hundredths; a draft must beat plain rounds by this (0: the core's 105)
++            .plain_margin = @as(f64, @floatFromInt(cuda.ovn.int("PLAIN_MARGIN", 0) catch 0)) / 100.0,
+             .hidden_rows = sharing,
+             .batch_rows = if (sharing) engine.shared_rows else 0,
+             .max_streams = if (sharing) engine.max_shared else 1,
