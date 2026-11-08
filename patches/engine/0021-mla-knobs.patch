@@ -1,0 +1,1016 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+
+ai-engine 436970264 grafted onto the pin stack. MLA_FUSEMERGE fuses a chunk pass that
+stops at its last live key tile with a merge that walks the row's chunks in registers;
+ABSORB_VEC reads bf16 kv_b by 16-byte loads; KVB8 reads E4M3 kv_b a 128-wide load times
+its scale. glm_glue_attn_ovn.cuh and glm_glue_latent_ovn.cuh carry the kernels, glue.Mla
+reads the knobs at load and glue.Set carries the choice, cuda_latent.fuses picks the
+fused path, and the DSA block routes through it. Default off: today's chunk programs
+and merge.
+
+Pin adaptations, each forced by the pin's own shapes: Mla.read/wanted are restored on the
+pin's struct (the conflict had dropped them) with the knob set the pin actually has;
+Kernels gains the new function fields and the load loop takes the source's
+skipped-kernel form so unset ones carry a null handle; Set keeps the pin's fields plus
+.mla; cuda_latent's headBlock takes rows alone at the pin; expandV takes `sv` at the pin
+so the DSA call passes it. Comment lines single-lined.
+
+Gates on pin+0001..0021: check-native-cuda-host green, test-lane-api-host green,
+whole-tree fmt green, lean base-vs-head 0 new, fatbins 226/226 green.
+diff --git a/zig/kernels/cuda/glm_glue.cu b/zig/kernels/cuda/glm_glue.cu
+index 06f2ba94c..2626aa259 100644
+--- a/zig/kernels/cuda/glm_glue.cu
++++ b/zig/kernels/cuda/glm_glue.cu
+@@ -8,3 +8,5 @@
+ #include "glm_glue_index.cuh"
+ #include "glm_glue_bmm.cuh"
+ #include "glm_glue_attn.cuh"
++#include "glm_glue_attn_ovn.cuh"
++#include "glm_glue_latent_ovn.cuh"
+diff --git a/zig/kernels/cuda/glm_glue_attn_ovn.cuh b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
+new file mode 100644
+index 000000000..d3743ef0f
+--- /dev/null
++++ b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
+@@ -0,0 +1,333 @@
++// TF_GLM_OVN_MLA_FUSEMERGE: the chunk pass stops at a chunk's last live key tile; merge walks the row's chunks.
++#pragma once
++
++#include "glm_glue_attn.cuh"
++
++namespace glm_attn_ovn {
++
++// Key tiles of chunk `start` up to its last live key (sparse: keys below n; dense: keys through limit); a live chunk.
++__device__ __forceinline__ int live_tiles(int64_t start, int64_t n, int64_t limit, int sparse) {
++  const int64_t past = start + glm_attn::CH, keys = sparse ? n : limit + 1;
++  return (int)(((keys < past ? keys : past) - start + glm_attn::KT - 1) / glm_attn::KT);
++}
++
++// glm_attn::chunks_wide with the tile loop bounded; FUSED: blockIdx.z 0 walks chunks 0 .. nch - 1 and writes `out`.
++template <int HB, bool FP8, bool FUSED>
++__device__ void chunks(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const float* scales, const int* pos,
++                       const int* tok, const int* cnt, float* po, float* pm, float* pl, __nv_bfloat16* out, int nch,
++                       int64_t rows, int64_t heads, int64_t w, float scale, int sparse, const int* pt, int64_t pstep) {
++  using namespace glm_attn;
++  constexpr int MT = HB / 16, FT = FUSED ? MT : 1;
++  extern __shared__ __align__(16) unsigned char smem[];
++  __nv_bfloat16* qs = reinterpret_cast<__nv_bfloat16*>(smem);
++  __nv_bfloat16* kvs = qs + HB * LW;
++  __nv_bfloat16* ps = kvs + 2 * KT * LW;
++  float* red = reinterpret_cast<float*>(ps + HB * KT);
++  float* stat = red + HB * 4;
++  const int t = threadIdx.x, lane = t & 31, warp = t >> 5, g = lane >> 2, q = lane & 3;
++  const int kg = warp & 3, hh = warp >> 2;
++  const int64_t r = blockIdx.x, h0 = (int64_t)blockIdx.y * HB;
++  const int64_t n = sparse ? cnt[r] : 0, limit = sparse ? 0 : (int64_t)pos[0] + r;
++  if (FUSED && sparse && n == 0) return;  // tf_glm_merge leaves a row with count 0 alone
++  int64_t c = FUSED ? 0 : (int64_t)blockIdx.z, start = 0;
++  const __nv_bfloat16* keys_at = lc;
++  auto load_kv = [&](int tile) {  // BF16: the tile's rows by cp.async into its buffer
++    __nv_bfloat16* dst = kvs + (tile & 1) * KT * LW;
++    const int64_t first = start + tile * KT;
++    for (int idx = t; idx < KT * (LW / 8); idx += blockDim.x) {
++      const int key = idx / (LW / 8), u = idx % (LW / 8);
++      const int64_t ki = first + key;
++      const bool ok = sparse ? ki < n : ki <= limit;
++      const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
++      cp16(dst + wide(key, u), keys_at + src * LW + u * 8, ok);
++    }
++  };
++  constexpr int PER = FP8 ? KT * (LW / 8) / 256 : 1;
++  uint2 pre_c[PER];
++  float pre_s[PER];
++  const uint32_t page_rows = pt ? (uint32_t)(pstep / LW) : 1u;
++  auto fetch = [&](int tile) {  // FP8: a tile's codes and scales into registers, as chunks_wide's fetch
++    const int64_t first = start + tile * KT;
++#pragma unroll
++    for (int p = 0; p < PER; ++p) {
++      const int idx = t + p * 256, key = idx / (LW / 8), u = idx % (LW / 8);
++      const int64_t ki = first + key;
++      const bool ok = sparse ? ki < n : ki <= limit;
++      const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
++      const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc) + src * LW;
++      const float* row_scales = scales + src;
++      if (pt && ok) {
++        const uint32_t off = sparse ? (uint32_t)src % page_rows : (uint32_t)(ki - start);
++        const unsigned char* page = sparse ? codes - (int64_t)off * LW
++                                           : reinterpret_cast<const unsigned char*>(lc) + (int64_t)pt[c] * pstep;
++        codes = page + (int64_t)off * LW;
++        row_scales = reinterpret_cast<const float*>(page + CH * LW) + off;
++      }
++      pre_c[p] = ok ? *reinterpret_cast<const uint2*>(codes + u * 8) : make_uint2(0u, 0u);
++      pre_s[p] = ok ? *row_scales : 1.0f;
++    }
++  };
++  auto store = [&](int tile) {
++    __nv_bfloat16* dst = kvs + (tile & 1) * KT * LW;
++#pragma unroll
++    for (int p = 0; p < PER; ++p) {
++      const int idx = t + p * 256, key = idx / (LW / 8), u = idx % (LW / 8);
++      uint32_t words[4];
++#pragma unroll
++      for (int j = 0; j < 4; ++j) {
++        const uint16_t bits = (uint16_t)(((j < 2 ? pre_c[p].x : pre_c[p].y) >> (16 * (j & 1))) & 0xffffu);
++        const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
++        const __nv_bfloat162 b = __floats2bfloat162_rn(__fmul_rn(v.x, pre_s[p]), __fmul_rn(v.y, pre_s[p]));
++        words[j] = *reinterpret_cast<const uint32_t*>(&b);
++      }
++      *reinterpret_cast<uint4*>(dst + wide(key, u)) = make_uint4(words[0], words[1], words[2], words[3]);
++    }
++  };
++  float m[MT][2], l[MT][2], o[MT][8][4];
++  float fm[FT][2], fl[FT][2], fo[FT][8][4];  // FUSED: tf_glm_merge's running m, l and o
++  for (int i = 0; i < FT; ++i)
++    for (int e = 0; e < 2; ++e) fm[i][e] = -INFINITY, fl[i][e] = 0.0f;
++  for (int i = 0; i < FT; ++i)
++    for (int j = 0; j < 8; ++j)
++      for (int e = 0; e < 4; ++e) fo[i][j][e] = 0.0f;
++  for (int ci = 0; ci < (FUSED ? nch : 1); ++ci) {
++    if (FUSED) c = ci;
++    start = c * CH;
++    const bool live = sparse ? start < n : start <= limit;
++    keys_at = !FP8 && pt && !sparse && live ? lc + ((int64_t)pt[c] * (pstep / 2) - start * LW) : lc;
++    const int tiles = live ? live_tiles(start, n, limit, sparse) : 0;
++    for (int i = 0; i < MT; ++i)
++      for (int e = 0; e < 2; ++e) m[i][e] = -INFINITY, l[i][e] = 0.0f;
++    for (int i = 0; i < MT; ++i)
++      for (int j = 0; j < 8; ++j)
++        for (int e = 0; e < 4; ++e) o[i][j][e] = 0.0f;
++    if (live) {
++      if (!FUSED || ci == 0)  // the query stays in shared memory for every chunk of the row
++        for (int idx = t; idx < HB * (LW / 8); idx += blockDim.x) {
++          const int hd = idx / (LW / 8), u = idx % (LW / 8);
++          const bool ok = h0 + hd < heads;
++          cp16(qs + wide(hd, u), qa + (r * heads + (ok ? h0 + hd : 0)) * LW + u * 8, ok);
++        }
++      if constexpr (FP8) {
++        fetch(0);
++        store(0);
++        fetch(1);
++        commit();
++      } else {
++        load_kv(0);
++        commit();
++        load_kv(1);
++        commit();
++      }
++    }
++    for (int tile = 0; tile < tiles; ++tile) {
++      if constexpr (FP8) {
++        wait<0>();
++      } else {
++        if (tile + 1 < tiles)
++          wait<1>();
++        else
++          wait<0>();
++      }
++      __syncthreads();
++      if constexpr (FP8) {
++        if (tile + 1 < tiles) store(tile + 1);
++        if (tile + 2 < tiles) fetch(tile + 2);
++      }
++      const __nv_bfloat16* kv = kvs + (tile & 1) * KT * LW;
++      const int64_t first = start + tile * KT;
++      float sc[4];
++      if (hh < MT) {
++        float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++#pragma unroll 4
++        for (int kk = 0; kk < LW; kk += 32) {
++          uint32_t a0[4], a1[4], b[4];
++          ldm4<false>(a0, qs + wide(hh * 16 + (lane & 15), (kk >> 3) + (lane >> 4)));
++          ldm4<false>(a1, qs + wide(hh * 16 + (lane & 15), ((kk + 16) >> 3) + (lane >> 4)));
++          ldm4<false>(b, kv + wide(kg * 8 + (lane & 7), (kk >> 3) + (lane >> 3)));
++          glm_router::mma16816(acc, a0, b);
++          glm_router::mma16816(acc, a1, b + 2);
++        }
++        for (int e = 0; e < 2; ++e) {
++          const int64_t ki = first + kg * 8 + q * 2 + e;
++          const bool ok = sparse ? ki < n : ki <= limit;
++          sc[e] = ok ? __fmul_rn(acc[e], scale) : -INFINITY;
++          sc[e + 2] = ok ? __fmul_rn(acc[e + 2], scale) : -INFINITY;
++        }
++        for (int hf = 0; hf < 2; ++hf) {
++          const float mx = quad_max(fmaxf(sc[hf * 2], sc[hf * 2 + 1]));
++          if (q == 0) red[(hh * 16 + hf * 8 + g) * 4 + kg] = mx;
++        }
++      }
++      __syncthreads();
++      if (t < HB * 4) {
++        float v = red[t];
++        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, 2));
++        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, 1));
++        if ((t & 3) == 0) stat[t / 4] = v;
++      }
++      __syncthreads();
++      float alpha[MT][2];
++      for (int i = 0; i < MT; ++i)
++        for (int hf = 0; hf < 2; ++hf) {
++          const float tm = stat[i * 16 + hf * 8 + g];
++          const bool active = tm != -INFINITY;
++          const float nm = active ? fmaxf(m[i][hf], tm) : m[i][hf];
++          alpha[i][hf] = active ? (m[i][hf] == -INFINITY ? 0.0f : glm_triton::exp_approx(m[i][hf] - nm)) : 1.0f;
++          if (i == hh) {
++            float p[2];
++            for (int e = 0; e < 2; ++e) {
++              const int64_t ki = first + kg * 8 + q * 2 + e;
++              const bool ok = sparse ? ki < n : ki <= limit;
++              p[e] = active && ok ? glm_triton::exp_approx(sc[hf * 2 + e] - nm) : 0.0f;
++            }
++            const int hr = i * 16 + hf * 8 + g, col = kg * 8 + q * 2;
++            *reinterpret_cast<__nv_bfloat162*>(ps + narrow(hr, col >> 3) + (col & 7)) = __floats2bfloat162_rn(p[0], p[1]);
++            const float s = quad_sum(p[0] + p[1]);
++            if (q == 0) red[hr * 4 + kg] = s;
++          }
++          m[i][hf] = nm;
++        }
++      __syncthreads();
++      if (t < HB * 4) {
++        float v = red[t];
++        v = v + __shfl_xor_sync(0xffffffffu, v, 2);
++        v = v + __shfl_xor_sync(0xffffffffu, v, 1);
++        if ((t & 3) == 0) stat[HB + t / 4] = v;
++      }
++      for (int i = 0; i < MT; ++i)
++        for (int j = 0; j < 8; ++j)
++          for (int e = 0; e < 4; ++e) o[i][j][e] = __fmul_rn(o[i][j][e], alpha[i][e / 2]);
++#pragma unroll
++      for (int k16 = 0; k16 < KT; k16 += 16) {
++        uint32_t a[MT][4];
++        for (int i = 0; i < MT; ++i) ldm4<false>(a[i], ps + narrow(i * 16 + (lane & 15), (k16 >> 3) + (lane >> 4)));
++#pragma unroll
++        for (int j = 0; j < 8; j += 2) {
++          uint32_t b[4];
++          ldm4<true>(b, kv + wide(k16 + (lane & 15), ((warp * 64 + j * 8) >> 3) + (lane >> 4)));
++          for (int i = 0; i < MT; ++i) {
++            glm_router::mma16816(o[i][j], a[i], b);
++            glm_router::mma16816(o[i][j + 1], a[i], b + 2);
++          }
++        }
++      }
++      __syncthreads();
++      for (int i = 0; i < MT; ++i)
++        for (int hf = 0; hf < 2; ++hf) l[i][hf] = __fmaf_rn(l[i][hf], alpha[i][hf], stat[HB + i * 16 + hf * 8 + g]);
++      if constexpr (!FP8) {
++        if (tile + 2 < tiles) load_kv(tile + 2);
++        commit();
++      }
++    }
++    // The tiles past the last live key: each is tile max -inf, alpha 1, p and keys +0, so o and l are unchanged.
++    if (live && tiles < CH / KT) {
++      const uint32_t z[4] = {0u, 0u, 0u, 0u};
++      for (int i = 0; i < MT; ++i)
++        for (int j = 0; j < 8; ++j)
++          for (int e = 0; e < 4; ++e) o[i][j][e] = __fmul_rn(o[i][j][e], 1.0f);
++#pragma unroll
++      for (int k16 = 0; k16 < KT; k16 += 16)
++#pragma unroll
++        for (int j = 0; j < 8; j += 2)
++          for (int i = 0; i < MT; ++i) {
++            glm_router::mma16816(o[i][j], z, z);
++            glm_router::mma16816(o[i][j + 1], z, z + 2);
++          }
++      for (int i = 0; i < MT; ++i)
++        for (int hf = 0; hf < 2; ++hf) l[i][hf] = __fmaf_rn(l[i][hf], 1.0f, 0.0f);
++    }
++    if constexpr (FUSED) {  // tf_glm_merge's step on chunk ci's (m, l, o), the values it would read back from po/pm/pl
++      float a[FT][2], b[FT][2];
++      for (int i = 0; i < FT; ++i)
++        for (int hf = 0; hf < 2; ++hf) {
++          const float cm = m[i][hf], cl = l[i][hf];
++          const bool active = cl > 0.0f;
++          const float nm = active ? fmaxf(fm[i][hf], cm) : fm[i][hf];
++          b[i][hf] = active ? glm_triton::exp_approx(cm - nm) : 0.0f;
++          a[i][hf] = ci == 0 ? 0.0f
++                             : (active ? (fm[i][hf] == -INFINITY ? 0.0f : glm_triton::exp_approx(fm[i][hf] - nm)) : 1.0f);
++          fl[i][hf] = ci == 0 ? __fmaf_rn(b[i][hf], cl, 0.0f) : __fmaf_rn(fl[i][hf], a[i][hf], __fmul_rn(b[i][hf], cl));
++          fm[i][hf] = nm;
++        }
++      for (int i = 0; i < FT; ++i)
++        for (int j = 0; j < 8; ++j)
++          for (int e = 0; e < 4; ++e) {
++            const float x = o[i][j][e], bb = b[i][e / 2];
++            fo[i][j][e] = ci == 0 ? __fmaf_rn(bb, x, 0.0f) : __fmaf_rn(fo[i][j][e], a[i][e / 2], __fmul_rn(bb, x));
++          }
++    }
++  }
++  if constexpr (FUSED) {  // tf_glm_merge's bf16(o / l) for the block's real heads
++    for (int i = 0; i < FT; ++i)
++      for (int hf = 0; hf < 2; ++hf) {
++        const int64_t hd = h0 + i * 16 + g + hf * 8;
++        if (hd >= heads) continue;
++        __nv_bfloat16* row = out + (r * heads + hd) * LW + warp * 64 + q * 2;
++        for (int j = 0; j < 8; ++j)
++          *reinterpret_cast<__nv_bfloat162*>(row + j * 8) =
++              __halves2bfloat162(__float2bfloat16_rn(glm_triton::div_full(fo[i][j][hf * 2], fl[i][hf])),
++                                 __float2bfloat16_rn(glm_triton::div_full(fo[i][j][hf * 2 + 1], fl[i][hf])));
++      }
++  } else {
++    for (int i = 0; i < MT; ++i)
++      for (int e = 0; e < 4; ++e) {
++        const int64_t hd = h0 + i * 16 + g + (e / 2) * 8;
++        if (hd >= heads) continue;
++        const int64_t base = (c * rows + r) * heads + hd;
++        for (int j = 0; j < 8; ++j) po[base * LW + warp * 64 + j * 8 + q * 2 + e % 2] = o[i][j][e];
++        if (warp == 0 && q == 0 && e % 2 == 0) {
++          pm[base] = m[i][e / 2];
++          pl[base] = l[i][e / 2];
++        }
++      }
++  }
++}
++
++}  // namespace glm_attn_ovn
++
++// Bounded tile loops (decode windows and unfused prompt launches): tf_glm_chunks_*'s arguments and partials, same bits.
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_chunks_16_skip(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
++                          const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
++                          float scale, int sparse, const int* pt, int64_t pstep) {
++  glm_attn_ovn::chunks<16, false, false>(qa, lc, nullptr, pos, tok, cnt, po, pm, pl, nullptr, 1, rows, heads, w, scale,
++                                         sparse, pt, pstep);
++}
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_chunks_32_skip(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
++                          const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
++                          float scale, int sparse, const int* pt, int64_t pstep) {
++  glm_attn_ovn::chunks<32, false, false>(qa, lc, nullptr, pos, tok, cnt, po, pm, pl, nullptr, 1, rows, heads, w, scale,
++                                         sparse, pt, pstep);
++}
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_chunks_16_fp8_skip(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
++                              const int* tok, const int* cnt, float* po, float* pm, float* pl, int64_t rows,
++                              int64_t heads, int64_t w, float scale, int sparse, const int* pt, int64_t pstep) {
++  glm_attn_ovn::chunks<16, true, false>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, po, pm,
++                                        pl, nullptr, 1, rows, heads, w, scale, sparse, pt, pstep);
++}
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_chunks_32_fp8_skip(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
++                              const int* tok, const int* cnt, float* po, float* pm, float* pl, int64_t rows,
++                              int64_t heads, int64_t w, float scale, int sparse, const int* pt, int64_t pstep) {
++  glm_attn_ovn::chunks<32, true, false>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, po, pm,
++                                        pl, nullptr, 1, rows, heads, w, scale, sparse, pt, pstep);
++}
++
++// Chunks and merge in one launch (grid rows x head blocks): out bf16 [rows][heads][512] as tf_glm_merge writes it.
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_chunks_32_fused(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
++                           const int* cnt, __nv_bfloat16* out, int64_t rows, int64_t heads, int64_t w, float scale,
++                           int sparse, const int* pt, int64_t pstep, int nch) {
++  glm_attn_ovn::chunks<32, false, true>(qa, lc, nullptr, pos, tok, cnt, nullptr, nullptr, nullptr, out, nch, rows, heads,
++                                        w, scale, sparse, pt, pstep);
++}
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_chunks_32_fp8_fused(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
++                               const int* tok, const int* cnt, __nv_bfloat16* out, int64_t rows, int64_t heads,
++                               int64_t w, float scale, int sparse, const int* pt, int64_t pstep, int nch) {
++  glm_attn_ovn::chunks<32, true, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, nullptr,
++                                       nullptr, nullptr, out, nch, rows, heads, w, scale, sparse, pt, pstep);
++}
+diff --git a/zig/kernels/cuda/glm_glue_latent_ovn.cuh b/zig/kernels/cuda/glm_glue_latent_ovn.cuh
+new file mode 100644
+index 000000000..43bfdbe5c
+--- /dev/null
++++ b/zig/kernels/cuda/glm_glue_latent_ovn.cuh
+@@ -0,0 +1,142 @@
++// TF_GLM_OVN_ABSORB_VEC and TF_GLM_OVN_KVB8: absorb and expand reading a three-way kv_b a row by one load.
++#pragma once
++
++#include "glm_glue_latent.cuh"
++#include <cuda_fp8.h>
++
++namespace glm_latent_ovn {
++
++constexpr int KB = 128;  // latent columns one E4M3 kv_b scale covers (the Python family's qmm.make_f8 block)
++
++// A bf16 value from its 16 bits, through the same bf() the scalar kernels call.
++__device__ __forceinline__ float bf_of(uint32_t bits) {
++  __nv_bfloat16_raw raw;
++  raw.x = (unsigned short)(bits & 0xffffu);
++  return bf(__nv_bfloat16(raw));
++}
++
++// 8 bf16 at p (16-byte aligned) by one load, element j from the low half of word j / 2 first (little-endian).
++__device__ __forceinline__ void bf8(float* out, const __nv_bfloat16* p) {
++  const uint4 u = *reinterpret_cast<const uint4*>(p);
++  const uint32_t words[4] = {u.x, u.y, u.z, u.w};
++#pragma unroll
++  for (int k = 0; k < 4; ++k) {
++    out[2 * k] = bf_of(words[k]);
++    out[2 * k + 1] = bf_of(words[k] >> 16);
++  }
++}
++
++// 8 E4M3 codes at p (8-byte aligned) by one load: each code's exact value times s (latent.py's _absorb_q8, _expand_v8).
++__device__ __forceinline__ void e4m3x8(float* out, const unsigned char* p, float s) {
++  const uint2 c = *reinterpret_cast<const uint2*>(p);
++#pragma unroll
++  for (int k = 0; k < 4; ++k) {
++    const uint16_t bits = (uint16_t)(((k < 2 ? c.x : c.y) >> (16 * (k & 1))) & 0xffffu);
++    const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
++    out[2 * k] = __fmul_rn(v.x, s);
++    out[2 * k + 1] = __fmul_rn(v.y, s);
++  }
++}
++
++// tf_glm_absorb_q's block and sums; F8: wk E4M3 [heads][256][512], sk fp32 [heads][256][512 / KB].
++template <bool F8>
++__device__ void absorb(const __nv_bfloat16* q, const void* wk, const float* sk, __nv_bfloat16* qa, int64_t rows,
++                       int64_t heads, int64_t rb) {
++  constexpr int D = 256, LW = 512;
++  __shared__ float part[128];
++  const int t = threadIdx.x, k0 = t >> 2, nq = t & 3, warp = t >> 5;
++  const int64_t h = blockIdx.x, n0 = (int64_t)blockIdx.y * 32 + nq * 8, r0 = blockIdx.z * rb;
++  float w[8][8];
++#pragma unroll
++  for (int rep = 0; rep < 8; ++rep) {
++    const int64_t row = h * D + k0 + 32 * rep;
++    if constexpr (F8)
++      e4m3x8(w[rep], static_cast<const unsigned char*>(wk) + row * LW + n0, sk[row * (LW / KB) + n0 / KB]);
++    else
++      bf8(w[rep], static_cast<const __nv_bfloat16*>(wk) + row * LW + n0);
++  }
++  for (int64_t r = r0; r < r0 + rb && r < rows; ++r) {
++    float qv[8];
++    for (int rep = 0; rep < 8; ++rep) qv[rep] = bf(q[(r * heads + h) * D + k0 + 32 * rep]);
++    for (int j = 0; j < 8; ++j) {
++      float a = fmul(w[1][j], qv[1]);
++      a = __fmaf_rn(w[0][j], qv[0], a);
++      for (int rep = 2; rep < 8; ++rep) a = __fmaf_rn(w[rep][j], qv[rep], a);
++      for (int o = 16; o >= 4; o >>= 1) a = a + __shfl_xor_sync(0xffffffffu, a, o);
++      if ((t & 28) == 0) part[(nq * 8 + j) * 4 + warp] = a;
++    }
++    __syncthreads();
++    float v = part[t];
++    v = v + __shfl_xor_sync(0xffffffffu, v, 2);
++    v = v + __shfl_xor_sync(0xffffffffu, v, 1);
++    if ((t & 3) == 0) qa[(r * heads + h) * LW + (int64_t)blockIdx.y * 32 + t / 4] = __float2bfloat16_rn(v);
++    __syncthreads();
++  }
++}
++
++// tf_glm_expand_v's block and sums; F8: wv E4M3 [heads][256][512], sv fp32 [heads][256][512 / KB], o read as there.
++template <bool F8>
++__device__ void expand(const __nv_bfloat16* ol, const void* wv, const float* sv, __nv_bfloat16* out, int64_t rows,
++                       int64_t heads, int64_t rb) {
++  constexpr int DV = 256, LW = 512;
++  __shared__ float part[32];
++  const int t = threadIdx.x, lane = t & 31, warp = t >> 5, kb = (warp & 1) * 256 + lane * 8, nb = warp >> 1;
++  const int64_t h = blockIdx.x, n0 = (int64_t)blockIdx.y * 16, r0 = blockIdx.z * rb;
++  float w[8][8];
++#pragma unroll
++  for (int rep = 0; rep < 8; ++rep) {
++    const int64_t row = h * DV + n0 + nb + 2 * rep;
++    if constexpr (F8)
++      e4m3x8(w[rep], static_cast<const unsigned char*>(wv) + row * LW + kb, sv[row * (LW / KB) + kb / KB]);
++    else
++      bf8(w[rep], static_cast<const __nv_bfloat16*>(wv) + row * LW + kb);
++  }
++  for (int64_t r = r0; r < r0 + rb && r < rows; ++r) {
++    float o[8];
++    if constexpr (F8) {
++      for (int j = 0; j < 8; ++j) o[j] = bf(ol[(r * heads + h) * LW + kb + j]);
++    } else {
++      bf8(o, ol + (r * heads + h) * LW + kb);
++    }
++    for (int rep = 0; rep < 8; ++rep) {
++      float a = fmul(w[rep][1], o[1]);
++      a = __fmaf_rn(w[rep][0], o[0], a);
++      for (int j = 2; j < 8; ++j) a = __fmaf_rn(w[rep][j], o[j], a);
++      for (int s = 16; s > 0; s >>= 1) a = a + __shfl_xor_sync(0xffffffffu, a, s);
++      if (lane == 0) part[(nb + 2 * rep) * 2 + (warp & 1)] = a;
++    }
++    __syncthreads();
++    if (t < 32) {
++      float v = part[t];
++      v = v + __shfl_xor_sync(0xffffffffu, v, 1);
++      if ((t & 1) == 0) out[(r * heads + h) * DV + n0 + t / 2] = __float2bfloat16_rn(v);
++    }
++    __syncthreads();
++  }
++}
++
++}  // namespace glm_latent_ovn
++
++// TF_GLM_OVN_ABSORB_VEC: tf_glm_absorb_q / tf_glm_expand_v bit for bit, kv_b (and expand's o) by 16-byte loads.
++extern "C" __global__ void __launch_bounds__(128)
++    tf_glm_absorb_q_vec(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
++                        int64_t heads, int64_t rb) {
++  glm_latent_ovn::absorb<false>(q, wk, nullptr, qa, rows, heads, rb);
++}
++extern "C" __global__ void __launch_bounds__(128)
++    tf_glm_expand_v_vec(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
++                        int64_t heads, int64_t rb) {
++  glm_latent_ovn::expand<false>(ol, wv, nullptr, out, rows, heads, rb);
++}
++
++// TF_GLM_OVN_KVB8 (a numerics trade): kv_b as E4M3 codes and fp32 scales, the same blocks and sums.
++extern "C" __global__ void __launch_bounds__(128)
++    tf_glm_absorb_q8(const __nv_bfloat16* q, const unsigned char* wk, const float* sk, __nv_bfloat16* qa, int64_t rows,
++                     int64_t heads, int64_t rb) {
++  glm_latent_ovn::absorb<true>(q, wk, sk, qa, rows, heads, rb);
++}
++extern "C" __global__ void __launch_bounds__(128)
++    tf_glm_expand_v8(const __nv_bfloat16* ol, const unsigned char* wv, const float* sv, __nv_bfloat16* out,
++                     int64_t rows, int64_t heads, int64_t rb) {
++  glm_latent_ovn::expand<true>(ol, wv, sv, out, rows, heads, rb);
++}
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index c30384a36..dacc5b279 100644
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -51,6 +51,8 @@ test {
+     _ = @import("cuda_formats_csf0_test.zig");
+     _ = @import("cuda_tile.zig");
+     _ = @import("cuda_kv8_test.zig");
++    _ = @import("cuda_kvb.zig");
++    _ = @import("cuda_mla_ovn_test.zig");
+     _ = kv8_ref;
+     _ = @import("cuda_prof.zig");
+     _ = @import("cuda_load_owner.zig");
+diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
+index 286ac69e1..b7fa7d8ba 100644
+--- a/zig/src/families/glm/cuda_dsa_block.zig
++++ b/zig/src/families/glm/cuda_dsa_block.zig
+@@ -24,6 +24,8 @@ pub const Layer = struct {
+     q_b: projection.Proj,
+     wk: u64,
+     wv: u64,
++    sk: u64 = 0, // TF_GLM_OVN_KVB8: wk's fp32 scales [heads][qk][lw / 128] (wk then E4M3); 0: wk bf16
++    sv: u64 = 0, // and wv's [heads][dv][lw / 128]
+     o: projection.Proj,
+     index: Index,
+     heads: usize,
+@@ -94,7 +96,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x:
+     try attend(k, stream, l, c, s, 0, rows, pos, host_pos, nch, part_rows);
+     const stamp = prof.span(k.prof, stream, .projections);
+     defer stamp.end();
+-    try latent.expandV(k.set, stream, s.ol, l.wv, s.vn, rows, l.heads, l.dv, l.lw);
++    try latent.expandV(k.set, stream, s.ol, l.wv, l.sv, s.vn, rows, l.heads, l.dv, l.lw);
+ }
+ 
+ /// Whether a sequence at `host_pos` has rows past the dense limit among its next `rows` (the sparse pass).
+@@ -120,7 +122,7 @@ pub fn prepareProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch,
+     const ix = l.index;
+     try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
+     try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
+-    try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.lw);
++    try latent.absorbQ(set, stream, s.q, l.wk, l.sk, s.qa, rows, l.heads, l.qk, l.lw);
+     if (qi) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
+ }
+ 
+@@ -190,7 +192,7 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
+     const pstamp = prof.span(k.prof, stream, .projections);
+     defer pstamp.end();
+     const off = (rows - 1) * l.heads * l.lw * 2;
+-    try latent.expandV(k.set, stream, s.ol + off, l.wv, s.vn, 1, l.heads, l.dv, l.lw); // its o, into vn's row 0
++    try latent.expandV(k.set, stream, s.ol + off, l.wv, l.sv, s.vn, 1, l.heads, l.dv, l.lw); // its o, into vn's row 0
+     try fill(k.set, stream, l, s, 0, 1, out);
+ }
+ 
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index f8f927c25..b8cd5904b 100644
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -58,6 +58,7 @@ pub const Modules = struct {
+     pack_dense: cuda.Function,
+     quant: quant.Kernels,
+     q4: q4.Kernels,
++    mla: glue.Mla, // TF_GLM_OVN_MLA_FUSEMERGE, TF_GLM_OVN_ABSORB_VEC: the MLA launch choices, read at load
+ 
+     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
+     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
+@@ -88,6 +89,7 @@ pub const Modules = struct {
+         m.chunked = if (kda_chunk.enabled()) try kda_chunk.Kernel.load(d) else null;
+         errdefer if (m.chunked) |*x| x.unload();
+         m.index = null;
++        m.mla = try glue.Mla.read();
+         errdefer if (m.index) |*x| x.unload();
+         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
+         _ = index_mod.splitRows() catch return error.BadIndexSetting; // TF_GLM_OVN_DECODE_INDEX: a typo is refused
+@@ -216,7 +218,7 @@ pub const Forward = struct {
+     }
+ 
+     pub fn set(f: *const Forward) glue.Set {
+-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
++        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null, .mla = f.m.mla };
+     }
+ 
+     /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
+diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index bc5bb8109..f4b268524 100644
+--- a/zig/src/families/glm/cuda_glue.zig
++++ b/zig/src/families/glm/cuda_glue.zig
+@@ -19,12 +19,12 @@ pub const Mla = struct {
+     /// MLA_FUSEMERGE: unset or 0 off; 1 fuses from latent.prompt_rows rows (prompt chunks); N > 1 from N rows.
+     pub fn read() error{BadOvnKnob}!Mla {
+         const fuse: usize = @intCast(try cuda.ovn.int("MLA_FUSEMERGE", 0));
+-        return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC"), .mma = cuda.ovn.on("LATENT_MMA"), .seg = cuda.ovn.on("SEG_PASS") };
++        return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC") };
+     }
+ 
+-    /// Whether a TF_GLM_OVN knob whose kernels sit in glm_glue is set (MLA_FUSEMERGE, ABSORB_VEC, KVB8, PK8).
++    /// Whether any knob whose kernels sit in glm_glue is set (MLA_FUSEMERGE, ABSORB_VEC).
+     pub fn wanted() bool {
+-        return cuda.ovn.on("MLA_FUSEMERGE") or cuda.ovn.on("ABSORB_VEC") or cuda.ovn.on("KVB8") or cuda.ovn.on("DECODE_SHARD") or cuda.ovn.on("LATENT_MMA") or cuda.ovn.on("PK8") or cuda.ovn.on("SEG_PASS");
++        return cuda.ovn.on("MLA_FUSEMERGE") or cuda.ovn.on("ABSORB_VEC");
+     }
+ };
+ 
+@@ -80,13 +80,28 @@ pub const Kernels = struct {
+     chunks_32_fp8: cuda.Function,
+     merge: cuda.Function,
+     scores: cuda.Function,
++    // TF_GLM_OVN_* forms (glm_glue_attn_ovn.cuh, glm_glue_latent_ovn.cuh), launched only with their knob on
++    chunks_16_skip: cuda.Function,
++    chunks_32_skip: cuda.Function,
++    chunks_16_fp8_skip: cuda.Function,
++    chunks_32_fp8_skip: cuda.Function,
++    chunks_32_fused: cuda.Function,
++    chunks_32_fp8_fused: cuda.Function,
++    absorb_q_vec: cuda.Function,
++    expand_v_vec: cuda.Function,
++    absorb_q8: cuda.Function,
++    expand_v8: cuda.Function,
+     router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
+ 
+     pub fn load(m: cuda.Module) !Kernels {
++        return loadOvn(m, Mla.wanted());
++    }
++
++    /// As load; the TF_GLM_OVN_* forms (chunks_16_skip on) looked up only with `ovn`, else null handles (none loads).
++    pub fn loadOvn(m: cuda.Module, ovn: bool) !Kernels {
++        const from = comptime std.meta.fieldIndex(Kernels, "chunks_16_skip").?;
+         var k: Kernels = undefined;
+-        inline for (@typeInfo(Kernels).@"struct".field_names) |name| {
+-            if (@FieldType(Kernels, name) == cuda.Function) @field(k, name) = try m.function("tf_glm_" ++ name);
+-        }
++        inline for (@typeInfo(Kernels).@"struct".field_names, 0..) |name, i| @field(k, name) = if (i < from or ovn) try m.function("tf_glm_" ++ name) else .{ .d = m.d, .handle = null };
+         const router16 = try cuda.ovn.int("ROUTER16", 0);
+         k.router16 = if (router16 == 0) null else try m.function(if (router16 == 4) "tf_glm_router16_s4" else "tf_glm_router16_s3");
+         try k.bmm_tile.allowDynamicShared(bmm_tile_smem);
+@@ -95,6 +110,13 @@ pub const Kernels = struct {
+         try k.chunks_32.allowDynamicShared(chunksSmem(32));
+         try k.chunks_16_fp8.allowDynamicShared(chunksSmem(16));
+         try k.chunks_32_fp8.allowDynamicShared(chunksSmem(32));
++        if (!ovn) return k;
++        try k.chunks_16_skip.allowDynamicShared(chunksSmem(16));
++        try k.chunks_32_skip.allowDynamicShared(chunksSmem(32));
++        try k.chunks_16_fp8_skip.allowDynamicShared(chunksSmem(16));
++        try k.chunks_32_fp8_skip.allowDynamicShared(chunksSmem(32));
++        try k.chunks_32_fused.allowDynamicShared(chunksSmem(32));
++        try k.chunks_32_fp8_fused.allowDynamicShared(chunksSmem(32));
+         return k;
+     }
+ };
+diff --git a/zig/src/families/glm/cuda_kvb.zig b/zig/src/families/glm/cuda_kvb.zig
+new file mode 100644
+index 000000000..b701b20e9
+--- /dev/null
++++ b/zig/src/families/glm/cuda_kvb.zig
+@@ -0,0 +1,70 @@
++//! A DSA layer's kv_b halves as the latent path reads them: bf16 as stored, or E4M3 and fp32 scales (TF_GLM_OVN_KVB8).
++
++const std = @import("std");
++const cuda = @import("cuda");
++const core = @import("core");
++const formats = @import("cuda_formats.zig");
++const Tensor = core.checkpoint.Tensor;
++
++/// Latent columns one scale covers (the Python family's qmm.F8_BLOCK).
++pub const block = 128;
++
++/// Each head's kv_b rows off .. off + len uploaded as `w`; TF_GLM_OVN_KVB8 (bf16 kv_b): E4M3 `w`, fp32 scales `s`.
++pub fn half(L: anytype, mx: ?formats.mxfp8.Mxfp8, t: Tensor, name: []const u8, heads: [2]usize, per: usize, off: usize, len: usize, total: usize, lw: usize, comptime w: []const u8, comptime s: []const u8, i: u32) !struct { u64, u64 } {
++    for (heads[0]..heads[1]) |head| {
++        const lo = head * per + off;
++        if (mx) |p| try formats.mxfp8.appendWide(L, p, name, lo, lo + len) else try L.rows(t, lo, lo + len, total, .bf16);
++    }
++    if (mx != null or !cuda.ovn.on("KVB8")) return .{ try L.put(w, .{i}), 0 };
++    if (lw % block != 0 or L.host.items.len % (block * 2) != 0) return error.LatentShape;
++    const n = L.host.items.len / 2;
++    const codes = try L.gpa.alloc(u8, n);
++    defer L.gpa.free(codes);
++    const scales = try L.gpa.alloc(f32, n / block);
++    defer L.gpa.free(scales);
++    quantize(L.host.items, codes, scales) catch |err| {
++        std.log.err("{s}: TF_GLM_OVN_KVB8 refuses a non-finite kv_b value", .{name});
++        return err;
++    };
++    L.host.clearRetainingCapacity();
++    try L.host.appendSlice(L.gpa, codes);
++    const wp = try L.put(w, .{i});
++    try L.host.appendSlice(L.gpa, std.mem.sliceAsBytes(scales));
++    return .{ wp, try L.put(s, .{i}) };
++}
++
++fn bf(bits: []const u8, j: usize) f32 {
++    return @bitCast(@as(u32, std.mem.readInt(u16, bits[2 * j ..][0..2], .little)) << 16);
++}
++
++/// qmm.make_f8 on bf16 bytes: per 128 values a scale max |x| / 448 (at least 1e-30) and codes e4m3(x / scale).
++pub fn quantize(bits: []const u8, codes: []u8, scales: []f32) error{NonFiniteKvb}!void {
++    std.debug.assert(bits.len == 2 * codes.len and codes.len == scales.len * block);
++    for (scales, 0..) |*sc, b| {
++        var amax: f32 = 0;
++        for (b * block..(b + 1) * block) |j| {
++            const v = bf(bits, j);
++            if (!std.math.isFinite(v)) return error.NonFiniteKvb;
++            amax = @max(amax, @abs(v));
++        }
++        sc.* = @max(amax / 448.0, @as(f32, 1e-30));
++        for (b * block..(b + 1) * block) |j| codes[j] = core.exlr8.codec.e4m3FromF32(bf(bits, j) / sc.*);
++    }
++}
++
++test "KVB8: make_f8's scale and codes a 128-column block" {
++    var bits: [2 * 2 * block]u8 = @splat(0);
++    std.mem.writeInt(u16, bits[2 * 5 ..][0..2], 0x4040, .little); // 3.0, the first block's largest
++    std.mem.writeInt(u16, bits[2 * 9 ..][0..2], 0xbfc0, .little); // -1.5
++    var codes: [2 * block]u8 = undefined;
++    var scales: [2]f32 = undefined;
++    try quantize(&bits, &codes, &scales);
++    try std.testing.expectEqual(@as(f32, 3.0) / 448.0, scales[0]);
++    try std.testing.expectEqual(@as(u8, 0x7e), codes[5]); // 448
++    try std.testing.expectEqual(@as(u8, 0xf6), codes[9]); // -224
++    try std.testing.expectEqual(@as(u8, 0), codes[0]);
++    try std.testing.expectEqual(@as(f32, 1e-30), scales[1]); // an all-zero block
++    for (codes[block..]) |c| try std.testing.expectEqual(@as(u8, 0), c);
++    std.mem.writeInt(u16, bits[2 * 200 ..][0..2], 0x7fc0, .little);
++    try std.testing.expectError(error.NonFiniteKvb, quantize(&bits, &codes, &scales));
++}
+diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
+index 8cc7b2eeb..56057b3c4 100644
+--- a/zig/src/families/glm/cuda_latent.zig
++++ b/zig/src/families/glm/cuda_latent.zig
+@@ -26,24 +26,35 @@ fn cdiv(a: usize, b: usize) u32 {
+     return @intCast((a + b - 1) / b);
+ }
+ 
+-/// latent.absorb_q (BF16 kv_b): out [rows][heads][lw] bf16 = q [rows][heads][d] . wk [heads][d][lw], fp32 sums.
+-pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, out: u64, rows: usize, heads: usize, d: usize, lw: usize) !void {
++/// latent.absorb_q: out [rows][heads][lw] bf16 = q [rows][heads][d] . wk [heads][d][lw], fp32 sums; sk: E4M3 kv_b's.
++pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, sk: u64, out: u64, rows: usize, heads: usize, d: usize, lw: usize) !void {
+     if (d != 256 or lw != 512) return error.LatentShape;
+-    try rowBlocks(set.glue.absorb_q, stream, q, wk, out, rows, heads, lw / 32);
++    if (sk != 0) { // TF_GLM_OVN_KVB8: wk E4M3 [heads][d][lw], sk fp32 [heads][d][lw / 128]
++        if (wk % 8 != 0) return error.LatentShape;
++        return rowBlocks(set.glue.absorb_q8, stream, .{ q, wk, sk, out }, rows, heads, lw / 32);
++    }
++    const f = if (set.mla.vec and wk % 16 == 0) set.glue.absorb_q_vec else set.glue.absorb_q; // TF_GLM_OVN_ABSORB_VEC
++    try rowBlocks(f, stream, .{ q, wk, out }, rows, heads, lw / 32);
+ }
+ 
+-/// The absorb and expand launches: rows in one block in decode windows, prompt_rb a block in prompt chunks.
+-fn rowBlocks(f: cuda.Function, stream: cuda.Stream, in: u64, w: u64, out: u64, rows: usize, heads: usize, cols: usize) !void {
++/// The absorb and expand launches (pointers, then rows, heads, rb): rows in one block in decode, prompt_rb in prompts.
++fn rowBlocks(f: cuda.Function, stream: cuda.Stream, ptrs: anytype, rows: usize, heads: usize, cols: usize) !void {
+     const rb = if (rows >= prompt_rows) prompt_rb else rows;
+     var a: cuda.Args = .{};
+-    inline for (.{ in, w, out, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(rb)) }) |v| a.add(v);
++    inline for (ptrs) |v| a.add(@as(u64, v));
++    inline for (.{ @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(rb)) }) |v| a.add(v);
+     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(heads), .y = @intCast(cols), .z = cdiv(rows, rb) }, .block = .{ .x = 128 } }, stream, &a);
+ }
+ 
+-/// latent.expand_v (BF16 kv_b): out [rows][heads][dv] bf16 = o_lat [rows][heads][lw] . wv [heads][dv][lw].
+-pub fn expandV(set: glue.Set, stream: cuda.Stream, ol: u64, wv: u64, out: u64, rows: usize, heads: usize, dv: usize, lw: usize) !void {
++/// latent.expand_v: out [rows][heads][dv] bf16 = o_lat [rows][heads][lw] . wv [heads][dv][lw]; sv: E4M3 kv_b's.
++pub fn expandV(set: glue.Set, stream: cuda.Stream, ol: u64, wv: u64, sv: u64, out: u64, rows: usize, heads: usize, dv: usize, lw: usize) !void {
+     if (dv != 256 or lw != 512) return error.LatentShape;
+-    try rowBlocks(set.glue.expand_v, stream, ol, wv, out, rows, heads, dv / 16);
++    if (sv != 0) { // TF_GLM_OVN_KVB8: wv E4M3 [heads][dv][lw], sv fp32 [heads][dv][lw / 128]
++        if (wv % 8 != 0) return error.LatentShape;
++        return rowBlocks(set.glue.expand_v8, stream, .{ ol, wv, sv, out }, rows, heads, dv / 16);
++    }
++    const vec = set.mla.vec and wv % 16 == 0 and ol % 16 == 0; // TF_GLM_OVN_ABSORB_VEC: kv_b and o by 16-byte loads
++    try rowBlocks(if (vec) set.glue.expand_v_vec else set.glue.expand_v, stream, .{ ol, wv, out }, rows, heads, dv / 16);
+ }
+ 
+ /// A latent cache holds BF16 rows, or E4M3 rows followed by one FP32 scale per row.
+@@ -82,6 +93,7 @@ pub fn attention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, t: Tab
+ }
+ 
+ pub fn attentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, pos: u64, p: Partials, out: u64, dummy: u64, rows: usize, heads: usize, lw: usize, nch: usize, scale: f32, hb: usize) !void {
++    if (fuses(set.mla, rows, hb)) return fused(set, stream, qa, cache, scales, t, pos, 0, 0, out, rows, heads, lw, nch, 0, scale, false);
+     try chunks(set, stream, qa, cache, scales, t, pos, 0, 0, p, rows, heads, lw, nch, 0, scale, hb, false);
+     try merge(set, stream, p, out, dummy, rows, heads, lw, nch, false);
+ }
+@@ -90,9 +102,11 @@ pub fn attentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
+ fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, pos: u64, tokens: u64, counts: u64, p: Partials, rows: usize, heads: usize, lw: usize, nch: usize, w: usize, scale: f32, hb: usize, sparse: bool) !void {
+     if (lw != 512) return error.LatentShape;
+     if (scales != 0 and t.pt != 0) return error.Fp8OnPages;
++    const k = set.glue;
++    const s = set.mla.skip; // TF_GLM_OVN_MLA_FUSEMERGE: the same partials from the tiles up to each chunk's last key
+     const f = switch (hb) {
+-        heads_tile => if (scales == 0) set.glue.chunks_16 else set.glue.chunks_16_fp8,
+-        heads_tile_wide => if (scales == 0) set.glue.chunks_32 else set.glue.chunks_32_fp8,
++        heads_tile => if (scales == 0) (if (s) k.chunks_16_skip else k.chunks_16) else if (s) k.chunks_16_fp8_skip else k.chunks_16_fp8,
++        heads_tile_wide => if (scales == 0) (if (s) k.chunks_32_skip else k.chunks_32) else if (s) k.chunks_32_fp8_skip else k.chunks_32_fp8,
+         else => return error.HeadBlock,
+     };
+     var a: cuda.Args = .{};
+@@ -108,6 +122,23 @@ fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64,
+     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, hb), .z = @intCast(nch) }, .block = .{ .x = 256 }, .shared = shared }, stream, &a);
+ }
+ 
++/// TF_GLM_OVN_MLA_FUSEMERGE: whether a launch of `rows` rows on `hb`-head blocks runs chunks and merge as one kernel.
++fn fuses(m: glue.Mla, rows: usize, hb: usize) bool {
++    return m.fuse_rows != 0 and rows >= m.fuse_rows and hb == heads_tile_wide;
++}
++
++/// chunks then merge as one launch (glm_glue_attn_ovn.cuh): a block a row and 32 heads walks the chunks, no partials.
++fn fused(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, pos: u64, tokens: u64, counts: u64, out: u64, rows: usize, heads: usize, lw: usize, nch: usize, w: usize, scale: f32, sparse: bool) !void {
++    if (lw != 512) return error.LatentShape;
++    const f = if (scales == 0) set.glue.chunks_32_fused else set.glue.chunks_32_fp8_fused;
++    var a: cuda.Args = .{};
++    a.add(qa);
++    a.add(cache);
++    if (scales != 0) a.add(scales);
++    inline for (.{ pos, tokens, counts, out, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(w)), scale, @as(c_int, @intFromBool(sparse)), t.pt, @as(i64, @intCast(t.ps)), @as(c_int, @intCast(nch)) }) |v| a.add(v);
++    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, heads_tile_wide) }, .block = .{ .x = 256 }, .shared = glue.chunksSmem(heads_tile_wide) }, stream, &a);
++}
++
+ /// latent.sparse_attention: rows with counts > 0 over their selected tokens (i32 [rows][w]); others left alone.
+ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
+     return sparseAttentionFormat(set, stream, qa, cache, 0, t, tokens, counts, w, p, out, rows, heads, lw, scale);
+@@ -115,7 +146,9 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
+ 
+ pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
+     const nch = chunksFor(w);
+-    try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, headBlock(rows), true);
++    const hb = headBlock(rows); // the pin's headBlock takes rows alone
++    if (fuses(set.mla, rows, hb)) return fused(set, stream, qa, cache, scales, t, 0, tokens, counts, out, rows, heads, lw, nch, w, scale, true);
++    try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, hb, true);
+     try merge(set, stream, p, out, counts, rows, heads, lw, nch, true);
+ }
+ 
+diff --git a/zig/src/families/glm/cuda_mla_ovn_test.zig b/zig/src/families/glm/cuda_mla_ovn_test.zig
+new file mode 100644
+index 000000000..0242cee5a
+--- /dev/null
++++ b/zig/src/families/glm/cuda_mla_ovn_test.zig
+@@ -0,0 +1,87 @@
++//! TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC and _KVB8 launch choices under a recording driver; off is today's kernels.
++const std = @import("std");
++const cuda = @import("cuda");
++const glue = @import("cuda_glue.zig");
++const latent = @import("cuda_latent.zig");
++const t = std.testing;
++
++const Rec = struct {
++    var n: usize = 0;
++    var ids: [8]usize = undefined;
++    var gz: [8]c_uint = undefined;
++    fn run(f: cuda.abi.Function, _: c_uint, _: c_uint, z: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
++        ids[n] = @intFromPtr(f);
++        gz[n] = z;
++        n += 1;
++        return 0;
++    }
++};
++
++/// A kernel's handle in `kernels`: its field's index plus one.
++fn id(comptime name: []const u8) usize {
++    return std.meta.fieldIndex(glue.Kernels, name).? + 1;
++}
++
++fn kernels(d: *cuda.Driver) glue.Kernels {
++    var ks: glue.Kernels = undefined;
++    inline for (@typeInfo(glue.Kernels).@"struct".field_names, 0..) |name, i| @field(ks, name) = .{ .d = d, .handle = @ptrFromInt(i + 1) };
++    return ks;
++}
++
++const p: latent.Partials = .{ .po = 1000, .pm = 2000, .pl = 3000 };
++
++/// The kernels one dense call (hb-head blocks) and one sparse call of `rows` rows launch, in order.
++fn attention(set: glue.Set, s: cuda.Stream, scales: u64, rows: usize, hb: usize) ![]const usize {
++    Rec.n = 0;
++    try latent.attentionFormat(set, s, 256, 512, scales, .{}, 768, p, 4096, 64, rows, 22, 512, 3, 0.0625, hb);
++    try latent.sparseAttentionFormat(set, s, 256, 512, scales, .{}, 1024, 2048, 2051, p, 4096, rows, 22, 512, 0.0625);
++    return Rec.ids[0..Rec.n];
++}
++
++test "TF_GLM_OVN MLA knobs off: today's chunk, merge, absorb and expand kernels" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.run;
++    const ks = kernels(&d);
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const off: glue.Set = .{ .glue = &ks };
++    try t.expectEqualSlices(usize, &.{ id("chunks_32"), id("merge"), id("chunks_32"), id("merge") }, try attention(off, s, 0, 70, 32));
++    try t.expectEqualSlices(usize, &.{ id("chunks_16_fp8"), id("merge"), id("chunks_16_fp8"), id("merge") }, try attention(off, s, 64, 2, 16));
++    Rec.n = 0;
++    try latent.absorbQ(off, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try latent.expandV(off, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try t.expectEqualSlices(usize, &.{ id("absorb_q"), id("expand_v") }, Rec.ids[0..Rec.n]);
++}
++
++test "TF_GLM_OVN_MLA_FUSEMERGE: 32-head launches from fuse_rows rows fused, the rest bounded" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.run;
++    const ks = kernels(&d);
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const on: glue.Set = .{ .glue = &ks, .mla = .{ .fuse_rows = 64, .skip = true } };
++    try t.expectEqualSlices(usize, &.{ id("chunks_32_fused"), id("chunks_32_fused") }, try attention(on, s, 0, 70, 32));
++    try t.expectEqual(@as(c_uint, 1), Rec.gz[0]); // one block a row and head block walks the chunks
++    try t.expectEqualSlices(usize, &.{ id("chunks_32_fp8_fused"), id("chunks_32_fp8_fused") }, try attention(on, s, 64, 64, 32));
++    try t.expectEqualSlices(usize, &.{ id("chunks_32_fp8_skip"), id("merge"), id("chunks_32_fp8_skip"), id("merge") }, try attention(on, s, 64, 63, 32));
++    try t.expectEqual(@as(c_uint, 3), Rec.gz[0]); // a chunk a block, as today
++    try t.expectEqualSlices(usize, &.{ id("chunks_16_skip"), id("merge"), id("chunks_16_skip"), id("merge") }, try attention(on, s, 0, 2, 16));
++    const every: glue.Set = .{ .glue = &ks, .mla = .{ .fuse_rows = 1, .skip = true } }; // never a 16-head block
++    try t.expectEqualSlices(usize, &.{ id("chunks_16_skip"), id("merge"), id("chunks_16_skip"), id("merge") }, try attention(every, s, 0, 4, 16));
++}
++
++test "TF_GLM_OVN_ABSORB_VEC and _KVB8: 16-byte forms when aligned, E4M3 forms whenever kv_b has scales" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.run;
++    const ks = kernels(&d);
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const vec: glue.Set = .{ .glue = &ks, .mla = .{ .vec = true } };
++    Rec.n = 0;
++    try latent.absorbQ(vec, s, 256, 4096, 0, 512, 70, 22, 256, 512);
++    try latent.expandV(vec, s, 256, 4096, 0, 512, 70, 22, 256, 512);
++    try latent.absorbQ(vec, s, 256, 4104, 0, 512, 70, 22, 256, 512); // kv_b off 16 bytes: today's kernel
++    try latent.expandV(vec, s, 264, 4096, 0, 512, 70, 22, 256, 512); // o off 16 bytes
++    try latent.absorbQ(vec, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
++    try latent.expandV(.{ .glue = &ks }, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
++    try t.expectEqualSlices(usize, &.{ id("absorb_q_vec"), id("expand_v_vec"), id("absorb_q"), id("expand_v"), id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
++    try t.expectEqual(@as(c_uint, 2), Rec.gz[0]); // 70 rows: two 64-row blocks
++    try t.expectError(error.LatentShape, latent.absorbQ(vec, s, 256, 4100, 8192, 512, 2, 22, 256, 512));
++}
+diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
+index db844401d..08ef66a12 100644
+--- a/zig/src/families/glm/cuda_shared.zig
++++ b/zig/src/families/glm/cuda_shared.zig
+@@ -84,7 +84,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di:
+                 const nch = @min(latent.chunksFor(g.st.pos + g.rows), b.nch);
+                 try dsa_block.attend(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, a, g.st.caches[di], b.dsa, g.row0, g.rows, g.st.pos_dev, g.st.pos, nch, b.part_rows);
+             }
+-            try latent.expandV(f.set(), f.stream, b.dsa.ol, a.wv, b.dsa.vn, rows, a.heads, a.dv, a.lw);
++            try latent.expandV(f.set(), f.stream, b.dsa.ol, a.wv, a.sv, b.dsa.vn, rows, a.heads, a.dv, a.lw);
+             if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
+         },
+     }
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index e818c5f36..9b7a2982a 100644
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -220,7 +220,10 @@ pub const Buffers = struct {
+         const lw: usize = c.kv_lora;
+         const part_rows = if (prefill) @min(rows, dsa_block.prompt_att_rows) else seg;
+         const nch = latent.chunksFor(@min(capacity, dense_reach) + seg);
+-        const partial_rows = @max(nch * part_rows, latent.chunksFor(sparse.width) * seg); // dense calls, or one sparse
++        // dense calls or one sparse call; TF_GLM_OVN_MLA_FUSEMERGE: fused launches (32-head blocks) need no partials
++        const fuse = (try glue.Mla.read()).fuse_rows;
++        const most = if (fuse != 0) @max(fuse, latent.prompt_rows) - 1 else std.math.maxInt(usize);
++        const partial_rows = @max(nch * @min(part_rows, most), latent.chunksFor(sparse.width) * @min(seg, most));
+         const np_max = capacity / sparse.pool;
+         var mm: usize = 4;
+         // windows under rows_from rows keep their K slices apart (a prompt's tail chunk on the prefill buffers too)
+diff --git a/zig/src/families/glm/cuda_weights.zig b/zig/src/families/glm/cuda_weights.zig
+index ac9f7aea1..645f01d94 100644
+--- a/zig/src/families/glm/cuda_weights.zig
++++ b/zig/src/families/glm/cuda_weights.zig
+@@ -17,6 +17,7 @@ const mm_mod = @import("cuda_mm.zig");
+ pub const formats = @import("cuda_formats.zig");
+ const projection = @import("cuda_proj.zig");
+ const glue = @import("cuda_glue.zig");
++const kvb = @import("cuda_kvb.zig");
+ const Tensor = core.checkpoint.Tensor;
+ const prefix = "model.language_model.";
+ /// A hyper-connection site: fn bf16 [s (s + 2)][s d], base and scale widened to fp32.
+@@ -255,10 +256,8 @@ const Loader = struct {
+         const kv_b = try L.get("layers.{d}.self_attn.kv_b_proj.weight", .{i});
+         const per = qk + c.v_dim; // a head's kv_b rows: its keys, then its values
+         const total = c.mla_heads * per;
+-        for (h.lo..h.hi) |head| try absorbRows(L, kv_wide, kv_b, kv_name, head * per, head * per + qk, total);
+-        const wk = try L.put("layers.{d}.dsa.absorb.wk", .{i});
+-        for (h.lo..h.hi) |head| try absorbRows(L, kv_wide, kv_b, kv_name, head * per + qk, (head + 1) * per, total);
+-        const wv = try L.put("layers.{d}.dsa.absorb.wv", .{i});
++        const wk, const sk = try kvb.half(L, kv_wide, kv_b, kv_name, .{ h.lo, h.hi }, per, 0, qk, total, c.kv_lora, "layers.{d}.dsa.absorb.wk", "layers.{d}.dsa.absorb.sk", i);
++        const wv, const sv = try kvb.half(L, kv_wide, kv_b, kv_name, .{ h.lo, h.hi }, per, qk, c.v_dim, total, c.kv_lora, "layers.{d}.dsa.absorb.wv", "layers.{d}.dsa.absorb.sv", i);
+         const o = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.o_proj", .cols = .{ h.lo * c.v_dim, h.hi * c.v_dim } }}, wants, "layers.{d}.dsa.o");
+         const iw: []const formats.Format = if (mtp) &.{ .bf16, .mxfp8 } else &.{.bf16};
+         const kw = try formats.cutProj(L, prefix, i, &.{ .{ .rel = "self_attn.indexer.wk" }, .{ .rel = "self_attn.indexer.weights_proj" } }, iw, "layers.{d}.dsa.index.kw");
+@@ -278,6 +277,8 @@ const Loader = struct {
+             .q_b = q_b,
+             .wk = wk,
+             .wv = wv,
++            .sk = sk,
++            .sv = sv,
+             .o = o,
+             .index = .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim },
+             .heads = h.len(),
+@@ -291,12 +292,6 @@ const Loader = struct {
+         };
+     }
+ 
+-    /// kv_b's rows [lo, hi) onto the host bytes: bf16 as stored, or MXFP8 (`mx`, the MTP layer's) widened exactly.
+-    fn absorbRows(L: *Loader, mx: ?formats.mxfp8.Mxfp8, t: Tensor, name: []const u8, lo: usize, hi: usize, total: usize) !void {
+-        if (mx) |p| return formats.mxfp8.appendWide(L, p, name, lo, hi);
+-        try L.rows(t, lo, hi, total, .bf16);
+-    }
+-
+     /// An NVFP4 linear's rows [lo, hi), inputs [klo, khi) as Fp4Linear.from_checkpoint (tf_pack_dense, packScales).
+     fn fp4(L: *Loader, comptime fmt: []const u8, i: u32, lo: usize, hi: usize, klo: usize, khi: usize) !cuda.qmmf.Weight {
+         const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ fmt, .{i});
