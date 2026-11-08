@@ -42,6 +42,12 @@ than grafting a knob.
 | source | why parked |
 |---|---|
 | 1a89c3e82 PK8 (pooled keys as production kv8 rows) | touches cuda_disk_image, cuda_dsa_seg, cuda_index_shard, native/cuda_glm_disk: none exist at the pin. Its cuda_state hunk conflicts. |
+| 08330f951 DISK_BCAST / _DISK_PUMP / _SNAP_GATHER / _DROP_MTP | needs cuda_disk_image.zig and cuda_disk_ranks.zig (absent at the pin); rows_store/rows_write hunks conflict. |
+| 436970264 MLA_FUSEMERGE / _ABSORB_VEC / _KVB8 | edits glue.Set and Kernels at the pin's changed load loop, plus cuda_latent chunk signatures: an era refactor. |
+| 3cceb587d PEER_FIRST / _FRONTS / _SIDE_PRIO | needs cuda_forward_fronts.zig / cuda_forward_pieces.zig and rewrites cuda_forward's peer paths. |
+| 3423859e7 GLUE_FUSE / _GLUE_ROW / _PDL_EARLY | adds cuda_forward_glue.zig and changes post()'s signature at the pin's own glue sites. |
+| c920d6e5a ROCE_RAILS / _LINK1 / _ROCE_ILP / _ROCE_CPU | needs cuda/roce_rails.zig and rewrites roce.zig's rail setup. |
+| e95d31f81 ITEMS (16-pair item plan) | needs kernels/cuda/exl3_ovn.cuh and rewrites exl3_experts' dispatch. |
 
 | 32060d706 shared-round knobs (prof, draw1, cost_time, prompt_pieces, lanes_fill, lanes_shared, kda_seg, commit_seg, wait) | 15 conflicts across 7 files, all divergent-era semantics at one site: pin's `glm_top1` template vs source's `glm_top1_row`; pin's lanes `mtp_confidence` vs source's `together`/`multi`; pin's L2PF prefetch path vs source's seg_kda path. This commit IS the era refactor the later knobs ride on. |
 | PRX / fill-slice family, SEG_KDA/SEG_DSA, KDA_PIECES | sit on 32060d706's module layout: prompt_pieces, lanes_fill, lanes_shared, slices, and the Buffers.seg tables (cuda_kda_seg, cuda_dsa_seg, cuda_commit_seg), none of which the pin has. Porting that era is a project with its own A/B, not a patch. |
