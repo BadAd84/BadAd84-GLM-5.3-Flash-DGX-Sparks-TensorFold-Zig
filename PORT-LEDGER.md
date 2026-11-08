@@ -1,6 +1,6 @@
 # PORT-LEDGER.md - engine patches ported from ai-engine into this recipe
 
-Current state only. The applied stack is `patches/engine/0001` .. `0011`, applied in
+Current state only. The applied stack is `patches/engine/0001` .. `0012`, applied in
 order onto the pin in `scripts/config.sh` (9c9bf542cc87ec21f44cee720fc4f1c056f8c905).
 Every landed patch was proven by a fresh application in order onto a clean pin
 checkout, with these gates: `zig build check-native-cuda-host`, whole-tree
@@ -22,6 +22,7 @@ patch touching `.cu`.
 | 0009 | TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32 | 94b93e567 | compile, fmt, lean, fatbins |
 | 0010 | TF_GLM_OVN_INDEX_REGROUP (reduce-scatter head sum) | 5da368af1 | compile, fmt, lean, fatbins |
 | 0011 | TF_GLM_OVN_ONE_CHUNK (marks kept from inside a prompt chunk) | 083da32bb, 7d01784c3 | compile, fmt, lean, test-lane-api-host |
+| 0012 | TF_GLM_OVN_PLAIN_MARGIN (the draft-over-plain margin) | 59604d959 | compile, fmt, lean, test-lane-api-host |
 
 ## Parked - blocked on a structural port, not a knob
 
