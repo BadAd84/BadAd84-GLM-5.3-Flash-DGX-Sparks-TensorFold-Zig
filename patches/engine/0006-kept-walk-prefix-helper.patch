@@ -1,0 +1,1046 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+
+ai-engine e9bc5dc54 grafted onto the pin. Every kept-state walk (keptNear,
+wouldServe, reserve, forget, keepBorn, find, interior, imprint, disk matches,
+extendedScan, link) checks the last id first and compares with one vectorised
+helper (prompt_prefix.same): prompt_prefix.zig with starts/ends/Lazy, the count
+and property tests, the bench. Same decisions, entries and links: the pin's
+images.matches and own_only conditions stay in their walks, the test-ref block
+moved from prompt_cache.zig (at the 600-line limit) to engine_api_test.zig, the
+cascade root that already references prompt_cache.zig.
+
+Measurement (ai-engine docs/PARITY.md item, e9bc5dc54): laptop warm turn at
+600k, 32 kept states, 540 -> 3.0 ms; 29 mutants killed. Behaviour-identical
+by construction (property test over 24 random sessions; count test per walk).
+
+Gates on pin+0001..0006: check-native-cuda-host green, test-lane-api-host
+green (550 tests, 1 skipped), whole-tree fmt green, lean base-vs-head 0 new.
+
+diff --git a/zig/build/lane_halt_host.zig b/zig/build/lane_halt_host.zig
+index 9220a26ed..1564829cc 100644
+--- a/zig/build/lane_halt_host.zig
++++ b/zig/build/lane_halt_host.zig
+@@ -11,6 +11,13 @@ pub fn steps(b: *std.Build) void {
+     b.step("test-lane-lone-host", "Existing lone-driver handoff and reclaim with a fake backend").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"lone driver"} })).step);
+     b.step("test-lane-api-host", "Shared lane host and engine API CPU regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
+     b.step("test-snapshot-index-host", "Prompt-cache lookup index against the whole-store scan, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"snapshot index:"} })).step);
++    b.step("test-kept-walk-host", "TF_GLM_OVN_KEPT_WALK: every kept-state walk decides the same, comparing fewer lists").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"kept walk:"} })).step);
++    const spark = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu });
++    inline for (.{ .{ b.graph.host, "kept-walk-bench", "compile-kept-walk-bench-host" }, .{ spark, "kept-walk-bench-spark", "compile-kept-walk-bench-spark" } }) |v| {
++        const fast_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = v[0], .optimize = .fast, .link_libc = true });
++        const walk_bench = b.addExecutable(.{ .name = v[1], .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/prompt_prefix_bench.zig"), .target = v[0], .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = fast_lanes }} }) });
++        b.step(v[2], "Build the CPU-only kept-state walk timing probe (TF_GLM_OVN_KEPT_WALK) without running it").dependOn(&b.addInstallArtifact(walk_bench, .{}).step);
++    }
+     b.step("test-rows-prefetch-host", "Disk states read ahead for queued requests: equality, cancellation, fallbacks").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"prefetch:"} })).step);
+     b.step("test-embedding-lane-host", "Prompt-only embedding jobs on the actual lane worker without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"embedding lane:"} })).step);
+     b.step("test-prefill-service-host", "The opt-in prompt-row budget beside decoding streams on the lane host with a fake backend").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"prefill service:"} })).step);
+diff --git a/zig/src/core/engine_api_test.zig b/zig/src/core/engine_api_test.zig
+index 74a4aadc5..066009d9d 100644
+--- a/zig/src/core/engine_api_test.zig
++++ b/zig/src/core/engine_api_test.zig
+@@ -10,9 +10,26 @@ test {
+     _ = @import("lane_rounds_test.zig");
+     _ = @import("lane_halt_test.zig");
+     _ = @import("prompt_cache.zig");
++    _ = @import("prompt_cache_repeat_test.zig");
+     _ = @import("prompt_radix.zig");
+     _ = @import("prompt_imprint.zig");
+     _ = @import("keepalive.zig");
+     _ = @import("originals_test.zig");
+     _ = @import("image_api_test.zig");
+ }
++
++test {
++    _ = @import("prompt_cache_index_test.zig");
++    _ = @import("prompt_cache_test.zig");
++    _ = @import("prompt_cache_learn_test.zig");
++    _ = @import("prompt_cache_rewind_test.zig");
++    _ = @import("prompt_cache_interior_test.zig");
++    _ = @import("prompt_cache_branch_test.zig");
++    _ = @import("prompt_cache_fork_test.zig");
++    _ = @import("prompt_cache_give_test.zig");
++    _ = @import("prompt_cache_lifetime_test.zig");
++    _ = @import("prompt_cache_scan_test.zig");
++    _ = @import("learned_fault_test.zig");
++    _ = @import("prompt_cache_tail_test.zig");
++    _ = @import("prompt_cache_others_test.zig");
++}
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index 775be5eda..677a7ab8c 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -12,6 +12,7 @@ const interior = @import("prompt_interior.zig");
+ const index = @import("prompt_cache_index.zig");
+ const forks = @import("prompt_cache_fork.zig");
+ pub const others = @import("prompt_cache_others.zig");
++pub const prefix = @import("prompt_prefix.zig"); // every kept-state walk's prefix compare (TF_GLM_OVN_KEPT_WALK)
+ pub const rows = @import("rows_store.zig");
+ /// A family's copy of one state.
+ pub const Saved = *anyopaque;
+@@ -93,6 +94,7 @@ pub const Entry = struct {
+     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
+     ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born later (policy.link): `extended` reads them
+     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
++    seen: u64 = 0, // TF_GLM_OVN_KEPT_WALK: the link walk (Store.walks) that proved its tokens begin the new entry's
+ };
+ pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
+ pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
+@@ -120,6 +122,7 @@ pub const Store = struct {
+     disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
+     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
+     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
++    walks: u64 = 0, // TF_GLM_OVN_KEPT_WALK: link walks so far, each marking the entries it proved (Entry.seen)
+     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
+     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
+     keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
+@@ -225,7 +228,7 @@ pub const Store = struct {
+         var best: ?u32 = null;
+         for (s.entries.items) |e| {
+             if (e.expired or e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
+-            if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !modes.equal(e.decode_spans, spans, e.at) or !images.matches(s, e)) continue;
++            if (!prefix.starts(prompt, e.tokens) or !modes.equal(e.decode_spans, spans, e.at) or !images.matches(s, e)) continue;
+             if (best == null or e.at > best.?) best = e.at;
+         }
+         return best;
+@@ -235,7 +238,7 @@ pub const Store = struct {
+     pub fn wouldServe(s: *const Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span, kept: []const u32, kept_spans: []const modes.Span, at: u32) bool {
+         const n = @as(usize, at) + s.rules.lookahead;
+         if (at >= prompt.len or n > prompt.len or n > kept.len or !s.usable(at, starts)) return false;
+-        return std.mem.eql(u32, prompt[0..n], kept[0..n]) and modes.equal(kept_spans, spans, at);
++        return prefix.starts(prompt, kept[0..n]) and modes.equal(kept_spans, spans, at);
+     }
+ 
+     /// The longest kept token prefix with matching canonical spans through its position, leaving at least one row.
+@@ -334,7 +337,7 @@ pub const Store = struct {
+         for (marks_) |at| {
+             const n = @as(usize, at) + s.rules.lookahead;
+             const exists = for (s.entries.items) |e| {
+-                if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) break true;
++                if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and prefix.starts(prompt, e.tokens) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) break true;
+             } else false;
+             if (!exists) need += s.family.vtable.bytes(s.family.ptr, at);
+             new += @intFromBool(!exists);
+@@ -359,7 +362,7 @@ pub const Store = struct {
+ 
+     /// Forget a failed peer state matching the token prefix and canonical spans through at.
+     pub fn forget(s: *Store, prompt: []const u32, at: u32, spans: []const modes.Span) void {
+-        for (s.entries.items) |e| if (!e.expired and e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
++        for (s.entries.items) |e| if (!e.expired and e.at == at and prefix.starts(prompt, e.tokens) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
+             s.counts.failed += 1;
+             e.expired = true;
+             return s.collectExpired();
+@@ -423,7 +426,7 @@ pub const Store = struct {
+         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
+         // the prompt this one parts from: the one it resumed, or (fork rule) on a miss the kept one sharing the most
+         const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt);
+-        const part: u32 = if (kept.len == 0 or short) 0 else @intCast(std.mem.indexOfDiff(u32, kept, prompt) orelse @min(kept.len, prompt.len));
++        const part: u32 = if (kept.len == 0 or short) 0 else @intCast(prefix.common(kept, prompt));
+         // the fork rule keeps one before the part, however near: a state at `at` is keyed with the token at `at`
+         const stable: u32 = if (part == 0 or part >= history_len or part < history_len / 2) 0 else if (s.rules.fork) part -| s.rules.lookahead else part;
+         if (stable > 0) try want.append(a, stable);
+@@ -460,7 +463,7 @@ pub const Store = struct {
+         if (at == 0 or n > prompt.len or s.hold) return false;
+         s.clock += 1;
+         const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
+-        for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
++        for (s.entries.items) |e| if (!e.expired and e.at == at and prefix.starts(prompt, e.tokens) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
+             e.used = s.clock; // the same state again: no copy
+             e.shared = e.shared or shared;
+             if (shared) learned.learn(s, e, starts);
+@@ -579,22 +582,3 @@ pub fn note(comptime fmt: []const u8, args: anytype) void {
+     if (@import("builtin").is_test) return @import("prompt_cache_note.zig").hear(fmt, args);
+     std.log.warn("prompt cache: " ++ fmt, args);
+ }
+-
+-test {
+-    _ = @import("prompt_cache_index_test.zig");
+-    _ = @import("prompt_cache_test.zig");
+-    _ = @import("prompt_cache_learn_test.zig");
+-    _ = @import("prompt_cache_rewind_test.zig");
+-    _ = @import("prompt_cache_interior_test.zig");
+-    _ = @import("prompt_cache_branch_test.zig");
+-    _ = @import("prompt_cache_fork_test.zig");
+-    _ = @import("prompt_cache_give_test.zig");
+-    _ = @import("prompt_cache_lifetime_test.zig");
+-    _ = @import("prompt_cache_scan_test.zig");
+-    _ = @import("learned_fault_test.zig");
+-    _ = modes;
+-    _ = rows;
+-    _ = @import("prompt_cache_repeat_test.zig");
+-    _ = @import("prompt_cache_tail_test.zig");
+-    _ = @import("prompt_cache_others_test.zig");
+-}
+diff --git a/zig/src/core/prompt_cache_fork.zig b/zig/src/core/prompt_cache_fork.zig
+index a9dc53fae..f7a817a35 100644
+--- a/zig/src/core/prompt_cache_fork.zig
++++ b/zig/src/core/prompt_cache_fork.zig
+@@ -1,5 +1,6 @@
+ //! A miss's fork: where a prompt parts from the kept prompt sharing the longest prefix, so a later pass resumes there.
+ const std = @import("std");
++const prefix = @import("prompt_prefix.zig");
+ 
+ /// The kept entry sharing the longest prefix with `prompt`, its last prompt the fork mark; empty when none shares.
+ pub fn longestShared(comptime E: type, entries: []const *const E, prompt: []const u32) []const u32 {
+@@ -7,7 +8,8 @@ pub fn longestShared(comptime E: type, entries: []const *const E, prompt: []cons
+     var best_n: usize = 0;
+     for (entries) |e| {
+         if (e.expired or e.last.len == 0) continue;
+-        const n = std.mem.indexOfDiff(u32, e.last, prompt) orelse @min(e.last.len, prompt.len);
++        if (!prefix.beyond(e.last, prompt, best_n)) continue; // it cannot share more than the best (production's skip)
++        const n = prefix.common(e.last, prompt);
+         if (n == 0 or n >= prompt.len or n <= best_n) continue;
+         best = e;
+         best_n = n;
+diff --git a/zig/src/core/prompt_cache_index.zig b/zig/src/core/prompt_cache_index.zig
+index be5b5c201..bb7a358b6 100644
+--- a/zig/src/core/prompt_cache_index.zig
++++ b/zig/src/core/prompt_cache_index.zig
+@@ -2,14 +2,14 @@
+ const std = @import("std");
+ const pc = @import("prompt_cache.zig");
+ const modes = @import("cache_modes.zig");
++const prefix = @import("prompt_prefix.zig");
+ 
+ /// The longest kept token prefix with matching canonical spans through its position, leaving at least one row.
+ pub fn find(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
+     std.debug.assert(s.by_position.items.len == s.entries.items.len); // add and Store.remove keep them equal
+     for (s.by_position.items[below(s, prompt.len)..]) |e| { // longest first: the first match is the scan's winner
+         if (e.expired or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
+-        const n = e.tokens.len;
+-        if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
++        if (!prefix.ends(prompt, e.tokens)) continue; // the last id first, as it always was
+         if (!modes.equal(e.decode_spans, spans, e.at) or !@import("cache_images.zig").matches(s, e)) continue;
+         return e;
+     }
+diff --git a/zig/src/core/prompt_cache_policy.zig b/zig/src/core/prompt_cache_policy.zig
+index 143cea51e..b37d6aec2 100644
+--- a/zig/src/core/prompt_cache_policy.zig
++++ b/zig/src/core/prompt_cache_policy.zig
+@@ -1,6 +1,7 @@
+ //! Snapshot eviction order, excluding entries borrowed by unfinished prompt passes.
+ const std = @import("std");
+ const pc = @import("prompt_cache.zig");
++const prefix = @import("prompt_prefix.zig");
+ 
+ pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32) ?usize {
+     return victimIn(s, skip, prompt, born, false);
+@@ -11,17 +12,19 @@ pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born:
+     var best: ?usize = null;
+     var oldest: ?usize = null;
+     var oldest_rewind = false;
+-    for (s.entries.items, 0..) |e, i| { // one prefix compare an entry: the superseded scan and the oldest scan share it
++    for (s.entries.items, 0..) |e, i| { // one prefix compare an entry at most (TF_GLM_OVN_KEPT_WALK: only where it decides)
+         if (own_only and !own(e, skip, prompt)) continue;
+-        const on = e.tokens.len <= prompt.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
+-        const rewind = !e.expired and e.at == s.active_rewind_at and on; // the active rewind state goes last
++        var on = prefix.Lazy.of(prompt, e.tokens);
++        const rewind = !e.expired and e.at == s.active_rewind_at and on.get(); // the active rewind state goes last
+         if (e.borrowers == 0 and e != skip and (oldest == null or (if (rewind != oldest_rewind) oldest_rewind else e.used < s.entries.items[oldest.?].used))) {
+             oldest = i;
+             oldest_rewind = rewind;
+         }
+         if (e.borrowers > 0 or e.shared or e.branched or e == skip or rewind) continue;
+-        const now = born > e.born and prompt.len > e.tokens.len and on; // a longer request's tokens extend it
+-        if ((now or extended(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
++        if (best != null and e.used >= s.entries.items[best.?].used) continue; // not older than the superseded one found
++        const now = born > e.born and prompt.len > e.tokens.len; // a longer request's tokens extend it (`on`)
++        // gated, the links first (a branch point needs no compare); off, as it always asked
++        if (if (prefix.gated()) extended(s, e) or (now and on.get()) else (now and on.get()) or extended(s, e)) best = i;
+     }
+     return best orelse oldest;
+ }
+@@ -42,22 +45,37 @@ pub fn extended(s: *const pc.Store, e: *const pc.Entry) bool {
+ /// `extended` over every entry, for a store whose links an allocation failure left incomplete.
+ pub fn extendedScan(s: *const pc.Store, e: *const pc.Entry) bool {
+     for (s.entries.items) |o| if (!o.expired and o != e and o.born > e.born and o.tokens.len > e.tokens.len and
+-        std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
++        prefix.starts(o.tokens, e.tokens)) return true;
+     return false;
+ }
+ 
+ /// A new entry linked to those it extends and those extending it, later born (tokens and born never change).
+ pub fn link(s: *pc.Store, x: *pc.Entry) void {
++    const proved = prefix.gated();
++    if (proved) prove(s, x);
+     for (s.entries.items) |o| {
+         if (o == x or o.born == x.born or o.tokens.len == x.tokens.len) continue;
+         const short, const long = if (o.tokens.len < x.tokens.len) .{ o, x } else .{ x, o };
+-        if (long.born < short.born or !std.mem.eql(u32, long.tokens[0..short.tokens.len], short.tokens)) continue;
++        if (long.born < short.born) continue;
++        if (!(if (proved and short == o) o.seen == s.walks else prefix.starts(long.tokens, short.tokens))) continue;
+         short.ext.append(s.gpa, long) catch {
+             s.links_lost = true;
+         };
+     }
+ }
+ 
++/// TF_GLM_OVN_KEPT_WALK: marks link's shorter entries that begin `x`, longest first; one a marked one extends is free.
++fn prove(s: *pc.Store, x: *const pc.Entry) void {
++    s.walks += 1;
++    for (s.by_position.items) |o| {
++        if (o.born >= x.born) continue; // link asks only of earlier-born entries (and a longer one is never a prefix)
++        const by_link = for (o.ext.items) |y| {
++            if (y.seen == s.walks) break true;
++        } else false;
++        if (by_link or prefix.starts(x.tokens, o.tokens)) o.seen = s.walks;
++    }
++}
++
+ /// An entry leaving the store leaves every link to it.
+ pub fn unlink(s: *pc.Store, x: *pc.Entry) void {
+     for (s.entries.items) |o| if (std.mem.indexOfScalar(*pc.Entry, o.ext.items, x)) |i| {
+diff --git a/zig/src/core/prompt_imprint.zig b/zig/src/core/prompt_imprint.zig
+index 0fc27383b..8c9b6741e 100644
+--- a/zig/src/core/prompt_imprint.zig
++++ b/zig/src/core/prompt_imprint.zig
+@@ -104,7 +104,7 @@ pub const Imprint = struct {
+         for (m.metas.items) |*x| {
+             if (x.at <= longer_than or x.tokens.len > prompt.len or x.at >= prompt.len) continue;
+             if (out != null and x.at <= out.?.at) continue;
+-            if (!std.mem.eql(u32, prompt[0..x.tokens.len], x.tokens)) continue;
++            if (!@import("prompt_prefix.zig").starts(prompt, x.tokens)) continue;
+             if (planned and !sameBelow(starts, x.starts, x.at)) continue;
+             out = x;
+         }
+diff --git a/zig/src/core/prompt_interior.zig b/zig/src/core/prompt_interior.zig
+index 57ba741c3..579d04777 100644
+--- a/zig/src/core/prompt_interior.zig
++++ b/zig/src/core/prompt_interior.zig
+@@ -31,7 +31,7 @@ pub fn cut(r: pc.Rules, len: usize, from: u32, end: u32, user: u32, starts: []co
+ 
+ fn same(s: *const pc.Store, e: *const pc.Entry, prompt: []const u32, at: u32, lookahead: u32, spans: []const modes.Span) bool {
+     return !e.expired and e.at == at and e.tokens.len == @as(usize, at) + lookahead and
+-        e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and
++        @import("prompt_prefix.zig").starts(prompt, e.tokens) and
+         modes.equal(e.decode_spans, spans, at) and @import("cache_images.zig").matches(s, e);
+ }
+ 
+diff --git a/zig/src/core/prompt_prefix.zig b/zig/src/core/prompt_prefix.zig
+new file mode 100644
+index 000000000..58e396e04
+--- /dev/null
++++ b/zig/src/core/prompt_prefix.zig
+@@ -0,0 +1,115 @@
++//! Whether kept ids begin a prompt, and how many ids two lists share: every walk over kept states asks here.
++const std = @import("std");
++const platform = @import("sys");
++
++// TF_GLM_OVN_KEPT_WALK=1 (production's IdsOf and common_prefix): the same answers from fewer compared ids.
++const knob = "TF_GLM_OVN_KEPT_WALK";
++
++/// Ids `common` compares a block before it looks for the first difference inside that block.
++const block = 1024;
++
++var read = false;
++var gate = false;
++
++/// Whole-list compares this thread ran (`starts` past its gate, one a `common`): the tests and the walk bench read it.
++pub threadlocal var full: u64 = 0;
++
++/// The knob, read once per process (unset, empty or "0": off); every rank and lane sees the same environment.
++pub fn gated() bool {
++    if (!read) {
++        const v = platform.c.getenv(knob);
++        gate = parse(if (v) |p| std.mem.span(p) else "");
++        read = true;
++    }
++    return gate;
++}
++
++fn parse(s: []const u8) bool {
++    return s.len > 0 and !std.mem.eql(u8, s, "0");
++}
++
++/// Tests only: the knob reads as `on` from now on, as if the environment held it.
++pub fn fake(on: bool) void {
++    if (!@import("builtin").is_test) @compileError("prompt_prefix.fake is for tests");
++    read = true;
++    gate = on;
++}
++
++/// `std.mem.eql(u32, prompt[0..tokens.len], tokens)`, false when `tokens` is longer; gated, the last id goes first.
++pub fn starts(prompt: []const u32, tokens: []const u32) bool {
++    return if (gated()) ends(prompt, tokens) else whole(prompt, tokens);
++}
++
++/// `starts` with the last id compared first, knob or not (the snapshot index's lookup always asked this way).
++pub fn ends(prompt: []const u32, tokens: []const u32) bool {
++    const n = tokens.len;
++    if (n > prompt.len) return false;
++    if (n > 0 and prompt[n - 1] != tokens[n - 1]) return false; // a prefix ends on the prompt's id at its length
++    return whole(prompt, tokens);
++}
++
++fn whole(prompt: []const u32, tokens: []const u32) bool {
++    if (tokens.len > prompt.len) return false;
++    full += 1;
++    return if (gated()) same(prompt[0..tokens.len], tokens) else std.mem.eql(u32, prompt[0..tokens.len], tokens);
++}
++
++/// Ids `same` folds into one vector test (std.mem.eql tests every 32 bytes: 3.6 ms at 600k ids on the laptop, 41 us).
++const fold = 64;
++
++/// `std.mem.eql(u32, a, b)` for lists of one length, `fold` ids a test: xor and or in vectors, then one reduction.
++fn same(a: []const u32, b: []const u32) bool {
++    std.debug.assert(a.len == b.len);
++    const V = @Vector(8, u32);
++    var i: usize = 0;
++    while (i + fold <= a.len) : (i += fold) {
++        var x: V = @splat(0);
++        inline for (0..fold / 8) |k| x |= @as(V, a[i + k * 8 ..][0..8].*) ^ @as(V, b[i + k * 8 ..][0..8].*);
++        if (@reduce(.Or, x) != 0) return false;
++    }
++    for (a[i..], b[i..]) |p, q| if (p != q) return false;
++    return true;
++}
++
++/// How many leading ids `a` and `b` share (`std.mem.indexOfDiff`, else the shorter length); gated, a block at a time.
++pub fn common(a: []const u32, b: []const u32) usize {
++    const n = @min(a.len, b.len);
++    full += 1;
++    if (!gated()) return std.mem.indexOfDiff(u32, a, b) orelse n;
++    var at: usize = 0;
++    while (at < n) : (at += block) { // a vector compare a block, the scalar search only inside the one that differs
++        const end = @min(n, at + block);
++        if (!same(a[at..end], b[at..end])) return at + std.mem.indexOfDiff(u32, a[at..end], b[at..end]).?;
++    }
++    return n;
++}
++
++/// Whether `a` and `b` may share more than `n` ids (they must agree at `n`); always true with the knob off.
++pub fn beyond(a: []const u32, b: []const u32, n: usize) bool {
++    return !gated() or (n < a.len and n < b.len and a[n] == b[n]);
++}
++
++/// `starts(prompt, tokens)` asked at most once and, gated, only when the walk needs it (off: at once, as before).
++pub const Lazy = struct {
++    prompt: []const u32,
++    tokens: []const u32,
++    known: ?bool = null,
++
++    pub fn of(prompt: []const u32, tokens: []const u32) Lazy {
++        return .{ .prompt = prompt, .tokens = tokens, .known = if (gated()) null else whole(prompt, tokens) };
++    }
++
++    pub fn get(l: *Lazy) bool {
++        if (l.known == null) l.known = starts(l.prompt, l.tokens);
++        return l.known.?;
++    }
++};
++
++test "kept walk: the knob is on for any value but empty and 0" {
++    try std.testing.expect(!parse("") and !parse("0"));
++    try std.testing.expect(parse("1") and parse("on") and parse("00"));
++}
++test {
++    _ = @import("prompt_prefix_test.zig");
++    _ = @import("prompt_prefix_count_test.zig");
++}
+diff --git a/zig/src/core/prompt_prefix_bench.zig b/zig/src/core/prompt_prefix_bench.zig
+new file mode 100644
+index 000000000..457c68034
+--- /dev/null
++++ b/zig/src/core/prompt_prefix_bench.zig
+@@ -0,0 +1,106 @@
++//! Laptop timing of the kept-state walks (TF_GLM_OVN_KEPT_WALK set or not): agent turns over many long kept states.
++const std = @import("std");
++const pc = @import("prompt_cache.zig");
++const prefix = @import("prompt_prefix.zig");
++const forks = @import("prompt_cache_fork.zig");
++
++const system = 8192; // ids of the system block every conversation starts with
++const step = 2048; // ids a turn adds (a reply and a tool result)
++
++/// A family whose saves cost nothing: the walks are all that is timed.
++const Family = struct {
++    gpa: std.mem.Allocator,
++    fn bytes(_: *anyopaque, _: u32) u64 {
++        return 1;
++    }
++    fn save(ptr: *anyopaque, _: ?*anyopaque, _: u32) anyerror!pc.Saved {
++        const f: *Family = @ptrCast(@alignCast(ptr));
++        return @ptrCast(try f.gpa.create(u8));
++    }
++    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
++    fn drop(ptr: *anyopaque, saved: pc.Saved) void {
++        const f: *Family = @ptrCast(@alignCast(ptr));
++        f.gpa.destroy(@as(*u8, @ptrCast(saved)));
++    }
++    fn snapshots(f: *Family) pc.Snapshots {
++        return .{ .ptr = f, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } };
++    }
++};
++
++fn output(text: []const u8) !void {
++    std.debug.print("{s}", .{text}); // stderr, on every host
++}
++
++/// One warm agent turn: the lookup, its restore, then the keeps it planned; the compares it ran.
++fn turn(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32) !u64 {
++    const before = prefix.full;
++    const l = try s.lookupUser(a, prompt, @intCast(prompt.len), @intCast(prompt.len - 64), 0, 0, &.{}, &.{}, &.{});
++    if (l.entry) |e| s.resumed(e, prompt, true);
++    for (l.marks) |m| _ = s.keepBorn(prompt, @intCast(prompt.len), m, null, &.{}, &.{});
++    return prefix.full - before;
++}
++
++fn ms(io: std.Io, started: std.Io.Timestamp) f64 {
++    return @as(f64, @floatFromInt(started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
++}
++
++/// kept-walk-bench IDS KEPT CONVERSATIONS TURNS: per-turn and per-walk milliseconds and whole compares, one JSON line.
++pub fn main(init: std.process.Init) !void {
++    const gpa = init.gpa;
++    const io = init.io;
++    const args = try init.minimal.args.toSlice(init.arena.allocator());
++    if (args.len != 5) return error.Arguments;
++    const n = try std.fmt.parseInt(usize, args[1], 10);
++    const kept = try std.fmt.parseInt(usize, args[2], 10);
++    const convs = try std.fmt.parseInt(usize, args[3], 10);
++    const turns = try std.fmt.parseInt(usize, args[4], 10);
++    const per = kept / convs; // kept turns a conversation
++    if (convs == 0 or per == 0 or n < system + (per + 1) * step) return error.Arguments;
++    var prng = std.Random.DefaultPrng.init(42);
++    const r = prng.random();
++    const ids = try gpa.alloc([]u32, convs + 1); // the last: a new conversation, the fork walk's miss
++    defer gpa.free(ids);
++    for (ids, 0..) |*c, i| {
++        c.* = try gpa.alloc(u32, n + turns * step);
++        for (c.*, 0..) |*t, j| t.* = if (j < system and i > 0) ids[0][j] else r.uintLessThan(u32, 151_000);
++    }
++    defer for (ids) |c| gpa.free(c);
++    var f: Family = .{ .gpa = gpa };
++    var s = pc.Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .fork = true }, 1 << 40);
++    s.most = kept;
++    defer s.deinit();
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    for (0..per) |j| for (ids[0..convs]) |c| { // warm up: each conversation's earlier turns, up to `n` ids
++        _ = try turn(&s, arena.allocator(), c[0 .. n - (per - j) * step]);
++    };
++    var times = try gpa.alloc(f64, turns * convs);
++    defer gpa.free(times);
++    var compares: u64 = 0;
++    for (0..turns) |j| for (ids[0..convs], 0..) |c, i| {
++        _ = arena.reset(.retain_capacity);
++        const started = std.Io.Clock.awake.now(io);
++        compares += try turn(&s, arena.allocator(), c[0 .. n + j * step]);
++        times[j * convs + i] = ms(io, started);
++    };
++    std.mem.sort(f64, times, {}, std.sort.asc(f64));
++    const next = ids[0][0 .. n + turns * step];
++    const fresh = ids[convs][0..n];
++    var walk: [3]f64 = .{ 1e9, 1e9, 1e9 };
++    var walk_cmp: [3]u64 = undefined;
++    for (0..5) |_| { // the walks alone on the warm store: eviction, the miss's fork, the lookup's index
++        inline for (0..3) |w| {
++            const before = prefix.full;
++            const started = std.Io.Clock.awake.now(io);
++            switch (w) {
++                0 => std.mem.doNotOptimizeAway(s.victimBut(null, next, @intCast(next.len))),
++                1 => std.mem.doNotOptimizeAway(forks.longestShared(pc.Entry, s.entries.items, fresh).len),
++                else => std.mem.doNotOptimizeAway(s.find(next, &.{}, &.{})),
++            }
++            walk[w] = @min(walk[w], ms(io, started));
++            walk_cmp[w] = prefix.full - before;
++        }
++    }
++    var line: [512]u8 = undefined;
++    try output(try std.fmt.bufPrint(&line, "{{\"gate\":{},\"ids\":{d},\"kept\":{d},\"convs\":{d},\"turn_ms_min\":{d:.3},\"turn_ms_median\":{d:.3},\"turn_compares\":{d:.1},\"victim_ms\":{d:.3},\"victim_compares\":{d},\"fork_ms\":{d:.3},\"fork_compares\":{d},\"find_ms\":{d:.3},\"find_compares\":{d}}}\n", .{ prefix.gated(), n, s.entries.items.len, convs, times[0], times[times.len / 2], @as(f64, @floatFromInt(compares)) / @as(f64, @floatFromInt(times.len)), walk[0], walk_cmp[0], walk[1], walk_cmp[1], walk[2], walk_cmp[2] }));
++}
+diff --git a/zig/src/core/prompt_prefix_count_test.zig b/zig/src/core/prompt_prefix_count_test.zig
+new file mode 100644
+index 000000000..72d410d4b
+--- /dev/null
++++ b/zig/src/core/prompt_prefix_count_test.zig
+@@ -0,0 +1,174 @@
++//! TF_GLM_OVN_KEPT_WALK: the whole-list compares each walk runs, gated and not, on two conversations' kept states.
++const std = @import("std");
++const pc = @import("prompt_cache.zig");
++const prefix = @import("prompt_prefix.zig");
++const forks = @import("prompt_cache_fork.zig");
++const rows = @import("rows_store.zig");
++const select = @import("rows_select.zig");
++const Fake = @import("prompt_cache_fake.zig").Fake;
++const RowsFake = @import("rows_fake.zig").Fake;
++const t = std.testing;
++const gpa = t.allocator;
++
++/// Conversations A and B behind one system block (8 ids); every id past it is its conversation's own.
++const Talk = struct {
++    a: [400]u32 = undefined,
++    b: [400]u32 = undefined,
++    fn init(x: *Talk) void {
++        for (&x.a, &x.b, 0..) |*p, *q, i| {
++            p.* = if (i < 8) @intCast(i) else @intCast(1000 + i);
++            q.* = if (i < 8) @intCast(i) else @intCast(5000 + i);
++        }
++    }
++    /// A's turn `k` ends at 40 + 30k ids; B's at 45 + 30k (B's turn 8 outruns A's turn 8).
++    fn lenA(k: usize) usize {
++        return 40 + 30 * k;
++    }
++    fn lenB(k: usize) usize {
++        return 45 + 30 * k;
++    }
++};
++
++/// Kept turns 0-7 of A and 0-8 of B, alternating, each state one id before its prompt's end.
++fn fill(s: *pc.Store, f: *Fake, x: *const Talk) !void {
++    for (0..9) |k| {
++        for ([_][]const u32{ x.a[0..Talk.lenA(k)], x.b[0..Talk.lenB(k)] }, 0..) |p, j| {
++            if (k == 8 and j == 0) continue;
++            f.at = @intCast(p.len - 1);
++            try t.expect(s.keep(p, f.at, null, &.{}, &.{}));
++        }
++    }
++}
++
++const Span = @import("cache_modes.zig").Span;
++const none: []const u32 = &.{};
++const plain: []const Span = &.{};
++
++/// The compares `run` makes with the gate `on`.
++fn count(on: bool, run: anytype, args: anytype) u64 {
++    prefix.fake(on);
++    const before = prefix.full;
++    _ = @call(.auto, run, args);
++    return prefix.full - before;
++}
++
++test "kept walk: each walk's whole compares, gated and not" {
++    defer prefix.fake(false);
++    var x: Talk = .{};
++    x.init();
++    var cells: [2][9]u64 = undefined;
++    for ([_]bool{ false, true }, 0..) |on, m| {
++        var f: Fake = .{ .gpa = gpa };
++        var s = pc.Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 40);
++        defer s.deinit();
++        prefix.fake(false);
++        try fill(&s, &f, &x);
++        const next = x.a[0..Talk.lenA(9)];
++        f.at = @intCast(Talk.lenA(8) - 1); // link: A's turn 8 against the seventeen kept (B's turn 8 longer than it)
++        cells[m][0] = count(on, pc.Store.keep, .{ &s, x.a[0..Talk.lenA(8)], f.at, @as(?*anyopaque, null), none, plain });
++        cells[m][1] = count(on, pc.Store.victimBut, .{ &s, null, next, @as(u32, @intCast(next.len)) }); // eviction
++        s.active_rewind_at = @intCast(Talk.lenA(3) - 1); // eviction with a rewind state: only A's turn 3 is asked
++        cells[m][2] = count(on, pc.Store.victimBut, .{ &s, null, next, @as(u32, @intCast(next.len)) });
++        s.active_rewind_at = 0;
++        cells[m][3] = count(on, pc.Store.find, .{ &s, next, none, plain });
++        cells[m][4] = count(on, forks.longestShared, .{ pc.Entry, s.entries.items, next }); // a miss's fork
++        cells[m][5] = count(on, pc.Store.wouldServe, .{ &s, next, none, plain, @as([]const u32, x.b[0..]), plain, @as(u32, 100) });
++        cells[m][6] = count(on, pc.Store.forget, .{ &s, x.a[0..Talk.lenB(2)], @as(u32, @intCast(Talk.lenB(2) - 1)), plain });
++        s.links_lost = true; // eviction asking `extendedScan`: off, a superseded state's prefix first, as always
++        cells[m][7] = count(on, pc.Store.victimBut, .{ &s, null, next, @as(u32, @intCast(next.len)) });
++        s.links_lost = false;
++        f.at = 289; // a state born as a short request: link asks nothing of the earlier-born, nor does the proof
++        cells[m][8] = count(on, pc.Store.keepBorn, .{ &s, x.a[0..290], @as(u32, 30), f.at, @as(?*anyopaque, null), none, plain });
++    }
++    // off: as the walks always compared; on: one compare a conversation where a link proves the rest, none for B
++    try t.expectEqualSlices(u64, &.{ 17, 18, 18, 1, 18, 1, 1, 18, 0 }, &cells[0]);
++    try t.expectEqualSlices(u64, &.{ 1, 0, 1, 1, 9, 0, 0, 1, 0 }, &cells[1]);
++}
++
++/// A disk tier beside a RAM store, as rows_select_test's rig: states are any token lists, the prompt is A's.
++const Disk = struct {
++    family: RowsFake = .{ .gpa = gpa },
++    disk: rows.Rows = undefined,
++    store: pc.Store = undefined,
++    fn init(d: *Disk, prompt: []const u32) void {
++        d.family.prompt = prompt;
++        const f = d.family.snapshots();
++        d.disk = .{ .gpa = gpa, .family = f, .img = f.vtable.rows.?, .sync_writes = true, .root = undefined, .dir = undefined, .keying = .{ .identity = 17, .block = rows.block_tokens, .lookahead = 1 }, .cap = 1 << 30, .daily = 1 << 30, .read_rate = 1000, .prefill_rate = 100 };
++        d.store = pc.Store.init(gpa, f, .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 30);
++        d.store.disk = &d.disk;
++    }
++    fn deinit(d: *Disk) void {
++        d.store.disk = null;
++        d.store.deinit();
++        for (d.disk.states.items) |state| gpa.free(state.tokens);
++        d.disk.states.deinit(gpa);
++    }
++    fn add(d: *Disk, tokens: []const u32, cost: u64) !void {
++        const own = try gpa.dupe(u32, tokens);
++        errdefer gpa.free(own);
++        try d.disk.states.append(gpa, .{ .name = @splat(0), .at = @intCast(tokens.len - 1), .tokens = own, .spans = &.{}, .starts = &.{}, .own = cost, .rows = 0, .used = 0, .shared = false });
++    }
++    /// The RAM state at `at` of the prompt, kept with the disk tier out of the way.
++    fn hold(d: *Disk, prompt: []const u32, at: u32) !*pc.Entry {
++        d.store.disk = null;
++        defer d.store.disk = &d.disk;
++        d.family.at = at;
++        try t.expect(d.store.keep(prompt, at, null, &.{}, &.{}));
++        return d.store.entries.items[d.store.entries.items.len - 1];
++    }
++};
++
++test "kept walk: a disk restore's choice is the same with the gate, from fewer compares" {
++    defer prefix.fake(false);
++    var x: Talk = .{};
++    x.init();
++    const prompt = x.a[0..Talk.lenA(9)];
++    var cells: [2]u64 = undefined;
++    for ([_]bool{ false, true }, 0..) |on, m| {
++        var d: Disk = .{};
++        d.init(prompt);
++        defer d.deinit();
++        var k: usize = 8;
++        while (k > 0) : (k -= 1) try d.add(x.a[0..Talk.lenA(k)], 10); // A's turns longest first, then B's
++        for (0..8) |j| try d.add(x.b[0..Talk.lenB(j)], 10);
++        const have = try d.hold(prompt, @intCast(Talk.lenA(5) - 1)); // RAM resumes at A's turn 5
++        prefix.fake(on);
++        const before = prefix.full;
++        const c = select.choose(&d.store, prompt, &.{}, &.{}, have);
++        cells[m] = prefix.full - before;
++        try t.expectEqual(@as(?usize, 0), c.restore); // A's turn 8 saves the most prefill
++        try t.expectEqual(@as(?usize, 0), c.disk);
++    }
++    // off: every state; on: A's turns past the RAM state (8, 7, 6), the rest moot or a last-id miss
++    try t.expectEqual([2]u64{ 16, 3 }, cells);
++}
++
++test "kept walk: random disk states choose the same restore with the gate" {
++    defer prefix.fake(false);
++    var prng = std.Random.DefaultPrng.init(11);
++    const r = prng.random();
++    var prompt: [300]u32 = undefined;
++    for (0..300) |round| {
++        for (&prompt) |*p| p.* = r.uintLessThan(u32, 3);
++        var got: [2]select.Choice = undefined;
++        for ([_]bool{ false, true }, 0..) |on, m| {
++            var rr = std.Random.DefaultPrng.init(round);
++            const q = rr.random();
++            var d: Disk = .{};
++            d.init(&prompt);
++            defer d.deinit();
++            for (0..q.uintLessThan(usize, 24)) |_| { // a prefix, or a prefix with one id changed (last ids collide)
++                var tokens: [300]u32 = prompt;
++                const n = 2 + q.uintLessThan(usize, 290);
++                if (q.boolean()) tokens[q.uintLessThan(usize, n)] +%= 1;
++                try d.add(tokens[0..n], 1 + q.uintLessThan(u64, 4000));
++            }
++            const have = if (q.boolean()) try d.hold(&prompt, 1 + q.uintLessThan(u32, 250)) else null;
++            prefix.fake(on);
++            got[m] = select.choose(&d.store, &prompt, &.{}, &.{}, have);
++        }
++        try t.expectEqual(got[0].disk, got[1].disk);
++        try t.expectEqual(got[0].restore, got[1].restore);
++        try t.expectEqual(got[0].read_seconds, got[1].read_seconds);
++    }
++}
+diff --git a/zig/src/core/prompt_prefix_test.zig b/zig/src/core/prompt_prefix_test.zig
+new file mode 100644
+index 000000000..8f5691723
+--- /dev/null
++++ b/zig/src/core/prompt_prefix_test.zig
+@@ -0,0 +1,272 @@
++//! TF_GLM_OVN_KEPT_WALK: every kept-state walk decides the same with the gate on random stores, comparing fewer lists.
++const std = @import("std");
++const pc = @import("prompt_cache.zig");
++const prefix = @import("prompt_prefix.zig");
++const forks = @import("prompt_cache_fork.zig");
++const Fake = @import("prompt_cache_fake.zig").Fake;
++const gpa = std.testing.allocator;
++
++test "kept walk: the helper answers as the plain compares, gated or not" {
++    defer prefix.fake(false);
++    var prng = std.Random.DefaultPrng.init(7);
++    const r = prng.random();
++    var a: [48]u32 = undefined;
++    var b: [48]u32 = undefined;
++    for (0..20000) |_| {
++        const na = r.uintLessThan(usize, a.len + 1);
++        const nb = r.uintLessThan(usize, b.len + 1);
++        for (a[0..na]) |*t| t.* = r.uintLessThan(u32, 3); // a small vocabulary: last ids collide often
++        for (b[0..nb], 0..) |*t, i| t.* = if (i < na and r.uintLessThan(u8, 8) != 0) a[i] else r.uintLessThan(u32, 3);
++        const x = a[0..na];
++        const y = b[0..nb];
++        const is_prefix = nb <= na and std.mem.eql(u32, x[0..nb], y);
++        const shared = std.mem.indexOfDiff(u32, x, y) orelse @min(na, nb);
++        for ([_]bool{ false, true }) |on| {
++            prefix.fake(on);
++            try std.testing.expectEqual(is_prefix, prefix.starts(x, y));
++            try std.testing.expectEqual(is_prefix, prefix.ends(x, y));
++            try std.testing.expectEqual(shared, prefix.common(x, y));
++            var lazy = prefix.Lazy.of(x, y);
++            try std.testing.expectEqual(is_prefix, lazy.get());
++            const n = r.uintLessThan(usize, 50);
++            if (!prefix.beyond(x, y, n)) try std.testing.expect(shared <= n); // a skip never hides a longer share
++        }
++    }
++}
++
++test "kept walk: common finds the first difference past many blocks" {
++    defer prefix.fake(false);
++    const x = try gpa.alloc(u32, 5000);
++    defer gpa.free(x);
++    const y = try gpa.alloc(u32, 4100);
++    defer gpa.free(y);
++    for (x, 0..) |*t, i| t.* = @intCast(i);
++    for (y, 0..) |*t, i| t.* = @intCast(i);
++    for ([_]bool{ false, true }) |on| {
++        prefix.fake(on);
++        try std.testing.expectEqual(@as(usize, 4100), prefix.common(x, y));
++        for ([_]usize{ 0, 1023, 1024, 1025, 2047, 3071, 4099 }) |at| {
++            y[at] += 1;
++            try std.testing.expectEqual(at, prefix.common(x, y));
++            try std.testing.expectEqual(at, prefix.common(y, x));
++            y[at] -= 1;
++        }
++    }
++}
++
++test "kept walk: a long prefix differing at any one id, past and inside the vector folds" {
++    defer prefix.fake(false);
++    const x = try gpa.alloc(u32, 700);
++    defer gpa.free(x);
++    const y = try gpa.alloc(u32, 700);
++    defer gpa.free(y);
++    for (x, y, 0..) |*p, *q, i| {
++        p.* = @intCast(i % 5);
++        q.* = p.*;
++    }
++    for ([_]bool{ false, true }) |on| {
++        prefix.fake(on);
++        for ([_]usize{ 1, 63, 64, 65, 128, 300, 641, 700 }) |n| {
++            try std.testing.expect(prefix.starts(x, y[0..n]));
++            for (0..n) |at| { // a difference anywhere: before the last id it takes the whole compare to find
++                y[at] +%= 1;
++                try std.testing.expect(!prefix.starts(x, y[0..n]));
++                try std.testing.expectEqual(at, prefix.common(x, y[0..n]));
++                y[at] -%= 1;
++            }
++        }
++    }
++}
++
++/// Prompts of agent sessions: conversations behind two shared system blocks, chains, re-sends and last-id twins.
++const Prompts = struct {
++    all: std.ArrayList([]u32) = .empty,
++    fn deinit(p: *Prompts) void {
++        for (p.all.items) |x| gpa.free(x);
++        p.all.deinit(gpa);
++    }
++    fn pick(p: *Prompts, r: std.Random) []u32 {
++        return p.all.items[r.uintLessThan(usize, p.all.items.len)];
++    }
++    fn next(p: *Prompts, r: std.Random) ![]const u32 {
++        const kind = if (p.all.items.len == 0) 0 else r.uintLessThan(u8, 10);
++        const out = switch (kind) {
++            0 => blk: { // a new conversation behind one of two system blocks that agree on their first ids
++                const sys: usize = 4 + r.uintLessThan(usize, 24);
++                const k = @as(u32, 1) + @intFromBool(r.boolean());
++                const o = try gpa.alloc(u32, sys + 4 + r.uintLessThan(usize, 40));
++                for (o[0..sys], 0..) |*t, i| t.* = 10 + @as(u32, @intCast(i)) * k % 7;
++                for (o[sys..]) |*t| t.* = r.uintLessThan(u32, 3);
++                break :blk o;
++            },
++            1 => try gpa.dupe(u32, p.pick(r)), // the same prompt again
++            2 => blk: { // the same length and last id, another body: a last-id collision
++                const o = try gpa.dupe(u32, p.pick(r));
++                if (o.len > 1) o[r.uintLessThan(usize, o.len - 1)] +%= 1;
++                break :blk o;
++            },
++            else => blk: { // a later turn: a stored prompt, maybe cut back, then new ids
++                const x = p.pick(r);
++                const from = x[0 .. x.len - r.uintLessThan(usize, @min(x.len, @as(usize, if (kind < 5) 30 else 2)))];
++                const o = try gpa.alloc(u32, from.len + 2 + r.uintLessThan(usize, 60));
++                @memcpy(o[0..from.len], from);
++                for (o[from.len..]) |*t| t.* = r.uintLessThan(u32, 3);
++                break :blk o;
++            },
++        };
++        try p.all.append(gpa, out);
++        return out;
++    }
++};
++
++/// Everything a walk decided, so far: returns, the entries in order with their links, the counts.
++const Trace = struct {
++    h: std.ArrayList(u64) = .empty,
++    fn add(t: *Trace, v: anytype) !void {
++        try t.h.append(gpa, switch (@typeInfo(@TypeOf(v))) {
++            .optional => if (v) |x| @as(u64, x) + 1 else 0,
++            .bool => @intFromBool(v),
++            else => @intCast(v),
++        });
++    }
++    fn ids(t: *Trace, x: []const u32) !void {
++        try t.add(x.len);
++        try t.add(std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(x)));
++    }
++    fn store(t: *Trace, s: *const pc.Store) !void {
++        try t.add(s.entries.items.len);
++        for (s.entries.items) |e| {
++            for ([_]u64{ e.at, e.born, e.used, e.bytes, @intFromBool(e.shared), @intFromBool(e.branched), @intFromBool(e.expired), e.borrowers }) |v| try t.add(v);
++            try t.ids(e.tokens);
++            try t.ids(e.last);
++            try t.add(e.ext.items.len);
++            for (e.ext.items) |o| try t.add(std.mem.indexOfScalar(*pc.Entry, s.entries.items, o));
++        }
++        for ([_]u64{ s.held, s.clock, s.active_rewind_at, s.counts.hits, s.counts.misses, s.counts.kept, s.counts.evicted, s.counts.failed }) |v| try t.add(v);
++    }
++};
++
++const Variant = struct { most: usize, fork: bool = false, lost: bool = false };
++
++/// One random session's trace, and the whole-list compares it ran.
++fn session(seed: u64, v: Variant, on: bool, t: *Trace) !u64 {
++    prefix.fake(on);
++    const before = prefix.full;
++    var prng = std.Random.DefaultPrng.init(seed);
++    const r = prng.random();
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    var f: Fake = .{ .gpa = gpa };
++    var s = pc.Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 4, .fork = v.fork }, 1 << 40);
++    s.most = v.most;
++    s.links_lost = v.lost; // links complete but unread: `extended` scans, the eviction asks in the other order
++    defer s.deinit();
++    var prompts: Prompts = .{};
++    defer prompts.deinit();
++    for (0..300) |_| {
++        const prompt = try prompts.next(r);
++        switch (r.uintLessThan(u8, 8)) {
++            0, 1, 2 => for (0..1 + r.uintLessThan(usize, 3)) |_| { // a pass keeps a few states, some born short
++                const at: u32 = 1 + r.uintLessThan(u32, @intCast(prompt.len - 1));
++                f.at = at;
++                try t.add(s.keepBorn(prompt, if (r.boolean()) @intCast(prompt.len) else at + 1, at, null, &.{}, &.{}));
++            },
++            3, 4, 5 => { // a lookup with a rewind state, resumed or failed
++                const history: u32 = r.uintLessThan(u32, @intCast(prompt.len));
++                const l = try s.lookupRewind(arena.allocator(), prompt, @intCast(prompt.len), history, r.uintLessThan(u32, @intCast(prompt.len)), &.{}, &.{}, &.{});
++                try t.add(if (l.entry) |e| std.mem.indexOfScalar(*pc.Entry, s.entries.items, e) else null);
++                for (l.marks) |m| try t.add(m);
++                if (l.entry) |e| s.resumed(e, prompt, r.uintLessThan(u8, 5) != 0);
++            },
++            6 => if (s.entries.items.len > 0) { // a state the family drops, or a failed peer state forgotten
++                const e = s.entries.items[r.uintLessThan(usize, s.entries.items.len)];
++                if (r.boolean()) s.expired(e.saved) else s.forget(prompt, e.at, &.{});
++                if (r.boolean()) s.collectExpired();
++            },
++            else => {},
++        }
++        try probe(&s, arena.allocator(), r, &prompts, t);
++        try t.store(&s);
++    }
++    return prefix.full - before;
++}
++
++/// The walks that change nothing, asked on random prompts: eviction, lookup, the fork, marks and wouldServe.
++fn probe(s: *pc.Store, a: std.mem.Allocator, r: std.Random, prompts: *Prompts, t: *Trace) !void {
++    for (0..3) |_| {
++        const prompt = prompts.pick(r);
++        const n = s.entries.items.len;
++        const skip: ?*pc.Entry = if (n > 0 and r.boolean()) s.entries.items[r.uintLessThan(usize, n)] else null;
++        const saved = s.active_rewind_at;
++        if (n > 0 and r.boolean()) s.active_rewind_at = s.entries.items[r.uintLessThan(usize, n)].at;
++        try t.add(s.victimBut(skip, prompt, r.uintLessThan(u32, @intCast(prompt.len + 2))));
++        s.active_rewind_at = saved;
++        try t.add(if (s.find(prompt, &.{}, &.{})) |e| std.mem.indexOfScalar(*pc.Entry, s.entries.items, e) else null);
++        try t.ids(forks.longestShared(pc.Entry, s.entries.items, prompt));
++        const kept = prompts.pick(r);
++        try t.add(s.wouldServe(prompt, &.{}, &.{}, kept, &.{}, r.uintLessThan(u32, @intCast(prompt.len + 1))));
++        const previous: []const u32 = if (r.boolean()) kept else &.{};
++        const m = try s.marks(a, prompt, r.uintLessThan(u32, 4), r.uintLessThan(u32, @intCast(prompt.len + 1)), &.{}, &.{}, previous);
++        for (m) |x| try t.add(x);
++        try t.add(m.len);
++    }
++}
++
++test "kept walk: every walk of random sessions decides the same with the gate" {
++    defer prefix.fake(false);
++    var compared = [2]u64{ 0, 0 };
++    var kept: u64 = 0;
++    for (0..24) |seed| {
++        const v: Variant = .{ .most = if (seed % 3 == 0) 40 else 8, .fork = seed % 2 == 1, .lost = seed % 4 == 2 };
++        var off: Trace = .{};
++        defer off.h.deinit(gpa);
++        var on: Trace = .{};
++        defer on.h.deinit(gpa);
++        compared[0] += try session(seed, v, false, &off);
++        compared[1] += try session(seed, v, true, &on);
++        try std.testing.expectEqualSlices(u64, off.h.items, on.h.items);
++        kept += off.h.items.len;
++    }
++    try std.testing.expect(kept > 100_000); // the sessions kept, evicted, looked up and linked: the walks ran
++    try std.testing.expect(compared[1] * 3 < compared[0]); // the gate: far fewer whole compares, the same answers
++}
++
++test {
++    _ = @import("prompt_prefix_count_test.zig");
++    _ = prefix;
++}
++
++test "kept walk: a state near or at a mark, of other tokens, is never taken as the prompt's" {
++    defer prefix.fake(false);
++    var p: [200]u32 = undefined;
++    for (&p, 0..) |*x, i| x.* = @intCast(i);
++    var q = p;
++    q[50] = 7777; // the same length and ids past 50: only a whole compare tells them apart
++    for ([_]bool{ false, true }) |on| {
++        prefix.fake(on);
++        for ([_]*const [200]u32{ &p, &q }) |prompt| { // p's own lookup, then another prompt's over p's states
++            var arena: std.heap.ArenaAllocator = .init(gpa);
++            defer arena.deinit();
++            var f: Fake = .{ .gpa = gpa };
++            var s = pc.Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 8 }, 1 << 40);
++            defer s.deinit();
++            s.most = 2;
++            for ([_]u32{ 100, 150 }) |at| {
++                f.at = at;
++                try std.testing.expect(s.keep(&p, at, null, &.{}, &.{}));
++            }
++            const l = try s.lookupRewind(arena.allocator(), prompt, prompt.len, 100, 104, &.{}, &.{}, &.{});
++            defer if (l.entry) |e| s.resumed(e, prompt, true);
++            if (prompt == &p) { // keptNear: the state at 100, under min_gap before the rewind at 103, is the rewind state
++                try std.testing.expectEqual(@as(u32, 100), s.active_rewind_at);
++                try std.testing.expectEqual(@as(u32, 150), l.entry.?.at);
++                continue;
++            }
++            try std.testing.expect(l.entry == null); // keptNear: p's state at 100 is not q's prefix
++            try std.testing.expectEqual(@as(u32, 103), s.active_rewind_at);
++            // reserve: q's mark at 100 needs a slot of its own beside p's state there, so both of p's go first
++            try std.testing.expectEqualSlices(u32, &.{ 100, 103 }, l.marks);
++            try std.testing.expectEqual(@as(u64, 2), s.counts.evicted);
++        }
++    }
++}
+diff --git a/zig/src/core/rows_select.zig b/zig/src/core/rows_select.zig
+index d6ac45784..55bf71960 100644
+--- a/zig/src/core/rows_select.zig
++++ b/zig/src/core/rows_select.zig
+@@ -28,6 +28,7 @@ fn chooseAt(s: *const pc.Store, prompt: []const u32, starts: []const u32, spans:
+     for (r.states.items, 0..) |*state, i| {
+         if (before) |at| if (state.at >= at) continue;
+         if (r.blankBytes(state.at) > room) continue;
++        if (moot(r, out, state.at, from)) continue; // TF_GLM_OVN_KEPT_WALK: no compare where a match changes nothing
+         if (!r.matches(state, prompt, starts, spans)) continue;
+         if (out.disk == null or state.at > r.states.items[out.disk.?].at) out.disk = i;
+         if (state.at <= from) continue;
+@@ -51,6 +52,11 @@ fn chooseAt(s: *const pc.Store, prompt: []const u32, starts: []const u32, spans:
+     return out;
+ }
+ 
++/// Gated, a state no longer than the restore point nor the disk match found: whether it matches decides nothing.
++fn moot(r: *const rows.Rows, out: Choice, at: u32, from: u32) bool {
++    return @import("prompt_prefix.zig").gated() and at <= from and out.disk != null and at <= r.states.items[out.disk.?].at;
++}
++
+ fn capacity(s: *const pc.Store, have: ?*pc.Entry) ?u64 {
+     var reclaimable: u64 = 0;
+     var protected: usize = 0;
+diff --git a/zig/src/core/rows_store.zig b/zig/src/core/rows_store.zig
+index e9a7a403e..9a6d12439 100644
+--- a/zig/src/core/rows_store.zig
++++ b/zig/src/core/rows_store.zig
+@@ -285,7 +285,7 @@ pub const Rows = struct {
+ 
+     pub fn matches(r: *const Rows, s: *const State, prompt: []const u32, starts: []const u32, spans: []const Span) bool {
+         if (s.tokens.len > prompt.len or s.at >= prompt.len) return false;
+-        if (!std.mem.eql(u32, prompt[0..s.tokens.len], s.tokens) or !modes.equal(s.spans, spans, s.at)) return false;
++        if (!@import("prompt_prefix.zig").starts(prompt, s.tokens) or !modes.equal(s.spans, spans, s.at)) return false;
+         if (r.keying.planned and starts.len == 0 and r.grid > 0) return s.at % r.grid == 0 and onGrid(s.starts, s.at, r.grid);
+         return !r.keying.planned or sameBelow(starts, s.starts, s.at);
+     }
