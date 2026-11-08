@@ -1,0 +1,1334 @@
+diff --git a/zig/kernels/cuda/glm_dflash.cu b/zig/kernels/cuda/glm_dflash.cu
+index 468dbcdc3..36f448ac9 100644
+--- a/zig/kernels/cuda/glm_dflash.cu
++++ b/zig/kernels/cuda/glm_dflash.cu
+@@ -269,6 +269,17 @@ extern "C" __global__ void df_sum2(const float* __restrict__ g, __nv_bfloat16* _
+     }
+ }
+ 
++// TF_GLM_OVN_DRAFT_MLPSPLIT: out = bf16(((g0 + g1) + g2) ..) of [world][R][D] partials (dflash2.py's _rank_sum).
++extern "C" __global__ void df_sumw(const float* __restrict__ g, __nv_bfloat16* __restrict__ out, int R, int world) {
++    const long long r = blockIdx.x;
++    for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024; c += blockDim.x) {
++        const long long i = r * D + c;
++        float s = g[i];
++        for (int w = 1; w < world; ++w) s = __fadd_rn(s, g[(long long)w * R * D + i]);
++        out[i] = tobf(s);
++    }
++}
++
+ // A rank's 16 largest logits a head row as global ids and fp32 values: per-chunk part, then merge; ties keep low id.
+ namespace {
+ constexpr int CHUNK_COLS = 4096;
+diff --git a/zig/kernels/cuda/qmm_group.cu b/zig/kernels/cuda/qmm_group.cu
+index df1d1ff2b..9743f16d1 100644
+--- a/zig/kernels/cuda/qmm_group.cu
++++ b/zig/kernels/cuda/qmm_group.cu
+@@ -343,3 +343,7 @@ template __global__ void tf_qmm_group::group_kernel<64, 64, 64, 1, 4, 4, false,
+     const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+ template __global__ void tf_qmm_group::group_kernel<64, 128, 64, 1, 4, 3, false, false, false, false>(
+     const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
++
++// Tile 2 with fp32 out: the GLM drafter's 4-bit down K slices (TF_GLM_OVN_DRAFT_DOWN4 with a split MLP), gathered.
++template __global__ void tf_qmm_group::group_kernel<64, 16, 64, 1, 4, 8, true, false, false, false>(
++    const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index 72041dca4..f09db0018 100644
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -95,6 +95,7 @@ test {
+     _ = @import("cuda_mtp_chance.zig");
+     _ = @import("cuda_tile.zig");
+     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them
++    _ = @import("dflash_ovn.zig");
+ }
+ 
+ pub const dflash = @import("dflash.zig");
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+index 1290beb98..cb6f8fa03 100644
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -344,7 +344,7 @@ pub const Engine = struct {
+         const r = from orelse return 0;
+         if (r.at == 0 or r.at >= len or r.at % fw.prefill_rows != 0) return error.BadResume;
+         try e.restoreState(r.id);
+-        if (e.drafter) |dr| try dr.restart(e.slot, r.at); // the rows before it were never tapped
++        if (e.drafter) |dr| try snapshots.resumeDrafter(e, dr, r); // KEEPWIN's kept window, else a fresh start at r.at
+         return r.at;
+     }
+ 
+@@ -470,7 +470,7 @@ pub const Engine = struct {
+     /// DFlash2's round (every rank, the same `reqs`): each stream's kept rows into its context, then the block pass.
+     pub fn draftBlock(e: *Engine, reqs: []dflash.Req) !void {
+         const dr = e.drafter orelse return error.NoDrafter;
+-        for (reqs) |*q| q.pos = @intCast((e.seqs.items[q.slot] orelse return error.UnknownSlot).st.pos);
++        for (reqs) |*q| q.* = dflash.located(q.*, e.seqs.items[q.slot] orelse return error.UnknownSlot);
+         try dr.draft(e, reqs);
+     }
+ 
+diff --git a/zig/src/families/glm/cuda_engine_types.zig b/zig/src/families/glm/cuda_engine_types.zig
+index 125a6ee1e..0a7db0586 100644
+--- a/zig/src/families/glm/cuda_engine_types.zig
++++ b/zig/src/families/glm/cuda_engine_types.zig
+@@ -21,7 +21,7 @@ pub const Seq = struct {
+ };
+ 
+ /// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
+-pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0 };
++pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0, win_from: ?i64 = null };
+ 
+ /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a multiple of the chunk rows.
+ pub const Resume = struct { id: u64, at: usize };
+@@ -31,7 +31,8 @@ pub const Marks = struct {
+     at: []const u32,
+     ctx: *anyopaque,
+     call: *const fn (ctx: *anyopaque, at: u32) void,
+-    interrupted: ?*const fn (ctx: *anyopaque, at: u32) void = null,
++    interrupted: ?*const fn (ctx: *anyopaque, at: u32) void = null,    win_from: ?i64 = null, // KEEPWIN: the drafter ring's first row this state carries
++
+ };
+ 
+ const ranks = @import("cuda_ranks.zig");
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index 66e67ee90..53b4ba431 100644
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -1,4 +1,5 @@
+ //! GLM-5.3-Flash's CUDA lane backend (as nemotron/cuda_lanes.zig): a slot per stream, shared verify, chunked prompts.
++
+ const std = @import("std");
+ const lanes = @import("lanes");
+ const engine = @import("cuda_engine.zig");
+@@ -6,33 +7,44 @@ const follow = @import("cuda_follow.zig");
+ const fw = @import("cuda_forward.zig");
+ const dflash = @import("dflash.zig");
+ const prompt_lp = @import("cuda_prompt_logprobs.zig");
+-const share_mod = @import("cuda_share.zig");
+ const cuda = @import("cuda");
++
+ const be = lanes.backend;
++
+ /// First tokens a handle names.
+ const ring = 1024;
++
+ /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
+ pub const max_rows = fw.window_rows;
+ const mtp_rows = 1 + engine.max_drafts;
+ const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
+-const copy_policy = @import("cuda_copy_policy.zig");
++
++/// With DFlash2: a window's ms by rows on two GB10s (EXL3, TF_GLM_PROF: 86 to 107 ms at 5 to 8), shared as glm_cuda's.
++const gb10_window_costs = costTable(max_rows, 52.0, 6.8);
++const gb10_shared_costs = costTable(engine.shared_rows, 76.0, 4.1);
++
++fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.config.Cost {
++    var c: [n]lanes.config.Cost = undefined;
++    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
++    return c;
++}
++
+ /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
+ const Lane = struct {
+     slot: u32,
+     pending_rows: ?usize = null,
+     held: [max_held]u32 = undefined,
+-    chances: [max_held]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
++    chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
+     held_n: usize = 0,
+     first: ?u64 = null,
+     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+-    marks: []const u32 = &.{}, // TF_KV_SHARE: where the shared prompt store keeps this stream's pass (owned)
+ };
++
+ pub const Lanes = struct {
+     x: follow.Leader,
+     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
++    together: bool = true, // stepped: short prompts admitted in one pass (TF_GLM_PROMPT_MANY=0: one a round)
+     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
+-    mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
+-    copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
+     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
+     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
+     drawn: [ring]u32 = undefined,
+@@ -42,8 +54,6 @@ pub const Lanes = struct {
+ 
+     pub fn deinit(self: *Lanes) void {
+         if (self.bits) |*b| b.free();
+-        var it = self.lanes.valueIterator();
+-        while (it.next()) |l| self.x.e.gpa.free(l.marks);
+         self.lanes.deinit(self.x.e.gpa);
+     }
+ 
+@@ -63,7 +73,7 @@ pub const Lanes = struct {
+     }
+ 
+     pub fn backend(self: *Lanes) be.Backend {
+-        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else &steps_vt };
++        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else if (self.together) &steps_many_vt else &steps_vt };
+     }
+ 
+     const whole_vt: be.Backend.VTable = .{
+@@ -76,7 +86,6 @@ pub const Lanes = struct {
+         .keep = keepFn,
+         .draft = draftFn,
+         .probabilities = chancesFn,
+-        .tree = copy_policy.held,
+         .release = releaseFn,
+         .first_masked = firstMaskedFn,
+         .held = heldFn,
+@@ -90,6 +99,12 @@ pub const Lanes = struct {
+         v.many_rows = 0;
+         break :vt v;
+     };
++    const steps_many_vt: be.Backend.VTable = vt: { // long, image and resumed prompts still fill by steps (open.batchable)
++        var v = steps_vt;
++        v.prefill_many = prefillManyFn;
++        v.many_rows = @intCast(engine.prompt_rows);
++        break :vt v;
++    };
+ 
+     /// Round loop facts: copies up to max_rows, head chains to mtp_rows, shared windows unless TF_GLM_SHARED=0.
+     pub fn facts(self: *const Lanes) lanes.Model {
+@@ -97,7 +112,6 @@ pub const Lanes = struct {
+         const block = self.x.e.drafter != null;
+         const sharing = drafting and !self.alone;
+         return .{
+-            .allocate_shared_drafts = drafting,
+             .exact_width = if (drafting) max_rows else 1,
+             .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
+             .gpu_tokens = false,
+@@ -107,22 +121,15 @@ pub const Lanes = struct {
+             .drafts = if (block) max_held else engine.max_drafts,
+             .draft_streams = block, // one block pass drafts every stream of the round
+             .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
+-            .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
+-            .draft_confidence = if (block) null else self.mtp_confidence,
+-            .window_costs = if (block) &copy_policy.window_costs else &.{},
+-            .shared_costs = if (block) &copy_policy.shared_costs else &.{},
++            .draft_probabilities = block, // the selector's chances size each window against the costs below
++            .window_costs = if (block) &gb10_window_costs else &.{},
++            .shared_costs = if (block) &gb10_shared_costs else &.{},
+             .hidden_rows = sharing,
+             .batch_rows = if (sharing) engine.shared_rows else 0,
+             .max_streams = if (sharing) engine.max_shared else 1,
+         };
+     }
+ 
+-    /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
+-    pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
+-        self.copy_confidence = enabled and self.x.e.mtp;
+-        return copy_policy.apply(self.facts(), enabled);
+-    }
+-
+     fn of(ptr: *anyopaque) *Lanes {
+         return @ptrCast(@alignCast(ptr));
+     }
+@@ -174,6 +181,13 @@ pub const Lanes = struct {
+         return l;
+     }
+ 
++    /// Whether a stream besides `s` is past its prompt pass: a paired prompt step would hold up its rounds.
++    pub fn othersDecode(self: *const Lanes, s: *const lanes.Stream) bool {
++        var it = self.lanes.iterator();
++        while (it.next()) |kv| if (kv.key_ptr.* != s and kv.value_ptr.fill == null) return true;
++        return false;
++    }
++
+     fn cancelled(ptr: ?*anyopaque) bool {
+         return @as(*lanes.Stream, @ptrCast(@alignCast(ptr.?))).isCancelled();
+     }
+@@ -188,14 +202,13 @@ pub const Lanes = struct {
+         try sink.prepare();
+         self.x.e.prompt_logprobs = sink.want();
+         defer self.x.e.prompt_logprobs = null;
+-        var keeps: share_mod.Keeps = undefined;
+-        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
++        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
+         self.lanes.getPtr(s).?.first = self.take(first);
+     }
+ 
+     fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
+         const self = of(ptr);
+-        if (!self.x.e.m.tiled or ss.len > engine.max_together or share_mod.of(self.x.e) != null) return false; // the store keeps a pass alone
++        if (!self.x.e.m.tiled or ss.len > engine.max_together) return false;
+         for (ss) |s| if (!canBatch(s)) return false;
+         var opened: usize = 0;
+         errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
+@@ -218,17 +231,14 @@ pub const Lanes = struct {
+         return true;
+     }
+ 
+-    pub fn many(self: anytype, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
++    fn many(self: *Lanes, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
+         try self.x.prefillMany(parts, firsts);
+-        for (ss) |s| lanes.prefill_widths.completed(self.x.e.gpa, s, s.prompt_len);
+         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
+     }
+ 
+     /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
+-    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
+-        return prefillStep(of(ptr), s);
+-    }
+-    pub fn prefillStep(self: anytype, s: *lanes.Stream) !bool {
++    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
++        const self = of(ptr);
+         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
+         const from = if (going == null) try self.opening(s) else null;
+         if (going == null) try self.images(s, from);
+@@ -240,19 +250,14 @@ pub const Lanes = struct {
+         try sink.prepare();
+         self.x.e.prompt_logprobs = sink.want();
+         defer self.x.e.prompt_logprobs = null;
+-        var keeps: share_mod.Keeps = undefined;
+-        const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
++        const step = try self.x.chunk(s.prompt(), at, !self.othersDecode(s), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
+         if (step.first) |first| {
+-            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
+             l.first = self.take(first);
+             l.fill = null;
+             return true;
+         }
+-        l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
+-        if (s.settle_step) { // its tail would land in the next decode round's time
+-            try self.x.e.stream.synchronize();
+-            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
+-        }
++        l.fill = at + step.rows;
++        if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
+         return false;
+     }
+ 
+@@ -262,8 +267,7 @@ pub const Lanes = struct {
+         const at = l.fill orelse return;
+         if (at <= s.cached or s.reuse.hook == null) return;
+         try self.x.bind(l.slot);
+-        var keeps: share_mod.Keeps = undefined;
+-        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, self.marksOf(s, &keeps)) catch |err| {
++        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, marksOf(s)) catch |err| {
+             if (err == error.Cancelled) return;
+             return err;
+         };
+@@ -278,47 +282,21 @@ pub const Lanes = struct {
+     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
+         const ids = s.prompt();
+         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
+-        const gpa = self.x.e.gpa;
+-        const share = self.cached(s);
+-        var owner: share_mod.Owner = .{};
+-        var adopt: std.ArrayList(u32) = .empty;
+-        defer adopt.deinit(gpa);
+-        // TF_KV_SHARE: the deepest kept state's pages, held for this call until the seat takes them
+-        const marks: []const u32 = if (share) (try share_mod.begin(self.x.e, s, &owner, &adopt)).marks else &.{};
+-        var held = true;
+-        errdefer if (held) gpa.free(marks);
+-        const pages = try self.seat(s, ids.len, s.max_new, adopt.items);
++        const pages = try self.seat(s, ids.len, s.max_new);
+         errdefer {
+             self.x.e.release(self.lanes.get(s).?.slot);
+             _ = self.lanes.remove(s);
+         }
+         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
+-        try self.x.beginOn(s.sampling, pages, adopt.items.len);
++        try self.x.beginOn(s.sampling, pages);
+         s.cached = 0;
+         s.prompt_rows.clearRetainingCapacity();
+-        const l = self.lanes.getPtr(s).?;
+-        gpa.free(l.marks);
+-        l.marks = marks;
+-        held = false;
+-        if (share) {
+-            const k = owner.pending orelse return null;
+-            s.cached = k.at;
+-            return .{ .id = k.id, .at = k.at };
+-        }
+         return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+     }
+ 
+-    /// Whether the shared prompt store keeps this content-keyed pass, with no prompt logprob rows asked.
+-    fn cached(self: *const Lanes, s: *const lanes.Stream) bool {
+-        return share_mod.of(self.x.e) != null and share_mod.cacheable(s);
+-    }
+-
+-    /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
+-    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
+-        const l = self.claim(s) catch |err| {
+-            if (self.x.e.pages) |p| p.give(adopted);
+-            return err;
+-        };
++    /// The stream's slot, its pages, then its sequence: a slot past the paged ones waits before binding makes a window.
++    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize) ![]const u32 {
++        const l = try self.claim(s);
+         l.pending_rows = null;
+         l.held_n = 0;
+         l.fill = null;
+@@ -327,20 +305,17 @@ pub const Lanes = struct {
+             if (self.x.e.pages) |p| p.close(l.slot);
+             _ = self.lanes.remove(s);
+         }
+-        const pages = try self.pagesFor(l.slot, prompt, max_new, adopted);
++        const pages = try self.pagesFor(l.slot, prompt, max_new);
+         try self.x.bind(l.slot);
+         return pages;
+     }
+ 
+     /// A slot's pages for a prompt and its reply (none without a pool); LaneMemory: the pool lacks them now.
+-    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
++    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize) ![]const u32 {
+         const p = self.x.e.pages orelse return &.{};
+-        if (!p.paged(slot)) { // every paged sequence is taken
+-            p.give(adopted);
+-            return error.LaneMemory;
+-        }
++        if (!p.paged(slot)) return error.LaneMemory; // every paged sequence is taken
+         p.close(slot); // a stream that opens again gives its earlier pages back first
+-        return p.openWith(slot, prompt, max_new, adopted);
++        return p.open(slot, prompt, max_new);
+     }
+ 
+     /// The lane host's admission: with a pool, a paged sequence and the request's pages are free.
+@@ -358,11 +333,7 @@ pub const Lanes = struct {
+     }
+     const Sink = @import("cuda_prompt_sink.zig").Sink;
+ 
+-    fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *share_mod.Keeps) ?engine.Marks {
+-        if (self.cached(s)) {
+-            const l = self.lanes.getPtr(s) orelse return null;
+-            return share_mod.marks(self.x.e, l.slot, s, l.marks, keeps);
+-        }
++    fn marksOf(s: *lanes.Stream) ?engine.Marks {
+         return if (s.reuse.hook == null) null else .{
+             .at = s.reuse.marks,
+             .ctx = s,
+@@ -371,13 +342,13 @@ pub const Lanes = struct {
+         };
+     }
+ 
+-    /// The stream's kept state, where its prompt pass starts (null: none, off the chunk grid, or no longer held).
++    /// The stream's kept state, where its prompt pass starts (null: none, not this prompt's prefix, or no longer held).
+     fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
+         const saved = s.reuse.saved orelse return null;
+         const k: *const engine.Kept = @ptrCast(@alignCast(saved));
+-        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or k.at % fw.prefill_rows != 0 or !self.x.e.holds(k.id)) {
++        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or !self.x.e.holds(k.id)) {
+             s.reuse_failed = true;
+-            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or k.at % fw.prefill_rows != 0) error.SnapshotOutOfStep else error.SnapshotStale;
++            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at) error.SnapshotOutOfStep else error.SnapshotStale;
+             return null;
+         }
+         s.cached = k.at;
+@@ -437,6 +408,12 @@ pub const Lanes = struct {
+     /// Each window in its own forward on its stream's sequence (the core sends one when no forward is shared).
+     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
+         const self = of(ptr);
++        // TF_GLM_LANES_LOG: how many streams' windows actually arrive in one call (the batching question)
++        if (std.c.getenv("TF_GLM_LANES_LOG") != null) {
++            var rows: usize = 0;
++            for (windows) |w| rows += w.rows();
++            std.log.info("glm lanes: {d} window(s), {d} row(s) in one verify", .{ windows.len, rows });
++        }
+         if (windows.len > 1) return self.verifyShared(windows, out);
+         for (windows, out) |w, *o| {
+             if (w.parents != null) return error.TreesNotBuilt;
+@@ -517,13 +494,12 @@ pub const Lanes = struct {
+             if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
+             if (r.lanes != null) return error.TreesNotBuilt;
+             const depth = @min(r.depth, engine.max_drafts);
+-            const chances: ?[]f64 = if (self.mtp_confidence != null) l.chances[0..depth] else null;
+             if (r.rows) |rows| {
+                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
+-                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held, chances);
++                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held);
+             } else {
+                 const first = self.value(r.first orelse return error.NoFirstToken);
+-                try self.x.draft(true, &.{first}, depth, &l.held, chances);
++                try self.x.draft(true, &.{first}, depth, &l.held);
+             }
+             l.held_n = depth;
+         }
+@@ -544,11 +520,12 @@ pub const Lanes = struct {
+                 n = rows.len;
+                 break :a r.follow[rows.len - 1];
+             } else self.value(r.first orelse return error.NoFirstToken);
+-            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .propose = r.depth > 0, .out = &l.held, .probs = &l.chances };
++            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .out = &l.held, .probs = &l.chances };
+             held[i] = l;
+         }
+         try self.x.block(reqs[0..requests.len]);
+-        const cut = dflash.confidence();
++        const cuts = self.x.e.drafter.?.knobs.cuts; // TF_GLM_OVN_DRAFT_CUTS: the cut by streams in this pass
++        const cut = (if (cuts) |c| c.at(requests.len) else null) orelse confidence();
+         for (requests, held[0..requests.len]) |r, l| {
+             l.held_n = @min(r.depth, max_held);
+             var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
+@@ -560,10 +537,16 @@ pub const Lanes = struct {
+         }
+     }
+ 
+-    /// Each held draft's chance, DFlash2's or the MTP head's under --mtp-confidence (else the per-depth rates stand).
++    /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
++    fn confidence() f64 {
++        const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
++        return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
++    }
++
++    /// DFlash2's chance for each held draft (the MTP head gives none: the lane core's per-depth rates stand).
+     fn chancesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
+         const self = of(ptr);
+-        if (self.x.e.drafter == null and self.mtp_confidence == null) return false;
++        if (self.x.e.drafter == null) return false;
+         const l = self.lanes.getPtr(s) orelse return false;
+         if (l.held_n == 0) return false;
+         const n = @min(out.len, l.held_n);
+@@ -572,7 +555,6 @@ pub const Lanes = struct {
+             chain *= p;
+             c.* = chain;
+         }
+-        if (self.mtp_confidence != null and self.copy_confidence and self.x.e.drafter == null) copy_policy.confidence(self.mtp_confidence, out[0..n]);
+         for (out[n..]) |*c| c.* = 0;
+         return true;
+     }
+@@ -581,7 +563,6 @@ pub const Lanes = struct {
+     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
+         const self = of(ptr);
+         const kv = self.lanes.fetchRemove(s) orelse return;
+-        self.x.e.gpa.free(kv.value.marks);
+         self.x.release(kv.value.slot) catch |err| std.log.err("releasing slot {d}: {s}", .{ kv.value.slot, @errorName(err) });
+         if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
+     }
+@@ -591,7 +572,9 @@ comptime {
+     std.debug.assert(max_rows <= fw.window_rows);
+ }
+ 
+-/// Eligibility for the maintained fresh-prompt batching path.
++/// Eligibility for the maintained fresh-prompt batching path: one pass that fires no mark, so none may fall inside.
+ pub fn canBatch(s: anytype) bool {
+-    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows;
++    if (s.prompt_logprobs != null or s.images.len != 0 or s.reuse.saved != null or s.prompt_len > engine.prompt_rows) return false;
++    for (s.reuse.marks) |m| if (m > 0 and m < s.prompt_len) return false; // a kept state the batch would skip
++    return true;
+ }
+diff --git a/zig/src/families/glm/cuda_q4.zig b/zig/src/families/glm/cuda_q4.zig
+index 382ca2932..2f141843a 100644
+--- a/zig/src/families/glm/cuda_q4.zig
++++ b/zig/src/families/glm/cuda_q4.zig
+@@ -6,6 +6,7 @@ const cuda = @import("cuda");
+ /// qmm_group.cu's tile-2 instantiation (LaneTile<64, 16, 64, 1, 4, 8>, bf16 out), as zig/kernels/cuda exports it.
+ const group_symbol = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
+ const group_smem: u32 = 35328; // LaneTile<64, 16, 64, 1, 4, 8>::SMEM
++const f32_symbol = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb1ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
+ 
+ /// qmm_group.cu's Part and Parts, passed by value: four projections at most, one used here.
+ const Part = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int, first: c_int };
+@@ -23,11 +24,19 @@ pub const Kernels = struct {
+     pack_dense: cuda.Function,
+     transpose: cuda.Function,
+     gb10: bool, // qmm_group_cuda's programmatic dependent launch: on for GB10 (sm_121)
++    module: ?cuda.Module = null, // qmm_group, owned by the caller (loadF32 looks the fp32 tile up in it)
+ 
+     /// From the qmm_group and affine4_pack modules.
+-    pub fn load(group: cuda.Module, ops: cuda.Module, ctx: *const cuda.Context) !Kernels {
++    pub fn loadF32(ks: *const Kernels) !cuda.Function {
++        const m = ks.module orelse return error.NoQmmGroupModule;
++        const f = try m.function(f32_symbol);
++        try f.allowDynamicShared(group_smem);
++        return f;
++    }
++
++    pub fn load(group_mod: cuda.Module, ops: cuda.Module, ctx: *const cuda.Context) !Kernels {
+         const k: Kernels = .{
+-            .group = try group.function(group_symbol),
++            .group = try group_mod.function(group_symbol),
+             .pack_dense = try ops.function("tf_pack_dense"),
+             .transpose = try ops.function("tf_transpose_pad16"),
+             .gb10 = try ctx.attribute(.compute_capability_major) == 12 and try ctx.attribute(.compute_capability_minor) == 1,
+@@ -106,3 +115,39 @@ test "the draft head's shape takes one K slice; npad rounds to 128s" {
+     try std.testing.expectEqual(@as(usize, 77440), npadOf(77440));
+     try std.testing.expectEqual(@as(usize, 51712), npadOf(51627));
+ }
++pub const many_rows: usize = 128;
++
++/// matmul over up to many_rows rows in one launch: row tile t is matmul's launch for rows 16t.., the weights read once.
++pub fn matmulMany(ks: *const Kernels, stream: cuda.Stream, x: u64, ldx: usize, xs: u64, q: Q4, out: u64, rows: usize) !void {
++    if (rows == 0 or rows > many_rows) return error.WindowTooWide;
++    try group(ks, ks.group, stream, x, ldx, xs, q, out, rows);
++}
++
++/// matmulMany with fp32 out (`f` from loadF32): the same K order a row, no bf16 rounding of the result.
++pub fn matmulF32(ks: *const Kernels, f: cuda.Function, stream: cuda.Stream, x: u64, ldx: usize, xs: u64, q: Q4, out: u64, rows: usize) !void {
++    if (rows == 0 or rows > many_rows) return error.WindowTooWide;
++    try group(ks, f, stream, x, ldx, xs, q, out, rows);
++}
++
++fn group(ks: *const Kernels, f: cuda.Function, stream: cuda.Stream, x: u64, ldx: usize, xs: u64, q: Q4, out: u64, rows: usize) !void {
++    const sk = splitK(q.n, q.k);
++    const tiles = (q.n + 63) / 64;
++    var parts: Parts = std.mem.zeroes(Parts);
++    parts.count = 1;
++    parts.p[0] = .{ .w = q.w, .scales = q.s, .biases = q.b, .out = out, .n = @intCast(q.n), .npad = @intCast(q.npad), .sk = @intCast(sk), .tiles = @intCast(tiles), .first = 0 };
++    const rows_t = (rows + 15) / 16;
++    const clusters = rows_t * tiles; // one part: a cluster is the sk K slices of one column tile
++    var a: cuda.Args = .{};
++    a.add(x);
++    a.add(xs);
++    a.add(parts);
++    for ([_]usize{ rows, q.k, if (rows == 1) q.k else ldx, rows_t, sk }) |v| a.add(@as(c_int, @intCast(v))); // M, K, ldx, rows_t, C
++    const cfg: cuda.Config = .{
++        .grid = .{ .x = @intCast(clusters * sk) },
++        .block = .{ .x = 128 },
++        .shared = group_smem,
++        .cluster = if (sk > 1) .{ .x = @intCast(sk) } else null,
++        .pdl = ks.gb10,
++    };
++    try cuda.launch.launch(f, cfg, stream, &a);
++}
+diff --git a/zig/src/families/glm/cuda_snapshot_pages.zig b/zig/src/families/glm/cuda_snapshot_pages.zig
+index 70ee337c9..065a10f75 100644
+--- a/zig/src/families/glm/cuda_snapshot_pages.zig
++++ b/zig/src/families/glm/cuda_snapshot_pages.zig
+@@ -22,7 +22,7 @@ const Arena = union(enum) {
+     device: cuda.DeviceBuffer,
+     host: struct { buf: cuda.HostBuffer, ptr: u64 },
+ 
+-    fn ptr(a: Arena) u64 {
++    pub fn ptr(a: Arena) u64 {
+         return switch (a) {
+             .device => |b| b.ptr,
+             .host => |h| h.ptr,
+@@ -36,7 +36,7 @@ const Arena = union(enum) {
+         };
+     }
+ 
+-    fn driver(a: Arena) *const cuda.Driver {
++    pub fn driver(a: Arena) *const cuda.Driver {
+         return switch (a) {
+             .device => |b| b.d,
+             .host => |h| h.buf.d,
+diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
+index 3eb62010b..9c8f5ad52 100644
+--- a/zig/src/families/glm/cuda_snapshots.zig
++++ b/zig/src/families/glm/cuda_snapshots.zig
+@@ -4,6 +4,7 @@ const cuda = @import("cuda");
+ const types = @import("cuda_engine_types.zig");
+ pub const pages = @import("cuda_snapshot_pages.zig");
+ pub const layout = @import("cuda_snapshot_layout.zig");
++const ring_bytes = @import("dflash.zig").ring_bytes;
+ 
+ pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
+ 
+@@ -24,13 +25,65 @@ pub fn agree(e: anytype, budget: u64) !void {
+     if (try e.shared(if (failed != null) 1 else 0) > 0) return failed orelse error.PeerSnapshotCache;
+ }
+ 
++/// A kept state's pool bytes at `at`, KEEPWIN's drafter ring on whole pages after the state's.
+ pub fn bytes(e: anytype, at: usize) u64 {
++    return planBytes(e, at) +| windowBytes(e);
++}
++
++fn planBytes(e: anytype, at: usize) u64 {
+     const head: ?usize = if (e.mtp) @min(e.capacity, std.math.add(usize, at, @import("cuda_state.zig").window_rows) catch return std.math.maxInt(u64)) else null;
+     // a paged sequence holds its request's rows: its prefix is counted to the capacity, in a window's bytes
+     const n = layout.Plan.size(&e.cur.st, &e.c, e.capacity, at, head, heldPages(e, at)) catch return std.math.maxInt(u64);
+     return pages.rounded(n) catch std.math.maxInt(u64);
+ }
+ 
++/// TF_GLM_OVN_DRAFT_KEEPWIN: the bound sequence's drafter ring and its first row a state kept here carries.
++const Window = struct { ring: u64, from: i64 };
++
++fn window(e: anytype) ?Window {
++    if (comptime !@hasField(@TypeOf(e.*), "drafter")) {
++        return null;
++    } else {
++        const dr = e.drafter orelse return null;
++        const w = dr.window(e.slot, e.cur.st.pos) orelse return null;
++        return .{ .ring = w.ring, .from = w.from };
++    }
++}
++
++/// KEEPWIN's share of a kept state's bytes: the drafter's whole ring (0 without the knob or a drafter).
++fn windowBytes(e: anytype) u64 {
++    if (comptime !@hasField(@TypeOf(e.*), "drafter")) {
++        return 0;
++    } else {
++        const dr = e.drafter orelse return 0;
++        return if (dr.knobs.keepwin) ring_bytes else 0;
++    }
++}
++
++/// `len` bytes at `live` into a lease's pages from byte `off` on (`into`), or back out of them.
++fn moveFlat(pool: *const pages.Pool, stream: cuda.Stream, lease: *const pages.Lease, off: usize, live: u64, len: usize, into: bool) !void {
++    const arena = pool.arena orelse return error.NoSnapshotRoom;
++    if (off + len > lease.ids.items.len * pages.page) return error.SnapshotSize;
++    var done: usize = 0;
++    while (done < len) {
++        const at = off + done;
++        const held = arena.ptr() + @as(u64, lease.ids.items[at / pages.page]) * pages.page + at % pages.page;
++        const n = @min(len - done, pages.page - at % pages.page);
++        const drv = arena.driver();
++        try drv.check(drv.api.cuMemcpyDtoDAsync_v2(if (into) held else live + done, if (into) live + done else held, n, stream.handle), "snapshot ring copy");
++        done += n;
++    }
++}
++
++/// The drafter at a resume: its kept window back in the slot's ring (KEEPWIN), else a fresh start at `r.at`.
++pub fn resumeDrafter(e: anytype, dr: anytype, r: types.Resume) !void {
++    const s = e.snaps.getPtr(r.id) orelse return error.NoKeptState;
++    const from = s.win_from orelse return dr.restart(e.slot, r.at); // the rows before it were never tapped
++    const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
++    try moveFlat(pool, e.stream, &s.lease, try pages.rounded(s.len), try dr.ringOf(e.slot), ring_bytes, false);
++    try dr.restartKept(e.slot, from, r.at);
++}
++
+ pub fn keep(e: anytype) !u64 {
+     if (e.next_snap > std.math.maxInt(u32)) return error.SnapshotIdLimit;
+     const id = e.next_snap;
+@@ -46,7 +99,13 @@ pub fn keepAs(e: anytype, id: u64) !void {
+         return error.NotAtMark;
+     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+     const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
+-    var lease = try pool.take(plan.len);
++    const win = window(e);
++    const state_len = if (win != null) try pages.rounded(plan.len) else plan.len; // the ring starts on a page
++    var lease = try pool.take(state_len + @as(usize, if (win != null) ring_bytes else 0));
++    if (win) |w| moveFlat(pool, e.stream, &lease, state_len, w.ring, ring_bytes, true) catch {
++        pool.give(&lease);
++        return error.NoSnapshotRoom;
++    };
+     errdefer {
+         cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot copy did not drain");
+         pool.give(&lease);
+@@ -55,7 +114,7 @@ pub fn keepAs(e: anytype, id: u64) !void {
+     errdefer e.gpa.free(cur);
+     try pool.move(e.stream, &lease, &plan, true);
+     try e.stream.synchronize();
+-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
++    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .win_from = if (win) |w| w.from else null });
+ }
+ 
+ pub fn restore(e: anytype, id: u64) !void {
+diff --git a/zig/src/families/glm/dflash_block.zig b/zig/src/families/glm/dflash_block.zig
+index 4d2366f6f..1f3f98504 100644
+--- a/zig/src/families/glm/dflash_block.zig
++++ b/zig/src/families/glm/dflash_block.zig
+@@ -17,18 +17,20 @@ fn set(e: anytype) glue.Set {
+     return .{ .glue = &e.m.glue, .mm = &e.m.mm };
+ }
+ 
+-/// out[m, n] = x[m, k] . w^T, bf16 out (`wide`: fp32, glm_mm only): 4 bits 16 rows a launch, or glm_mm.
++/// out[m, n] = x[m, k] . w^T, bf16 out (`wide`: fp32, glm_mm or DOWN4's tile): 4 bits 16 rows a launch, or glm_mm.
+ fn lin(dr: *const Drafter, e: anytype, x: u64, w: df.Lin, out: u64, m: usize, wide: bool) !void {
+     switch (w) {
+         .bf16 => |t| try mm.matmul(&e.m.mm, e.stream, x, t.k, t, out, dr.part, m, wide, false),
+         .q4 => |q| {
+-            if (wide) return error.WideFromFourBits;
++            if (wide and dr.wide4 == null) return error.WideFromFourBits;
+             var a: cuda.Args = .{};
+             a.add(x);
+             a.add(@as(i32, @intCast(q.k)));
+             a.add(@as(i32, @intCast(q.k)));
+             a.add(dr.gs);
+             try go(dr.k.gsum, .{ .x = @intCast(m) }, 128, e, &a);
++            if (wide) return many(e, dr.wide4, x, dr.gs, q, out, m);
++            if (dr.knobs.onepass) return many(e, null, x, dr.gs, q, out, m);
+             var r0: usize = 0;
+             while (r0 < m) : (r0 += 16) {
+                 const rows = @min(16, m - r0);
+@@ -38,6 +40,18 @@ fn lin(dr: *const Drafter, e: anytype, x: u64, w: df.Lin, out: u64, m: usize, wi
+     }
+ }
+ 
++/// TF_GLM_OVN_DRAFT_ONEPASS: q4.many_rows rows a launch, a 16-row tile lin's own launch for it (`wide4`: fp32 out).
++fn many(e: anytype, wide4: ?cuda.Function, x: u64, xs: u64, q: q4.Q4, out: u64, m: usize) !void {
++    var r0: usize = 0;
++    while (r0 < m) : (r0 += q4.many_rows) {
++        const rows = @min(q4.many_rows, m - r0);
++        const at = .{ x + r0 * q.k * 2, xs + r0 * (q.k / 64) * 4 };
++        if (wide4) |f| {
++            try q4.matmulF32(&e.m.q4, f, e.stream, at[0], q.k, at[1], q, out + r0 * q.n * 4, rows);
++        } else try q4.matmulMany(&e.m.q4, e.stream, at[0], q.k, at[1], q, out + r0 * q.n * 2, rows);
++    }
++}
++
+ fn linB(dr: *const Drafter, e: anytype, x: u64, w: mm.Tiled, out: u64, m: usize, wide: bool) !void {
+     try lin(dr, e, x, .{ .bf16 = w }, out, m, wide);
+ }
+@@ -95,6 +109,29 @@ fn conv(dr: *const Drafter, e: anytype, z: u64, which: i32, base: u64, out: u64,
+     try go(dr.k.conv, .{ .x = @intCast(M), .y = D / 1024 }, 256, e, &a);
+ }
+ 
++/// gate and up, SwiGLU, down: whole into a, or this rank's `ff` columns with down's K slice as fp32 partials, summed.
++fn mlp(dr: *const Drafter, e: anytype, gu: df.Lin, down: df.Lin, ff: usize, split: bool, M: usize) !void {
++    try lin(dr, e, dr.y2, gu, dr.gu, M, false);
++    {
++        var a: cuda.Args = .{};
++        a.add(dr.gu);
++        a.add(dr.act);
++        a.add(@as(i32, @intCast(ff)));
++        try go(dr.k.swiglu, .{ .x = @intCast(M), .y = @intCast(ff / 1024) }, 256, e, &a);
++    }
++    if (!split) return lin(dr, e, dr.act, down, dr.a, M, false);
++    const bytes = M * D * 4; // every rank's partials gathered, then added in rank order
++    try lin(dr, e, dr.act, down, dr.sums + e.share.rank * bytes, M, true);
++    try gather(e, dr.sums, bytes);
++    var a: cuda.Args = .{};
++    a.add(dr.sums);
++    a.add(dr.a);
++    a.add(@as(i32, @intCast(M)));
++    if (dr.world == 2) return go(dr.k.sum2, .{ .x = @intCast(M), .y = D / 1024 }, 256, e, &a);
++    a.add(@as(i32, @intCast(dr.world)));
++    try go(dr.k.sumw, .{ .x = @intCast(M), .y = D / 1024 }, 256, e, &a);
++}
++
+ /// The block pass for `S` streams (tables uploaded): embed, 5 layers, norm, each rank's 16 best a row, gathered.
+ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
+     const M = S * BLOCK;
+@@ -136,31 +173,17 @@ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
+         try glue.rmsnorm(set(e), e.stream, dr.x, D, l.post_norm, dr.y, D, null, df.EPS, M, D);
+         try lin(dr, e, dr.y, l.m_proj, dr.dyn, M, false);
+         try conv(dr, e, dr.y, 0, l.m_base, dr.y2, false, M);
+-        try lin(dr, e, dr.y2, l.gu, dr.gu, M, false);
+-        {
+-            var a: cuda.Args = .{};
+-            a.add(dr.gu);
+-            a.add(dr.act);
+-            a.add(@as(i32, @intCast(dr.ff)));
+-            try go(dr.k.swiglu, .{ .x = @intCast(M), .y = @intCast(dr.ff / 1024) }, 256, e, &a);
+-        }
+-        if (dr.split) { // each rank's half of down's K as fp32 partials, gathered and summed
+-            const bytes = M * D * 4;
+-            try linB(dr, e, dr.act, l.down, dr.sums + e.share.rank * bytes, M, true);
+-            try gather(e, dr.sums, bytes);
+-            var a: cuda.Args = .{};
+-            a.add(dr.sums);
+-            a.add(dr.a);
+-            a.add(@as(i32, @intCast(M)));
+-            try go(dr.k.sum2, .{ .x = @intCast(M), .y = D / 1024 }, 256, e, &a);
+-        } else try linB(dr, e, dr.act, l.down, dr.a, M, false);
++        const sliced = dr.sff != 0 and S <= dr.knobs.mlpsplit; // MLPSPLIT: S is the step's, so every rank agrees
++        if (sliced) try mlp(dr, e, l.sgu, l.sdown, dr.sff, true, M) else try mlp(dr, e, l.gu, l.down, dr.ff, dr.split, M);
+         try conv(dr, e, dr.a, 1, l.m_base + 2 * D * 2, dr.x, true, M);
+     }
+     // every row through the drafts' 4-bit head (this rank's vocabulary), its 16 best, gathered; rank 0's projections
+     try glue.rmsnorm(set(e), e.stream, dr.x, D, dr.norm, dr.hn, D, dr.xs, df.EPS, M, D);
+     const head = e.w.mtp.?.draft;
+     var r0: usize = 0;
+-    while (r0 < M) : (r0 += 16) {
++    if (dr.knobs.onepass) {
++        try many(e, null, dr.hn, dr.xs, head, dr.logits, M);
++    } else while (r0 < M) : (r0 += 16) {
+         const rows = @min(16, M - r0);
+         try q4.matmul(&e.m.q4, e.stream, dr.hn + r0 * D * 2, D, dr.xs + r0 * (D / 64) * 4, head, dr.logits + r0 * head.n * 2, rows);
+     }
+diff --git a/zig/src/families/glm/dflash_load.zig b/zig/src/families/glm/dflash_load.zig
+index 79b136ebb..d7193c325 100644
+--- a/zig/src/families/glm/dflash_load.zig
++++ b/zig/src/families/glm/dflash_load.zig
+@@ -1,7 +1,6 @@
+ //! DFlash2's checkpoint onto the device: the config checked, linears tiled for glm_mm, scratch carved from one buffer.
+ const std = @import("std");
+ const cuda = @import("cuda");
+-const core = @import("core");
+ const mm = @import("cuda_mm.zig");
+ const q4 = @import("cuda_q4.zig");
+ const quant = @import("cuda_quant.zig");
+@@ -48,7 +47,7 @@ const Loader = struct {
+             return error.DrafterTensorShape;
+         }
+         try l.buf.resize(l.gpa, e.n);
+-        if (try l.file.readPositionalAll(l.io, l.buf.items, e.off) != e.n) return error.BadDrafterHeader;
++        _ = try l.file.readPositionalAll(l.io, l.buf.items, e.off);
+         return l.buf.items;
+     }
+ 
+@@ -109,19 +108,35 @@ const Loader = struct {
+     }
+ };
+ 
+-/// The drafter's tensors from `json`, a header of `data_len` data bytes: core's checks, then every tensor BF16.
+-fn addEntries(arena: std.mem.Allocator, json: []const u8, data_len: u64, ents: *std.StringHashMap(Ent)) !void {
+-    const names = try core.safetensors.parseHeader(arena, json, std.math.cast(usize, data_len) orelse return error.BadDrafterHeader);
+-    for (names.keys(), names.values()) |name, e| {
+-        if (e.dtype != .bf16) return error.DrafterNotBf16;
+-        try ents.put(name, .{ .off = 8 + json.len + e.begin, .n = e.end - e.begin });
+-    }
+-}
+-
+ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
+     return std.fmt.bufPrint(b, "layers.{d}.{s}", .{ li, s });
+ }
+ 
++/// Device bytes a 4-bit [n][k] takes in the loader's buffer: its words, scales and biases, each 256-aligned.
++fn q4Bytes(n: usize, k: usize) u64 {
++    var t: u64 = 0;
++    for (q4.bytes(n, k)) |b| t += std.mem.alignForward(u64, b, 256);
++    return t;
++}
++
++/// Device bytes of a linear [n][k] at `bits` (4, or bf16 for 0), as the loader takes it.
++fn linBytes(n: usize, k: usize, bits: u8) u64 {
++    return if (bits == 4) q4Bytes(n, k) else std.mem.alignForward(u64, n * k * 2, 256);
++}
++
++/// TF_GLM_OVN_DRAFT_MLPSPLIT=n's slice width at `world` ranks: 0 when off or below world 3 (world 2 splits already).
++fn mlpSlice(n: usize, world: usize) !usize {
++    if (n == 0 or world < 3) return 0;
++    if (FF % (world * 1024) != 0) return error.BadOvnKnob; // swiglu's 1024-column blocks a row
++    return FF / world;
++}
++
++/// Down's columns col0.. (`n` of them) as fp32-out K slices: bf16 for glm_mm, or 4 bits for the fp32 tile (DOWN4).
++fn downSlice(l: *Loader, name: []const u8, col0: usize, n: usize, four: bool) !df.Lin {
++    if (four) return l.linear(&.{name}, &.{D}, FF, .{ 0, 0, col0, n });
++    return .{ .bf16 = try l.linearB(&.{name}, &.{D}, FF, .{ 0, 0, col0, n }) };
++}
++
+ /// The drafter from `dir` (config.json and model.safetensors, bf16) for rank `rank` of `world`, on engine `e`.
+ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
+     if (bits != 0 and bits != 4) return error.BadDrafterBits;
+@@ -132,24 +147,38 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
+     defer gpa.free(path);
+     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+     defer file.close(io);
+-    const size = try file.length(io);
+     var lenb: [8]u8 = undefined;
+-    if (size < 8 or try file.readPositionalAll(io, &lenb, 0) != 8) return error.BadDrafterHeader;
+-    const hlen = core.safetensors.headerSize(std.mem.readInt(u64, &lenb, .little), size) catch return error.BadDrafterHeader;
++    _ = try file.readPositionalAll(io, &lenb, 0);
++    const hlen = std.mem.readInt(u64, &lenb, .little);
+     if (hlen > 1 << 20) return error.BadDrafterHeader;
+-    var names: std.heap.ArenaAllocator = .init(gpa);
+-    defer names.deinit();
+-    const text = try names.allocator().alloc(u8, hlen);
+-    if (try file.readPositionalAll(io, text, 8) != hlen) return error.BadDrafterHeader;
++    const text = try gpa.alloc(u8, hlen);
++    defer gpa.free(text);
++    _ = try file.readPositionalAll(io, text, 8);
++    const hdr = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
++    defer hdr.deinit();
+     var ents = std.StringHashMap(Ent).init(gpa);
+     defer ents.deinit();
+-    try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
++    var it = hdr.value.object.iterator();
++    while (it.next()) |x| {
++        if (std.mem.eql(u8, x.key_ptr.*, "__metadata__")) continue;
++        if (!std.mem.eql(u8, x.value_ptr.object.get("dtype").?.string, "BF16")) return error.DrafterNotBf16;
++        const offs = x.value_ptr.object.get("data_offsets").?.array.items;
++        try ents.put(x.key_ptr.*, .{ .off = 8 + hlen + @as(u64, @intCast(offs[0].integer)), .n = @intCast(offs[1].integer - offs[0].integer) });
++    }
++    var temp: f64 = 1.0;
++    const knobs = try @import("dflash_ovn.zig").Knobs.read(&temp);
+     const split = world == 2;
+     const ff: usize = if (split) FF / 2 else FF;
++    const down4 = knobs.down4 and bits == 4; // DOWN4: every down form at 4 bits (production's dflash2.py:403)
++    const sff = try mlpSlice(knobs.mlpsplit, world); // MLPSPLIT: this rank's MLP slice at world 3+ (0: none)
++    const full = sff == 0 or knobs.mlpsplit < df.MAX_S; // the whole MLP too, unless every pass runs the slices
+     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2 + 16 * 256;
+     const per: u64 = if (bits == 4) 1 else 4; // quarter-bytes a weight: 4 bits (plus scales and biases below) or bf16
+-    const lin_elems: u64 = df.QKV * D + 2 * KVW * D + D * D + 2 * ff * D + 2 * KVW * D + 5 * D * D / df.LAYERS;
+-    const total: u64 = df.LAYERS * (lin_elems * per / 2 + lin_elems / 16 + D * ff * 2 + small + 32 * 256) + df.RANK * D * 2 + 2 * D * 2 + 64 * 256;
++    const gu_elems: u64 = if (full) 2 * ff * D else 0;
++    const lin_elems: u64 = df.QKV * D + 2 * KVW * D + D * D + gu_elems + 2 * KVW * D + 5 * D * D / df.LAYERS;
++    const down_bytes: u64 = if (!full) 0 else if (down4) q4Bytes(D, ff) else D * ff * 2;
++    const slice_bytes: u64 = if (sff == 0) 0 else linBytes(2 * sff, D, bits) + linBytes(D, sff, if (down4) 4 else 0);
++    const total: u64 = df.LAYERS * (lin_elems * per / 2 + lin_elems / 16 + down_bytes + slice_bytes + small + 32 * 256) + df.RANK * D * 2 + 2 * D * 2 + 64 * 256;
+     var wbuf = try cuda.DeviceBuffer.alloc(d, total);
+     errdefer wbuf.free();
+     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
+@@ -165,7 +194,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
+     }
+     const dr = try gpa.create(Drafter);
+     errdefer gpa.destroy(dr);
+-    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
++    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .knobs = knobs, .temp = temp, .sff = sff };
++    if (down4 and (split or sff != 0)) dr.wide4 = try e.m.q4.loadF32();
+     defer @import("cuda_load_owner.zig").drain(e.stream, d);
+     var nb: [4][96]u8 = undefined;
+     for (&dr.layers, 0..) |*lw, i| {
+@@ -186,10 +216,22 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
+         const down = try layerName(&nb[3], i, "mlp.down_proj.weight");
+         if (split) { // this rank's half of the MLP width: gate and up rows, down columns
+             lw.gu = try l.linear(&.{ gate, up }, &.{ FF, FF }, D, .{ rank * ff, ff, 0, D });
+-            lw.down = try l.linearB(&.{down}, &.{D}, FF, .{ 0, 0, rank * ff, ff });
+-        } else {
++            lw.down = try downSlice(&l, down, rank * ff, ff, down4);
++        } else if (full) {
+             lw.gu = try l.linear(&.{ gate, up }, &.{ FF, FF }, D, null);
+-            lw.down = try l.linearB(&.{down}, &.{D}, FF, null);
++            lw.down = if (down4) try l.linear(&.{down}, &.{D}, FF, null) else .{ .bf16 = try l.linearB(&.{down}, &.{D}, FF, null) };
++        }
++        if (sff != 0) { // MLPSPLIT: this rank's slice, cut as the world-2 split cuts its half
++            lw.sgu = try l.linear(&.{ gate, up }, &.{ FF, FF }, D, .{ rank * sff, sff, 0, D });
++            lw.sdown = try downSlice(&l, down, rank * sff, sff, down4);
++        }
++        if (!full) { // every pass runs the slices: the whole forms are never loaded (carve reads these)
++            lw.gu = lw.sgu;
++            lw.down = lw.sdown;
++        }
++        if (sff == 0) { // no slices: never read
++            lw.sgu = lw.gu;
++            lw.sdown = lw.down;
+         }
+         lw.a_proj = try l.linear(&.{try layerName(&nb[1], i, "attention_conv.kernel_projection.weight")}, &.{KVW}, D, null);
+         lw.m_proj = try l.linear(&.{try layerName(&nb[1], i, "mlp_conv.kernel_projection.weight")}, &.{KVW}, D, null);
+@@ -198,12 +240,15 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
+     dr.hproj = try l.linearB(&.{"candidate_selector.hidden_projection.weight"}, &.{df.RANK}, D, null);
+     dr.hnorm = try l.raw("hidden_norm.weight", D * 2);
+     dr.norm = try l.raw("norm.weight", D * 2);
++    if (sff != 0) std.log.info("dflash2: MLP slices of {d} a rank while at most {d} streams draft (TF_GLM_OVN_DRAFT_MLPSPLIT)", .{ sff, knobs.mlpsplit });
+     if (l.at > total) return error.DrafterLayout;
+     var tail: Tail = .{ .loader = &l, .head_n = head.n };
+     const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
+     try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
+     if (std.c.getenv("TF_GLM_DFLASH2_LOG")) |v| dr.log = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0;
+     if (std.c.getenv("TF_GLM_DFLASH2_PROF") != null) dr.prof = io;
++    dr.win = try df.parseWin(if (std.c.getenv("TF_GLM_DFLASH2_WIN")) |v| std.mem.span(v) else null);
++    if (dr.win != df.WIN) std.log.info("dflash2: drafts attend to at most {d} context positions (TF_GLM_DFLASH2_WIN)", .{dr.win});
+     std.log.info("dflash2: drafter from {s} (CC BY-NC-ND 4.0: non-commercial use only), linears at {d} bits, {d:.2} GiB on the device", .{ dir, if (bits == 0) 16 else bits, @as(f64, @floatFromInt(l.at)) / (1 << 30) });
+     return dr;
+ }
+@@ -233,21 +278,21 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
+     const chunks: u64 = (head_n + 4095) / 4096;
+     var part: u64 = 16;
+     for (dr.layers) |l| {
+-        for ([_]df.Lin{ l.qkv, l.kv, l.o, l.gu, l.a_proj, l.m_proj }) |w| if (w == .bf16) {
++        for ([_]df.Lin{ l.qkv, l.kv, l.o, l.gu, l.down, l.a_proj, l.m_proj, l.sgu, l.sdown }) |w| if (w == .bf16) {
+             part = @max(part, mm.partBytes(64, w.bf16));
+         };
+-        part = @max(part, mm.partBytes(64, l.down));
+     }
+     if (dr.fc == .bf16) part = @max(part, mm.partBytes(64, dr.fc.bf16));
+     part = @max(part, mm.partBytes(64, dr.hproj));
++    const ranks: u64 = if (dr.sff != 0) dr.world else 2; // the split down's gathered partials: 2 ranks, or MLPSPLIT's
+     const fields = .{
+         .{ "x", M * D * 2 },                                                                     .{ "y", M * D * 2 },                        .{ "y2", M * D * 2 },                .{ "dyn", M * KVW * 2 },
+         .{ "qkv", M * df.QKV * 2 },                                                              .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },              .{ "vb", M * KVW * 2 },
+         .{ "att", M * D * 2 },                                                                   .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },           .{ "act", M * FF * 2 },
+         .{ "hn", M * D * 2 },                                                                    .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },           .{ "logits", M * head_n * 2 },
+-        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", 2 * M * D * 4 },          .{ "cin", C * df.TAP_ROW },
++        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", ranks * M * D * 4 },      .{ "cin", C * df.TAP_ROW },
+         .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },         .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
+-        .{ "taps_prefill", dr.tap_rows * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
++        .{ "taps_prefill", df.TAP_ROWS * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
+         .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                  .{ "crings", C * 8 },
+         .{ "gtk", @import("dflash_candidates.zig").Layout.init(dr.world, M, df.CW).device * 4 }, .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 }, .{ "pm", M * df.QH * df.CH * 4 },
+         .{ "pl", M * df.QH * df.CH * 4 },                                                        .{ "pacc", M * df.QH * df.CH * df.HD * 4 },
+@@ -284,30 +329,3 @@ pub fn checkConfig(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+     if (taps.len != taps_mod.layers.len) return error.DrafterConfigUnexpected;
+     for (taps, taps_mod.layers) |t, w| if (t.integer != w) return error.DrafterConfigUnexpected;
+ }
+-
+-test "a malformed drafter header is refused with an error, and a range past the data is refused" {
+-    const bad = [_][]const u8{
+-        "[]",
+-        "{\"a\":1}",
+-        "{\"a\":{\"shape\":[1],\"data_offsets\":[0,2]}}",
+-        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0]}}",
+-        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[4,2]}}",
+-        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0.0,2]}}",
+-        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,999999]}}",
+-    };
+-    for (bad) |json| {
+-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+-        defer arena.deinit();
+-        var ents = std.StringHashMap(Ent).init(std.testing.allocator);
+-        defer ents.deinit();
+-        try std.testing.expectError(error.BadSafetensors, addEntries(arena.allocator(), json, 4, &ents));
+-    }
+-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+-    defer arena.deinit();
+-    var ents = std.StringHashMap(Ent).init(std.testing.allocator);
+-    defer ents.deinit();
+-    const json = "{\"a\":{\"dtype\":\"BF16\",\"shape\":[2],\"data_offsets\":[0,4]}}";
+-    try addEntries(arena.allocator(), json, 4, &ents);
+-    try std.testing.expectEqual(Ent{ .off = 8 + json.len, .n = 4 }, ents.get("a").?);
+-    try std.testing.expectError(error.DrafterNotBf16, addEntries(arena.allocator(), "{\"f\":{\"dtype\":\"F16\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4, &ents));
+-}
+diff --git a/zig/src/families/glm/dflash_ovn.zig b/zig/src/families/glm/dflash_ovn.zig
+new file mode 100644
+index 000000000..fc7497710
+--- /dev/null
++++ b/zig/src/families/glm/dflash_ovn.zig
+@@ -0,0 +1,111 @@
++//! The speed hunt's DFlash2 knobs (TF_GLM_OVN_DRAFT_*), read once at load on every rank; unset is today's drafter.
++const std = @import("std");
++const cuda = @import("cuda");
++const lanes = @import("lanes");
++
++/// A stream count's chain cut (TF_GLM_OVN_DRAFT_CUTS="1:0.3,2:0.3,4:0.7"): the largest key at most the count applies.
++pub const Cuts = struct {
++    n: usize = 0,
++    keys: [16]usize = undefined,
++    cuts: [16]f64 = undefined,
++
++    pub fn parse(text: []const u8) !Cuts {
++        var c: Cuts = .{};
++        var it = std.mem.splitScalar(u8, text, ',');
++        while (it.next()) |raw| {
++            const item = std.mem.trim(u8, raw, " ");
++            const colon = std.mem.indexOfScalar(u8, item, ':') orelse return error.BadOvnKnob;
++            if (c.n == c.keys.len) return error.BadOvnKnob;
++            const k = std.fmt.parseInt(usize, std.mem.trim(u8, item[0..colon], " "), 10) catch return error.BadOvnKnob;
++            const v = std.fmt.parseFloat(f64, std.mem.trim(u8, item[colon + 1 ..], " ")) catch return error.BadOvnKnob;
++            if (k == 0 or !(v >= 0 and v <= 1)) return error.BadOvnKnob;
++            for (c.keys[0..c.n]) |x| if (x == k) return error.BadOvnKnob;
++            c.keys[c.n] = k;
++            c.cuts[c.n] = v;
++            c.n += 1;
++        }
++        if (c.n == 0) return error.BadOvnKnob;
++        return c;
++    }
++
++    /// The cut for `streams` streams in the pass: the largest key at most `streams`, else null (the default cut).
++    pub fn at(c: *const Cuts, streams: usize) ?f64 {
++        var best: ?usize = null;
++        for (c.keys[0..c.n], 0..) |k, i| if (k <= streams and (best == null or k > c.keys[best.?])) {
++            best = i;
++        };
++        return if (best) |i| c.cuts[i] else null;
++    }
++};
++
++/// The drafter's knobs; every default is the drafter as it runs without them.
++pub const Knobs = struct {
++    onepass: bool = false, // ONEPASS: a pass's 4-bit linears in launches of q4.many_rows rows
++    down4: bool = false, // DOWN4: the MLP's down at 4 bits (production's quantize4)
++    mlpsplit: usize = 0, // MLPSPLIT=N: the MLP split over the ranks (world 3+) while at most N streams are in a pass
++    edge: f32 = 1.0, // EDGE: the selector's edge weight in a pick
++    noisy: bool = false, // BETA set: the chances are softmax((score + noise) / beta), production's noisy_confidence
++    noise: f32 = 0, // NOISE: the target's keyed Gumbel draw's weight in a sampled stream's pick (0: off)
++    keepwin: bool = false, // KEEPWIN: kept prompt states carry the drafter's window rows and its start
++    cuts: ?Cuts = null, // CUTS: the chain cut by streams in the pass (null: TF_GLM_DRAFT_CONFIDENCE, today's)
++
++    /// The knobs from the environment (every rank's is the same); `beta` the chances' temperature (1.0 unset).
++    pub fn read(beta: *f64) !Knobs {
++        var k: Knobs = .{ .onepass = cuda.ovn.on("DRAFT_ONEPASS"), .down4 = cuda.ovn.on("DRAFT_DOWN4"), .keepwin = cuda.ovn.on("DRAFT_KEEPWIN") };
++        k.mlpsplit = @intCast(try cuda.ovn.int("DRAFT_MLPSPLIT", 0));
++        if (try float("DRAFT_EDGE")) |v| k.edge = @floatCast(v);
++        if (try float("DRAFT_BETA")) |v| {
++            if (!(v > 0)) return error.BadOvnKnob;
++            beta.* = v;
++            k.noisy = true;
++        }
++        if (try float("DRAFT_NOISE")) |v| {
++            if (!(v >= 0)) return error.BadOvnKnob;
++            k.noise = @floatCast(v);
++        }
++        if (cuda.ovn.text("DRAFT_CUTS")) |t| k.cuts = try Cuts.parse(t);
++        return k;
++    }
++};
++
++/// `TF_GLM_OVN_<name>` as a finite float (unset or empty: null); anything else is refused.
++pub fn float(comptime name: []const u8) !?f64 {
++    const s = cuda.ovn.text(name) orelse return null;
++    const v = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " ")) catch return error.BadOvnKnob;
++    if (!std.math.isFinite(v)) return error.BadOvnKnob;
++    return v;
++}
++
++/// The target's keyed Gumbel draw for token `id` at position `pos` (sample.cu's race: -log(-log(u)), u below 1).
++pub fn gumbel(seed: u64, pos: i64, id: u32) f32 {
++    const u = lanes.gpu_full.raceUniform(seed, @intCast(pos), id);
++    return -@log(-@log(u));
++}
++
++test "a stream count takes the cut of the largest key at most it; no such key is the default" {
++    const c = try Cuts.parse("1:0.3, 2:0.3,4:0.7");
++    try std.testing.expectEqual(@as(?f64, 0.3), c.at(1));
++    try std.testing.expectEqual(@as(?f64, 0.3), c.at(3));
++    try std.testing.expectEqual(@as(?f64, 0.7), c.at(4));
++    try std.testing.expectEqual(@as(?f64, 0.7), c.at(16));
++    const late = try Cuts.parse("4:0.5");
++    try std.testing.expectEqual(@as(?f64, null), late.at(2));
++    for ([_][]const u8{ "", "1", "0:0.3", "1:x", "1:1.5", "1:-0.1", "1:0.3,1:0.4" }) |bad| try std.testing.expectError(error.BadOvnKnob, Cuts.parse(bad));
++}
++
++test "the host's keyed uniform is sample.cu's: (top 24 bits of the splitmix chain + 0.5f) / 2^24 in float32" {
++    // bits from sample.cu's mix/uniform arithmetic (u64 wrapping, float32 add rounding to nearest even)
++    const known = [_]struct { seed: u64, pos: u32, id: u32, bits: u32 }{
++        .{ .seed = 0, .pos = 0, .id = 0, .bits = 0x3e4ffa2e },
++        .{ .seed = 7, .pos = 1, .id = 5, .bits = 0x3f04b384 },
++        .{ .seed = 7, .pos = 66903620, .id = 1500, .bits = 0x3f800000 }, // the top value: 1.0, which the race clamps
++        .{ .seed = 123456789, .pos = 4097, .id = 154855, .bits = 0x3e48b596 },
++        .{ .seed = std.math.maxInt(u64), .pos = std.math.maxInt(u32), .id = std.math.maxInt(u32), .bits = 0x3ebc25b3 },
++        .{ .seed = 42, .pos = 1000, .id = 77, .bits = 0x3f6de160 },
++    };
++    for (known) |k| try std.testing.expectEqual(k.bits, @as(u32, @bitCast(lanes.gpu_rule.uniform24(k.seed, k.pos, k.id))));
++    try std.testing.expect(std.math.isFinite(gumbel(7, 66903620, 1500))); // the clamped draw stays finite
++    var u: f32 = @bitCast(@as(u32, 0x3f04b384)); // runtime, as gumbel computes it
++    _ = &u;
++    try std.testing.expectEqual(-@log(-@log(u)), gumbel(7, 1, 5));
++}
+diff --git a/zig/tests/cuda/glm_draft_onepass_tests.zig b/zig/tests/cuda/glm_draft_onepass_tests.zig
+new file mode 100644
+index 000000000..e3db57d9d
+--- /dev/null
++++ b/zig/tests/cuda/glm_draft_onepass_tests.zig
+@@ -0,0 +1,139 @@
++//! TF_GLM_OVN_DRAFT_ONEPASS and DOWN4's fp32 tile against q4.matmul's 16-row bf16 launches, byte for byte.
++const std = @import("std");
++const cuda = @import("cuda");
++const glm = @import("glm_cuda");
++const check = @import("check.zig");
++pub const Gpu = check.Gpu;
++
++const counts = [_]usize{ 1, 15, 16, 17, 40, 127, 128 };
++
++fn bf(v: f32) u16 {
++    const u: u32 = @bitCast(v);
++    return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
++}
++
++fn shape(gpu: check.Gpu, ks: *const glm.q4.Kernels, s: cuda.Stream, n: usize, k: usize) !void {
++    const a = gpu.gpa;
++    const rows = glm.q4.many_rows;
++    const sz = glm.q4.bytes(n, k);
++    var prng = std.Random.DefaultPrng.init(n * 31 + k);
++    const r = prng.random();
++    const words = try a.alloc(u32, sz[0] / 4);
++    defer a.free(words);
++    for (words) |*w| w.* = r.int(u32);
++    const scales = try a.alloc(u16, sz[1] / 2);
++    defer a.free(scales);
++    for (scales) |*v| v.* = bf(0.01 + r.float(f32) * 0.02);
++    const biases = try a.alloc(u16, sz[2] / 2);
++    defer a.free(biases);
++    for (biases) |*v| v.* = bf(r.floatNorm(f32) * 0.01);
++    const hx = try a.alloc(u16, rows * k);
++    defer a.free(hx);
++    for (hx) |*v| v.* = bf(r.floatNorm(f32) * 0.25);
++    const hxs = try a.alloc(f32, rows * (k / 64));
++    defer a.free(hxs);
++    for (hxs) |*v| v.* = r.floatNorm(f32);
++    var w = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(words));
++    defer w.free();
++    var sc = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(scales));
++    defer sc.free();
++    var bi = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(biases));
++    defer bi.free();
++    var x = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(hx));
++    defer x.free();
++    var xs = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(hxs));
++    defer xs.free();
++    var solo = try cuda.DeviceBuffer.alloc(gpu.d, rows * n * 2);
++    defer solo.free();
++    var many = try cuda.DeviceBuffer.alloc(gpu.d, rows * n * 2);
++    defer many.free();
++    var wide = try cuda.DeviceBuffer.alloc(gpu.d, rows * n * 4);
++    defer wide.free();
++    defer s.synchronize() catch @panic("glm-draft-onepass retains device work until completion");
++    const got_solo = try a.alloc(u8, solo.len);
++    defer a.free(got_solo);
++    const got_many = try a.alloc(u8, many.len);
++    defer a.free(got_many);
++    const got_wide = try a.alloc(f32, rows * n);
++    defer a.free(got_wide);
++    const rounded = try a.alloc(u16, rows * n);
++    defer a.free(rounded);
++    const f32_tile = try ks.loadF32();
++    const q: glm.q4.Q4 = .{ .w = w.ptr, .s = sc.ptr, .b = bi.ptr, .n = n, .k = k, .npad = glm.q4.npadOf(n) };
++    for (counts) |m| {
++        try solo.fill8(0xa5, s.handle);
++        try many.fill8(0x5a, s.handle);
++        var r0: usize = 0;
++        while (r0 < m) : (r0 += 16) {
++            try glm.q4.matmul(ks, s, x.ptr + r0 * k * 2, k, xs.ptr + r0 * (k / 64) * 4, q, solo.ptr + r0 * n * 2, @min(16, m - r0));
++        }
++        try glm.q4.matmulMany(ks, s, x.ptr, k, xs.ptr, q, many.ptr, m);
++        try s.synchronize();
++        try solo.download(0, got_solo);
++        try many.download(0, got_many);
++        try check.sameBytes("glm-draft-onepass: one launch against 16-row launches", got_many[0 .. m * n * 2], got_solo[0 .. m * n * 2]);
++        for (got_many[m * n * 2 ..]) |byte| try check.expect(byte == 0x5a, "glm-draft-onepass: a row past {d} written", .{m});
++        // DOWN4's split down: the fp32 tile's values round (RN) to the bf16 tile's bytes, the same arithmetic a row
++        try glm.q4.matmulF32(ks, f32_tile, s, x.ptr, k, xs.ptr, q, wide.ptr, m);
++        try s.synchronize();
++        try wide.download(0, std.mem.sliceAsBytes(got_wide));
++        for (rounded[0 .. m * n], got_wide[0 .. m * n]) |*r, v| r.* = bf(v);
++        try check.sameBytes("glm-draft-onepass: the fp32 tile rounded against the bf16 tile", std.mem.sliceAsBytes(rounded[0 .. m * n]), got_many[0 .. m * n * 2]);
++    }
++}
++
++/// MLPSPLIT's df_sumw: world 2 is df_sum2 byte for byte; world 3 is bf16(((g0 + g1) + g2)) in fp32, round to nearest.
++fn sums(gpu: check.Gpu, s: cuda.Stream) !void {
++    const a = gpu.gpa;
++    const D = 4096;
++    const R = 24;
++    var m = try cuda.Module.load(gpu.d, cuda.kernels.glm_dflash);
++    defer m.unload();
++    const sum2 = try m.function("df_sum2");
++    const sumw = try m.function("df_sumw");
++    var prng = std.Random.DefaultPrng.init(3);
++    const g = try a.alloc(f32, 3 * R * D);
++    defer a.free(g);
++    for (g) |*v| v.* = prng.random().floatNorm(f32) * 3;
++    var dg = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(g));
++    defer dg.free();
++    var out = try cuda.DeviceBuffer.alloc(gpu.d, 2 * R * D * 2);
++    defer out.free();
++    defer s.synchronize() catch @panic("glm-draft-onepass retains device work until completion");
++    const got = try a.alloc(u16, 2 * R * D);
++    defer a.free(got);
++    const want = try a.alloc(u16, R * D);
++    defer a.free(want);
++    for ([_]i32{ 2, 3 }) |world| {
++        for ([_]cuda.Function{ sum2, sumw }, 0..) |f, i| {
++            var args: cuda.Args = .{};
++            args.add(dg.ptr);
++            args.add(out.ptr + i * R * D * 2);
++            args.add(@as(i32, R));
++            if (i == 1) args.add(world);
++            try cuda.launch.launch(f, .{ .grid = .{ .x = R, .y = D / 1024 }, .block = .{ .x = 256 } }, s, &args);
++        }
++        try s.synchronize();
++        try out.download(0, std.mem.sliceAsBytes(got));
++        if (world == 2) {
++            try check.sameBytes("glm-draft-onepass: df_sumw at world 2 against df_sum2", std.mem.sliceAsBytes(got[R * D ..]), std.mem.sliceAsBytes(got[0 .. R * D]));
++        } else {
++            for (want, 0..) |*w, i| w.* = bf((g[i] + g[R * D + i]) + g[2 * R * D + i]);
++            try check.sameBytes("glm-draft-onepass: df_sumw at world 3 against ((g0 + g1) + g2)", std.mem.sliceAsBytes(got[R * D ..]), std.mem.sliceAsBytes(want));
++        }
++    }
++}
++
++pub fn run(gpu: check.Gpu) !void {
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var group = try cuda.Module.load(gpu.d, cuda.kernels.qmm_group);
++    defer group.unload();
++    var ops = try cuda.Module.load(gpu.d, cuda.kernels.affine4_pack);
++    defer ops.unload();
++    const ks = try glm.q4.Kernels.load(group, ops, gpu.ctx);
++    // a clustered shape (8 K slices), gate/up (one slice), the 4-bit down (4 slices) and MLPSPLIT's down slice (4)
++    for ([_][2]usize{ .{ 320, 4096 }, .{ 24576, 4096 }, .{ 4096, 12288 }, .{ 4096, 4096 } }) |dims| try shape(gpu, &ks, s, dims[0], dims[1]);
++    try sums(gpu, s);
++    check.pass("glm-draft-onepass: 1 to 128 rows in one launch and the fp32 tile, byte-identical to 16-row launches; df_sumw", .{});
++}
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+index ad75f4d0c..b8afdee78 100644
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -36,6 +36,7 @@ const glm_exl3_tests = @import("glm_exl3_tests.zig");
+ const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
+ const glm_vision_tests = @import("glm_vision_tests.zig");
+ const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
++const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
+ const glm_mm_bench = @import("glm_mm_bench.zig");
+ const glm_index_check = @import("glm_index_check.zig");
+ const carveout_tests = @import("carveout_tests.zig");
+@@ -272,6 +273,7 @@ const usage =
+     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
+     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
+     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
++    \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
+     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
+     \\  glm-index-check           GLM's indexer with glm_index against tf_glm_scores and tf_glm_select_rows, byte for byte (one GPU)
+     \\  glm-kv-host-slots         TF_GLM_KV_HOST's gather past its slots is refused as error.GlmKvHostSlots, then one within (one GPU)
+@@ -438,6 +440,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
+     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
++    if (std.mem.eql(u8, cmd, "glm-draft-onepass")) return glm_draft_onepass.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
