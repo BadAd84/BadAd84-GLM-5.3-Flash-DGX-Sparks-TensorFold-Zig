@@ -1,0 +1,91 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: carry the family's warm-turn wait to the lane host (0014 was inert)
+
+0014 ported TF_GLM_OVN_REPLY_PREFILL and gave GLM `warmQuietNow`, but the pin's
+serve path hardcoded the Nemotron constant:
+
+    h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
+
+so GLM's quiet wait never reached the lane host and the knob's background pass had no
+wait to honour. Measured before this patch: `test-cuda-host` named failure "a family's
+warm wait and warm_alone reach the lane host only with warm turns on".
+
+Two rows carry the values from where the family type is in scope (`openWith`) to where
+the host is built:
+
+- `Host` gains `warm_quiet`/`warm_alone`, filled in `openWith` from `snaps.warmQuiet(F)`
+  and `F.warm_alone` (the same expressions `info.warm_turns` already uses), and passed
+  through the serve callbacks.
+- `cuda_startup_phase.serve` reads `callbacks.warm_quiet`/`callbacks.warm_alone`
+  instead of the Nemotron constant, so every family that declares them is honoured.
+
+`api.Info` is left untouched: it sits at the 600-line limit, and fmt keeps one field per
+line, so the values travel on the host and the callbacks instead.
+
+The warm-serve test drives the same two Host fields `openWith` sets, so it covers the
+Info-to-lane-host leg that was missing rather than asserting its own inputs.
+
+Gates on pin+0001..0025: check-native-cuda-host green, whole-tree fmt green, lean
+base-vs-head 0 new, test-cuda-host drops that named failure from 11 to 10 with no new
+ones (status_routes' capability booleans still pass).
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index 36bc496db..f31845436 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -75,6 +75,8 @@ pub const Host = struct {
+     startup_phase: @import("cuda_startup_phase.zig").Hook = null,
+     recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
+     served: drafted.Served = .{ .backend = undefined, .facts = .{}, .stream_bytes = 0 }, // the family's backend, wrapped with --drafter's draft model when given
++    warm_quiet: u64 = 0, // the family warm-turn wait, read from F in openWith
++    warm_alone: bool = false, // and whether it waits out every other admitted prompt
+     fn followFamily(p: *anyopaque) anyerror!void {
+         const h: *Host = @ptrCast(@alignCast(p));
+         if (h.gpu) |g| try g.ctx.makeCurrent();
+@@ -111,6 +113,8 @@ pub const Host = struct {
+             .initThread = initThread,
+             .loneRun = loneRun,
+             .learner = learner,
++            .warm_quiet = h.warm_quiet,
++            .warm_alone = h.warm_alone,
+         });
+     }
+     /// The family's learner, each call made with the context current on the lane thread.
+@@ -436,6 +440,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     h.kv = kv_pages.watchOf(F, loaded, paged);
+     h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
+     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
++    h.warm_quiet = if (h.store != null) (snaps.warmQuiet(F) orelse 0) else 0;
++    h.warm_alone = h.store != null and @hasDecl(F, "warm_alone") and F.warm_alone;
+     try h.serve(io, served.facts, loaded.rows, .{
+         .benchmark_ranks = bench.ranks,
+         .benchmark_group = bench.group,
+diff --git a/zig/src/native/cuda_startup_phase.zig b/zig/src/native/cuda_startup_phase.zig
+index abb2d1e9b..36d140b2c 100644
+--- a/zig/src/native/cuda_startup_phase.zig
++++ b/zig/src/native/cuda_startup_phase.zig
+@@ -34,7 +34,8 @@ pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.In
+     h.host.explain = explain;
+     h.host.health = @import("cuda_readiness.zig").source(h);
+     h.host.cache = h.store;
+-    h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
++    h.host.warm_quiet = if (info.warm_turns) callbacks.warm_quiet else 0;
++    h.host.warm_alone = info.warm_turns and callbacks.warm_alone;
+     if (h.lone != null) h.host.lone = .{ .ctx = h, .run = callbacks.loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
+     if (h.learn != null) h.host.learner = callbacks.learner(h);
+     kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
+diff --git a/zig/src/native/cuda_warm_serve_test.zig b/zig/src/native/cuda_warm_serve_test.zig
+index f4aa14a59..e96e57bc0 100644
+--- a/zig/src/native/cuda_warm_serve_test.zig
++++ b/zig/src/native/cuda_warm_serve_test.zig
+@@ -14,7 +14,10 @@ fn served(comptime Host: type, comptime serve: anytype, comptime F: type, warm:
+     const h = try gpa.create(Host);
+     defer gpa.destroy(h);
+     h.* = .{ .gpa = gpa, .gpu = null, .family = &unused, .release = Family.release, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
+-    _ = F; // comptime only: Host.serve is a method on the family's Host type
++    const quiet: u64 = if (@hasDecl(F, "warm_quiet")) F.warm_quiet else if (@hasDecl(F, "warmQuietNow")) (F.warmQuietNow() orelse 0) else 0;
++    const alone = @hasDecl(F, "warm_alone") and F.warm_alone;
++    h.warm_quiet = quiet;
++    h.warm_alone = alone;
+     try serve(h, std.testing.io, .{ .exact_width = 8 }, 8, .{ .lanes = 2, .warm_turns = warm }, null);
+     defer {
+         h.host.stop();
