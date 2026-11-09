@@ -1,0 +1,78 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm tests: the any-row adapter, the base's wide-tile floor, the knob path
+
+Three pin tests encoded behaviour this port replaces; each is adapted to the base's own
+semantics rather than the code bent to them.
+
+1. `glm_snapshot_host`: `TF_KV_SHARE's adapter reads GLM's decls ... the 2,048 grid`
+asserted `r.planned and r.grid == 2048`, the grid design 0007 removed. With any-row
+states GLM declares no `snap_grid`, so `cacheRules` plans nothing: the assertion is now
+`!r.planned and r.grid == 0`.
+
+2. `cuda_onepass`: `takesExact` takes the onepass shapes only where the DEFAULT launches
+32-head blocks, and on this base that tile widens at 64 rows (`latent.headBlock(rows)`,
+the same function the sparse launch uses), not at the era's head-dependent 5-row floor.
+The two expectations that encoded the floor now read false at 5 and 4 rows.
+
+3. `cuda_zero_budget_test` and `glm/backend` call `lanes.shared_draft_check.check`,
+which asserts `facts.allocate_shared_drafts`. Our deliberate default flip (PARITY,
+7b41f0d26: the depth rule is the default) leaves that false for GLM unless
+TF_GLM_OVN_SHARED_DRAFTS is set, so both call sites enable the knob: they exist to
+exercise the allocation path, and with it on the check's assumption holds.
+
+Gates on pin+0001..0028: check-native-cuda-host green, whole-tree fmt green, lean
+base-vs-head 0 new, test-cuda-host 6 to 3 named failures with no new ones.
+diff --git a/zig/glm_snapshot_host.zig b/zig/glm_snapshot_host.zig
+index b04ce33aa..29fbccf50 100644
+--- a/zig/glm_snapshot_host.zig
++++ b/zig/glm_snapshot_host.zig
+@@ -594,7 +594,7 @@ test "GLM snapshots: with the engine's own sequence on pages too, a prefix's siz
+     }
+ }
+ 
+-test "GLM snapshots: TF_KV_SHARE's adapter reads GLM's decls as the store it replaced: the 2,048 grid, a lookahead of 1" {
++test "GLM snapshots: the adapter reads GLM's decls: no grid (any row), a lookahead of 1" {
+     const r = adapter.cacheRules(glm.native);
+-    try std.testing.expect(r.planned and r.grid == 2048 and r.lookahead == 1 and r.min_prompt == 0 and r.warm == .off and !r.fork);
++    try std.testing.expect(!r.planned and r.grid == 0 and r.lookahead == 1 and r.min_prompt == 0 and r.warm == .off and !r.fork);
+ }
+diff --git a/zig/src/families/glm/backend.zig b/zig/src/families/glm/backend.zig
+index 036562133..f8b50caf5 100644
+--- a/zig/src/families/glm/backend.zig
++++ b/zig/src/families/glm/backend.zig
+@@ -452,6 +452,7 @@ test "zero grant: GLM Metal MTP resumes after a long priced skip" {
+     var b: Backend = undefined;
+     b.sl = &sl;
+     b.costs = null;
++    cuda.ovn.fake("SHARED_DRAFTS", "1"); // the depth rule is GLM's default; this checks the allocation path
+     try lanes.shared_draft_check.check(b.facts(), false);
+ }
+ 
+diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
+index 40418514e..36a7d66d8 100644
+--- a/zig/src/families/glm/cuda_onepass.zig
++++ b/zig/src/families/glm/cuda_onepass.zig
+@@ -153,9 +153,9 @@ test "onepass exact: the knob gates the path and the 32-head-block shapes take i
+     try std.testing.expect(!wantedExact());
+     cuda.ovn.fake("ONEPASS_EXACT", "1");
+     try std.testing.expect(wantedExact());
+-    // the exact path takes the onepass shapes only where the default uses 32-head blocks (rows >= 5 at 17-24 heads)
++    // the exact path takes the onepass shapes only where the default uses 32-head blocks (64 rows on this base))
+     try std.testing.expect(takesExact(true, 0x1000, 22, 512, 64)); // a prompt chunk
+-    try std.testing.expect(takesExact(true, 0x1000, 21, 512, 5)); // the five-row wide-block floor
++    try std.testing.expect(!takesExact(true, 0x1000, 21, 512, 5)); // this base's wide tile starts at 64 rows
+     try std.testing.expect(!takesExact(true, 0x1000, 22, 512, 4)); // four rows: the default uses 16-head blocks
+     try std.testing.expect(!takesExact(true, 0x1000, 22, 512, 1)); // one row (a chunk's last row) too
+     try std.testing.expect(!takesExact(true, 0, 22, 512, 64)); // a BF16 cache keeps the chunk programs
+diff --git a/zig/src/families/glm/cuda_zero_budget_test.zig b/zig/src/families/glm/cuda_zero_budget_test.zig
+index 9d19c91e9..d102469ca 100644
+--- a/zig/src/families/glm/cuda_zero_budget_test.zig
++++ b/zig/src/families/glm/cuda_zero_budget_test.zig
+@@ -14,6 +14,7 @@ test "zero grant: GLM CUDA MTP and DFlash2 preserve tokens through a long skip"
+         b.x.e = &e;
+         b.alone = false;
+         b.mtp_confidence = null;
++        @import("cuda").ovn.fake("SHARED_DRAFTS", "1"); // the depth rule is GLM's default; this checks the allocation path
+         try lanes.shared_draft_check.check(b.facts(), false);
+     }
+ }
