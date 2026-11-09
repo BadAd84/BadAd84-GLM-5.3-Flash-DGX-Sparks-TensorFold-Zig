@@ -13,6 +13,10 @@ Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carrie
   behaviour-identical until A/B'd at every stream count, with its measurement receipt in the
   header. A proven patch graduates to the `BadAd84/TensorFold` fork as a single-commit branch
   and goes upstream by PR; after it merges, the patch here is deleted and the pin advances.
+- `scripts/build-image.sh <tag> <src.tar>` builds the serve image: a PyTorch CUDA base plus
+  Zig, compiling the applied tree for `sm_121a` into `/opt/tensorfold` (binaries and fatbins
+  only; weights and launchers come from the serve config). Pack the tree first:
+  `tar -C <work-dir>/tree --exclude .git -cf <work-dir>/src.tar .`
 - `PORT-LEDGER.md` records what is landed, what is parked and why, and the gates each patch
   was proved with.
 
