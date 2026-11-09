@@ -95,20 +95,11 @@ FINAL STATE (measured on a fresh application of all 31 patches onto a clean
 9c9bf542 checkout): every patch applies in order, check-native-cuda-host green,
 whole-tree fmt green, lean base-vs-head 0 new, and `test-cuda-host` exits 0 with ZERO
 named failures - the same result the pin gives. The last failure was the head-block
-rule: the era's `headBlock(rows, heads)` widens at 2048+ rows or from 5 rows at 17-24
-heads, and the port had flattened it to a 64-row threshold, so a 22-head pass at 63 rows
+rule: the era's `headBlock(rows, heads)` widens from `prompt_rows` rows (64 in this
+tree) or from 5 rows at 17-24 heads, and the port had flattened it to a 64-row threshold, so a 22-head pass at 63 rows
 took the 16-head tile in the sparse pass and (after 0031 converted them) both dense
 sites. 0031 restores the rule as `headBlockOf` and uses it at every read site, and adds
 the `chunkOf` stub the pin's prefill host test needs after 0022 moved the stepped pass.
-
-Patch 0024 landed the first of those as one corrective patch with the owning patch named
-per hunk. Still open after it (11 named failures): `copy_drafts_cuda_test` (2),
-`cuda_lanes_test`'s knob assertions (3: DEPTH_FULL/SHARED_COPY, SHARED_DRAFTS,
-WIN_FREE), `cuda_kv8_test`, `cuda_mla_ovn_test`, `cuda_onepass`, `cuda_zero_budget`,
-`draft_sources_cuda_test`, `glm_snapshot_host`'s TF_KV_SHARE adapter test, and the
-warm-serve plumbing test (0014's `warmQuiet` never reaches the host: the pin's
-`cuda_startup_phase.serve` hardcodes the Nemotron constant, so TF_GLM_OVN_REPLY_PREFILL's
-wait is inert in production until that wiring is carried through).
 
 ## What this means
 
