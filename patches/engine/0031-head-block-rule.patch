@@ -1,0 +1,121 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm latent: the head block takes the head count back (test-cuda-host green)
+
+The era rule is `headBlock(rows, heads)`: wide at 2048+ rows, or from 5 rows when heads
+is 17-24 (TP=3's 22/21/21). The port had flattened it to `headBlock(rows)` with a 64-row
+threshold, so a 22-head pass at rows 5..63 took the 16-head tile everywhere that rule is
+read. `cuda_mla_ovn_test` caught the visible half: its sparse pass at 63 rows emitted
+chunks_32_fp8 where the test expects chunks_32_fp8_skip (measured ids 51,46,50,46
+against 51,46,51,46).
+
+`latent.headBlockOf(rows, heads)` restores the rule and every read site uses it: the
+sparse dispatch, the two dense/mixed sites in `cuda_dsa_block.zig` (which would
+otherwise run 16-head chunks on the dense half and 32-head on the sparse half, writing
+the same partials with different block counts), and `onepass.takesExact`. With the rule
+uniform, the onepass test's five-row floor is correct again and its two adapted
+expectations return to the era values, and `headBlockOf` gains two unit assertions
+(8 rows/22 heads wide, 2 rows/22 heads tile).
+
+Separately, 0022 moved the stepped pass into `cuda_lanes_step.zig`, which calls
+`Leader.chunkOf`; the pin's `prefill_widths_glm_host.zig` stub declared `chunk` only and
+stopped compiling. The stub gains `chunkOf` delegating to `chunk`, cap ignored.
+
+Gates on pin+0001..0031: check-native-cuda-host green, whole-tree fmt green, lean
+base-vs-head 0 new, and `test-cuda-host` exits 0 with zero named failures - the same
+result a clean 9c9bf542 checkout gives, from 27 named failures at 0001..0023.
+diff --git a/zig/prefill_widths_glm_host.zig b/zig/prefill_widths_glm_host.zig
+index ae6e14668..068f55cbc 100644
+--- a/zig/prefill_widths_glm_host.zig
++++ b/zig/prefill_widths_glm_host.zig
+@@ -18,6 +18,9 @@ const Leader = struct {
+         if (last) try x.e.stream.synchronize(); // Engine.prefillChunk draws the final row before returning.
+         return .{ .rows = rows, .first = if (last) 1 else null };
+     }
++    pub fn chunkOf(x: @This(), ids: []const u32, at: usize, alone: bool, from: anytype, cancel: anytype, marks: anytype, _: usize) !glm.follow.Chunk {
++        return x.chunk(ids, at, alone, from, cancel, marks); // the cap is a cut boundary the stub does not model
++    }
+     pub fn prefillMany(x: @This(), _: []const glm.engine.Prompt, tokens: []u32) !void {
+         if (x.fail) return error.PlantedForward;
+         try x.e.stream.synchronize(); // Engine.prefillMany draws each stream before returning.
+diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
+index c2fe61012..0b277d966 100644
+--- a/zig/src/families/glm/cuda_dsa_block.zig
++++ b/zig/src/families/glm/cuda_dsa_block.zig
+@@ -215,7 +215,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+     if (host_pos < l.dense_limit) { // the same keys today's whole-chunk call read for this row
+         var stamp = prof.span(k.prof, stream, .mla);
+-        try latent.attentionFormat(k.set, stream, v.qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, v.partials, v.ol, v.dummy, 1, l.heads, l.lw, nch, scale, latent.headBlock(rows));
++        try latent.attentionFormat(k.set, stream, v.qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, v.partials, v.ol, v.dummy, 1, l.heads, l.lw, nch, scale, latent.headBlockOf(rows, l.heads));
+         stamp.end();
+     }
+     if (sparseRows(l, host_pos, rows)) {
+@@ -233,7 +233,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+ 
+ /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
+ fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
+-    const hb = latent.headBlock(rows);
++    const hb = latent.headBlockOf(rows, l.heads);
+     var r0: usize = 0;
+     while (r0 < rows) : (r0 += part_rows) {
+         const n = @min(part_rows, rows - r0);
+diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
+index 56057b3c4..2874538af 100644
+--- a/zig/src/families/glm/cuda_latent.zig
++++ b/zig/src/families/glm/cuda_latent.zig
+@@ -17,6 +17,12 @@ pub fn headBlock(rows: usize) usize {
+     return if (rows >= 64) heads_tile_wide else heads_tile;
+ }
+ 
++/// The head block a launch takes with its head count in view: TP=3's 17-24 heads widen from 5 rows.
++pub fn headBlockOf(rows: usize, heads: usize) usize {
++    if (rows >= prompt_rows) return heads_tile_wide;
++    return if (rows >= 5 and heads >= 17 and heads <= 24) heads_tile_wide else heads_tile;
++}
++
+ /// latent.chunks_for: 512-key chunks to cover `length` keys.
+ pub fn chunksFor(length: usize) usize {
+     return (length + chunk - 1) / chunk;
+@@ -146,7 +152,7 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
+ 
+ pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
+     const nch = chunksFor(w);
+-    const hb = headBlock(rows); // the pin's headBlock takes rows alone
++    const hb = headBlockOf(rows, heads); // 17-24 heads widen from 5 rows
+     if (fuses(set.mla, rows, hb)) return fused(set, stream, qa, cache, scales, t, 0, tokens, counts, out, rows, heads, lw, nch, w, scale, true);
+     try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, hb, true);
+     try merge(set, stream, p, out, counts, rows, heads, lw, nch, true);
+@@ -161,6 +167,8 @@ fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64,
+ 
+ test "latent.py's tiling rules" {
+     try std.testing.expectEqual(@as(usize, 16), headBlock(8));
++    try std.testing.expectEqual(@as(usize, 32), headBlockOf(8, 22)); // 17-24 heads widen from 5 rows
++    try std.testing.expectEqual(@as(usize, 16), headBlockOf(2, 22));
+     try std.testing.expectEqual(@as(usize, 32), headBlock(64));
+     try std.testing.expectEqual(@as(usize, 3), chunksFor(1025));
+     try std.testing.expectEqual(@as(usize, 1), chunksFor(512));
+diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
+index 36a7d66d8..dc3a20151 100644
+--- a/zig/src/families/glm/cuda_onepass.zig
++++ b/zig/src/families/glm/cuda_onepass.zig
+@@ -103,7 +103,7 @@ pub fn takes(prompt: bool, scales: u64, heads: usize, lw: usize) bool {
+ 
+ /// `takes`'s shapes, only where the default uses 32-head blocks (headBlock == heads_tile_wide), else chunk programs.
+ pub fn takesExact(prompt: bool, scales: u64, heads: usize, lw: usize, rows: usize) bool {
+-    return takes(prompt, scales, heads, lw) and latent.headBlock(rows) == latent.heads_tile_wide;
++    return takes(prompt, scales, heads, lw) and latent.headBlockOf(rows, heads) == latent.heads_tile_wide;
+ }
+ 
+ /// latent.sparse_onepass: rows with counts > 0 over their `w`-wide token lists (as `t` maps them) into out bf16.
+@@ -153,9 +153,9 @@ test "onepass exact: the knob gates the path and the 32-head-block shapes take i
+     try std.testing.expect(!wantedExact());
+     cuda.ovn.fake("ONEPASS_EXACT", "1");
+     try std.testing.expect(wantedExact());
+-    // the exact path takes the onepass shapes only where the default uses 32-head blocks (64 rows on this base))
++    // the exact path takes the onepass shapes only where the default uses 32-head blocks (5 rows at 17-24 heads))
+     try std.testing.expect(takesExact(true, 0x1000, 22, 512, 64)); // a prompt chunk
+-    try std.testing.expect(!takesExact(true, 0x1000, 21, 512, 5)); // this base's wide tile starts at 64 rows
++    try std.testing.expect(takesExact(true, 0x1000, 21, 512, 5)); // the five-row wide-block floor
+     try std.testing.expect(!takesExact(true, 0x1000, 22, 512, 4)); // four rows: the default uses 16-head blocks
+     try std.testing.expect(!takesExact(true, 0x1000, 22, 512, 1)); // one row (a chunk's last row) too
+     try std.testing.expect(!takesExact(true, 0, 22, 512, 64)); // a BF16 cache keeps the chunk programs
