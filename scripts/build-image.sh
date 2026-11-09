@@ -2,6 +2,11 @@
 # build-image.sh TAG SRC.tar   (on a dev Spark)
 # Recipe: the tree is what scripts/apply.sh produced; pack it with
 #   tar -C <work-dir>/tree --exclude .git -cf <work-dir>/src.tar .
+# Migrated from the ai-engine engine build script (same Dockerfile, same compile flags); the
+# image namespace is this recipe's and the input tree is apply.sh's output.
+# It takes the GPU lock on the dev Sparks as the original does, because a build shares their
+# memory bandwidth with running benchmarks.
+#
 # Build glm53-zig:TAG from this recipe's source tree (made by apply.sh, packed with `tar -C ARM -cf SRC.tar .`):
 # the PyTorch image's CUDA toolchain + Zig, `zig build fatbins install native` into /opt/tensorfold, the engine
 # binaries and fatbins only (model kits, weights and launchers come from the model's serve config).
