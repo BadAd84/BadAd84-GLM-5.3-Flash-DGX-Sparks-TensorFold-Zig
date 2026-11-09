@@ -1,0 +1,2 @@
+# patch files are applied by git apply, which needs LF to match context
+*.patch text eol=lf
