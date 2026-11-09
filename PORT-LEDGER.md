@@ -1,6 +1,6 @@
 # PORT-LEDGER.md - engine patches ported from ai-engine into this recipe
 
-Current state only. The applied stack is `patches/engine/0001` .. `0022`, applied in
+Current state only. The applied stack is `patches/engine/0001` .. `0023`, applied in
 order onto the pin in `scripts/config.sh` (9c9bf542cc87ec21f44cee720fc4f1c056f8c905).
 Every landed patch was proven by a fresh application in order onto a clean pin
 checkout, with these gates: `zig build check-native-cuda-host`, whole-tree
@@ -33,6 +33,7 @@ patch touching `.cu`.
 | 0020 | TF_GLM_OVN_MM_WIDE / _SWIGLU_REDUCE / _MM_CLUSTER / _MM_DECTILE (bf16 matmul) | cbf94fde5 | compile, fmt, lean, test-lane-api-host, fatbins |
 | 0021 | TF_GLM_OVN_MLA_FUSEMERGE / _ABSORB_VEC / _KVB8 (MLA attention) | 436970264 | compile, fmt, lean, test-lane-api-host, fatbins |
 | 0022 | TF_GLM_OVN_GLUE_FUSE / _GLUE_ROW / _PDL_EARLY (glue fuse) | 3423859e7 | compile, fmt, lean, test-lane-api-host, fatbins |
+| 0023 | the shared-round era: prof, draw1, cost_time, fills, segments, disk tier | 32060d706 | compile, fmt, lean, test-lane-api-host, fatbins |
 
 ## Parked - blocked on a structural port, not a knob
 
@@ -49,7 +50,6 @@ than grafting a knob.
 | c920d6e5a ROCE_RAILS / _LINK1 / _ROCE_ILP / _ROCE_CPU | needs cuda/roce_rails.zig and rewrites roce.zig's rail setup. |
 | e95d31f81 ITEMS (16-pair item plan) | needs kernels/cuda/exl3_ovn.cuh and rewrites exl3_experts' dispatch. |
 
-| 32060d706 shared-round knobs (prof, draw1, cost_time, prompt_pieces, lanes_fill, lanes_shared, kda_seg, commit_seg, wait) | 15 conflicts across 7 files, all divergent-era semantics at one site: pin's `glm_top1` template vs source's `glm_top1_row`; pin's lanes `mtp_confidence` vs source's `together`/`multi`; pin's L2PF prefetch path vs source's seg_kda path. This commit IS the era refactor the later knobs ride on. |
 | PRX / fill-slice family, SEG_KDA/SEG_DSA, KDA_PIECES | sit on 32060d706's module layout: prompt_pieces, lanes_fill, lanes_shared, slices, and the Buffers.seg tables (cuda_kda_seg, cuda_dsa_seg, cuda_commit_seg), none of which the pin has. Porting that era is a project with its own A/B, not a patch. |
 
 ## What this means
