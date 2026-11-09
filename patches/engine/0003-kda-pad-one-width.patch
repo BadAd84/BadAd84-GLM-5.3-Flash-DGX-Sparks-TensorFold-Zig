@@ -1,3 +1,23 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: TF_GLM_KDA_PAD pads the KDA input stack at one width
+
+ai-engine 917575463..e796315f3, squashed. TP=3 splits KDA heads 22/21/21, so the fused input
+row width is 8,726 / 8,341: not a multiple of 8, which makes glm_mm skip the stack and cost about
+9 ms a call. With the knob on, the stack is copied to its own eight-aligned buffer (true rows,
+then zeros) so it packs; the pad columns come from zero weights and are ignored, and the field
+offsets inside a row do not move. `tileLinears` calls it at load, so the pad applies to a stack
+only when the knob is set.
+
+Receipt (ai-engine, measured on the dev triangle): padded at 4 dense bits, decode aggregate
+tok/s 46.12/46.14 to 58.88/58.29 at one stream, 63.01/62.85 to 72.80/72.66 at two, 70.73/69.77
+to 79.24/79.11 at four, 79.07/79.62 to 84.92/85.55 at six, 85.97 to 89.75/89.72 at eight: no
+regression at any level. Numerics: the pad columns are exactly zero (0 of 68 dumped), but at
+DENSE_BITS=4 the stack is quantized where it was not before, so replies differ; the accuracy
+gate that cleared it is the retrieval fixture, not bit-identity. Default off.
+
+Gate: applies on the pin; check-native-cuda-host green; whole-tree fmt green; lean base-vs-head
+0 new; the pad's own check rides in the patch.
+
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
 index 72041dca4..f09db0018 100644
 --- a/zig/src/families/glm/cuda.zig

@@ -1,3 +1,19 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+
+ai-engine 39304587f with 0f4b0ed85's window parse. Adds the knob module and the surfaces it
+drives: onepass, down4, mlpsplit, edge, noisy, noise, keepwin and cuts, the KEEPWIN window and
+its restart/ring bookkeeping, the q4 fp32 matmul family the draft head needs, and the drafter
+tests. Drafting only: no reply path reads these.
+
+Receipt (ai-engine): the drafter is worth 61.08 against 58.41 tok/s at one stream on the padded
+build, and the draft-chain confidence sweep at four streams measured 0.5 to 90.68/90.63,
+0.7 (default) to 94.14/94.13, 0.85 to 91.54/91.13, so the threshold stays where it is. Every
+knob defaults off; the drafter itself is a serve flag, not a knob.
+
+Gate: applies on the pin stack; check-native-cuda-host green; whole-tree fmt green; lean
+base-vs-head 0 new; fatbins green.
+
 diff --git a/zig/kernels/cuda/glm_dflash.cu b/zig/kernels/cuda/glm_dflash.cu
 index 468dbcdc3..36f448ac9 100644
 --- a/zig/kernels/cuda/glm_dflash.cu

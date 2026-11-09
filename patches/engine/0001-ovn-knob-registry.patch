@@ -1,3 +1,13 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] core: the TF_GLM_OVN knob registry
+
+ai-engine c60ce5fd1. One registry for the speed-hunt knobs: each is read from the environment
+once per process, cached in its own type so every knob has its own statics, and defaults off.
+Nothing else reads a knob directly, so a patch that adds a knob adds one entry here.
+
+Gate: applies on the pin; check-native-cuda-host green; whole-tree fmt green; lean
+base-vs-head 0 new. This patch is infrastructure and has no speed claim of its own.
+
 diff --git a/zig/src/cuda/ovn.zig b/zig/src/cuda/ovn.zig
 new file mode 100644
 index 000000000..7b2896777

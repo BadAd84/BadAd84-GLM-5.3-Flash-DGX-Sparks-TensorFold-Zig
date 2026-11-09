@@ -1,3 +1,13 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] core: every OVN knob gets its own cache statics
+
+ai-engine 32989e34f. The registry's cache key captures the knob name, so each knob gets its own
+type and its own statics; a single type for all names would answer the first knob it read for
+every later one. Same reads, same values, no behaviour change.
+
+Gate: applies on the pin stack; check-native-cuda-host green; whole-tree fmt green; lean
+base-vs-head 0 new. No speed claim of its own.
+
 diff --git a/zig/src/cuda/ovn.zig b/zig/src/cuda/ovn.zig
 index 7b2896777..762497f51 100644
 --- a/zig/src/cuda/ovn.zig
