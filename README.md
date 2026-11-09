@@ -17,6 +17,11 @@ Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carrie
   Zig, compiling the applied tree for `sm_121a` into `/opt/tensorfold` (binaries and fatbins
   only; weights and launchers come from the serve config). Pack the tree first:
   `tar -C <work-dir>/tree --exclude .git -cf <work-dir>/src.tar .`
+- `scripts/serve.sh <rank> <parallel> [ctx]` boots one rank of the serve from that image. It
+  is rank-local by design: rank, world size and the NCCL bootstrap address are parameters, so
+  fleet orchestration stays outside this repo. It adds the recipe's knob set (the ones the
+  patches implement) unless `XENV` already names a knob, so an A/B arm can turn any of them
+  off without editing the script.
 - `PORT-LEDGER.md` records what is landed, what is parked and why, and the gates each patch
   was proved with.
 
