@@ -78,7 +78,32 @@ gate, so these are regressions of the ports, not pre-existing upstream red. The 
   `shared_copy_width`, which the port deliberately left out (unported levers).
 - 0022: `prefillStep` moved to `cuda_lanes_step.zig` and its `Lanes` shim was missing.
 
-Patch 0024 landed those repairs as one corrective patch with the owning patch named
+Thirty patches are landed (0001..0030). Patches 0024..0030 are corrections found by
+running the real gate, each with the owning patch named in its header: the pad call and
+the staged download (0003), knob-first windowBytes and the test engines' drafter (0004),
+the snap_grid adapters and the any-row snapshot assertion (0007), the warm-turn wait
+carried to the lane host (0014), the three dead knob reads (0012/0015/0018 via 0026),
+DEAD findings corrected in 0027 (SHARED_DRAFTS gating), the base's wide-tile floor and
+the allocation-path checks (0028), two duplicated sparse-attention launches (0029), and
+the dropped draft_confidence (0030).
+
+MEASURED GATE RESULT: pin 9c9bf542 passes test-cuda-host; the stack went 27 named
+failures (0001..0023) -> 15 (0024) -> 11 (0025) -> 10 (0026) -> 8 (0027) -> 6 -> 5 -> 3
+(0028) -> 2 (0029) -> 1 (0030).
+
+THE ONE REMAINING FAILURE, characterised rather than guessed:
+`cuda_mla_ovn_test: TF_GLM_OVN_MLA_FUSEMERGE: 32-head launches from fuse_rows rows
+fused, the rest bounded`. Its third assertion calls the test helper's two passes
+(attentionFormat then sparseAttentionFormat) at rows=63 with fuse_rows=64, and expects
+chunks_32_fp8_skip + merge twice; the second pass emits chunks_32_fp8 + merge instead
+(measured ids 51,46,50,46 against 51,46,51,46). The dense pass takes its head block from
+the caller; the sparse pass derives it from `headBlock(rows)`, and on this base that is
+16 for 63 rows, while the era's derivation gave 32 for 22 heads. The era's rule is not
+recoverable from the diff I have (a "heads < 32" rule also contradicts the test's
+subsequent 16-head assertion), so this needs the source's hb derivation read from
+`32060d706`/the MLA commit before it can be fixed without guessing.
+
+Patch 0024 landed the first of those as one corrective patch with the owning patch named
 per hunk. Still open after it (11 named failures): `copy_drafts_cuda_test` (2),
 `cuda_lanes_test`'s knob assertions (3: DEPTH_FULL/SHARED_COPY, SHARED_DRAFTS,
 WIN_FREE), `cuda_kv8_test`, `cuda_mla_ovn_test`, `cuda_onepass`, `cuda_zero_budget`,
