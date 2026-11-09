@@ -1,0 +1,1164 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+
+ai-engine 3423859e7 grafted onto the pin stack, after 0021's MLA knobs. GLUE_FUSE runs
+each hc_post with the next site's hc_pre in one kernel (cuda_forward_glue.zig), GLUE_ROW
+glues a prompt piece of N rows or more in one kernel, and PDL_EARLY launches the glue's
+variants programmatic-dependent. The glue kernels gain the fused/_pdl forms
+(glm_glue_bmm.cuh, glm_glue_hc.cuh, glm_glue_moe.cuh, glm_glue_norm.cuh, glm_glue_rows.cuh)
+and cuda_glue.Kernels carries them. Default off: each site's own kernel, as today.
+
+Pin adaptations: the pin's `post` takes (rank, rows) so the fused path's x is the rank's
+own b.x and the three call sites pass (r, R); the pin's L2PF accessor keeps its name
+(prefetch) so the shared path calls it unchanged; the pin's Set keeps its own fields and
+gains the fused/_pdl ones; the Mla struct is closed properly with read/wanted restored.
+Comment lines single-lined.
+
+Gates on pin+0001..0022: check-native-cuda-host green, test-lane-api-host green,
+whole-tree fmt green, lean base-vs-head 0 new, fatbins green.
+diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.cuh
+index 0ea950a1b..ea029dcf8 100644
+--- a/zig/kernels/cuda/glm_glue_bmm.cuh
++++ b/zig/kernels/cuda/glm_glue_bmm.cuh
+@@ -2,6 +2,7 @@
+ #pragma once
+ 
+ #include "glm_glue_router.cuh"
++#include "common/qmm_frag.cuh"
+ 
+ namespace glm_bmm {
+ 
+@@ -97,16 +98,25 @@ __device__ void bmm(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, f
+ }
+ 
+ __device__ __forceinline__ void cp16(void* dst, const void* src, bool ok) {
+-  tf_common::cp16z(dst, src, ok);
++  const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(dst));
++  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
+ }
+ __device__ __forceinline__ void cp16s(unsigned d, const void* src, bool ok) {
+-  tf_common::cp16z(d, src, ok);
++  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
+ }
+-__device__ __forceinline__ void commit() { tf_common::cp_commit(); }
++__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n" ::); }
+ template <int N>
+-__device__ __forceinline__ void wait() { tf_common::cp_wait<N>(); }
+-__device__ __forceinline__ void ldm4s(uint32_t* r, unsigned a) { qmm_frag::ldmatrix4(r, a); }
+-__device__ __forceinline__ void ldm2s(uint32_t* r, unsigned a) { qmm_frag::ldmatrix2(r, a); }
++__device__ __forceinline__ void wait() {
++  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
++}
++__device__ __forceinline__ void ldm4s(uint32_t* r, unsigned a) {
++  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
++               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
++               : "r"(a));
++}
++__device__ __forceinline__ void ldm2s(uint32_t* r, unsigned a) {
++  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
++}
+ __device__ __forceinline__ void ldm4(uint32_t* r, const void* p) {
+   ldm4s(r, static_cast<unsigned>(__cvta_generic_to_shared(p)));
+ }
+@@ -295,10 +305,12 @@ extern "C" __global__ void __launch_bounds__(256, 2)
+   glm_bmm::bmm_tiles<128, 128, 32, 3, 2, 4, false>(x, w, out, m, x_stride, n, k, sk, f32);
+ }
+ 
++namespace glm_bmm {
++
+ // glue._router_part on aligned rows: part[s][m][e] = x[m] . w[e] over K slice s, tf_glm_router_part's chain, tiled.
+-extern "C" __global__ void __launch_bounds__(128)
+-    tf_glm_router_tile(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
+-                       int64_t d, int64_t ne, int ks) {
++template <bool PDL>
++__device__ __forceinline__ void router_tile(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows,
++                                            int64_t x_stride, int64_t d, int64_t ne, int ks) {
+   constexpr int BM = 64, BE = 32, KS = 64, LD = KS + 8, A = BM * LD, B = BE * LD, STAGE = (A + B) * 2, RPI = 16;
+   __shared__ __align__(16) __nv_bfloat16 sm[2][A + B];
+   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, q = lane & 3;
+@@ -320,20 +332,39 @@ extern "C" __global__ void __launch_bounds__(128)
+     gb[i] = w + (e < ne ? e : 0) * d + s * span + lc;
+   }
+   const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(sm)), soff = (lr * LD + lc) * 2;
+-  auto load = [&](int st, int kt) {
++  auto loadA = [&](int st, int kt) {
+     const unsigned a = sbase + st * STAGE + soff;
+ #pragma unroll
+     for (int i = 0; i < BM / RPI; ++i) glm_bmm::cp16s(a + i * RPI * LD * 2, ga[i] + kt * KS, (oka >> i) & 1);
++  };
++  auto loadB = [&](int st, int kt) {
++    const unsigned a = sbase + st * STAGE + soff;
+ #pragma unroll
+     for (int i = 0; i < BE / RPI; ++i) glm_bmm::cp16s(a + A * 2 + i * RPI * LD * 2, gb[i] + kt * KS, (okb >> i) & 1);
+   };
++  auto load = [&](int st, int kt) {
++    loadA(st, kt);
++    loadB(st, kt);
++  };
+   const unsigned fa = sbase + ((warp * 16 + (lane & 15)) * LD + (lane >> 4) * 8) * 2;
+   const unsigned fb = sbase + A * 2 + (((lane >> 4) * 8 + (lane & 7)) * LD + ((lane >> 3) & 1) * 8) * 2;
+   float c[BE / 8][4] = {};
+-  load(0, 0);
++  if constexpr (PDL) {  // the weights' stages 0 and 1 while the kernel before finishes, then the rows
++    loadB(0, 0);
++    if (steps > 1) loadB(1, 1);
++    qmm_frag::grid_wait();
++    loadA(0, 0);
++  } else {
++    load(0, 0);
++  }
+   glm_bmm::commit();
+   for (int kt = 0; kt < steps; ++kt) {
+-    if (kt + 1 < steps) load((kt + 1) & 1, kt + 1);
++    if (kt + 1 < steps) {
++      if (PDL && kt == 0)
++        loadA(1, 1);  // stage 1's weights went before the wait
++      else
++        load((kt + 1) & 1, kt + 1);
++    }
+     glm_bmm::commit();
+     glm_bmm::wait<1>();
+     __syncthreads();
+@@ -364,74 +395,19 @@ extern "C" __global__ void __launch_bounds__(128)
+       }
+ }
+ 
+-// TF_GLM_OVN_ROUTER16 (decode, up to 16 rows): 16 x 32 a block, one 16 x 8 tile a warp; chains as tf_glm_router_tile.
+-namespace glm_bmm {
+-template <int ST>
+-__device__ __forceinline__ void router16(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows,
+-                                         int64_t x_stride, int64_t d, int64_t ne, int ks) {
+-  constexpr int BM = 16, BE = 32, KS = 64, LD = KS + 8, A = BM * LD, B = BE * LD, STAGE = (A + B) * 2;
+-  __shared__ __align__(16) __nv_bfloat16 sm[ST][A + B];
+-  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, q = lane & 3;
+-  const int64_t m0 = (int64_t)blockIdx.x * BM, e0 = (int64_t)blockIdx.y * BE, s = blockIdx.z, span = d / ks;
+-  const int steps = static_cast<int>(span / KS), lr = tid / 8, lc = (tid % 8) * 8;
+-  const bool oka = m0 + lr < rows;                          // one 16-byte piece of x a thread, two of w
+-  const __nv_bfloat16* ga = x + (oka ? m0 + lr : 0) * x_stride + s * span + lc;
+-  const __nv_bfloat16* gb[2];
+-  unsigned okb = 0;
+-#pragma unroll
+-  for (int i = 0; i < 2; ++i) {
+-    const int64_t e = e0 + lr + i * 16;
+-    okb |= (e < ne ? 1u : 0u) << i;
+-    gb[i] = w + (e < ne ? e : 0) * d + s * span + lc;
+-  }
+-  const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(sm)), soff = (lr * LD + lc) * 2;
+-  auto load = [&](int st, int kt) {
+-    const unsigned a = sbase + st * STAGE + soff;
+-    cp16s(a, ga + kt * KS, oka);
+-#pragma unroll
+-    for (int i = 0; i < 2; ++i) cp16s(a + A * 2 + i * 16 * LD * 2, gb[i] + kt * KS, (okb >> i) & 1);
+-  };
+-  const unsigned fa = sbase + ((lane & 15) * LD + (lane >> 4) * 8) * 2;
+-  const unsigned fb = sbase + A * 2 + ((warp * 8 + (lane & 7)) * LD + ((lane >> 3) & 1) * 8) * 2;
+-  float c[4] = {};
+-#pragma unroll
+-  for (int st = 0; st < ST - 1; ++st) {
+-    if (st < steps) load(st, st);
+-    commit();
+-  }
+-  for (int kt = 0; kt < steps; ++kt) {
+-    if (kt + ST - 1 < steps) load((kt + ST - 1) % ST, kt + ST - 1);
+-    commit();
+-    wait<ST - 1>();
+-    __syncthreads();
+-    const unsigned st = (kt % ST) * STAGE;
+-#pragma unroll
+-    for (int k16 = 0; k16 < KS; k16 += 16) {
+-      uint32_t a[4], b[2];
+-      ldm4s(a, fa + st + k16 * 2);
+-      ldm2s(b, fb + st + k16 * 2);
+-      glm_router::mma16816(c, a, b);
+-    }
+-    __syncthreads();
+-  }
+-#pragma unroll
+-  for (int h = 0; h < 2; ++h)
+-#pragma unroll
+-    for (int jj = 0; jj < 2; ++jj) {
+-      const int64_t r = m0 + g + h * 8, col = e0 + warp * 8 + q * 2 + jj;
+-      if (r < rows && col < ne) part[(s * rows + r) * ne + col] = c[h * 2 + jj];
+-    }
+-}
+ }  // namespace glm_bmm
++
+ extern "C" __global__ void __launch_bounds__(128)
+-    tf_glm_router16_s3(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
++    tf_glm_router_tile(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
+                        int64_t d, int64_t ne, int ks) {
+-  glm_bmm::router16<3>(x, w, part, rows, x_stride, d, ne, ks);
++  glm_bmm::router_tile<false>(x, w, part, rows, x_stride, d, ne, ks);
+ }
++
++// TF_GLM_OVN_PDL_EARLY: router_tile launched dependent (its weight stages before griddepcontrol.wait).
+ extern "C" __global__ void __launch_bounds__(128)
+-    tf_glm_router16_s4(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
+-                       int64_t d, int64_t ne, int ks) {
+-  glm_bmm::router16<4>(x, w, part, rows, x_stride, d, ne, ks);
++    tf_glm_router_tile_pdl(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows,
++                           int64_t x_stride, int64_t d, int64_t ne, int ks) {
++  glm_bmm::router_tile<true>(x, w, part, rows, x_stride, d, ne, ks);
+ }
+ 
+ // Decode windows (under 128 rows): 16 x 64 a block of 4 warps, K 64 at a time, one K slice a block along z.
+diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
+index 48e203a90..c45cab2c3 100644
+--- a/zig/kernels/cuda/glm_glue_hc.cuh
++++ b/zig/kernels/cuda/glm_glue_hc.cuh
+@@ -1,6 +1,8 @@
+ // glue._hc_partial and glue._hc_finish by hand (hyper-connections' pre side, 4 streams of 4096).
+ #pragma once
+ 
++#include "glm_glue_rows.cuh"
++#include "common/qmm_frag.cuh"
+ #include "glm_triton.cuh"
+ 
+ using namespace glm_triton;
+@@ -55,14 +57,24 @@ extern "C" __global__ void __launch_bounds__(128)
+   }
+ }
+ 
++namespace glm_hc {
++
+ // The same for decode windows (16 blocks a row): 8 steps of 128 at once, a 128-thread group each; same ops, same order.
+-extern "C" __global__ void __launch_bounds__(1024)
+-    tf_glm_hc_partial8(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
++template <bool PDL>
++__device__ __forceinline__ void partial8(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide,
++                                         int nb) {
+   __shared__ float dots[8][24];
+   __shared__ float smem[4];
+   const int64_t r = blockIdx.x, b = blockIdx.y, kb = wide / nb;
+   const int grp = threadIdx.x >> 7, t = threadIdx.x & 127, c = t & 15, m0 = (t >> 4) & 7;
+   const int steps = static_cast<int>(kb / 128);
++  [[maybe_unused]] uint4 wq[3];
++  if constexpr (PDL) {  // TF_GLM_OVN_PDL_EARLY, launched dependent: the weights load first, x after the wait
++    if (grp < steps)
++      for (int i = 0; i < 3; ++i)
++        wq[i] = __ldg(reinterpret_cast<const uint4*>(fn + (int64_t)(m0 + 8 * i) * wide + b * kb + grp * 128 + c * 8));
++    qmm_frag::grid_wait();
++  }
+   if (grp < steps) {
+     const int64_t base = b * kb + grp * 128;
+     float xv[8];
+@@ -72,7 +84,11 @@ extern "C" __global__ void __launch_bounds__(1024)
+       for (int j = 0; j < 8; ++j) xv[j] = bf(h[j]);
+     }
+     for (int i = 0; i < 3; ++i) {
+-      const uint4 u = __ldg(reinterpret_cast<const uint4*>(fn + (int64_t)(m0 + 8 * i) * wide + base + c * 8));
++      uint4 u;
++      if constexpr (PDL)
++        u = wq[i];
++      else
++        u = __ldg(reinterpret_cast<const uint4*>(fn + (int64_t)(m0 + 8 * i) * wide + base + c * 8));
+       const __nv_bfloat16* w = reinterpret_cast<const __nv_bfloat16*>(&u);
+       float d = __fmul_rn(xv[1], bf(w[1]));
+       d = __fmaf_rn(xv[0], bf(w[0]), d);
+@@ -101,8 +117,6 @@ extern "C" __global__ void __launch_bounds__(1024)
+   }
+ }
+ 
+-namespace glm_hc {
+-
+ // The Sinkhorn sums of 4: lanes (i, j) = (lane / 4 % 4, lane % 4), rows over j (xor 2, 1), columns over i (xor 8, 4).
+ __device__ __forceinline__ float row4(float v) {
+   v = v + __shfl_xor_sync(0xffffffffu, v, 2);
+@@ -139,30 +153,39 @@ struct Weights<float> {
+   }
+ };
+ 
++// A load of hc_finish's rows or partials: plain, or (CG: other blocks of the same kernel wrote them) from L2.
++template <bool CG, typename T>
++__device__ __forceinline__ T ldr(const T* p) {
++  if constexpr (CG)
++    return __ldcg(p);
++  else
++    return *p;
++}
++
+ // glue._hc_finish, 256 threads a row (D 4096, 4 streams): warp 0 sums K blocks and Sinkhorn, then collapse, RMS-norm.
+-template <typename W>
++template <typename W, bool CG = false>
+ __device__ __forceinline__ void finish(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
+                                        const W* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
+-                                       float hc_eps, int nb, int iters) {
++                                       float hc_eps, int nb, int iters, int64_t r) {
+   constexpr int D = 4096, S = 4;
+   __shared__ float smem[8];
+   __shared__ float pre[4];
+-  const int64_t r = blockIdx.x;
+   const int t = threadIdx.x, lane = t & 31;
+   // A thread's 8 inputs of each half are contiguous: one 16-byte load per stream and half, issued before Sinkhorn.
+   const __nv_bfloat16* row = x + r * S * D;
+   uint4 xu[2][S];
+   Weights<W> wu;
+   for (int rep = 0; rep < 2; ++rep) {
+-    for (int st = 0; st < S; ++st) xu[rep][st] = *reinterpret_cast<const uint4*>(row + st * D + rep * 2048 + t * 8);
++    for (int st = 0; st < S; ++st)
++      xu[rep][st] = ldr<CG>(reinterpret_cast<const uint4*>(row + st * D + rep * 2048 + t * 8));
+     wu.load(nw, rep, t);
+   }
+   if (t < 32) {
+     const float* p = part + r * nb * 32;
+     float mix = 0.0f, ss = 0.0f;
+     for (int b = 0; b < nb; ++b) {
+-      mix = mix + p[b * 32 + lane];
+-      ss = ss + p[b * 32 + 24];
++      mix = mix + ldr<CG>(p + b * 32 + lane);
++      ss = ss + ldr<CG>(p + b * 32 + 24);
+     }
+     const float rinv = div_full(1.0f, sqrt_approx(eps + div_full(ss, (float)(S * D))));
+     mix = __fmul_rn(mix, rinv);
+@@ -222,13 +245,163 @@ __device__ __forceinline__ void finish(const __nv_bfloat16* x, const float* part
+   }
+ }
+ 
++// TF_GLM_OVN_GLUE_FUSE: block (row, K block b) runs hc_post of its 1024 values into xout, hc_partial8, hc_finish.
++template <typename W, bool LAUNCH>
++__device__ __forceinline__ void glue(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g, int64_t rs, int world,
++                                     const __nv_bfloat16* fn, float* part, unsigned* count, const float* base,
++                                     const float* scale, const W* nw, __nv_bfloat16* out, float* xs, float* post,
++                                     float* comb, float eps, float hc_eps, int iters) {
++  constexpr int D = 4096, S = 4, NB = 16, KB = S * D / NB, STEPS = KB / 128, HALF = STEPS / 2;
++  constexpr int64_t wide = S * D;
++  __shared__ __align__(16) __nv_bfloat16 xn[KB];
++  __shared__ float dots[STEPS][24];
++  __shared__ float sq[4];
++  __shared__ bool last;
++  if constexpr (LAUNCH) qmm_frag::grid_launch();  // TF_GLM_OVN_PDL_EARLY: the next site's weights stream in meanwhile
++  const int64_t r = blockIdx.x, b = blockIdx.y;
++  const int tid = threadIdx.x, grp = tid >> 7, t = tid & 127, c = t & 15, m0 = (t >> 4) & 7;
++  uint4 wq[HALF][3];  // the weights of this group's steps grp * 4 .. + 3 (hc_partial8's loads), issued first
++  for (int k = 0; k < HALF; ++k)
++    for (int i = 0; i < 3; ++i)
++      wq[k][i] = __ldg(reinterpret_cast<const uint4*>(fn + (int64_t)(m0 + 8 * i) * wide + b * KB +
++                                                       (grp * HALF + k) * 128 + c * 8));
++  if (tid < KB / 8) {  // stream b / 4's new values read all 4 streams here: hence xout, never x in place
++    const int s = static_cast<int>(b / 4);
++    const int64_t col = b % 4 * KB + tid * 8;
++    float branch[8], xv[S][8], o[8];
++    glm_glue::ranks8(g, rs, r * D + col, world, branch);
++    for (int u = 0; u < S; ++u) glm_glue::ld8(x + r * wide + u * D + col, xv[u]);
++    glm_glue::post_s(xv, branch, comb, post, r, s, o);
++    glm_glue::st8(xout + r * wide + s * D + col, o);
++    glm_glue::st8(xn + tid * 8, o);  // the bf16 values hc_partial8 would read back from x
++  }
++  __syncthreads();
++  for (int k = 0; k < HALF; ++k) {
++    const int step = grp * HALF + k;
++    float xv[8];
++    glm_glue::ld8(xn + step * 128 + c * 8, xv);
++    for (int i = 0; i < 3; ++i) {
++      const __nv_bfloat16* w = reinterpret_cast<const __nv_bfloat16*>(&wq[k][i]);
++      float d = __fmul_rn(xv[1], bf(w[1]));
++      d = __fmaf_rn(xv[0], bf(w[0]), d);
++      for (int j = 2; j < 8; ++j) d = __fmaf_rn(xv[j], bf(w[j]), d);
++      for (int o = 8; o > 0; o >>= 1) d = d + __shfl_xor_sync(0xffffffffu, d, o);
++      if (c == 0) dots[step][m0 + 8 * i] = d;
++    }
++  }
++  if (grp == 0) {
++    float ss = 0.0f;
++    for (int s = 0; s < STEPS; ++s) {
++      const float xt = bf(xn[s * 128 + t]);
++      ss = __fmaf_rn(xt, xt, ss);
++    }
++    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
++    if ((t & 31) == 0) sq[t >> 5] = ss;
++  }
++  __syncthreads();
++  float* po = part + (r * NB + b) * 32;
++  if (tid < 24) {
++    float acc = 0.0f;
++    for (int s = 0; s < STEPS; ++s) acc = acc + dots[s][tid];
++    po[tid] = acc;
++  } else if (tid == 32) {
++    po[24] = (sq[0] + sq[2]) + (sq[1] + sq[3]);
++  }
++  __threadfence();  // this block's x and partials are visible before its count
++  __syncthreads();
++  if (tid == 0) last = atomicAdd(count + r, 1u) == NB - 1;  // the row's 16th block finishes it
++  __syncthreads();
++  if (!last) return;
++  __threadfence();
++  if (tid == 0) count[r] = 0;  // the row's next launch counts from zero (the launch boundary orders it)
++  finish<W, true>(xout, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, NB, iters, r);
++}
++
++// TF_GLM_OVN_GLUE_ROW: 4 rows a block; each quarter's hc_post in place, then hc_partial's chains; then hc_finish.
++template <typename W>
++__device__ __forceinline__ void rows4(__nv_bfloat16* x, const float* g, int64_t rs, int world, const __nv_bfloat16* fn,
++                                      const float* base, const float* scale, const W* nw, __nv_bfloat16* out, float* xs,
++                                      float* post, float* comb, float eps, float hc_eps, int iters, int64_t rows) {
++  constexpr int R = 4, D = 4096, S = 4, NB = 16, KB = S * D / NB, QUARTERS = D / KB, CHUNKS = KB / 8;
++  constexpr int64_t wide = S * D;
++  __shared__ float part[R][NB][32];
++  __shared__ float sq[2][R][4];
++  const int64_t r0 = (int64_t)blockIdx.x * R;
++  const int tid = threadIdx.x, grp = tid >> 7, t = tid & 127, lane = t & 31, warp = t >> 5, c = t & 15;
++  const int m0 = (t >> 4) & 7;
++  for (int qq = 0; qq < QUARTERS; ++qq) {
++    for (int u = tid; u < R * CHUNKS; u += 256) {
++      const int64_t row = r0 + u / CHUNKS;
++      if (row < rows) glm_glue::hc_post8(x, x, g, post, comb, rs, D, world, row, qq * KB + u % CHUNKS * 8);
++    }
++    __syncthreads();
++    for (int h = 0; h < 2; ++h) {
++      const int b = (grp + 2 * h) * QUARTERS + qq;
++      float acc[R][3] = {}, ss[R] = {};
++      for (int64_t step = 0; step < KB / 128; ++step) {
++        const int64_t at = b * KB + step * 128;
++        float xv[R][8];
++        for (int q = 0; q < R; ++q) {
++          uint4 v = make_uint4(0, 0, 0, 0);
++          if (r0 + q < rows) v = *reinterpret_cast<const uint4*>(x + (r0 + q) * wide + at + c * 8);
++          const __nv_bfloat16* hv = reinterpret_cast<const __nv_bfloat16*>(&v);
++          for (int j = 0; j < 8; ++j) xv[q][j] = bf(hv[j]);
++        }
++        for (int i = 0; i < 3; ++i) {
++          const uint4 v = __ldg(reinterpret_cast<const uint4*>(fn + (int64_t)(m0 + 8 * i) * wide + at + c * 8));
++          const __nv_bfloat16* hw = reinterpret_cast<const __nv_bfloat16*>(&v);
++          float w[8];
++          for (int j = 0; j < 8; ++j) w[j] = bf(hw[j]);
++          for (int q = 0; q < R; ++q) {
++            float d = __fmul_rn(xv[q][1], w[1]);
++            d = __fmaf_rn(xv[q][0], w[0], d);
++            for (int j = 2; j < 8; ++j) d = __fmaf_rn(xv[q][j], w[j], d);
++            for (int o = 8; o > 0; o >>= 1) d = d + __shfl_xor_sync(0xffffffffu, d, o);
++            acc[q][i] = acc[q][i] + d;
++          }
++        }
++        for (int q = 0; q < R; ++q) {
++          const float xt = r0 + q < rows ? bf(x[(r0 + q) * wide + at + t]) : 0.0f;
++          ss[q] = __fmaf_rn(xt, xt, ss[q]);
++        }
++      }
++      for (int q = 0; q < R; ++q) {
++        for (int o = 16; o > 0; o >>= 1) ss[q] += __shfl_xor_sync(0xffffffffu, ss[q], o);
++        if (lane == 0) sq[grp][q][warp] = ss[q];
++      }
++      __syncthreads();
++      for (int q = 0; q < R; ++q) {
++        if (c == 0)
++          for (int i = 0; i < 3; ++i) part[q][b][m0 + 8 * i] = acc[q][i];
++        if (t == 0) part[q][b][24] = (sq[grp][q][0] + sq[grp][q][2]) + (sq[grp][q][1] + sq[grp][q][3]);
++      }
++      __syncthreads();
++    }
++  }
++  for (int q = 0; q < R && r0 + q < rows; ++q)
++    finish<W>(x + r0 * wide, &part[0][0][0], base, scale, nw, out + r0 * D, xs + r0 * (D / 64), post + r0 * S,
++              comb + r0 * 16, eps, hc_eps, NB, iters, q);
++}
++
+ }  // namespace glm_hc
+ 
++// hcPre's decode windows (16 blocks a row of 1024 threads): glm_hc::partial8.
++extern "C" __global__ void __launch_bounds__(1024)
++    tf_glm_hc_partial8(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
++  glm_hc::partial8<false>(x, fn, part, wide, nb);
++}
++
++// TF_GLM_OVN_PDL_EARLY: hc_partial8 launched dependent, its weights loading before griddepcontrol.wait.
++extern "C" __global__ void __launch_bounds__(1024)
++    tf_glm_hc_partial8_pdl(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
++  glm_hc::partial8<true>(x, fn, part, wide, nb);
++}
++
+ extern "C" __global__ void __launch_bounds__(256)
+     tf_glm_hc_finish(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
+                      const __nv_bfloat16* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
+                      float hc_eps, int nb, int iters) {
+-  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
++  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters, blockIdx.x);
+ }
+ 
+ // FP4-Local's float32 post-attention norm weight: hc_finish's arithmetic, the weight read as float32.
+@@ -236,5 +409,45 @@ extern "C" __global__ void __launch_bounds__(256)
+     tf_glm_hc_finish_f32w(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
+                           const float* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
+                           float hc_eps, int nb, int iters) {
+-  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
++  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters, blockIdx.x);
+ }
++
++// TF_GLM_OVN_PDL_EARLY: hc_finish releasing its dependent launch (the next site's first matmul) at entry.
++#define TF_GLM_HC_FINISH_PDL(name, W)                                                                              \
++  extern "C" __global__ void __launch_bounds__(256)                                                                \
++      name(const __nv_bfloat16* x, const float* part, const float* base, const float* scale, const W* nw,         \
++           __nv_bfloat16* out, float* xs, float* post, float* comb, float eps, float hc_eps, int nb, int iters) {  \
++    qmm_frag::grid_launch();                                                                                       \
++    glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters, blockIdx.x);            \
++  }
++TF_GLM_HC_FINISH_PDL(tf_glm_hc_finish_pdl, __nv_bfloat16)
++TF_GLM_HC_FINISH_PDL(tf_glm_hc_finish_f32w_pdl, float)
++#undef TF_GLM_HC_FINISH_PDL
++
++// TF_GLM_OVN_GLUE_FUSE's kernel (glm_hc::glue), bf16 or float32 norm weight; _pdl: TF_GLM_OVN_PDL_EARLY's trigger.
++#define TF_GLM_HC_GLUE(name, W, LAUNCH)                                                                            \
++  extern "C" __global__ void __launch_bounds__(256)                                                                \
++      name(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g, int64_t rs, int world,                    \
++           const __nv_bfloat16* fn, float* part, unsigned* count, const float* base, const float* scale,          \
++           const W* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps, float hc_eps,          \
++           int iters) {                                                                                            \
++    glm_hc::glue<W, LAUNCH>(x, xout, g, rs, world, fn, part, count, base, scale, nw, out, xs, post, comb, eps,    \
++                            hc_eps, iters);                                                                        \
++  }
++TF_GLM_HC_GLUE(tf_glm_hc_glue, __nv_bfloat16, false)
++TF_GLM_HC_GLUE(tf_glm_hc_glue_f32w, float, false)
++TF_GLM_HC_GLUE(tf_glm_hc_glue_pdl, __nv_bfloat16, true)
++TF_GLM_HC_GLUE(tf_glm_hc_glue_f32w_pdl, float, true)
++#undef TF_GLM_HC_GLUE
++
++// TF_GLM_OVN_GLUE_ROW's kernel (glm_hc::rows4), bf16 or float32 norm weight.
++#define TF_GLM_HC_ROW(name, W)                                                                                     \
++  extern "C" __global__ void __launch_bounds__(256)                                                                \
++      name(__nv_bfloat16* x, const float* g, int64_t rs, int world, const __nv_bfloat16* fn, const float* base,   \
++           const float* scale, const W* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,    \
++           float hc_eps, int iters, int64_t rows) {                                                                \
++    glm_hc::rows4<W>(x, g, rs, world, fn, base, scale, nw, out, xs, post, comb, eps, hc_eps, iters, rows);         \
++  }
++TF_GLM_HC_ROW(tf_glm_hc_row, __nv_bfloat16)
++TF_GLM_HC_ROW(tf_glm_hc_row_f32w, float)
++#undef TF_GLM_HC_ROW
+diff --git a/zig/kernels/cuda/glm_glue_moe.cuh b/zig/kernels/cuda/glm_glue_moe.cuh
+index c095eab9e..17e015b2b 100644
+--- a/zig/kernels/cuda/glm_glue_moe.cuh
++++ b/zig/kernels/cuda/glm_glue_moe.cuh
+@@ -3,6 +3,7 @@
+ 
+ #include "glm_swiglu.cuh"
+ #include "glm_triton.cuh"
++#include "common/qmm_frag.cuh"
+ 
+ using namespace glm_triton;
+ 
+@@ -19,9 +20,11 @@ __device__ __forceinline__ float group64(const float* q) {
+ 
+ }  // namespace glm_moe
+ 
++namespace glm_moe {
++
+ // glue._swiglu with BLOCK 512 (128 threads, 4 values each, 64-group sums over 16 lanes), column block blockIdx.y.
+-extern "C" __global__ void __launch_bounds__(128)
+-    tf_glm_swiglu_512(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
++__device__ __forceinline__ void swiglu_512(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit,
++                                           int64_t w) {
+   const int64_t r = blockIdx.x, d0 = blockIdx.y * 512 + threadIdx.x * 4;
+   const uint2 gv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + d0);
+   const uint2 uv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + w + d0);
+@@ -40,8 +43,8 @@ extern "C" __global__ void __launch_bounds__(128)
+ }
+ 
+ // glue._swiglu with BLOCK 64 (the TP=3 shared expert's 704): one value a thread, the warp's butterfly, then 2 warps.
+-extern "C" __global__ void __launch_bounds__(64)
+-    tf_glm_swiglu_64(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
++__device__ __forceinline__ void swiglu_64(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit,
++                                          int64_t w) {
+   __shared__ float smem[2];
+   const int64_t r = blockIdx.x, d = blockIdx.y * 64 + threadIdx.x;
+   const float a = glm_moe::swiglu1(bf(gu[r * 2 * w + d]), bf(gu[r * 2 * w + w + d]), limit);
+@@ -50,6 +53,31 @@ extern "C" __global__ void __launch_bounds__(64)
+   if (threadIdx.x == 0) xs[r * (w / 64) + blockIdx.y] = g;
+ }
+ 
++}  // namespace glm_moe
++
++extern "C" __global__ void __launch_bounds__(128)
++    tf_glm_swiglu_512(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
++  glm_moe::swiglu_512(gu, out, xs, limit, w);
++}
++
++extern "C" __global__ void __launch_bounds__(64)
++    tf_glm_swiglu_64(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
++  glm_moe::swiglu_64(gu, out, xs, limit, w);
++}
++
++// TF_GLM_OVN_PDL_EARLY: the swiglus releasing their dependent launch (the down projection's weight loads) at entry.
++extern "C" __global__ void __launch_bounds__(128)
++    tf_glm_swiglu_512_pdl(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
++  qmm_frag::grid_launch();
++  glm_moe::swiglu_512(gu, out, xs, limit, w);
++}
++
++extern "C" __global__ void __launch_bounds__(64)
++    tf_glm_swiglu_64_pdl(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
++  qmm_frag::grid_launch();
++  glm_moe::swiglu_64(gu, out, xs, limit, w);
++}
++
+ // qmm._group_sums: row blockIdx.x's 64-input sums, 8 lanes a group of 8 consecutive inputs each, 16 groups a block.
+ extern "C" __global__ void __launch_bounds__(128)
+     tf_glm_group_sums(const __nv_bfloat16* x, float* xs, int64_t x_stride, int64_t kg) {
+diff --git a/zig/kernels/cuda/glm_glue_norm.cuh b/zig/kernels/cuda/glm_glue_norm.cuh
+index 92db977da..2c0fd8015 100644
+--- a/zig/kernels/cuda/glm_glue_norm.cuh
++++ b/zig/kernels/cuda/glm_glue_norm.cuh
+@@ -1,6 +1,7 @@
+ // glue._rmsnorm by hand (glm_glue.cu's first group): see glm_triton.cuh for the Triton ops it keeps.
+ #pragma once
+ 
++#include "common/qmm_frag.cuh"
+ #include "glm_triton.cuh"
+ 
+ namespace glm_glue {
+@@ -152,3 +153,17 @@ extern "C" __global__ void __launch_bounds__(256)
+                              int64_t o_stride, float* xs, float eps, int sums) {
+   glm_glue::rmsnorm<4096, 4096, 8, 8, float>(x, x_stride, w, out, o_stride, xs, eps, sums);
+ }
++
++// TF_GLM_OVN_PDL_EARLY: the norms above, releasing their dependent launch (a matmul's weight loads) at entry.
++#define RMSNORM_PDL(name, D, BLOCK, NW, S, W)                                                                      \
++  extern "C" __global__ void __launch_bounds__(NW * 32)                                                            \
++      name(const __nv_bfloat16* x, int64_t x_stride, const W* w, __nv_bfloat16* out, int64_t o_stride, float* xs, \
++           float eps, int sums) {                                                                                  \
++    qmm_frag::grid_launch();                                                                                       \
++    glm_glue::rmsnorm<D, BLOCK, NW, S, W>(x, x_stride, w, out, o_stride, xs, eps, sums);                          \
++  }
++RMSNORM_PDL(tf_glm_rmsnorm_4096_pdl, 4096, 4096, 8, 8, __nv_bfloat16)
++RMSNORM_PDL(tf_glm_rmsnorm_1536_pdl, 1536, 2048, 4, 8, __nv_bfloat16)
++RMSNORM_PDL(tf_glm_rmsnorm_512_pdl, 512, 512, 4, 4, __nv_bfloat16)
++RMSNORM_PDL(tf_glm_rmsnorm_4096_f32w_pdl, 4096, 4096, 8, 8, float)
++#undef RMSNORM_PDL
+diff --git a/zig/kernels/cuda/glm_glue_rows.cuh b/zig/kernels/cuda/glm_glue_rows.cuh
+index f708771a7..037290e30 100644
+--- a/zig/kernels/cuda/glm_glue_rows.cuh
++++ b/zig/kernels/cuda/glm_glue_rows.cuh
+@@ -1,6 +1,7 @@
+ // GLM's element-wise glue by hand: each output value alone, in the Triton kernel's order of fp32 ops.
+ #pragma once
+ 
++#include "common/qmm_frag.cuh"
+ #include "glm_triton.cuh"
+ 
+ namespace glm_glue {
+@@ -39,6 +40,34 @@ __device__ __forceinline__ void ranks8(const float* g, int64_t rs, int64_t i, in
+   }
+ }
+ 
++// glue._hc_post's stream s of row r at 8 columns, before the bf16 store: post[s] branch + sum_t comb[t][s] x[t].
++__device__ __forceinline__ void post_s(const float xv[4][8], const float branch[8], const float* comb,
++                                       const float* post, int64_t r, int s, float o[8]) {
++  const float* cm = comb + r * 16 + s;
++  const float c0 = cm[0], c1 = cm[4], c2 = cm[8], c3 = cm[12], p = post[r * 4 + s];
++  for (int j = 0; j < 8; ++j) {
++    float m = __fmul_rn(xv[1][j], c1);
++    m = __fmaf_rn(xv[0][j], c0, m);
++    m = __fmaf_rn(xv[2][j], c2, m);
++    m = __fmaf_rn(xv[3][j], c3, m);
++    o[j] = __fmaf_rn(rbf(branch[j]), p, m);
++  }
++}
++
++// glue._hc_post of row r's 8 columns at c, every stream; x may be xout (a thread reads its 4 x 8 values first).
++__device__ __forceinline__ void hc_post8(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g, const float* post,
++                                         const float* comb, int64_t rs, int64_t d, int world, int64_t r, int64_t c) {
++  float branch[8];
++  ranks8(g, rs, r * d + c, world, branch);
++  float xv[4][8];
++  for (int t = 0; t < 4; ++t) ld8(x + r * 4 * d + t * d + c, xv[t]);
++  for (int s = 0; s < 4; ++s) {
++    float o[8];
++    post_s(xv, branch, comb, post, r, s, o);
++    st8(xout + r * 4 * d + s * d + c, o);
++  }
++}
++
+ }  // namespace glm_glue
+ 
+ using namespace glm_triton;
+@@ -93,24 +122,16 @@ extern "C" __global__ void tf_glm_hc_post(const __nv_bfloat16* x, __nv_bfloat16*
+                                           const float* post, const float* comb, int64_t rs, int64_t d, int world) {
+   const int64_t c = glm_glue::col8();
+   if (c >= d) return;
+-  const int64_t r = blockIdx.x;
+-  float branch[8];
+-  glm_glue::ranks8(g, rs, r * d + c, world, branch);
+-  float xv[4][8];
+-  for (int t = 0; t < 4; ++t) glm_glue::ld8(x + r * 4 * d + t * d + c, xv[t]);
+-  for (int s = 0; s < 4; ++s) {
+-    const float* cm = comb + r * 16 + s;
+-    const float c0 = cm[0], c1 = cm[4], c2 = cm[8], c3 = cm[12], p = post[r * 4 + s];
+-    float o[8];
+-    for (int j = 0; j < 8; ++j) {
+-      float m = __fmul_rn(xv[1][j], c1);
+-      m = __fmaf_rn(xv[0][j], c0, m);
+-      m = __fmaf_rn(xv[2][j], c2, m);
+-      m = __fmaf_rn(xv[3][j], c3, m);
+-      o[j] = __fmaf_rn(rbf(branch[j]), p, m);
+-    }
+-    glm_glue::st8(xout + r * 4 * d + s * d + c, o);
+-  }
++  glm_glue::hc_post8(x, xout, g, post, comb, rs, d, world, blockIdx.x, c);
++}
++
++// TF_GLM_OVN_PDL_EARLY: hc_post releasing its dependent launch (hc_partial8_pdl's weight loads) at entry.
++extern "C" __global__ void tf_glm_hc_post_pdl(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g,
++                                              const float* post, const float* comb, int64_t rs, int64_t d, int world) {
++  qmm_frag::grid_launch();
++  const int64_t c = glm_glue::col8();
++  if (c >= d) return;
++  glm_glue::hc_post8(x, xout, g, post, comb, rs, d, world, blockIdx.x, c);
+ }
+ 
+ // glue._combine: fp32 sum over slots in order of y[r][k] wts[r][k] (fma from 0), y fp32 or bf16, 8 columns a thread.
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index b8cd5904b..2e62737e0 100644
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -30,6 +30,7 @@ const pair_mod = @import("cuda_forward_pair.zig");
+ pub const max_pieces = pair_mod.max_pieces; // overlap.PIECES_MAX
+ const onepass_mod = @import("cuda_onepass.zig");
+ const kda_chunk = @import("cuda_kda_chunk.zig");
++const hc_glue = @import("cuda_forward_glue.zig");
+ pub const prefill_rows = state.prefill_rows;
+ pub const solo_rows = state.solo_rows;
+ pub const window_rows = state.window_rows;
+@@ -59,6 +60,8 @@ pub const Modules = struct {
+     quant: quant.Kernels,
+     q4: q4.Kernels,
+     mla: glue.Mla, // TF_GLM_OVN_MLA_FUSEMERGE, TF_GLM_OVN_ABSORB_VEC: the MLA launch choices, read at load
++    glue_row: u64, // TF_GLM_OVN_GLUE_ROW=N: a prompt piece's glue of N rows or more in one kernel (0: off)
++    pdl_early: u64, // TF_GLM_OVN_PDL_EARLY: 1 the decode windows' glue launches dependent-ready, 2 prompt chunks too
+ 
+     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
+     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
+@@ -106,6 +109,8 @@ pub const Modules = struct {
+         m.pools32 = cuda.ovn.on("POOLS32");
+         m.packs = null; // `m` starts undefined: the field default does not apply
+         m.onepass_pipe = onepass_mod.openPipe(d, k.glm_onepass_pipe, @intCast(try ctx.attribute(.compute_capability_major)));
++        m.glue_row = try cuda.ovn.int("GLUE_ROW", 0);
++        m.pdl_early = try cuda.ovn.int("PDL_EARLY", 0);
+         return m;
+     }
+ 
+@@ -213,12 +218,13 @@ pub const Forward = struct {
+     l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
+ 
+     /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
+-    pub fn prefetch(f: *const Forward) ?*const l2pf_mod.L2pf {
++    pub fn l2pfFor(f: *const Forward) ?*const l2pf_mod.L2pf {
+         return if (f.ranks.len == 1 and !f.ranks[0].b.prefill) f.l2pf else null;
+     }
+ 
+     pub fn set(f: *const Forward) glue.Set {
+-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null, .mla = f.m.mla };
++        const pdl = f.m.pdl_early >= @as(u64, if (f.ranks[0].b.prefill) 2 else 1);
++        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .pdl_early = pdl };
+     }
+ 
+     /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
+@@ -281,7 +287,7 @@ pub const Forward = struct {
+                     s.saves.b = st.save_b + li * window_rows * st.heads * 4;
+                 }
+                 const conv = st.conv + li * 3 * st.conv_c * 2;
+-                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (b.prefill) kda_chunk.prompt(&f.m.chunked, st.pos) else null, if (f.prefetch()) |p| .{ .l2 = p, .layer = l.index } else null);
++                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (b.prefill) kda_chunk.prompt(&f.m.chunked, st.pos) else null, if (f.l2pfFor()) |p| .{ .l2 = p, .layer = l.index } else null);
+                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
+             },
+             .mla => |a| {
+@@ -367,36 +373,7 @@ pub const Forward = struct {
+ 
+     const exchangePieces = @import("cuda_forward_pieces.zig").exchangePieces;
+ 
+-    /// hc_post of rows lo..hi from partials `g` [world][hi - lo][D] (a gathered room or a split one's own rows).
+-    fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64) !void {
+-        const c = &r.w.config;
+-        const b = r.b;
+-        const S: usize = c.hc;
+-        const D: usize = c.hidden;
+-        const x = b.x + lo * S * D * 2;
+-        try glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
+-    }
+-
+-    /// forward._pre of rows lo..hi.
+-    fn preRows(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, lo: usize, hi: usize) !void {
+-        const c = &r.w.config;
+-        const b = r.b;
+-        const S: usize = c.hc;
+-        const D: usize = c.hidden;
+-        try glue.hcPre(f.set(), f.stream, b.x + lo * S * D * 2, hc.fn_w, hc.base, hc.scale, norm, b.normed + lo * D * 2, b.xs + lo * (D / 64) * 4, b.post + lo * S * 4, b.comb + lo * S * S * 4, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, hi - lo, D, S);
+-    }
+-
+-    /// One piece's glue after a site: hc_post, then the next layer's hc_pre or (after the last layer) the stream mean.
+-    pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Site, lo: usize, hi: usize, g: u64) !void {
+-        const stamp = prof_mod.span(f.prof, f.stream, .glue);
+-        defer stamp.end();
+-        const c = &r.w.config;
+-        const layers = r.w.layers;
+-        try f.postRows(r, lo, hi, g);
+-        if (site == .mixer) return f.preRows(r, layers[j].ffn_hc, layers[j].post_norm, lo, hi);
+-        if (j + 1 < layers.len) return f.preRows(r, layers[j + 1].attn_hc, layers[j + 1].in_norm, lo, hi);
+-        try glue.streamMean(f.set(), f.stream, r.b.x + lo * c.hc * c.hidden * 2, r.b.hidden + lo * c.hidden * 2, hi - lo, c.hidden, c.hc);
+-    }
++    pub const glueRows = hc_glue.glueRows;
+ 
+     const gluePieces = @import("cuda_forward_pieces.zig").gluePieces;
+     const tapPieces = @import("cuda_forward_pieces.zig").tapPieces;
+@@ -457,14 +434,16 @@ pub const Forward = struct {
+     /// The unpieced loop over the layers (and the stream mean): each site's partials whole, then the glue.
+     fn whole(f: *const Forward, R: usize) !void {
+         const c = &f.ranks[0].w.config;
+-        const pf = f.prefetch();
++        const fuse = hc_glue.fuses(f, R); // TF_GLM_OVN_GLUE_FUSE: each hc_post with the next site's hc_pre, one kernel
++        var alt = false; // the residual in b.x_alt (each fused glue writes the other buffer)
++        const pf = f.l2pfFor();
+         var li: usize = 0;
+         var di: usize = 0;
+         for (f.ranks[0].w.layers, 0..) |_, j| {
+             prof_mod.context(f.prof, j, null, .mixer);
+             for (f.ranks) |r| {
+                 const l = r.w.layers[j];
+-                try f.pre(r, l.attn_hc, l.in_norm, R);
++                if (!fuse or j == 0) try f.pre(r, l.attn_hc, l.in_norm, R);
+                 if (r.segs.len > 0) try shared.mixer(f, r, l, li, di, R, slot(r, R)) else try f.mixer(r, l, li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), slot(r, R));
+             }
+             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
+@@ -474,23 +453,37 @@ pub const Forward = struct {
+             prof_mod.context(f.prof, j, null, .ffn);
+             for (f.ranks) |r| {
+                 const l = r.w.layers[j];
+-                try f.post(r, R);
+-                try f.pre(r, l.ffn_hc, l.post_norm, R);
++                if (fuse) {
++                    try hc_glue.fused(f, r, alt, l.ffn_hc, l.post_norm, R);
++                } else {
++                    try f.post(r, R);
++                    try f.pre(r, l.ffn_hc, l.post_norm, R);
++                }
+                 try f.ffn(r, l, R, slot(r, R));
+             }
++            alt = alt != fuse;
+             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
+             if (pf) |p| try p.fork(f.stream, j, .n);
+             try f.gather(R);
+-            for (f.ranks) |r| try f.post(r, R);
+-            if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, 0, R);
++            const next = fuse and j + 1 < f.ranks[0].w.layers.len; // fused: the next layer's attention-site hc_pre too
++            for (f.ranks) |r| if (next) try hc_glue.fused(f, r, alt, r.w.layers[j + 1].attn_hc, r.w.layers[j + 1].in_norm, R) else try f.post(r, R);
++            alt = alt != next;
++            if (f.taps) |t| try t.at(f.stream, j, hc_glue.xAt(f.ranks[0], alt), 0, R);
+             if (f.prof) |p| p.mark(f.stream, .gather_b);
+             switch (f.ranks[0].w.layers[j].mixer) {
+                 .kda => li += 1,
+                 .mla => di += 1,
+             }
+         }
+-        for (f.ranks) |r| try glue.streamMean(f.set(), f.stream, r.b.x, r.b.hidden, R, c.hidden, c.hc);
+-        if (pf) |p| try p.join(f.stream);
++        if (f.l2pf) |p| try p.join(f.stream); // the side stream's forks rejoin before the window ends
++        for (f.ranks) |r| try glue.streamMean(f.set(), f.stream, hc_glue.xAt(r, alt), r.b.hidden, R, c.hidden, c.hc);
++    }
++
++    /// TF_GLM_L2PF site `which` of layer `j` (a decode window's weight prefetch; off for prompt chunks).
++    fn prefetch(f: *const Forward, j: usize, which: usize) !void {
++        const p = f.l2pf orelse return;
++        if (f.ranks[0].b.prefill) return;
++        try p.site(f.stream, @intCast(j), which);
+     }
+ 
+     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).
+diff --git a/zig/src/families/glm/cuda_forward_glue.zig b/zig/src/families/glm/cuda_forward_glue.zig
+new file mode 100644
+index 000000000..4c5d661fd
+--- /dev/null
++++ b/zig/src/families/glm/cuda_forward_glue.zig
+@@ -0,0 +1,72 @@
++//! The hyper-connection glue between sites: a prompt piece's (glueRows) and TF_GLM_OVN_GLUE_FUSE's decode glue.
++const glue = @import("cuda_glue.zig");
++const weights = @import("cuda_weights.zig");
++const prof = @import("cuda_prof.zig");
++const fw = @import("cuda_forward.zig");
++const Forward = fw.Forward;
++const Rank = fw.Rank;
++
++/// TF_GLM_OVN_GLUE_FUSE=N: a decode window of at most N rows (hc_partial8's, under 64) glues with hcGlue.
++pub fn fuses(f: *const Forward, rows: usize) bool {
++    const b = f.ranks[0].b;
++    return !b.prefill and b.x_alt != 0 and rows <= b.fuse_rows and rows < 64;
++}
++
++/// The residual's buffer: b.x, or b.x_alt after an odd number of fused glues.
++pub fn xAt(r: Rank, alt: bool) u64 {
++    return if (alt) r.b.x_alt else r.b.x;
++}
++
++/// hc_post of the gathered partials from xAt(alt) into the other buffer, then the next site's hc_pre: one kernel.
++pub fn fused(f: *const Forward, r: Rank, alt: bool, hc: weights.Hc, norm: glue.Norm, rows: usize) !void {
++    const stamp = prof.span(f.prof, f.stream, .glue);
++    defer stamp.end();
++    const c = &r.w.config;
++    const b = r.b;
++    if (b.x_alt == 0) return error.NoGlueBuffer; // every rank's buffers take the same knob
++    try glue.hcGlue(f.set(), f.stream, xAt(r, alt), xAt(r, !alt), b.gathered, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, b.hc_count, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc, r.w.share.world);
++}
++
++/// One piece's glue after a site: hc_post, then the next layer's hc_pre or (after the last layer) the stream mean.
++pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Forward.Site, lo: usize, hi: usize, g: u64) !void {
++    const stamp = prof.span(f.prof, f.stream, .glue);
++    defer stamp.end();
++    const c = &r.w.config;
++    const layers = r.w.layers;
++    if (site == .mixer) return postPre(f, r, layers[j].ffn_hc, layers[j].post_norm, lo, hi, g);
++    if (j + 1 < layers.len) return postPre(f, r, layers[j + 1].attn_hc, layers[j + 1].in_norm, lo, hi, g);
++    try postRows(f, r, lo, hi, g);
++    try glue.streamMean(f.set(), f.stream, r.b.x + lo * c.hc * c.hidden * 2, r.b.hidden + lo * c.hidden * 2, hi - lo, c.hidden, c.hc);
++}
++
++/// hc_post then hc_pre of rows lo..hi; TF_GLM_OVN_GLUE_ROW=N: one kernel (hcRow) for N rows or more.
++fn postPre(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, lo: usize, hi: usize, g: u64) !void {
++    if (f.m.glue_row == 0 or hi - lo < f.m.glue_row) {
++        try postRows(f, r, lo, hi, g);
++        return preRows(f, r, hc, norm, lo, hi);
++    }
++    const c = &r.w.config;
++    const b = r.b;
++    const S: usize = c.hc;
++    const D: usize = c.hidden;
++    try glue.hcRow(f.set(), f.stream, b.x + lo * S * D * 2, g, hc.fn_w, hc.base, hc.scale, norm, b.normed + lo * D * 2, b.xs + lo * (D / 64) * 4, b.post + lo * S * 4, b.comb + lo * S * S * 4, c.eps, c.hc_eps, c.sinkhorn, hi - lo, D, S, r.w.share.world);
++}
++
++/// hc_post of rows lo..hi from partials `g` [world][hi - lo][D] (a gathered room or a split one's own rows).
++fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64) !void {
++    const c = &r.w.config;
++    const b = r.b;
++    const S: usize = c.hc;
++    const D: usize = c.hidden;
++    const x = b.x + lo * S * D * 2;
++    try glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
++}
++
++/// forward._pre of rows lo..hi.
++fn preRows(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, lo: usize, hi: usize) !void {
++    const c = &r.w.config;
++    const b = r.b;
++    const S: usize = c.hc;
++    const D: usize = c.hidden;
++    try glue.hcPre(f.set(), f.stream, b.x + lo * S * D * 2, hc.fn_w, hc.base, hc.scale, norm, b.normed + lo * D * 2, b.xs + lo * (D / 64) * 4, b.post + lo * S * 4, b.comb + lo * S * S * 4, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, hi - lo, D, S);
++}
+diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index f4b268524..71c53f703 100644
+--- a/zig/src/families/glm/cuda_glue.zig
++++ b/zig/src/families/glm/cuda_glue.zig
+@@ -92,6 +92,24 @@ pub const Kernels = struct {
+     absorb_q8: cuda.Function,
+     expand_v8: cuda.Function,
+     router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
++    // TF_GLM_OVN_GLUE_FUSE (hcGlue), TF_GLM_OVN_GLUE_ROW (hcRow) and TF_GLM_OVN_PDL_EARLY's variants (Set.pdl_early)
++    hc_glue: cuda.Function,
++    hc_glue_f32w: cuda.Function,
++    hc_glue_pdl: cuda.Function,
++    hc_glue_f32w_pdl: cuda.Function,
++    hc_row: cuda.Function,
++    hc_row_f32w: cuda.Function,
++    hc_post_pdl: cuda.Function,
++    hc_partial8_pdl: cuda.Function,
++    hc_finish_pdl: cuda.Function,
++    hc_finish_f32w_pdl: cuda.Function,
++    router_tile_pdl: cuda.Function,
++    swiglu_512_pdl: cuda.Function,
++    swiglu_64_pdl: cuda.Function,
++    rmsnorm_4096_pdl: cuda.Function,
++    rmsnorm_1536_pdl: cuda.Function,
++    rmsnorm_512_pdl: cuda.Function,
++    rmsnorm_4096_f32w_pdl: cuda.Function,
+ 
+     pub fn load(m: cuda.Module) !Kernels {
+         return loadOvn(m, Mla.wanted());
+@@ -119,6 +137,16 @@ pub const Kernels = struct {
+         try k.chunks_32_fp8_fused.allowDynamicShared(chunksSmem(32));
+         return k;
+     }
++    /// MLA_FUSEMERGE: unset or 0 off; 1 fuses from latent.prompt_rows rows (prompt chunks); N > 1 from N rows.
++    pub fn read() error{BadOvnKnob}!Mla {
++        const fuse: usize = @intCast(try cuda.ovn.int("MLA_FUSEMERGE", 0));
++        return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC") };
++    }
++
++    /// Whether any knob whose kernels sit in glm_glue is set (MLA_FUSEMERGE, ABSORB_VEC).
++    pub fn wanted() bool {
++        return cuda.ovn.on("MLA_FUSEMERGE") or cuda.ovn.on("ABSORB_VEC");
++    }
+ };
+ 
+ /// An element-wise kernel's launch: a block of 256 columns, `rows` x the blocks to cover `d`.
+@@ -147,10 +175,12 @@ fn pow2(d: usize) i64 {
+ 
+ /// glue.rmsnorm: bf16(w * bf16(x / sqrt(mean(x^2) + eps))) into `out`, with `xs` each 64 outputs' fp32 sum.
+ pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, o_stride: usize, xs: ?u64, eps: f32, rows: usize, d: usize) !void {
++    const k = set.glue;
++    const e = set.pdl_early;
+     const f, const warps: u32 = switch (d) {
+-        4096 => .{ set.glue.rmsnorm_4096, 8 },
+-        1536 => .{ set.glue.rmsnorm_1536, 4 },
+-        512 => .{ set.glue.rmsnorm_512, 4 },
++        4096 => .{ if (e) k.rmsnorm_4096_pdl else k.rmsnorm_4096, 8 },
++        1536 => .{ if (e) k.rmsnorm_1536_pdl else k.rmsnorm_1536, 4 },
++        512 => .{ if (e) k.rmsnorm_512_pdl else k.rmsnorm_512, 4 },
+         else => return error.NoRmsnormWidth,
+     };
+     var a: cuda.Args = .{};
+@@ -174,7 +204,8 @@ pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm
+     if (d != 4096) return error.NoRmsnormWidth;
+     var a: cuda.Args = .{};
+     inline for (.{ x, i64of(x_stride), g, out, i64of(o_stride), xs orelse @as(u64, 0), eps, @as(c_int, @intFromBool(xs != null)) }) |v| a.add(v);
+-    try cuda.launch.launch(set.glue.rmsnorm_4096_f32w, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
++    const f = if (set.pdl_early) set.glue.rmsnorm_4096_f32w_pdl else set.glue.rmsnorm_4096_f32w;
++    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
+ }
+ 
+ fn cdiv(a: usize, b: usize) u32 {
+@@ -191,7 +222,9 @@ fn swigluBlock(w: usize) !usize {
+ /// glue.swiglu: [gate | up] -> bf16(bf16(silu(min(g, L))) * clip(u, -L, L)), 64-sums in `xs`.
+ pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: f32, rows: usize, w: usize) !void {
+     const block = try swigluBlock(w);
+-    const f, const threads: u32 = if (block == 512) .{ set.glue.swiglu_512, 128 } else .{ set.glue.swiglu_64, 64 };
++    const k = set.glue;
++    const e = set.pdl_early;
++    const f, const threads: u32 = if (block == 512) .{ if (e) k.swiglu_512_pdl else k.swiglu_512, 128 } else .{ if (e) k.swiglu_64_pdl else k.swiglu_64, 64 };
+     var a: cuda.Args = .{};
+     inline for (.{ gu, out, xs, limit, i64of(w) }) |v| a.add(v);
+     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(w / block) }, .block = .{ .x = threads } }, stream, &a);
+@@ -214,13 +247,12 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
+     if (d % (router_ks * 64) != 0) return error.RouterWidth; // the Python family's single-pass _router: no GLM width
+     var a: cuda.Args = .{};
+     inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
+-    if (x % 16 == 0 and x_stride % 8 == 0) { // rows on 16 bytes: cp.async tiles (decode's rows past m load as zeros)
+-        if (set.glue.router16) |f| if (m <= 16) { // TF_GLM_OVN_ROUTER16: 16-row tiles, each warp 8 experts
+-            try cuda.launch.launch(f, .{ .grid = .{ .x = 1, .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
+-            return sliceSum(set, stream, part, out, m * ne, router_ks, true);
+-        };
+-        try cuda.launch.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
+-    } else try cuda.launch.launch(set.glue.router_part, .{ .grid = .{ .x = cdiv(m, 16), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
++    if (x % 16 == 0 and x_stride % 8 == 0) { // rows on 16 bytes: 64-row tiles staged by cp.async (decode's rows past m load as zeros)
++        const f = if (set.pdl_early) set.glue.router_tile_pdl else set.glue.router_tile; // _pdl: launched dependent
++        try cuda.launch.launch(f, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .pdl = set.pdl_early }, stream, &a);
++    } else {
++        try cuda.launch.launch(set.glue.router_part, .{ .grid = .{ .x = cdiv(m, 16), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
++    }
+     try sliceSum(set, stream, part, out, m * ne, router_ks, true);
+ }
+ 
+@@ -254,14 +286,16 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
+     inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
+     // Decode windows (16 blocks a row) take each block's 8 steps at once; prompt rows 4 rows a 128-thread block.
+     if (rows < 64) {
+-        try cuda.launch.launch(set.glue.hc_partial8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
++        const p8 = if (set.pdl_early) set.glue.hc_partial8_pdl else set.glue.hc_partial8; // _pdl: launched dependent
++        try cuda.launch.launch(p8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 }, .pdl = set.pdl_early }, stream, &a);
+     } else {
+         a.add(i64of(rows));
+         try cuda.launch.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
+     }
++    const e = set.pdl_early;
+     const f, const w = switch (norm) {
+-        .bf16 => |p| .{ set.glue.hc_finish, p },
+-        .f32 => |p| .{ set.glue.hc_finish_f32w, p },
++        .bf16 => |p| .{ if (e) set.glue.hc_finish_pdl else set.glue.hc_finish, p },
++        .f32 => |p| .{ if (e) set.glue.hc_finish_f32w_pdl else set.glue.hc_finish_f32w, p },
+     };
+     var b: cuda.Args = .{};
+     inline for (.{ x, part, base, scale, w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
+@@ -273,7 +307,36 @@ pub fn hcPost(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u6
+     if (s != 4) return error.StreamsNotFour;
+     var a: cuda.Args = .{};
+     inline for (.{ x, xout, g, post, comb, i64of(rows * d), i64of(d), cint(world) }) |v| a.add(v);
+-    try rows8Launch(set.glue.hc_post, stream, &a, rows, d, .{ x, xout, g });
++    try rows8Launch(if (set.pdl_early) set.glue.hc_post_pdl else set.glue.hc_post, stream, &a, rows, d, .{ x, xout, g });
++}
++
++/// TF_GLM_OVN_GLUE_FUSE: hcPost from x into xout (never in place), hcPre on xout, one kernel; `count` u32 zeros a row.
++pub fn hcGlue(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, fn_w: u64, base: u64, scale: u64, norm: Norm, out: u64, xs: u64, post: u64, comb: u64, part: u64, count: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize, world: usize) !void {
++    if (d != 4096 or s != 4) return error.HcShape;
++    if (rows == 0 or rows >= 64 or x == xout) return error.HcGlueWindow;
++    inline for (.{ x, xout, g }) |p| if (p % 16 != 0) return error.RowsUnaligned;
++    const k = set.glue;
++    const e = set.pdl_early;
++    const f, const w = switch (norm) {
++        .bf16 => |p| .{ if (e) k.hc_glue_pdl else k.hc_glue, p },
++        .f32 => |p| .{ if (e) k.hc_glue_f32w_pdl else k.hc_glue_f32w, p },
++    };
++    var a: cuda.Args = .{};
++    inline for (.{ x, xout, g, i64of(rows * d), cint(world), fn_w, part, count, base, scale, w, out, xs, post, comb, eps, hc_eps, cint(iters) }) |v| a.add(v);
++    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 256 } }, stream, &a);
++}
++
++/// TF_GLM_OVN_GLUE_ROW: hcPost in place then hcPre of `rows` rows, one kernel of 4 rows a block, their bytes.
++pub fn hcRow(set: Set, stream: cuda.Stream, x: u64, g: u64, fn_w: u64, base: u64, scale: u64, norm: Norm, out: u64, xs: u64, post: u64, comb: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize, world: usize) !void {
++    if (d != 4096 or s != 4) return error.HcShape;
++    inline for (.{ x, g }) |p| if (p % 16 != 0) return error.RowsUnaligned;
++    const f, const w = switch (norm) {
++        .bf16 => |p| .{ set.glue.hc_row, p },
++        .f32 => |p| .{ set.glue.hc_row_f32w, p },
++    };
++    var a: cuda.Args = .{};
++    inline for (.{ x, g, i64of(rows * d), cint(world), fn_w, base, scale, w, out, xs, post, comb, eps, hc_eps, cint(iters), i64of(rows) }) |v| a.add(v);
++    try cuda.launch.launch(f, .{ .grid = .{ .x = cdiv(rows, 4) }, .block = .{ .x = 256 } }, stream, &a);
+ }
+ 
+ /// glue.rank_sum: out bf16 = partials summed rank 0 first, `me`'s from `own`, others' from `peers` in rank order.
+diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
+index 08ef66a12..2245384f7 100644
+--- a/zig/src/families/glm/cuda_shared.zig
++++ b/zig/src/families/glm/cuda_shared.zig
+@@ -48,7 +48,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di:
+             var s = b.kda;
+             s.p = b.kproj;
+             try kda_block.project(f.set(), f.stream, k, s, b.normed, c.hidden, rows);
+-            if (f.prefetch()) |p| try p.fork(f.stream, l.index, .o); // TF_GLM_L2PF: o read into L2 while the chains run
++            if (f.l2pfFor()) |p| try p.fork(f.stream, l.index, .o); // TF_GLM_L2PF: o read into L2 while the chains run
+             for (r.segs) |g| {
+                 const st = g.st;
+                 const cur = st.cur[li];
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index 9b7a2982a..85798b2ee 100644
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -175,6 +175,10 @@ pub const Buffers = struct {
+     mcat: u64, // bf16 [rows][2 dims]: [enorm(me) | hnorm(hin)]
+     mx: u64, // bf16 [rows][dims]: its stream
+     part: u64, // fp32 [rows][dims]: this rank's partial rows a split exchange sends from
++    x_alt: u64 = 0, // TF_GLM_OVN_GLUE_FUSE (decode buffers): the residual's second buffer, bf16 [rows][4][dims]
++    hc_count: u64 = 0, // and hcGlue's blocks counted in, u32 a row (zero between launches)
++    fuse_rows: usize = 0, // TF_GLM_OVN_GLUE_FUSE=N: the most rows a fused window takes (0: off)
++    alt: ?cuda.DeviceBuffer = null, // x_alt and hc_count's own allocation: the arena's sizes stay as they are
+ 
+     pub fn init(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize) !Buffers {
+         return make(d, w, rows, prefill, capacity, rows, null);
+@@ -332,14 +336,35 @@ pub const Buffers = struct {
+         if (twin) |of| {
+             var t = of.*;
+             t.arena = out.arena;
++            t.x_alt = 0;
++            t.alt = null; // a twin owns no fused-glue buffer (prompt buffers have none)
+             inline for (@typeInfo(@TypeOf(twin_at)).@"struct".field_names) |f| @field(t, f) = @field(out, f);
+             return t;
+         }
++        if (!prefill) out.glueAlt(d, S * D * 2) catch |err| {
++            out.arena.buf.free();
++            return err;
++        };
+         return out;
+     }
+ 
++    /// TF_GLM_OVN_GLUE_FUSE=N (N > 0): x_alt and hc_count for hcGlue, zeroed, in their own allocation (none when off).
++    fn glueAlt(b: *Buffers, d: *const cuda.Driver, row_bytes: usize) !void {
++        const n = try cuda.ovn.int("GLUE_FUSE", 0);
++        if (n == 0) return;
++        const at = std.mem.alignForward(usize, b.rows * row_bytes, 256);
++        var buf = try cuda.DeviceBuffer.alloc(d, at + b.rows * 4);
++        errdefer buf.free();
++        try buf.fill8(0, null);
++        b.x_alt = buf.ptr;
++        b.hc_count = buf.ptr + at;
++        b.fuse_rows = @intCast(n);
++        b.alt = buf;
++    }
++
+     pub fn deinit(b: *Buffers) void {
+         b.arena.buf.free();
++        if (b.alt) |*x| x.free();
+         b.* = undefined;
+     }
+ };
