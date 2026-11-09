@@ -22,6 +22,9 @@ Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carrie
   fleet orchestration stays outside this repo. It adds the recipe's knob set (the ones the
   patches implement) unless `XENV` already names a knob, so an A/B arm can turn any of them
   off without editing the script.
+- `scripts/streams.py <port> <n> --kind prose|code` is the measurement instrument: N concurrent
+  streams against the serve, reporting per-stream and aggregate decode plus each reply's sha256.
+  A run that does not cover 1, 2, 4, 6 and 8 streams is not a verdict on a change.
 - `PORT-LEDGER.md` records what is landed, what is parked and why, and the gates each patch
   was proved with.
 
