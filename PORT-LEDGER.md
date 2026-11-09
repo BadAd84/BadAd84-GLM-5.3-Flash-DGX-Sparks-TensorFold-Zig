@@ -59,8 +59,11 @@ The gate column above is wrong for every family patch. `check-native-cuda-host` 
 be green in those columns and still break `zig build test-cuda-host` - the step the pin
 itself passes (rc=0 on a clean 9c9bf542 checkout).
 
-Measured on pin+0001..0023 with the repairs applied: 9 failing test binaries, 27 named
-test failures the pin does not have. The classes, each a real defect in the landed set:
+Measured on pin+0001..0023: 9 failing test binaries, 27 named test failures the pin
+does not have. Patch 0024 repairs most of them; measured on pin+0001..0024: 7 binaries,
+11 named failures. The pin itself passes test-cuda-host (rc=0) on a clean 9c9bf542
+checkout, and `glm_snapshot_host.zig` / `copy_drafts_cuda_test.zig` are both in its
+gate, so these are regressions of the ports, not pre-existing upstream red. The classes, each a real defect in the landed set:
 
 - 0001: the registry has no `fake`, so every knob test that drives a knob fails.
 - 0003: `tileLinears` lost its `padKdaInputs` call in the port (the pad never ran), and
@@ -75,12 +78,14 @@ test failures the pin does not have. The classes, each a real defect in the land
   `shared_copy_width`, which the port deliberately left out (unported levers).
 - 0022: `prefillStep` moved to `cuda_lanes_step.zig` and its `Lanes` shim was missing.
 
-Repairs for all of the above are written and compile clean
-(`work/scratch/gate-repairs.patch`, 305 lines, 18 files) but they are NOT yet landed
-into the individual patch files. Still open after them: the `copy_drafts_cuda_test`
-suite (7), `cuda_lanes_test`'s knob assertions (4), `cuda_kv8_test`, `cuda_mla_ovn_test`,
-`cuda_onepass`, `cuda_zero_budget` (2), `draft_sources_cuda_test`, and the snapshot
-TF_KV_SHARE adapter test.
+Patch 0024 landed those repairs as one corrective patch with the owning patch named
+per hunk. Still open after it (11 named failures): `copy_drafts_cuda_test` (2),
+`cuda_lanes_test`'s knob assertions (3: DEPTH_FULL/SHARED_COPY, SHARED_DRAFTS,
+WIN_FREE), `cuda_kv8_test`, `cuda_mla_ovn_test`, `cuda_onepass`, `cuda_zero_budget`,
+`draft_sources_cuda_test`, `glm_snapshot_host`'s TF_KV_SHARE adapter test, and the
+warm-serve plumbing test (0014's `warmQuiet` never reaches the host: the pin's
+`cuda_startup_phase.serve` hardcodes the Nemotron constant, so TF_GLM_OVN_REPLY_PREFILL's
+wait is inert in production until that wiring is carried through).
 
 ## What this means
 
