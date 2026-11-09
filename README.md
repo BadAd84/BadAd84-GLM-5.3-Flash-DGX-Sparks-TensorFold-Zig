@@ -19,9 +19,9 @@ Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carrie
   `tar -C <work-dir>/tree --exclude .git -cf <work-dir>/src.tar .`
 - `scripts/serve.sh <rank> <parallel> [ctx]` boots one rank of the serve from that image. It
   is rank-local by design: rank, world size and the NCCL bootstrap address are parameters, so
-  fleet orchestration stays outside this repo. It adds the recipe's knob set (the ones the
-  patches implement) unless `XENV` already names a knob, so an A/B arm can turn any of them
-  off without editing the script.
+  fleet orchestration stays outside this repo. The recipe's knob set is opt-in (`KNOBS=measured`), because this stack has
+  not been A/B'd here yet and the rule is default-off until it is; any knob can still be
+  overridden through `XENV`.
 - `scripts/streams.py <port> <n> --kind prose|code` is the measurement instrument: N concurrent
   streams against the serve, reporting per-stream and aggregate decode plus each reply's sha256.
   A run that does not cover 1, 2, 4, 6 and 8 streams is not a verdict on a change.

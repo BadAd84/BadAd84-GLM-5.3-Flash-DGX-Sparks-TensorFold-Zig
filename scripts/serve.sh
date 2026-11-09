@@ -13,7 +13,7 @@
 #   MODEL     model directory inside the container (default the recipe's EXL3 4bpw checkpoint)
 #   RES       memory reserve GiB (default: 12.5 at P1, 14.5 at P2, 13.0 at P4, 6.5 above)
 #   XSERVE    extra serve arguments; XENV extra -e arguments
-#   NOKN     1 skips the recipe's knob set (an A/B arm sets its own)
+#   KNOBS    off (default), measured or all: which of the recipe's knobs to enable
 #
 # The knob set is the one this recipe's patches implement, each of which was proved default-off
 # and only becomes the recipe's default after its own A/B; NODEFS-style overrides are per knob
@@ -50,11 +50,18 @@ DEFS="TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_ONE_CHUNK=1 TF_GLM_OVN_KEP
  TF_GLM_OVN_REPLY_PREFILL=1 TF_GLM_OVN_MLA_FUSEMERGE=1 TF_GLM_OVN_GLUE_FUSE=1
  TF_GLM_OVN_INDEX_SCHED=1 TF_GLM_OVN_POOLS32=1 TF_GLM_OVN_INDEX_REGROUP=1
  TF_GLM_OVN_MM_WIDE=1 TF_GLM_OVN_SPARSE_ONEPASS=1 TF_GLM_OVN_ROUTER_WARM=1"
-if [[ "${NOKN:-0}" != 1 ]]; then
-  for kv in $DEFS; do
-    [[ " ${XENV:-} " == *" -e ${kv%%=*}="* ]] || XENV="${XENV:-} -e $kv"
-  done
-fi
+# Off by default: this recipe's own stack has not been A/B'd at 1/2/4/6/8 streams yet, and the
+# rule here is that a knob is default-off until it is. KNOBS=measured opts into the set the
+# source stack measured (ai-engine serve4.sh def17, production's probe, ABBA, every digest
+# equal); KNOBS=all is the same list for an arm that means to test them all.
+case "${KNOBS:-off}" in
+  measured|all)
+    for kv in $DEFS; do
+      [[ " ${XENV:-} " == *" -e ${kv%%=*}="* ]] || XENV="${XENV:-} -e $kv"
+    done ;;
+  off) ;;
+  *) echo "KNOBS must be off, measured or all" >&2; exit 2 ;;
+esac
 read -r -a XE <<< "${XENV:-}"; ENV+=("${XE[@]}")
 
 RUN=(--gpus all --ipc=host --network host --shm-size 16g --cap-add IPC_LOCK
