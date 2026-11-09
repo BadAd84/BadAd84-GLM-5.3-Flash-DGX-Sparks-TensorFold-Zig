@@ -1,2 +1,4 @@
 # patch files are applied by git apply, which needs LF to match context
 *.patch text eol=lf
+# scripts run under bash on the Sparks; CRLF breaks their shebang
+*.sh text eol=lf
