@@ -1,6 +1,6 @@
 # PORT-LEDGER.md - engine patches ported from ai-engine into this recipe
 
-Current state only. The applied stack is `patches/engine/0001` .. `0021`, applied in
+Current state only. The applied stack is `patches/engine/0001` .. `0022`, applied in
 order onto the pin in `scripts/config.sh` (9c9bf542cc87ec21f44cee720fc4f1c056f8c905).
 Every landed patch was proven by a fresh application in order onto a clean pin
 checkout, with these gates: `zig build check-native-cuda-host`, whole-tree
@@ -32,6 +32,7 @@ patch touching `.cu`.
 | 0019 | TF_GLM_OVN_KDA_CHUNKED (production chunked KDA prompt kernel) | f2e093ca9 | compile, fmt, lean, test-lane-api-host, fatbins |
 | 0020 | TF_GLM_OVN_MM_WIDE / _SWIGLU_REDUCE / _MM_CLUSTER / _MM_DECTILE (bf16 matmul) | cbf94fde5 | compile, fmt, lean, test-lane-api-host, fatbins |
 | 0021 | TF_GLM_OVN_MLA_FUSEMERGE / _ABSORB_VEC / _KVB8 (MLA attention) | 436970264 | compile, fmt, lean, test-lane-api-host, fatbins |
+| 0022 | TF_GLM_OVN_GLUE_FUSE / _GLUE_ROW / _PDL_EARLY (glue fuse) | 3423859e7 | compile, fmt, lean, test-lane-api-host, fatbins |
 
 ## Parked - blocked on a structural port, not a knob
 
@@ -45,7 +46,6 @@ than grafting a knob.
 | 1a89c3e82 PK8 (pooled keys as production kv8 rows) | touches cuda_disk_image, cuda_dsa_seg, cuda_index_shard, native/cuda_glm_disk: none exist at the pin. Its cuda_state hunk conflicts. |
 | 08330f951 DISK_BCAST / _DISK_PUMP / _SNAP_GATHER / _DROP_MTP | needs cuda_disk_image.zig and cuda_disk_ranks.zig (absent at the pin); rows_store/rows_write hunks conflict. |
 | 3cceb587d PEER_FIRST / _FRONTS / _SIDE_PRIO | needs cuda_forward_fronts.zig / cuda_forward_pieces.zig and rewrites cuda_forward's peer paths. |
-| 3423859e7 GLUE_FUSE / _GLUE_ROW / _PDL_EARLY | adds cuda_forward_glue.zig and changes post()'s signature at the pin's own glue sites. |
 | c920d6e5a ROCE_RAILS / _LINK1 / _ROCE_ILP / _ROCE_CPU | needs cuda/roce_rails.zig and rewrites roce.zig's rail setup. |
 | e95d31f81 ITEMS (16-pair item plan) | needs kernels/cuda/exl3_ovn.cuh and rewrites exl3_experts' dispatch. |
 
