@@ -3,14 +3,37 @@
 OTS recipe for serving GLM-5.3-Flash (Mia-AiLab EXL3 4bpw checkpoint) with the TensorFold
 Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carries a public mirror.
 
-- `scripts/config.sh` pins the engine commit the recipe builds against.
-- `patches/engine/` holds numbered engine patches, applied in filename order at image build.
-  Each patch is one change, default-off or behaviour-identical until A/B'd at every stream
-  count, with its measurement receipt in the header. A proven patch graduates to the
-  `BadAd84/TensorFold` fork as a single-commit branch and goes upstream by PR; after it merges,
-  the patch here is deleted and the pin advances past the merged commit.
-- The `candidates/` directory holds unproven leads not in the applied stack.
+## Layout
 
-Skeleton created at the reorganisation (2026-11-08); the OTS series re-cut from the ai-engine
-trunk lands here as the numbered patches, with the tree-identity gate against `ovn-up` as the
-first check.
+- `scripts/config.sh` pins the engine commit the recipe builds against (`TF_REF`).
+- `scripts/apply.sh <work-dir> [engine-src]` builds the tree: clones or copies the engine,
+  checks out the pin, and applies every patch in `patches/engine/` in filename order. It
+  refuses a tree that is not at the pin and prints which patches were already applied.
+- `patches/engine/` holds the numbered engine patches. Each is one change, default-off or
+  behaviour-identical until A/B'd at every stream count, with its measurement receipt in the
+  header. A proven patch graduates to the `BadAd84/TensorFold` fork as a single-commit branch
+  and goes upstream by PR; after it merges, the patch here is deleted and the pin advances.
+- `PORT-LEDGER.md` records what is landed, what is parked and why, and the gates each patch
+  was proved with.
+
+## Gates
+
+Run these on the applied tree, in this order. `test-cuda-host` is the gate that matters for
+any patch touching the GLM family: `check-native-cuda-host` and `test-lane-api-host` do not
+compile the family's host tests, so a patch can be green in them and still break the suite.
+
+    zig build check-native-cuda-host
+    zig build test-cuda-host
+    zig fmt --check zig/
+    python tools/zig/lean_check.py            # base and head lists, diffed with lean_new.py
+
+## State
+
+31 patches applied, all gates green on a fresh application onto the pin: compile, whole-tree
+fmt, lean base-versus-head 0 new, and `test-cuda-host` at rc=0 with no named failures, which
+is what a clean pin checkout gives.
+
+The OTS series is not fully re-cut: the committed patch set covers the knobs that plug into
+the pin's own structures, and `PORT-LEDGER.md` lists the commits parked on modules the pin
+does not carry (`cuda_disk_image`, `cuda_forward_fronts`, `roce_rails`, `exl3_ovn`, the
+32060d706 era layout) plus the A/B each still needs.
