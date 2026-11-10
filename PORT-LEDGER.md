@@ -62,8 +62,10 @@ of the gitdir link; the worktree gitfile carried a hidden attribute that had to 
 to edit it). Two were deferred with the reason measured:
 
 - `ds4.1-flash-dev`: excluded by the owner, the serve is in use on spark4+5.
-- `glm5.3-flash-dev`: held by a live omp session (pid 17964, cwd in the tree); renaming
-  would break that session. Rename it when that session closes.
+- `glm5.3-flash-dev`: initially held by an orphaned omp worker daemon (pid 17964, cwd in the
+  tree, parent gone); the owner confirmed nothing should be running there, the daemon was
+  stopped, and the rename completed. `git status`, the remote and the worktree list all
+  verified on the renamed clone; a handle sweep found zero stale holds on all three old names.
 
 No local-path references broke: the agent config and the ai-engine docs reference the repo
 NAME and the spark-side clones, which were not renamed. The seven ai-engine research docs
