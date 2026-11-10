@@ -52,6 +52,23 @@ than grafting a knob.
 
 | PRX / fill-slice family, SEG_KDA/SEG_DSA, KDA_PIECES | sit on 32060d706's module layout: prompt_pieces, lanes_fill, lanes_shared, slices, and the Buffers.seg tables (cuda_kda_seg, cuda_dsa_seg, cuda_commit_seg), none of which the pin has. Porting that era is a project with its own A/B, not a patch. |
 
+## Local clone renames (2026-11-09)
+
+The local Windows clones were renamed to match their Gitea repos: `glm5.3-flash-dev` to
+`GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP3`, `qwen3.8-flash-next-dev` to
+`Qwen3.8-Flash-Next-DGX-Sparks-TensorFold-Zig`, and `tf-levers-sign` to
+`tensorfold-levers124` (its internal `work/0050` worktree repaired by repointing both sides
+of the gitdir link; the worktree gitfile carried a hidden attribute that had to be cleared
+to edit it). Two were deferred with the reason measured:
+
+- `ds4.1-flash-dev`: excluded by the owner, the serve is in use on spark4+5.
+- `glm5.3-flash-dev`: held by a live omp session (pid 17964, cwd in the tree); renaming
+  would break that session. Rename it when that session closes.
+
+No local-path references broke: the agent config and the ai-engine docs reference the repo
+NAME and the spark-side clones, which were not renamed. The seven ai-engine research docs
+that referenced the local Windows path were updated and pushed (394cc988).
+
 ## Gate correction: test-cuda-host is the gate for family patches (measured 2026-11-09)
 
 The gate column above is wrong for every family patch. `check-native-cuda-host` and
