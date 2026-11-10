@@ -1,0 +1,24 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: pass the rows argument glm_tap_tests' prefillChunk lost in the port
+
+tf-cuda-test failed to compile on pin+0001..0031 (found by the image build,
+after 0032/0033): glm_tap_tests.zig:70 calls prefillChunk with the six-argument
+form from before 0007 introduced the rows parameter; the engine takes
+(part, start, rows, len, from, cancel, marks) - the same shape the engine's own
+callers use (cuda_engine.zig:364, cuda_follow.zig:252). The test's loop already
+computes rows two lines above, so the call passes it.
+
+Gates: the image build glm53-zig:9c9bf54 (fatbins, install, native, sm_121a)
+green on spark4, which compiles tf-cuda-test.
+diff --git a/zig/tests/cuda/glm_tap_tests.zig b/zig/tests/cuda/glm_tap_tests.zig
+--- a/zig/tests/cuda/glm_tap_tests.zig
++++ b/zig/tests/cuda/glm_tap_tests.zig
+@@ -67,7 +67,7 @@
+             while (true) : (at += C) {
+                 const rows = @min(len - at, C);
+                 const part = ids[at..@min(len, at + C + 1)];
+-                const done = e.prefillChunk(part, at, len, null, null, null) catch |err| {
++                const done = e.prefillChunk(part, at, rows, len, null, null, null) catch |err| {
+                     std.debug.print("FAIL tap: {s} prompt {d} chunk at {d}: {s}\n", .{ v.name, len, at, @errorName(err) });
+                     return err;
+                 };

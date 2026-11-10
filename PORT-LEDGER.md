@@ -132,3 +132,36 @@ glm_top1), so each is a structural port with its own A/B, not a knob graft.
 
 The production serve (spark1-3, glm53-flash-tf) still runs the Python TensorFold
 stack with the full OTS patch set; nothing here changes it.
+
+## The image build is a gate too (2026-11-10)
+
+The first real image build of this stack (`scripts/build-image.sh 9c9bf54`, the
+`zig build fatbins install native` step inside the PyTorch CUDA base) failed on
+pin+0001..0031 with defects none of the repo gates reach, because
+`check-native-cuda-host`, `test-cuda-host` and `test-lane-api-host` never
+resolve fatbin imports or compile the full `tf-cuda-test` graph:
+
+- `zig/build/cuda_kernels.zig` had no entries for four kernels the patch set
+  added, so the native exe and tf-cuda-test failed with
+  `failed opening "fatbin_glm_kda_chunk": FileNotFound` and the same for
+  `fatbin_glm_onepass`. 0008, 0016, 0017 and 0019 added the .cu files and the
+  `kernels.zig` embeds but no catalog entries, and 0019 also references
+  `fatbin_glm_l2pf` whose `.cu` was never ported at all.
+- `glm_draft_onepass_tests.zig:80` used a capture `|*r, v|` that shadows the
+  function's rng binding, failing the tf-cuda-test compile.
+- `glm_tap_tests.zig:70` called `prefillChunk` with the six-argument form from
+  before 0007 added the `rows` parameter; the engine takes
+  `(part, start, rows, len, from, cancel, marks)`, the shape its own callers
+  use (cuda_engine.zig:364, cuda_follow.zig:252). The test loop computes
+  `rows` two lines above, so the call passes it.
+
+Three patches close them: **0032** (the four catalog entries with the flags of
+their source commits f2e093ca9, f2ffea045, a63e56649, plus `glm_l2pf.cu`
+ported verbatim from ai-engine f2e093ca9, blob 98cc3098), **0033** (the
+capture renamed to `out`) and **0034** (the tap test's `prefillChunk` call
+passes the `rows` argument). All verified with `git apply --check` in order
+against a fresh pin+0001..0031 checkout. Standing rule: any patch that adds a `.cu` or a
+`kernels.zig` embed MUST also add the `cuda_kernels.zig` entry, and any change
+to a family signature MUST be checked against the full `zig/tests/cuda/`
+graph, not just the test-cuda-host subset - the image build is the only gate
+that runs both today.

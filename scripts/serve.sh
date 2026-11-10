@@ -67,6 +67,7 @@ read -r -a XE <<< "${XENV:-}"; ENV+=("${XE[@]}")
 RUN=(--gpus all --ipc=host --network host --shm-size 16g --cap-add IPC_LOCK
  --ulimit memlock=-1 --ulimit stack=67108864
  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" -v "$(dirname "$MODEL"):$(dirname "$MODEL"):ro")
+[[ $WORLD > 1 ]] && RUN+=(--device /dev/infiniband)
 
 SERVE=(tensorfold-native serve "$MODEL" --context "$CTX" --parallel "$P" --max-tokens 32768
  --top-k 20 --backend cuda "${KVFLAG[@]}")
