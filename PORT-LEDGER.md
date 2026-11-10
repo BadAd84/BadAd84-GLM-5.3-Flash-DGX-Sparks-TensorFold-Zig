@@ -165,3 +165,31 @@ against a fresh pin+0001..0031 checkout. Standing rule: any patch that adds a `.
 to a family signature MUST be checked against the full `zig/tests/cuda/`
 graph, not just the test-cuda-host subset - the image build is the only gate
 that runs both today.
+
+## First boot on spark1-3 (measured 2026-11-10)
+
+The stack serves: TP=3 on spark1-3, NCCL over the RoCE rails (8 connections a peer), the 163.6 GiB
+checkpoint digested in ~37 s, the DFlash2 drafter loaded, `serving GLM-5.3-Flash-EXL3 at
+http://0.0.0.0:8300/v1`, and `/v1/models` returns 200. The operating requirements measured on the way:
+
+- **Detached launch only.** serve.sh starts the container with `docker run -d`: an attached run ties the
+  engine's stdout to the launching shell, and the moment that shell ends the pipe breaks and the ranks
+  stop (`rank 0: rank N stopped ...`). With -d the serve outlives every session; logs are
+  `docker logs glm53-zig-r<rank>`.
+- **Model and drafter are container paths** (`/root/.cache/huggingface/.../snapshots/<rev>`): the HF
+  cache is mounted whole at /root/.cache/huggingface so the snapshots' blob symlinks resolve. A host-path
+  model with a snapshot-dir bind fails on `tokenizer.json` (dangling symlinks).
+- **Rank mapping is r0 spark1, r1 spark2, r2 spark3** (host = spark(rank+1)). Rank 1 on the head put two
+  ranks on one GB10 and NCCL refused with `Multiple Ranks are using the same GPU/Partition`.
+- **Production and BOTH watchdogs must be stopped for a Zig window.** The GLM watchdog restarts the
+  production stack after its down limit; that engine holds ~83 GiB of the GPU and the Zig ranks then fail
+  `the checkpoint's 61.3 GiB of weights do not fit ...` (this is what the production doc's
+  "watchdogs start production under the stuck boot" warning looks like from this side).
+- **A kernel symbol can be missing from the image without any repo gate noticing**: the sampling contract
+  requests `tf_glm_top1_sums`; the port kept only the pre-sums `glm_top1_row`. 0035 ports the template and
+  the kernel. Any contract symbol must exist in a compiled .cu/.cuh, or the boot dies at
+  `cuModuleGetFunction: CUDA_ERROR_NOT_FOUND`.
+
+Open: rank 0 raises `PromptTooLong` after ~8-10 minutes idle with no requests and stops the TP=3
+ensemble (`rank 0: rank N stopped (PromptTooLong)`); the workers stay up, so rank 0 is the raiser. The
+clean pin (no patches) is being measured under the same idle window to split upstream from port.

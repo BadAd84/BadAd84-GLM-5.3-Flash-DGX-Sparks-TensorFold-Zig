@@ -17,9 +17,12 @@ Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carrie
   Zig, compiling the applied tree for `sm_121a` into `/opt/tensorfold` (binaries and fatbins
   only; weights and launchers come from the serve config). Pack the tree first:
   `tar -C <work-dir>/tree --exclude .git -cf <work-dir>/src.tar .`
-- `scripts/serve.sh <rank> <parallel> [ctx]` boots one rank of the serve from that image. It
-  is rank-local by design: rank, world size and the NCCL bootstrap address are parameters, so
-  fleet orchestration stays outside this repo. The recipe's knob set is opt-in (`KNOBS=measured`), because this stack has
+- `scripts/serve.sh <rank> <parallel> [ctx]` boots one rank of the serve from that image, detached
+  (`docker run -d`; logs via `docker logs glm53-zig-r<rank>`). It is rank-local by design: rank, world
+  size and the NCCL bootstrap address are parameters. `scripts/zig-tp3.sh P [CTX]` boots the whole
+  TP=3 on spark1-3 from the head (r0 spark1, r1 spark2, r2 spark3) and waits for `/v1/models`;
+  `scripts/zig-tp3-stop.sh` stops all three. Production and both GLM watchdogs must be stopped for a
+  window (the watchdog restarts production under the boot). The recipe's knob set is opt-in (`KNOBS=measured`), because this stack has
   not been A/B'd here yet and the rule is default-off until it is; any knob can still be
   overridden through `XENV`.
 - `scripts/streams.py <port> <n> --kind prose|code` is the measurement instrument: N concurrent
