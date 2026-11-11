@@ -65,7 +65,7 @@ stack runs without any of them, and that is the parity gap to close:
 
 | knob | production value | tier | what it is |
 |---|---|---|
-| `TF_GLM_MULTI_WINDOW` | `32` | era | several decode windows in flight |
+| `TF_GLM_MULTI_WINDOW` | `32` | python | several decode windows in flight (the era tree names it only in a comment) |
 | `TF_GLM_DRAFT_WIDE` | `2176:prompt` | python | the drafter's wide prompt window |
 | `TF_GLM_L2PF` | `1` | L2 weight prefetch beside decode windows |
 | `TF_GLM_INDEXER_SHARD` | `prefill` | python | the indexer's sharded prefill |
@@ -84,6 +84,10 @@ stack runs without any of them, and that is the parity gap to close:
 | `KV_POOL_GIB` | `31` | python | KV pool at boot |
 | `DISPLAY_KV_MIB` / `DISPLAY_KV_BACKEND` | `2032` / `dispram` | python | the display-KV overlay (absent at the pin) |
 | `SPILL_GIB` | `120` | python | the spill tier (the pin has `--spill-gib`/`--snapshot-dir` only) |
+
+Also measured: the prompt cache is NOT part of the gap. The pin's serve already exposes `--prompt-cache-gib`
+and `--prompt-cache-disk`, and our boots log a 16 GiB prompt cache, so both engines keep prompt states; the
+P1 decode difference is in the decode-path knobs, not in cache reuse.
 
 Tiers, by exact-name grep of the clean pin and the newer era tree (`ai-engine` fair-base): **pin** = the
 pinned upstream already implements it, so it is an env switch today; **era** = absent at the pin but
