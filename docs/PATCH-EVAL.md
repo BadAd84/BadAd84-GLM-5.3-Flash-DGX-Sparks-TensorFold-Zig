@@ -36,6 +36,22 @@ Each arm: `git clone --shared` the parity tree, apply the fixes + the block, `ta
 `ai-build.sh`-style build on spark1 (`build-image.sh`), distribute spark1 -> spark2/3, boot and bench.
 One arm is roughly 20 minutes of build plus 15 of bench.
 
+## Phase 1 result (clean pin, drafts on)
+
+| P | clean pin, drafts on | clean pin, drafts off | delta | 39 patches, drafts on |
+|---|---:|---:|---:|---:|
+| 1 | 52.36 | 49.69 | +5.4% | 51.28 |
+| 2 | 58.41 | 54.72 | +6.7% | 59.46 |
+| 4 | 72.17 | 72.34 | -0.2% | 81.42 |
+| 6 | 95.18 | 90.77 | +4.9% | 108.05 |
+| 8 | 115.17 | 109.35 | +5.3% | 134.45 |
+
+The drafter is worth 5 to 7 percent except at four streams, and every digest stays `3ec88b6418f7`, so
+drafts on is bit-exact. Against this baseline the 39 patches add nothing at one and two streams and
++12.9% and +16.7% at four and eight: the patch value sits in the concurrency path, exactly where the
+shared-round and prefill work lives. Production's 83.43 at one stream is still 59% above the clean pin,
+so phase 2's env is the remaining low-stream lever.
+
 ## State
 
 Phase 1 (clean pin, drafts on) = the `pin-drafts` cell. Phase 2 (env batches on the pin) =
