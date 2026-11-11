@@ -31,6 +31,21 @@ Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carrie
 - `PORT-LEDGER.md` records what is landed, what is parked and why, and the gates each patch
   was proved with.
 
+## Patch packages
+
+- **Everything external arrives as .patch files (owner 2026-11-11).** A contributor's branch, an upstream PR's
+  commits or our own delta against a pin is carried as numbered `.patch` files in a package under ``patches/` and `candidates/``, applied to
+  a pristine checkout at a recorded base sha. Each package carries `RECORD.md` (repository, branch, sha, the base it
+  applies to, and whether we edited the text), `SHA256SUMS`, and `apply.sh` whose `--check` writes nothing. Someone
+  else's commits come from `git format-patch` verbatim, ours from `git diff`; never merge, rebase or cherry-pick into
+  the base tree, and never edit it in place, so the gates and any A/B run against upstream's own source. A measurement
+  taken on a patched tree names the base sha and the patches applied.
+
+- `scripts/check-patch-packages.sh` - every package dir that carries `.patch` files (walked to depth 3 under the
+  roots in `scripts/patch-packages.list`) has `RECORD.md` and `SHA256SUMS`, and the hashes match. Packages written
+  before the rule are listed in `scripts/patch-packages.allow` and skipped; `--strict` shows that debt, and each is
+  brought up to the rule the next time it is touched.
+
 ## Gates
 
 Run these on the applied tree, in this order. `test-cuda-host` is the gate that matters for
