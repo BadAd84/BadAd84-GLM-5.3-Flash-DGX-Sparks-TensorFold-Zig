@@ -56,29 +56,32 @@ Read from production's own launcher env (`~/v110ots.env` and `start-tp3.sh` on s
 and its container environment. None of these are in serve.sh's DEFS, so with `KNOBS=off` the Zig
 stack runs without any of them, and that is the parity gap to close:
 
-| knob | production value | what it is |
+| knob | production value | tier | what it is |
 |---|---|---|
-| `TF_GLM_MULTI_WINDOW` | `32` | several decode windows in flight |
-| `TF_GLM_DRAFT_WIDE` | `2176:prompt` | the drafter's wide prompt window |
+| `TF_GLM_MULTI_WINDOW` | `32` | era | several decode windows in flight |
+| `TF_GLM_DRAFT_WIDE` | `2176:prompt` | python | the drafter's wide prompt window |
 | `TF_GLM_L2PF` | `1` | L2 weight prefetch beside decode windows |
-| `TF_GLM_INDEXER_SHARD` | `prefill` | the indexer's sharded prefill |
-| `TF_GLM_PREFILL_OVERLAP` | `2` | overlapping prefill work |
+| `TF_GLM_INDEXER_SHARD` | `prefill` | python | the indexer's sharded prefill |
+| `TF_GLM_PREFILL_OVERLAP` | `2` | python | overlapping prefill work |
 | `TF_GLM_EXL3_LOADS` | `nc` | EXL3 load path |
 | `TF_GLM_EXL3_DEC_ORDER` | `1` | decode order |
-| `TF_GLM_EXPERT_ROTATE` | `10,16,16` | expert rotation per rank |
-| `TF_GLM_POOLED_PACK` | `2` | pooled packing |
-| `TF_GLM_KEEP_PER_CHAT` | `2` | kept states per chat |
-| `TF_GLM_KEPT_BYTES_GIB` | `8` | kept-state budget |
-| `TF_GLM_KV_SHARD` | `1` | KV sharding across ranks |
-| `TF_GLM_CACHE_ENTRIES` | `96` | prompt-cache entries |
-| `TF_GLM_FILL_FAST_MS` | `400` | fill scheduling |
+| `TF_GLM_EXPERT_ROTATE` | `10,16,16` | era | expert rotation per rank |
+| `TF_GLM_POOLED_PACK` | `2` | python | pooled packing |
+| `TF_GLM_KEEP_PER_CHAT` | `2` | python | kept states per chat |
+| `TF_GLM_KEPT_BYTES_GIB` | `8` | python | kept-state budget |
+| `TF_GLM_KV_SHARD` | `1` | python | KV sharding across ranks |
+| `TF_GLM_CACHE_ENTRIES` | `96` | python | prompt-cache entries |
+| `TF_GLM_FILL_FAST_MS` | `400` | era | fill scheduling |
 | `TF_GLM_PREFILL_ROWS` / `TF_GLM_FILL_ROWS` | `4096` | prompt pass rows |
-| `TF_GLM_STREAM_SMOOTH` | `0` | stream smoothing off |
-| `KV_POOL_GIB` | `31` | KV pool at boot |
-| `DISPLAY_KV_MIB` / `DISPLAY_KV_BACKEND` | `2032` / `dispram` | the display-KV overlay (absent at the pin) |
-| `SPILL_GIB` | `120` | the spill tier (the pin has `--spill-gib`/`--snapshot-dir` only) |
+| `TF_GLM_STREAM_SMOOTH` | `0` | python | stream smoothing off |
+| `KV_POOL_GIB` | `31` | python | KV pool at boot |
+| `DISPLAY_KV_MIB` / `DISPLAY_KV_BACKEND` | `2032` / `dispram` | python | the display-KV overlay (absent at the pin) |
+| `SPILL_GIB` | `120` | python | the spill tier (the pin has `--spill-gib`/`--snapshot-dir` only) |
 
-Where the knobs stand at the pinned upstream (measured by grepping the clean pin tree, `work/pin/tree`,
+Tiers, by exact-name grep of the clean pin and the newer era tree (`ai-engine` fair-base): **pin** = the
+pinned upstream already implements it, so it is an env switch today; **era** = absent at the pin but
+implemented in the newer Zig tree, so the port has a reference; **python** = present only in the
+production Python stack. Where the knobs stand at the pinned upstream (measured by grepping the clean pin tree, `work/pin/tree`,
 for each name): only `TF_GLM_L2PF`, `TF_GLM_PREFILL_ROWS` and `TF_GLM_FILL_ROWS` exist there; the other
 fourteen are absent from the whole pin, so they are not a wiring job in our GLM path but code the recipe
 carries that upstream does not. Each is a port item: carry the knob's code as a numbered patch, prove it
