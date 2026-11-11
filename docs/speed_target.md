@@ -78,7 +78,10 @@ stack runs without any of them, and that is the parity gap to close:
 | `DISPLAY_KV_MIB` / `DISPLAY_KV_BACKEND` | `2032` / `dispram` | the display-KV overlay (absent at the pin) |
 | `SPILL_GIB` | `120` | the spill tier (the pin has `--spill-gib`/`--snapshot-dir` only) |
 
-Each is a port item: carry the knob's code as a numbered patch, prove it bit-exact where the knob is
-numeric-only, and A/B it at 1/2/4/6/8 before it joins the measured set. The parked rows in
+Where the knobs stand at the pinned upstream (measured by grepping the clean pin tree, `work/pin/tree`,
+for each name): only `TF_GLM_L2PF`, `TF_GLM_PREFILL_ROWS` and `TF_GLM_FILL_ROWS` exist there; the other
+fourteen are absent from the whole pin, so they are not a wiring job in our GLM path but code the recipe
+carries that upstream does not. Each is a port item: carry the knob's code as a numbered patch, prove it
+bit-exact where the knob is numeric-only, and A/B it at 1/2/4/6/8 before it joins the measured set. The parked rows in
 PORT-LEDGER already name several (MULTI_WINDOW, DRAFT_WIDE, the disk family); this table is the
 target's own list, which is why it lives with the numbers.
