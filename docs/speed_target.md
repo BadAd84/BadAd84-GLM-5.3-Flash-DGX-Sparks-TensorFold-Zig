@@ -27,6 +27,23 @@ Note the serve's own `--parallel 4`: beyond four streams the requests queue, whi
 real behaviour and is the number to match. That shows in the cells: six streams dips to 111.99 before
 eight recovers 136.18, and the eight-stream TTFT has a 9.7 s outlier where a request waited for a slot.
 
+## What the draft accounting says the gap is (2026-11-11)
+
+First real numbers from `streams.py`'s draft record, full stack (39 patches), drafts on, one stream:
+
+| round | agg tok/s | acceptance | tok/round | ms/round | drafted | accepted |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 | 50.89 | 0.596 | 2.68 | 52.3 | 421 | 251 |
+| 1 | 51.13 | 0.596 | 2.68 | 52.1 | 421 | 251 |
+| 2 | 50.87 | 0.596 | 2.68 | 52.3 | 421 | 251 |
+
+**The drafter is not the problem.** 59.6% of drafts land and a round yields 2.68 tokens, both in the band Mia's
+own records publish (60-64% and ~2.15). With 2.68 tokens a round, 50.9 tok/s means a 52.3 ms round; production's
+83.4 tok/s at the same token-per-round would be a round of roughly 32 ms. **The one-to-four-stream gap is
+per-round decode latency**, which is exactly where production's decode-path knobs live: EXL3 decode order, the
+multi-window decode, its fused EXL3 decode and the window geometries. That is the target for the decode-side
+port work, and acceptance is a healthy variable to hold fixed while chasing it.
+
 ## The comparison caveat that decides the gap
 
 Production runs the DFlash2 drafter (speculative decode), and every Zig number in the table below was
