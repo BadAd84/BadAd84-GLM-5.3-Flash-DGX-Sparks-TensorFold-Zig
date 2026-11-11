@@ -5,10 +5,12 @@ full benchmark at stock and the patches added one step at a time.
 
 ## Result in one line
 
-The stack boots and answers chats (patch **0036**; the first prompt used to kill it), the stock pin
-and every patch arm through **0017** are bit-coherent with each other, decode corrupts from **0019**
-onward and that repair is the one open defect, and the stock benchmark is complete at 1/2/4/6/8
-streams (`docs/BENCH.md`; the arm table fills as the second run lands).
+**The latest build works end to end**: the full 37-patch stack boots, answers the smoke prompt with
+the stock pin's own text, and its P1 reply digest is the pin's (`3ec88b6418f7`). Two port bugs stood in
+the way and both are fixed and proven: **0036** (the chunk step lost its start and length, so every
+chat request killed the stack with PromptTooLong) and **0037** (the KDA block never wrote its output,
+so every reply was token salad). The stock pin and armK6 are benched at 1/2/4/6/8; the full-stack
+bench runs in the same harness and its table lands in `docs/BENCH.md`.
 
 ## What was found and fixed
 
@@ -30,9 +32,10 @@ streams (`docs/BENCH.md`; the arm table fills as the second run lands).
    - stock pin: "1 2 3 4 5 6 7 8 9 10 11", coherent
    - 0001-0004, 0001-0006, 0001-0011, 0001-0017: identical coherent reply
    - 0001-0017 + 0019, and 0001-0022, and the full stack: token salad with the knob off and at
-     16-bit dense. **0019 (the chunked KDA prompt port) is the corrupting step**; its knob gate is
-     correct in source, so the defect is in its unconditional wiring of the prompt path
-     (cuda_reply_prefill's grid coupling, the bodyProfile seam, or the kernel). Repair next.
+     16-bit dense. **0019 (the chunked KDA prompt port) is the corrupting step**: it replaced the
+     forward's KDA body call and dropped the `if (out) |o| try kda_block.fill(...)` line beside it,
+     so no KDA layer ever wrote its output and every reply read stale rows. **0037 restores the
+     fill**; the full stack then answers the pin's own text and its P1 digest is the pin's.
 
 ## Benchmark state (docs/BENCH.md)
 

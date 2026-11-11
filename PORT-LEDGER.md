@@ -207,9 +207,9 @@ clean pin (no patches) is being measured under the same idle window to split ups
   coherently, the same text and the same digest kind as the stock pin ("1 2 3 4 5 6 7 8 9 10 11"
   for the count prompt). Adding **0019** (the chunked KDA prompt port) to the same base turns
   every reply into token salad while `KNOBS=off`, and it stays garbage at `TF_GLM_DENSE_BITS=16`
-  and with 0036's protocol fix in. The knob's gate (`ovn.on("KDA_CHUNKED")`, unset = off) is
-  correct in the source, so the defect is in 0019's unconditional wiring of the prompt path (the
-  reply-prefill grid coupling in cuda_reply_prefill, the bodyProfile seam, or the kernel itself);
-  that repair is the next work item and no arm past 0017 is benched until it lands.
+  too. **0037** fixes it: the 0019 port replaced the forward's KDA body call and dropped the
+  `if (out) |o| try kda_block.fill(...)` line beside it, so no KDA layer ever wrote its o_proj and
+  every step read stale rows. Restoring that line makes the full stack answer the pin's own text,
+  and the P1 stream cell's digest equals the pin's (`3ec88b6418f7`).
 - The pin and the coherent arms are benched at 1/2/4/6/8 streams under `docs/BENCH.md` (DRAFTER=0,
   KNOBS=off): the stock cell at P=1 reads 49.7 tok/s decode, 156 ms TTFT, one digest across rounds.

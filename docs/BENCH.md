@@ -50,3 +50,18 @@ the bits on the pin.
 Every reply digest equals the pin's at the same stream count: this arm is bit-identical to stock
 and slightly faster under load. P1's -1.3% is inside the run-to-run spread seen on repeated pin
 boots; P2..P8 are consistently ahead.
+
+## fix2: the full stack (0001..0037), DRAFTER=0, KNOBS=off
+
+| P | decode aggregate tok/s | pin | delta | TTFT med (ms) | reply digests |
+|---|---:|---:|---:|---:|---|
+| 1 | 48.95 | 49.69 | -1.5% | 58 | 3ec88b6418f7 |
+| 2 | 54.78 | 54.72 | +0.1% | 62 / 243 | 3ec88b6418f7, c36689783326 |
+| 4 | 72.54 | 72.34 | +0.3% | 58 / 237 | 3ec88b6418f7, c36689783326 |
+| 6 | 93.04 | 90.77 | +2.5% | 419 / 240 | 3ec88b6418f7, c36689783326 |
+| 8 | 110.95 | 109.35 | +1.5% | 62 / 211 | 3ec88b6418f7, c36689783326 |
+
+Every digest equals the pin's at the same stream count: all 37 patches are bit-exact to stock for
+these prompts and slightly faster under load. P1 is inside the pin's own run-to-run spread; the
+gain grows with load (P6 +2.5%, P8 +1.5%). The KNOBS=measured set (the def17 knobs) has not been
+A/B'd on this stack yet and is the next benchmark arm.
