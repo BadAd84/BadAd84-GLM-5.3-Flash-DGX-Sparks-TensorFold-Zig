@@ -65,10 +65,10 @@ stack runs without any of them, and that is the parity gap to close:
 
 | knob | production value | tier | what it is |
 |---|---|---|
-| `TF_GLM_MULTI_WINDOW` | `32` | python | several decode windows in flight (the era tree names it only in a comment) |
-| `TF_GLM_DRAFT_WIDE` | `2176:prompt` | python | the drafter's wide prompt window |
+| `TF_GLM_MULTI_WINDOW` | `32` | python | several decode windows in flight; with EXL3_DEC_ORDER this is the decode path the one-to-four-stream gap points at |
+| `TF_GLM_DRAFT_WIDE` | `2176:prompt` | python | the wide prompt-chunk drafter (production notes 9.47-9.48): a drafter-path lever for the drafts-on runs, which is where the low-stream cells live |
 | `TF_GLM_L2PF` | `1` | L2 weight prefetch beside decode windows |
-| `TF_GLM_INDEXER_SHARD` | `prefill` | python | the indexer's sharded prefill |
+| `TF_GLM_INDEXER_SHARD` | `prefill` | python | the indexer's prompt scoring split over ranks: production measures -12.8% cold at ~605k and -22% on a warm turn at ~596k, bits identical, so a long-context win that cannot move a 400-token cell |
 | `TF_GLM_PREFILL_OVERLAP` | `2` | python | overlapping prefill work |
 | `TF_GLM_EXL3_LOADS` | `nc` | EXL3 load path |
 | `TF_GLM_EXL3_DEC_ORDER` | `1` | decode order |
