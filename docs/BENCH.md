@@ -75,8 +75,47 @@ index regroup, mm wide, sparse onepass, router warm). Getting it to boot took tw
 restores cuda_glue's `@FieldType == cuda.Function` guard so optional fields are not requested under
 the bare struct name. With them the set boots in 115 s and answers with coherent reasoning.
 
-**Its reply digest differs from stock** (`f8cc18addd25` against the stock `3ec88b6418f7` for the same
-cell), so the measured set is NOT bit-exact and its speed numbers need that stated: the knob halving
-(`scripts/knob-digest.sh`) is what names the knob that moves the bits. Stock and the KNOBS=off arms
-remain the bit-exact pair; a knob set that changes the bits is only shippable with the owner's call on
-the numerics.
+| P | decode aggregate tok/s | stock | delta vs stock | fix2 (KNOBS=off) | TTFT med (ms) | reply digest |
+|---|---:|---:|---:|---:|---:|---|
+| 1 | 61.37 | 49.69 | +23.5% | 48.95 | 51 | f8cc18addd25 |
+| 2 | 64.13 | 54.72 | +17.2% | 54.78 | 56 / 393 | ffa9d50563ca |
+| 4 | 78.52 | 72.34 | +8.5% | 72.54 | 407 / 54 | ffa9d50563ca |
+| 6 | 99.61 | 90.77 | +9.7% | 93.04 | 381 / 55 | ffa9d50563ca |
+| 8 | 107.40 | 109.35 | -1.8% | 110.95 | 355 / 55 | ffa9d50563ca |
+
+The set is 17 to 24 percent faster at 1 and 2 streams and 8 to 10 percent faster at 4 and 6, and 1.8
+percent slower at 8. **Its reply digests differ from stock** (`f8cc18addd25`/`ffa9d50563ca` against
+`3ec88b6418f7`/`c36689783326`), so the set is NOT bit-exact and none of these cells is a gated win:
+`scripts/knob-digest.sh` halves the set to name the knob that moves the bits, and a bits-changing knob
+is only shippable with the owner's call on the numerics. Stock and the KNOBS=off arms stay the
+bit-exact pair.
+
+The halving (`scripts/knob-digest.sh`, one P=1 prose cell a boot, digest against `3ec88b6418f7`):
+
+| set | digest | verdict |
+|---|---|---|
+| poolA: KDA_PAD, INDEX_CUDA, ONE_CHUNK, KEPT_WALK, REPLY_PREFILL, MLA_FUSEMERGE | f8cc | moves the bits |
+| poolB: GLUE_FUSE, INDEX_SCHED, POOLS32, INDEX_REGROUP, MM_WIDE, SPARSE_ONEPASS, ROUTER_WARM | 3ec88 | bit-exact |
+| poolA1: KDA_PAD, INDEX_CUDA, ONE_CHUNK | f8cc | moves the bits |
+| poolA2: KEPT_WALK, REPLY_PREFILL, MLA_FUSEMERGE | 3ec88 | bit-exact |
+| kdaPad: KDA_PAD alone | f8cc | **the one bit-changing knob** |
+| idxOne: INDEX_CUDA, ONE_CHUNK | 3ec88 | bit-exact |
+
+**TF_GLM_KDA_PAD alone changes the reply bits**; every other knob in the measured set is bit-exact
+to stock. That is the knob that puts the KDA input stack on the 4-bit pack list, so the digest change
+is the quantisation the pad activates, not a wiring error.
+
+## fix4 with every knob except KDA_PAD (the bit-exact set), DRAFTER=0
+
+| P | decode aggregate tok/s | stock | delta | fix4-knobs (with KDA_PAD) | reply digest |
+|---|---:|---:|---:|---:|---|
+| 1 | 48.91 | 49.69 | -1.6% | 61.37 | 3ec88b6418f7 |
+| 2 | 55.32 | 54.72 | +1.1% | 64.13 | 3ec88b6418f7 |
+| 4 | 72.68 | 72.34 | +0.5% | 78.52 | 3ec88b6418f7 |
+| 6 | 92.82 | 90.77 | +2.3% | 99.61 | 3ec88b6418f7 |
+| 8 | 112.81 | 109.35 | +3.2% | 107.40 | 3ec88b6418f7 |
+
+Every digest equals stock at every level, so this set is the shippable one on the current numerics
+gate. It is faster than stock at 2, 4, 6 and 8 streams (P1 inside the run spread) and faster than the
+KDA_PAD set at 8 streams. The choice left for the owner is the big P1/P2 gain KDA_PAD brings
+(+23.5%/+17.2%) against its digest change and its P8 cost.
