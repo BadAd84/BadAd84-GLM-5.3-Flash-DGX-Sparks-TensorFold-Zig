@@ -173,3 +173,38 @@ Kernel time sums to 60.3 ms a round against a 49.9 ms round period, so the side-
 main stream and the GPU is busy for the whole round: there is no idle host gap to recover. The routed experts'
 grouped kernel is the largest single cost, and it is larger here than the `routed` span the section profiler
 reports (13.1 ms at two rows).
+
+### The round ledger closes: a round is the verify at its real width plus the drafter
+
+The accounting cell (`k-base-a`, one stream, knobs off) reads 421 drafted tokens over 149 rounds at acceptance
+0.596: a verify window is 1 + 2.83 = 3.8 rows on average, not the 2 rows the first reading assumed. The verify
+profile's wall by rows (38.6 / 43.4 / 48.8 ms at 2 / 3 / 4 rows) puts a 3.8-row verify near 48 ms; with the
+drafter's 5.9 ms that is 53.7 ms against the 52.2 ms a round the accounting measures. Nothing is left over.
+
+So the verify is a fixed part plus about 4.9 ms a row (the routed experts carry the slope: 13.1 / 16.9 / 21.3 ms),
+and the one-stream levers are, separately: tokens a round, the fixed part, the per-row slope, the drafter.
+
+## What phases 2 and 3 did not test (found 2026-11-11, by reading production and the pin)
+
+- **Production's dense numerics are 4-bit, by choice.** Its launchers set `TF_GLM_DENSE=q4`
+  (`scripts/glm53/tp3/launch_tp3.sh`, `tf-tp3-rank.sh` in the Python repo): every BF16 projection quantized at
+  load to 4-bit groups of 64, the head in FP8, documented there as lossy with its quality scores. Our serve sets
+  `TF_GLM_DENSE_BITS=4`, which is the same choice, but the KDA input stack is not 8-aligned at TP=3 (8,726 /
+  8,341 columns) and stays BF16 unless `TF_GLM_KDA_PAD=1`. Pad on is therefore the like-for-like numerics against
+  production, and pad off compares a BF16 KDA stack against production's 4-bit one.
+- **The pin already has `TF_GLM_KDA_PAD`, and patch 0003 regressed it.** The pin sizes the KDA state rows with
+  `rowWidth` (one common padded width, 8,728, on every rank). 0003, squashed from an older fork state, replaced
+  those four lines with `paddedWidth(own raw width)`: 8,344 on the two ranks holding 21 heads while every consumer
+  still uses 8,728. Patch 0040 restores the pin's lines. The symptom on the unfixed image (`k-kda_pad`): one digest
+  at one stream, but 4 distinct digests at two streams and 8 at four and six, where a stable engine gives one a
+  prompt.
+- **The pin's L2 prefetch is on by default** on a GB10 at two ranks or more (`cuda_l2pf.zig`: 12 MiB a site, 2
+  CTAs, paced at 150 GB/s). Phase 2's `L2PF=1` batch therefore changed nothing; the arm that tests it is
+  `TF_GLM_L2PF=0`.
+- **The drafting cut differs from production's.** Production stops a DFlash2 chain when its chance product falls
+  under 0.3 (`engine.py`: `fc5:0.3` by default, `fnc7:0.3` in its launchers); ours stops at 0.7
+  (`dflash.zig: confidence()`, `TF_GLM_DRAFT_CONFIDENCE`).
+- **The window selector prices rows from a static table** measured on two GB10s (`cuda_lanes.zig`: 52.0 ms plus
+  6.8 a row); `TF_GLM_OVN_COST_TIME` times them at load instead and is not in the knob list.
+- **The block arms ran every knob off**, so a patch whose code sits behind a default-off switch was measured only
+  for its unconditional code. `scripts/knob-arms.sh` runs each knob as its own arm.

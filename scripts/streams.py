@@ -5,7 +5,10 @@ Recipe: the measurement instrument for scripts/serve.sh. Copied from the OTS rep
 (ai-engine docs/repro/dsv41-cellc-r1-lane/streams.py, itself a glm copy). OTS-656 copy of glm-tp2-lane/streams.py.
 
 Usage: streams.py PORT N --kind prose|code [--max-tokens 400] [--rounds 3] [--tag X] [--out FILE.jsonl] [--each 1]
+       [--pad WORDS]
 --kind picks a prompt set (all N streams prose, or all N code; stream i = SET[i % 4]).
+--pad puts WORDS filler words (about 1.5 tokens a word, the same text on every arm) in front of each prompt, so the
+prompt pass crosses the 2,048-row chunk and 6,144-token pair thresholds a short prompt never reaches.
 Steady window per stream = first content chunk to last content chunk (TTFT excluded); round decode aggregate =
 sum(tokens - 1) / (last content of any stream - first content of any stream).
 Each round sends N different prompts at once (prompt i = PROMPTS[i % len]), thinking off, temperature 0, stream with
@@ -104,6 +107,15 @@ def opt(name, default, argv):
     return default
 
 
+def padded(prompts, words):
+    """Each prompt behind `words` deterministic filler words: a long prompt pass with the same question at its end."""
+    if words <= 0:
+        return prompts
+    lines = [f"Note {i}: shelf {i % 97} of the archive holds ledger {i * 7 % 1013}." for i in range(words // 9 + 1)]
+    filler = " ".join(lines)
+    return [(name, filler + "\n\nIgnore the notes above. " + text) for name, text in prompts]
+
+
 def model_id(base):
     return json.load(urllib.request.urlopen(base + "/v1/models", timeout=10))["data"][0]["id"]
 
@@ -184,7 +196,7 @@ def round_row(tag, n, k, w, prompts):
 def main(argv):
     max_tokens = int(opt("--max-tokens", "400", argv)); rounds = int(opt("--rounds", "3", argv))
     tag = opt("--tag", "", argv); out = opt("--out", "", argv)
-    prompts = SETS[opt("--kind", "prose", argv)]
+    prompts = padded(SETS[opt("--kind", "prose", argv)], int(opt("--pad", "0", argv)))
     each = opt("--each", "0", argv) == "1"
     port, n = argv[1], int(argv[2])
     base = f"http://127.0.0.1:{port}"
