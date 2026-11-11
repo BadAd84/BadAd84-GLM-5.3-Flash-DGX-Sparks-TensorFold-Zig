@@ -52,6 +52,21 @@ drafts on is bit-exact. Against this baseline the 39 patches add nothing at one 
 shared-round and prefill work lives. Production's 83.43 at one stream is still 59% above the clean pin,
 so phase 2's env is the remaining low-stream lever.
 
+## Phase 2 result (production's env on the clean pin)
+
+| P | pin + drafts | + `L2PF=1` | + `PREFILL_ROWS=4096` | + `FILL_ROWS=4096` |
+|---|---:|---:|---:|---:|
+| 1 | 52.36 | 52.22 | 52.11 | 52.18 |
+| 2 | 58.41 | 58.58 | 58.39 | 58.56 |
+| 4 | 72.17 | 72.10 | 71.67 | 71.82 |
+| 6 | 95.18 | 95.46 | 95.30 | 96.10 |
+| 8 | 115.17 | 115.21 | 114.84 | (the batch ended before this cell) |
+
+Every batch is inside the run-to-run spread. The pin-readable env does nothing measurable at any stream
+count, which closes phase 2: the 59 percent gap to production at one stream is not in the env switches
+the pin understands. What is left on that side is the eleven Python-tier mechanisms (the decode-path
+knobs and the cache/keeps family), and the patch blocks of phase 3 on ours.
+
 ## State
 
 Phase 1 (clean pin, drafts on) = the `pin-drafts` cell. Phase 2 (env batches on the pin) =
