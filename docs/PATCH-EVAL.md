@@ -141,3 +141,27 @@ which is the +16.7% the knob measured at one stream. It is the single biggest ex
 also the one knob whose digest moves, because the pad is what puts the KDA input stack on the 4-bit pack list.
 With it, a round is kda 5.2 + routed 13.4 + ~5.5 elsewhere, so **the routed experts are now the largest section**
 and the next target (`EXL3_LOADS=nc`, the fused EXL3 decode, the window geometries).
+
+### The round's real composition: the draft pass is 26 ms (measured 2026-11-11)
+
+The verify profile accounts for 29.5 ms a round, but 2.68 tokens a round at 57.9 tok/s is a 46.3 ms round period.
+The difference is the DFlash2 draft pass, and two cells pin it exactly:
+
+| cell | tokens/round | tok/s | round period |
+|---|---:|---:|---:|
+| DRAFTER=0 | 1.00 | 49.7 | 20.1 ms |
+| DRAFTER=1 | 2.68 | 57.9 | 46.3 ms |
+
+So a verify round is 20.1 ms and the draft pass adds 26.2 ms on top. The draft buys 1.68 tokens for 26 ms, a
+net +16%, and it is the single largest block in the round.
+
+**The Python engine pipelines it away**: `family_shared.py` queues a stream's drafts a round late ("Queue heads
+that read only hidden states before building cache rollback so their GPU work overlaps it"; `_land_inflight`
+lands the queued token while the next verify launches), so its draft overlaps the next round's verify. Ours runs
+`Lanes.draftBlock` synchronously inside the round (cuda_lanes.zig:513), on the same stream, so the 26 ms is exposed.
+Overlapping it puts the round near max(verify, draft) ~ 26-29 ms, which at 2.68 tokens a round is about 92 tok/s
+against today's 57.9 and production's 83.4.
+
+The Zig port of that overlap is the next engineering item: launch the draft block on a second stream with the
+dependencies the verifier already has (the kept rows and the anchor), sync only where the next window reads the
+drafts, and keep the digest gate (drafts on and off must still answer identically).
