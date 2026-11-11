@@ -1,0 +1,29 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: the kernel loop skips fields that are not plain functions
+
+With the measured knob set the boot died at:
+
+  error: kernel symbol not in module: tf_glm_router16
+
+cuda_glue's Kernels struct carries optional fields (router16 is ?cuda.Function,
+set from TF_GLM_OVN_ROUTER16 with the _s3/_s4 suffixed kernels), and the port's
+load loop requested "tf_glm_" ++ field_name for EVERY field, so the OVN path
+asked the module for a bare tf_glm_router16 that no fatbin defines. The source
+era guards the loop with @FieldType(Kernels, name) == cuda.Function so optional
+fields are left to their own setters; this restores that guard.
+
+Gates: the KNOBS=measured boot passes kernel load and serves on TP=3.
+diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+--- a/zig/src/families/glm/cuda_glue.zig
++++ b/zig/src/families/glm/cuda_glue.zig
+@@ -119,7 +119,9 @@
+     pub fn loadOvn(m: cuda.Module, ovn: bool) !Kernels {
+         const from = comptime std.meta.fieldIndex(Kernels, "chunks_16_skip").?;
+         var k: Kernels = undefined;
+-        inline for (@typeInfo(Kernels).@"struct".field_names, 0..) |name, i| @field(k, name) = if (i < from or ovn) try m.function("tf_glm_" ++ name) else .{ .d = m.d, .handle = null };
++        inline for (@typeInfo(Kernels).@"struct".field_names, 0..) |name, i| {
++            if (@FieldType(Kernels, name) == cuda.Function) @field(k, name) = if (i < from or ovn) try m.function("tf_glm_" ++ name) else .{ .d = m.d, .handle = null };
++        }
+         const router16 = try cuda.ovn.int("ROUTER16", 0);
+         k.router16 = if (router16 == 0) null else try m.function(if (router16 == 4) "tf_glm_router16_s4" else "tf_glm_router16_s3");
+         try k.bmm_tile.allowDynamicShared(bmm_tile_smem);

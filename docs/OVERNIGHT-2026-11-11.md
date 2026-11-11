@@ -60,8 +60,9 @@ BENCH.md.
   body. Needs a free GB10 pair (the dev triangle is occupied); the same harness as tonight runs it.
 - Ash's separate invitation: open `ovn-solo` as a PR on today's main (they reproduced the prompt
   stall and want prompt-token equality plus main-vs-branch gap numbers).
-- **0019's decode repair** is the next engineering item before any arm past 0017 can be benched or
-  shipped.
+- **The measured knob set** now boots (0038's router kernel + 0039's glue type guard) and answers
+  coherently, but its reply digest differs from stock: the knob halving (`scripts/knob-digest.sh`)
+  names the bit-changing knob before any of its numbers count as a gated win.
 
 ## Fleet state as left
 

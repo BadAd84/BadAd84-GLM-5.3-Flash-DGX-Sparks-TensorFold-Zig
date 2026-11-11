@@ -213,3 +213,26 @@ clean pin (no patches) is being measured under the same idle window to split ups
   and the P1 stream cell's digest equals the pin's (`3ec88b6418f7`).
 - The pin and the coherent arms are benched at 1/2/4/6/8 streams under `docs/BENCH.md` (DRAFTER=0,
   KNOBS=off): the stock cell at P=1 reads 49.7 tok/s decode, 156 ms TTFT, one digest across rounds.
+
+## The knob set exposes unported kernels (measured 2026-11-11)
+
+Turning the measured set on (`KNOBS=measured`) killed every boot at kernel load:
+`error: kernel symbol not in module: tf_glm_router16`. cuda_glue.zig requests
+`tf_glm_router16_s3`/`_s4` (TF_GLM_OVN_ROUTER16) and the port's glm_glue_bmm.cuh was missing
+the whole `router16<ST>` block, so **0038** ports it from the source era. The scan that finds
+this class in one pass: every `m.function("tf_...")` / quoted `tf_*` name in the GLM family,
+checked as a substring against `zig/kernels/cuda/*.cu|cuh`; the absent set for the current tree
+was router16_s3/s4 plus five names that resolve through other images. Run that scan whenever a
+knob is added to the measured set: a knob whose kernel is absent boots straight into
+cuModuleGetFunction NOT_FOUND.
+
+- **The glue's kernel loop needs its type guard (0039).** cuda_glue's Kernels struct carries
+  optional fields (`router16: ?cuda.Function`, set from TF_GLM_OVN_ROUTER16 to the `_s3`/`_s4`
+  kernels), and the port's load loop asked the module for `"tf_glm_" ++ field_name` on every
+  field, so the OVN path requested a bare `tf_glm_router16` that no fatbin defines (the boot died
+  at kernel load with `kernel symbol not in module: tf_glm_router16` even after 0038 compiled the
+  real kernels). The source era guards the loop with
+  `@FieldType(Kernels, name) == cuda.Function`; **0039** restores it. Diagnostic order that found
+  it in one pass: the error's name is the literal string passed to `m.function`, so the bare name
+  proved a *different* caller than the suffixed one, and `strings` on the built binary showed no
+  router16 literal at all because the loop builds it with `++`.

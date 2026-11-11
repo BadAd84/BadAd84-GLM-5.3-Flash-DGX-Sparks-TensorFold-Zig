@@ -65,3 +65,18 @@ Every digest equals the pin's at the same stream count: all 37 patches are bit-e
 these prompts and slightly faster under load. P1 is inside the pin's own run-to-run spread; the
 gain grows with load (P6 +2.5%, P8 +1.5%). The KNOBS=measured set (the def17 knobs) has not been
 A/B'd on this stack yet and is the next benchmark arm.
+
+## fix2 with KNOBS=measured (the def17 knob set), DRAFTER=0
+
+The set is serve.sh's DEFS (the knobs the source stack measured: KDA pad, index CUDA, one-chunk,
+kept walk, the four drafter knobs, reply prefill, MLA fusemerge, glue fuse, index sched, pools32,
+index regroup, mm wide, sparse onepass, router warm). Getting it to boot took two more port fixes:
+**0038** ports the 16-row router kernel (the set requests `tf_glm_router16_s3/s4`), and **0039**
+restores cuda_glue's `@FieldType == cuda.Function` guard so optional fields are not requested under
+the bare struct name. With them the set boots in 115 s and answers with coherent reasoning.
+
+**Its reply digest differs from stock** (`f8cc18addd25` against the stock `3ec88b6418f7` for the same
+cell), so the measured set is NOT bit-exact and its speed numbers need that stated: the knob halving
+(`scripts/knob-digest.sh`) is what names the knob that moves the bits. Stock and the KNOBS=off arms
+remain the bit-exact pair; a knob set that changes the bits is only shippable with the owner's call on
+the numerics.
