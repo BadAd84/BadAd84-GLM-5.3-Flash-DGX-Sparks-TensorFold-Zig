@@ -95,3 +95,16 @@ stack: no block moves those cells. It is the decode-path knobs production runs a
 Phase 1 (clean pin, drafts on) = the `pin-drafts` cell. Phase 2 (env batches on the pin) =
 `pin-b1-l2pf`, `pin-b2-rows`, `pin-b3-fill`, running as `work/batches.sh`. Phase 3 arms are built from
 the block table above once those land.
+
+## Profiling the rounds (the switches that exist, measured)
+
+- `TF_GLM_PROF=1` profiles PROMPT chunks (`glm prof prompt chunk to N rows`). First reading on the full stack,
+  drafts on: a 64-row chunk costs wall 67.2 ms (gpu 86.4 across the sections), split gate 7.2, embed 0.0,
+  router 39.5, routed 36.7, head 1.2, draw 0.6, mtp 1.2, commit 0.0. The router plus the routed experts are
+  the prompt pass's cost, so prefill-side work (indexer sharding, routing) has the headroom there.
+- `TF_GLM_OVN_SHARED_PROF=1` profiles the DECODE rounds: `glm prof shared N segs to M rows` (buckets to 8, 16,
+  24, 32 rows) and `glm prof shared commit N segs`. Without it a decode round has no section breakdown at all,
+  which is why the first profiled request (with `TF_GLM_PROF=1` only) showed prompt chunks and nothing else.
+- The round-time target from the draft accounting: our one-stream round is 52.3 ms at 2.68 tokens a round;
+  production's 83.4 tok/s at the same tokens a round implies about 32 ms. The decode profile is what splits
+  that difference into sections.
