@@ -33,6 +33,12 @@ Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carrie
 
 ## Patch packages
 
+- **On every TensorFold version bump, re-test the whole patch stack and retire what upstream absorbed (owner
+  2026-11-11).** Bring our environment and our patches onto the new base first (``patches/` and `candidates/``), then decide every patch
+  with evidence: apply it, run the gates (exactness, the suite, the A/B), and if the behaviour and the numbers hold
+  without it, the patch is RETIRED: removed from the stack and recorded as superseded, naming the upstream commit that
+  absorbed it. A patch that no longer applies is NOT automatically redundant; re-seat it, then test. Never carry a
+  patch forward because it was there, and never drop one without the test.
 - **Everything external arrives as .patch files (owner 2026-11-11).** A contributor's branch, an upstream PR's
   commits or our own delta against a pin is carried as numbered `.patch` files in a package under ``patches/` and `candidates/``, applied to
   a pristine checkout at a recorded base sha. Each package carries `RECORD.md` (repository, branch, sha, the base it
