@@ -108,3 +108,21 @@ the block table above once those land.
 - The round-time target from the draft accounting: our one-stream round is 52.3 ms at 2.68 tokens a round;
   production's 83.4 tok/s at the same tokens a round implies about 32 ms. The decode profile is what splits
   that difference into sections.
+
+### The decode round's section split (measured 2026-11-11)
+
+`TF_GLM_PROF=1`, one stream, full stack, drafts on. The verify profilers report every 64 calls PER ROW BUCKET, so
+a short run shows nothing: a 1,400-token cell is the smallest that crosses them. Per round:
+
+| verify rows | wall ms | kda | routed | router | mla | gather_a | shared | gather_b | head |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 38.6 | 14.9 | 13.1 | 1.3 | 3.0 | 1.8 | 1.7 | 1.2 | 1.0 |
+| 3 | 43.4 | 15.1 | 16.9 | 1.3 | 3.1 | 2.1 | 1.7 | 1.5 | 1.0 |
+| 4 | 48.8 | 15.4 | 21.3 | 1.4 | 3.4 | 2.1 | 1.7 | 1.7 | 1.0 |
+
+The KDA linear-attention chain is a FLAT ~15 ms per round whatever the width, and the routed experts scale with
+rows (13.1 at two to 21.3 at four, about +4 ms a row). Together they are 70-80% of the round, so the two levers
+map one-to-one: `KDA_PAD` (measured +12 tok/s at one stream, and it is the knob that packs the KDA stack at 4
+bits, which is also why its digest moves) against the flat kda section, and the `EXL3_LOADS=nc`/decode-order
+family against the routed section. Everything else in a round is 6-8 ms in total, so production's ~32 ms round
+is one or both of those two sections being cheaper.
