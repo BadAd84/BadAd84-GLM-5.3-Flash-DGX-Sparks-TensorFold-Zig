@@ -116,3 +116,23 @@ carries that upstream does not. Each is a port item: carry the knob's code as a 
 bit-exact where the knob is numeric-only, and A/B it at 1/2/4/6/8 before it joins the measured set. The parked rows in
 PORT-LEDGER already name several (MULTI_WINDOW, DRAFT_WIDE, the disk family); this table is the
 target's own list, which is why it lives with the numbers.
+
+## The round-time target, as their production states it (MiaAI-Lab AGENT-v2, 2026-11-11)
+
+Their served decode round, from their own agentic-session log: 13.66 ms a round for 2.75 tokens (201 tok/s),
+64% of offered drafts landing. Their accounting of that round:
+
+| part | their cost |
+|---|---:|
+| plain decode step (no drafter), short / 200K / 690K | 7.05 / 7.72 / 8.56 ms |
+| each extra verify row | ~1.2 ms |
+| DFlash2 drafter | ~1.1 ms |
+| sampling and host work | ~1 ms |
+
+Their conclusion, which is the shape of our problem too: the per-step FIXED cost (per-layer-site glue) matters
+more than per-row cost, because 1 ms off the plain step is ~+8% real decode while 0.1 ms off each verify row is
+only ~+2%.
+
+Against that, ours on the same class of hardware: a verify round of 20.1 ms at one row (their 7.05), and a
+DFlash2 draft pass of 26.2 ms (their 1.1). The drafter is the widest single gap in the stack, then the plain
+step, and both sit in the fixed per-site machinery rather than in per-row work.
