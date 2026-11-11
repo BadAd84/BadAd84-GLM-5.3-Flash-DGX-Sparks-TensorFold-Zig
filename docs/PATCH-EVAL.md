@@ -67,6 +67,29 @@ count, which closes phase 2: the 59 percent gap to production at one stream is n
 the pin understands. What is left on that side is the eleven Python-tier mechanisms (the decode-path
 knobs and the cache/keeps family), and the patch blocks of phase 3 on ours.
 
+## Phase 3 result (blocks added back in, drafts on)
+
+| P | pin | +0001-0011 | +0001-0017 | +0001-0023 | +0001-0027 | all 39 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 52.36 | 51.64 | 51.20 | 51.39 | 51.44 | 51.05 |
+| 2 | 58.41 | 59.06 | 59.12 | 59.84 | 59.66 | 61.10 |
+| 4 | 72.17 | 72.46 | 72.28 | **81.85** | 81.85 | 81.65 |
+| 6 | 95.18 | 97.96 | 98.15 | **110.41** | 110.07 | 108.77 |
+| 8 | 115.17 | 117.76 | 117.79 | **134.56** | 135.02 | 134.84 |
+
+Digests equal the pin's `3ec88b6418f7` at every level and arm, so every one of these cells is bit-exact.
+
+**The verdict**: the 0018-0023 block carries the whole concurrency win (+13.4% P4, +16.0% P6, +16.8% P8);
+0001-0017 is worth 2-3% at six and eight streams and nothing at one to four; 0024-0039 measure neutral.
+That is not the same as disposable: 0032-0039 are the build and correctness fixes without which the tree
+neither builds nor answers, and they are already inside the a0023 arm which shows the full win, while
+0024-0031 are behaviour-neutral wiring and test repairs exactly as the ledger describes them. For trimming,
+the candidates are the 0001-0017 block (16 patches for ~2%), and the era block 0018-0023 is the one to
+defend.
+
+The one-to-four-stream gap to production (83.4 against 51.4 at one stream) is therefore NOT in the patch
+stack: no block moves those cells. It is the decode-path knobs production runs and the Zig tree lacks.
+
 ## State
 
 Phase 1 (clean pin, drafts on) = the `pin-drafts` cell. Phase 2 (env batches on the pin) =
