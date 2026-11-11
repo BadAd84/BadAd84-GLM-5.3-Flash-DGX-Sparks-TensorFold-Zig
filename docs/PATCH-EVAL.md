@@ -126,3 +126,18 @@ map one-to-one: `KDA_PAD` (measured +12 tok/s at one stream, and it is the knob 
 bits, which is also why its digest moves) against the flat kda section, and the `EXL3_LOADS=nc`/decode-order
 family against the routed section. Everything else in a round is 6-8 ms in total, so production's ~32 ms round
 is one or both of those two sections being cheaper.
+
+### KDA_PAD proven against the kda section
+
+Same cell with `TF_GLM_KDA_PAD=1`:
+
+| verify rows | wall | kda | routed | everything else | agg tok/s |
+|---|---:|---:|---:|---:|---:|
+| 2 | 29.5 | **5.2** | 13.4 | ~5.5 | **57.9** |
+| 3 | 34.4 | 5.2 | 17.6 | ~7.0 | |
+
+Against the without-pad cells the kda section drops 14.9 to 5.2 ms and the round 38.6 to 29.5 (-9.1 ms, -23.6%),
+which is the +16.7% the knob measured at one stream. It is the single biggest explained lever so far, and it is
+also the one knob whose digest moves, because the pad is what puts the KDA input stack on the 4-bit pack list.
+With it, a round is kda 5.2 + routed 13.4 + ~5.5 elsewhere, so **the routed experts are now the largest section**
+and the next target (`EXL3_LOADS=nc`, the fused EXL3 decode, the window geometries).
