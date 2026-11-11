@@ -142,26 +142,34 @@ also the one knob whose digest moves, because the pad is what puts the KDA input
 With it, a round is kda 5.2 + routed 13.4 + ~5.5 elsewhere, so **the routed experts are now the largest section**
 and the next target (`EXL3_LOADS=nc`, the fused EXL3 decode, the window geometries).
 
-### The round's real composition: the draft pass is 26 ms (measured 2026-11-11)
+### The round's real composition (corrected 2026-11-11: the draft pass is ~5.9 ms, not 26)
 
-The verify profile accounts for 29.5 ms a round, but 2.68 tokens a round at 57.9 tok/s is a 46.3 ms round period.
-The difference is the DFlash2 draft pass, and two cells pin it exactly:
+An earlier version of this section put the DFlash2 draft pass at 26 ms a round and said the Python engine
+pipelines it away. Both halves were wrong:
 
-| cell | tokens/round | tok/s | round period |
-|---|---:|---:|---:|
-| DRAFTER=0 | 1.00 | 49.7 | 20.1 ms |
-| DRAFTER=1 | 2.68 | 57.9 | 46.3 ms |
+- The 26 ms came from subtracting two cells that are not comparable: a DRAFTER=0 round (one verify row, no
+  `KDA_PAD`, 20.1 ms) from a DRAFTER=1 round (2-3 verify rows, with `KDA_PAD`, 46.3 ms). A drafted round's verify
+  is wider and so costs more by itself.
+- The drafter's own phase profile (`TF_GLM_DFLASH2_PROF=1`, one stream) reads ingest 0.47, tables 0.01, block
+  5.3-5.45, select 0.03 ms a round: about 5.9 ms.
+- The `family_shared.py` loop quoted as the pipelining was the MLX path's, not the CUDA GLM decode loop.
 
-So a verify round is 20.1 ms and the draft pass adds 26.2 ms on top. The draft buys 1.68 tokens for 26 ms, a
-net +16%, and it is the single largest block in the round.
+What the GPU does in a round, from Nsight (`scripts/nsys-rank0.sh base`, rank 0, one stream, knobs off, 400
+tokens = 159 rounds at 50.4 tok/s, digest `3ec88b6418f7`; kernel time per round = total / 159):
 
-**The Python engine pipelines it away**: `family_shared.py` queues a stream's drafts a round late ("Queue heads
-that read only hidden states before building cache rollback so their GPU work overlaps it"; `_land_inflight`
-lands the queued token while the next verify launches), so its draft overlaps the next round's verify. Ours runs
-`Lanes.draftBlock` synchronously inside the round (cuda_lanes.zig:513), on the same stream, so the 26 ms is exposed.
-Overlapping it puts the round near max(verify, draft) ~ 26-29 ms, which at 2.68 tokens a round is about 92 tok/s
-against today's 57.9 and production's 83.4.
+| kernel | ms a round | launches a round | what it is |
+|---|---:|---:|---|
+| `tf_exl3_grouped_1` | 19.0 | 84 | routed experts, gate/up and down (42 MoE layers x 2) |
+| `tf_glm_bmm_decode` | 12.8 | 103 | the KDA chain's matmuls (mean 124 us, median 7.8 us: a few launches carry it) |
+| `dsv41_l2pace::paced_kernel` | 5.1 | 89 | paced L2 prefetch, side stream |
+| `glm_mm4_16` | 3.5 | 168 | 4-bit dense matmuls |
+| `tfl2pf::segments_kernel` | 3.2 | 34 | L2 prefetch, side stream |
+| NCCL `AllGather` | 3.1 | 95 | inter-rank exchanges |
+| `tf_qmm_group` | 3.0 | 32 | the drafter's block |
+| `glm_mm16_16` | 2.2 | 6 | 16-bit dense matmuls |
+| everything else (58 kernels) | 8.4 | | |
 
-The Zig port of that overlap is the next engineering item: launch the draft block on a second stream with the
-dependencies the verifier already has (the kept rows and the anchor), sync only where the next window reads the
-drafts, and keep the digest gate (drafts on and off must still answer identically).
+Kernel time sums to 60.3 ms a round against a 49.9 ms round period, so the side-stream prefetch overlaps the
+main stream and the GPU is busy for the whole round: there is no idle host gap to recover. The routed experts'
+grouped kernel is the largest single cost, and it is larger here than the `routed` span the section profiler
+reports (13.1 ms at two rows).

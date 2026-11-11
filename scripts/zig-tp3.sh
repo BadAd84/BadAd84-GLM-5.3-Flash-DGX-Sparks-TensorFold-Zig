@@ -4,7 +4,8 @@
 # serve.sh carries the model path, the drafter and the production-shaped NCCL env; this driver
 # only names the ranks, the bootstrap address and the box each rank lands on.
 # Env: IMAGE (default glm53-zig:9c9bf54), KNOBS (off|measured|all), DRAFTER (1|0),
-#      COMM_ID (default 192.168.99.11:29561), PORT (default 8300), XENV, XSERVE extras.
+#      COMM_ID (default 192.168.99.11:29561), PORT (default 8300), XENV, XSERVE extras,
+#      WRAP0 / XRUN0 (rank 0 only: serve.sh's WRAP and XRUN, for profiling the head rank).
 # Bring-up only: production must be STOPPED first (glm-v110-stop.sh) and the GLM watchdogs paused,
 # because a TP=3 boot occupies all three boxes' GPUs.
 set -euo pipefail
@@ -19,7 +20,7 @@ boot() { # boot RANK - rank 0 runs locally, workers over ssh (spark1 has keys to
   local rank=$1
   local envstr="IMAGE='$IMAGE' XENV='${XENV:-}' XSERVE='${XSERVE:-}' KNOBS='${KNOBS:-off}' DRAFTER='${DRAFTER:-1}' KEEP='${KEEP:-0}' COMM_ID='$COMM_ID' PORT='${PORT:-8300}'"
   if [ "$rank" = 0 ]; then
-    nohup bash -c "$envstr bash "$(dirname "${BASH_SOURCE[0]}")/serve.sh" $rank $P $CTX" \
+    nohup bash -c "$envstr WRAP='${WRAP0:-}' XRUN='${XRUN0:-}' bash "$(dirname "${BASH_SOURCE[0]}")/serve.sh" $rank $P $CTX" \
       > "$HOME/glm-zig-r0-$(date +%H%M%S).log" 2>&1 < /dev/null &
   else
     nohup ssh -n "adam@spark$((rank + 1)).ots-int.net" "$envstr bash ~/work/glm53-zig/serve.sh $rank $P $CTX" \

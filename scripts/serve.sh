@@ -15,6 +15,8 @@
 #   DRAFTER   1 (default) loads the DFlash2 drafter at 4 bits; 0 runs the MTP head instead
 #   RES       memory reserve GiB (default: 12.5 at P1, 14.5 at P2, 13.0 at P4, 6.5 above)
 #   XSERVE    extra serve arguments; XENV extra -e arguments
+#   WRAP      command words run in front of the engine (a profiler: "nsys profile -o /out/r0 --trace=cuda
+#             --sample=none"); XRUN extra docker run arguments (the profiler's output mount)
 #   KNOBS    off (default), measured or all: which of the recipe's knobs to enable
 #
 # The env block mirrors the production stack's shape (ai-engine serve4.sh measured set: P2P and
@@ -57,8 +59,10 @@ ENV+=(-e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_MIN_NCHANNELS=4 -e NCC
 
 # The recipe's knobs: each patch in patches/engine/ adds one, and each is added only when XENV
 # does not already name it, so an A/B arm can turn any of them off without editing this file.
-DEFS="TF_GLM_L2PF=1 TF_GLM_PREFILL_ROWS=4096 TF_GLM_FILL_ROWS=4096
- TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_ONE_CHUNK=1 TF_GLM_OVN_KEPT_WALK=1
+# The pin's own knobs (L2PF, PREFILL_ROWS, FILL_ROWS) are NOT in this set: setting them explicitly
+# killed the boot (container created, then gone within 60s, twice) and L2PF already reports its own
+# sizing at boot, so each needs its own A/B before it can join. See PORT-LEDGER.
+DEFS="TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_ONE_CHUNK=1 TF_GLM_OVN_KEPT_WALK=1
  TF_GLM_OVN_DRAFT_ONEPASS=1 TF_GLM_OVN_DRAFT_DOWN4=1 TF_GLM_OVN_DRAFT_MLPSPLIT=4
  TF_GLM_OVN_REPLY_PREFILL=1 TF_GLM_OVN_MLA_FUSEMERGE=1 TF_GLM_OVN_GLUE_FUSE=1
  TF_GLM_OVN_INDEX_SCHED=1 TF_GLM_OVN_POOLS32=1 TF_GLM_OVN_INDEX_REGROUP=1
@@ -87,6 +91,8 @@ SERVE=(tensorfold-native serve "$MODEL" --context "$CTX" --parallel "$P" --max-t
 [[ "${DRAFTER:-1}" = 1 && "$XSERVE" != *--drafter* ]] && SERVE+=(--drafter "$DFLASH" --drafter-bits 4)
 read -r -a XS <<< "${XSERVE:-}"; SERVE+=("${XS[@]}")
 [[ $RANK = 0 ]] && SERVE+=(--host 0.0.0.0 --port "$PORT" --name GLM-5.3-Flash-EXL3)
+read -r -a XR <<< "${XRUN:-}"; RUN+=("${XR[@]}")
+read -r -a WR <<< "${WRAP:-}"
 
 echo "[serve] $(date -Is) $IMAGE rank=$RANK world=$WORLD P=$P ctx=$CTX res=$RES"
 echo "[serve] exec docker run ${RUN[*]} ${ENV[*]} $IMAGE ${SERVE[*]}"
@@ -94,5 +100,5 @@ echo "[serve] exec docker run ${RUN[*]} ${ENV[*]} $IMAGE ${SERVE[*]}"
 # launching session ends the broken pipe stops every rank (measured: "rank 0: rank N stopped"). With -d the
 # log goes to the docker log driver and the serve outlives every session. Logs: docker logs glm53-zig-r$RANK.
 RM=(--rm); [[ "${KEEP:-0}" = 1 ]] && RM=()  # KEEP=1 keeps the container and its docker log after a crash
-docker run -d "${RM[@]}" --name "glm53-zig-r$RANK" "${RUN[@]}" "${ENV[@]}" "$IMAGE" "${SERVE[@]}" >/dev/null
+docker run -d "${RM[@]}" --name "glm53-zig-r$RANK" "${RUN[@]}" "${ENV[@]}" "$IMAGE" "${WR[@]}" "${SERVE[@]}" >/dev/null
 echo "[serve] glm53-zig-r$RANK started (docker logs glm53-zig-r$RANK)"
