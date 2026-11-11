@@ -39,13 +39,20 @@ must be measured with drafts on before the gap is attributed. That arm is the ne
 From `docs/BENCH.md` (same instrument, same prompts, TP=3 on spark1-3, DRAFTER=0, KNOBS=off unless
 stated):
 
-| streams | production (Python) | Zig stock pin | Zig 39 patches | Zig all knobs but KDA_PAD | Zig all knobs |
+| streams | production (Python) | Zig 39 patches, drafts on | delta | Zig stock pin | Zig 39 patches, drafts off |
 |---:|---:|---:|---:|---:|---:|
-| 1 | | 49.69 | 48.95 | 48.91 | 61.37 |
-| 2 | | 54.72 | 54.78 | 55.32 | 64.13 |
-| 4 | | 72.34 | 72.54 | 72.68 | 78.52 |
-| 6 | | 90.77 | 93.04 | 92.82 | 99.61 |
-| 8 | | 109.35 | 110.95 | 112.81 | 107.40 |
+| 1 | 83.43 | 51.28 | -38.6% | 49.69 | 48.95 |
+| 2 | 91.07 | 59.46 | -34.7% | 54.72 | 54.78 |
+| 4 | 119.97 | 81.42 | -32.1% | 72.34 | 72.54 |
+| 6 | 111.99 | 108.05 | -3.5% | 90.77 | 93.04 |
+| 8 | 136.18 | 134.45 | -1.3% | 109.35 | 110.95 |
+
+The shape of the gap is the useful result: at six and eight streams the Zig stack is at parity (within
+1.3 to 3.5 percent) and at one to four streams production is 32 to 39 percent ahead. The drafts-on arm
+also runs L2PF/PREFILL_ROWS/FILL_ROWS off (it predates their addition to the measured set), so those
+three pin knobs are unmeasured headroom here. The low-concurrency lead matches production's
+cache-and-keeps family (`CACHE_ENTRIES`, `KEEP_PER_CHAT`, `KEPT_BYTES_GIB`), which the Zig tree does not
+have at all, on top of the prefill/overlap knobs.
 
 Parity work: the gap per level is the production column minus the best bit-exact Zig column at that
 level; the coverage and the open levers are tracked in PORT-LEDGER and BENCH.
