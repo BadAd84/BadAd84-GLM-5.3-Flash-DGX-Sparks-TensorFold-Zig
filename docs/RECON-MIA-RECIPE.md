@@ -40,6 +40,13 @@ Measured by grepping both trees:
 
 ## Clues that change our plan
 
+0. **The `CACHE_FIRST` port is not needed at all.** Our 1.2.4-era `kv_pool.windows()` already carries
+   `b.asked`: an EXPLICIT `--prompt-cache-gib` sets the cache aside before the room is counted in whole
+   windows, which is exactly what Mia's 0112 adds behind `TF_PROMPT_CACHE_FIRST`. Our serve.sh has never
+   passed `--prompt-cache-gib`, so every boot ran with the default, unasked cache. The cheap experiment is
+   therefore a flag plus their reserve value (`TENSORFOLD_MEMORY_RESERVE_GIB=6.5 --prompt-cache-gib 8`), not
+   a port. Confirmed by reading both trees; the batch joins the phase-2 queue as B4.
+
 1. **Adopt rather than re-derive.** With Apache-2.0 patches, the shortlist above can be ported from their
    diffs against a near-contemporary base, with CREDITS attribution, instead of RE'd from behaviour. That is
    the fastest route for `CACHE_FIRST`, the DFlash2 window rules and the window geometries.
