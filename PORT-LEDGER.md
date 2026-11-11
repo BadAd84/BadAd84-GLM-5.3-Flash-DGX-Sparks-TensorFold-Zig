@@ -193,3 +193,23 @@ http://0.0.0.0:8300/v1`, and `/v1/models` returns 200. The operating requirement
 Open: rank 0 raises `PromptTooLong` after ~8-10 minutes idle with no requests and stops the TP=3
 ensemble (`rank 0: rank N stopped (PromptTooLong)`); the workers stay up, so rank 0 is the raiser. The
 clean pin (no patches) is being measured under the same idle window to split upstream from port.
+
+## The first prompt: 0007's chunk step and 0019's decode (measured 2026-11-11)
+
+- **Every chat request killed the stack** with `rank N stopped (PromptTooLong)` while `/v1/models`
+  answered and idle was stable. 0007 rewrote the prompt chunk protocol (rows in the header's flags,
+  bits 16+) and its ported leader stopped setting `depth` (the chunk's start) and `top_k` (the
+  prompt's length) on the send, which the follower still reads: its prefill arrived with len=0 and
+  prefillStart's guard raised PromptTooLong. **0036** restores both fields; the full stack then
+  answers chats.
+- **Decode correctness, bisected by booting each arm and reading its own reply to one prompt**
+  (a chat is the instrument; health and idle hide everything): arms through **0017** answer
+  coherently, the same text and the same digest kind as the stock pin ("1 2 3 4 5 6 7 8 9 10 11"
+  for the count prompt). Adding **0019** (the chunked KDA prompt port) to the same base turns
+  every reply into token salad while `KNOBS=off`, and it stays garbage at `TF_GLM_DENSE_BITS=16`
+  and with 0036's protocol fix in. The knob's gate (`ovn.on("KDA_CHUNKED")`, unset = off) is
+  correct in the source, so the defect is in 0019's unconditional wiring of the prompt path (the
+  reply-prefill grid coupling in cuda_reply_prefill, the bodyProfile seam, or the kernel itself);
+  that repair is the next work item and no arm past 0017 is benched until it lands.
+- The pin and the coherent arms are benched at 1/2/4/6/8 streams under `docs/BENCH.md` (DRAFTER=0,
+  KNOBS=off): the stock cell at P=1 reads 49.7 tok/s decode, 156 ms TTFT, one digest across rounds.

@@ -92,5 +92,6 @@ echo "[serve] exec docker run ${RUN[*]} ${ENV[*]} $IMAGE ${SERVE[*]}"
 # Detached on purpose: an attached `docker run` ties the engine's stdout to this shell, and when the
 # launching session ends the broken pipe stops every rank (measured: "rank 0: rank N stopped"). With -d the
 # log goes to the docker log driver and the serve outlives every session. Logs: docker logs glm53-zig-r$RANK.
-docker run -d --rm --name "glm53-zig-r$RANK" "${RUN[@]}" "${ENV[@]}" "$IMAGE" "${SERVE[@]}" >/dev/null
+RM=(--rm); [[ "${KEEP:-0}" = 1 ]] && RM=()  # KEEP=1 keeps the container and its docker log after a crash
+docker run -d "${RM[@]}" --name "glm53-zig-r$RANK" "${RUN[@]}" "${ENV[@]}" "$IMAGE" "${SERVE[@]}" >/dev/null
 echo "[serve] glm53-zig-r$RANK started (docker logs glm53-zig-r$RANK)"
