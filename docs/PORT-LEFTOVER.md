@@ -55,3 +55,49 @@ From `leftover-tests.md` section 2, lane sampler-guards 03: the two index checks
 `error.PastRing`'s unit test (`glm_ring_host.zig`); the shared-window check at 5 to 8 rows a stream; the rows grid round
 trip on the I/O worker; the quiesce drain test; a snapshot kept past the index rings. With lane prompt-step: the
 whole-pass `chunkEnd` test and the `canBatch` mark test.
+
+## Where each item stands after the port lanes
+
+Five lanes ported the list in private trees, one patch a fork commit; their reports are `docs/audit-2026-11-12/port-*.md`.
+Stacked on the tree through 0042 in one integration tree (25 patches, one import-line merge by hand), the CPU gates
+read: `check-native-cuda-host` 0, `compile-cuda-tests` 0, `zig fmt` 0, `test-cuda-host` the pin's own 26 failing
+names and 62 more tests passing, the four standalone host steps 0, lean 116 problems against the pin's 116 (0 new).
+None of these patches is in `patches/engine` until its GPU cells are in.
+
+| item | patch (lane order) | fork commit | GPU receipt |
+|---|---|---|---|
+| lean: 11 multi-line comments from 0032, 0038, 0042 | lean-comments | - | none needed (no code) |
+| D2 / S6 chunk grid | prompt-step 01 | `cfa2cd93c`, log line from `50bf69eb6` | image `ps1` queued |
+| S3 MTP head skip with a drafter | prompt-step 02 | `a8ccc5c81` | image `ps2` queued |
+| D5 whole pass steps at marks | prompt-step 03 | `1b4bd2975` | image `ps6` queued (knob-off digests) |
+| D4 no batch with an interior mark | prompt-step 04 | `03138041e` | image `ps6` queued |
+| D10 follower `.disk` bind | prompt-step 05 | `a3c043cca` | none possible (no disk tier) |
+| D7 `ONE_CHUNK` wiring | prompt-step 06 | `083da32bb`, `7d01784c3`, `a6f5615d4` | image `ps6`, then the knob arm on `all1` |
+| S4 FP8 keys a tile ahead | kernels-decode 01 | `450b9519c` | image `k1` queued |
+| S5 EXL3 prompt experts a whole chunk (+146 MiB a rank as served) | kernels-decode 02 | `0aec07b2f` | image `k2` queued |
+| `TF_EXL3_DEC_ORDER` knob | kernels-decode 03 | `46b46550f` | arms on `all1` queued |
+| D6 one-pass pipe scale | kernels-decode 04 | `dd426c1a1` | knob arm on `all1` |
+| D8 draft edge and noise | kernels-decode 05 | `39304587f`, `6f3127df8` | image `all1` (unset digest) |
+| D11 `df_sumw` record | kernels-decode 06 | `09edd1ce0` | a fatbin build against the record |
+| D3 logit gather, one block a rank | sampler-guards 01 | `0a77dcd7d` | a TP=3 `prompt_logprobs` request over 128 tokens |
+| D9 reply-prefill eviction guard | sampler-guards 02 | `c9468e336` | knob arm on `all1`; `glm-reply-prefill-check` |
+| D12 GPU checks compile and are registered | sampler-guards 03 | - | the three checks run on a Spark |
+| gate gaps: PastRing test, window width, rows worker, quiesce drain, snapshot past rings | sampler-guards 04-07 | - | none needed (host tests) |
+| S8 render and tokenize once | host-once 01-03 | `ef81b4a49` | measured on the laptop: `chat.prepare` 63.35 to 35.89 ms at 637k ids, 20.72 to 11.57 at 215k, ids identical; `all1` for digests |
+| S1 RoCE gather at worlds 2 to 4 | lane roce (splitting `roce.zig` under 600 lines) | `060465305` and three | `roce1`: +2.0% and +1.7% at one and two streams against the same image on NCCL, level at four to eight; with the pad +2.8% and +3.2%; ABBA at six and eight queued |
+| S2 complete prompt taps | no patch | - | already in the pin: upstream merged it as `2f894e0bb`; our tree's tap files are byte-identical to the pin's |
+| S7 4,096-row prompt chunks, S9 shared windows after the pool | not started | `85df341ed`; `d1661d165` | - |
+
+Three more defects the port lanes found by compiling or tracing, each with its patch:
+
+- **`TF_GLM_OVN_GLUE_FUSE` gave wrong replies** (patch 0022): the fork changed `post` to take the buffer and passes
+  the fused one at the last layer; the port kept the old signature, so the last layer's FFN contribution was missing
+  from the window's final hidden state. Decode windows only, knob on. Lane drafter-taps 01 (`3423859e7`).
+- **`TF_GLM_OVN_DRAFT_KEEPWIN` did nothing on the `MULTI_FILL` path** (patch 0023): a resumed piece restarted the
+  drafter instead of restoring its kept window. Lane drafter-taps 02.
+- **`glm_reply_prefill_check.zig` had never compiled** (patch 0008): it called `chunkOf` with an argument our tree
+  does not have, and nothing imported the file. Lane sampler-guards 03.
+
+One lane test was wrong and only the combined gate showed it: the fork's `canBatch` test uses a 2,088-token prompt,
+which our 2,048-row chunk refuses for its length before the mark is looked at. Re-derived for a prompt inside one chunk.
+`scripts/gates.sh` now runs `compile-cuda-tests` and the four standalone host steps, which is how it was found.
