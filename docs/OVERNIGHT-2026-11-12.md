@@ -173,3 +173,54 @@ series resumes in 62 to 66 ms; the mid prompt 2,964 ms cold and 1,455 ms repeate
 `docs/audit-2026-11-12/v127-drift.md` says what upstream changed (decode windows 8 to 32 rows and MTP chains 3 to 15
 drafts by default, load-time round pricing, prompt cuts, a registry for GLM switches) and
 `docs/audit-2026-11-12/fold-series.md` the 35-lever form of our series the re-seat starts from.
+
+## 11. Where the one-stream round goes against production
+
+Both serves measured today on the same three machines, one stream, prose prompt, 400 tokens, greedy, KDA pad on ours.
+
+| | production (Python tf-v110) | ours, upstream v1.2.7 |
+|---|---:|---:|
+| decode tok/s, one stream | 80.8 and 77.9 (cells; 81.73 mean of the earlier run) | 62.3 to 62.7 |
+| draft acceptance | 0.686 (388 drafted, 266 accepted a cell) | 0.638 (401 and 256) |
+| drafts a round | 2.41 (3,440 drafted over 1,427 rounds) | 2.80 (401 over 143 rounds) |
+| tokens a round | 2.59 (3,698 generated over 1,427 rounds, warm-up included) | 2.79 |
+| ms a round | 31.9 (2.59 tokens at 80.8 tok/s) | 44.5 |
+
+Production does not draft more cleverly: it verifies fewer rows (3.4 against 3.8 a round) and takes fewer tokens a
+round. The 12.6 ms is the first reading of the gap and it is an upper bound: it uses aggregate counters with the
+warm-up included, and the sum of production's own component times at 3.4 rows gives 34.6 to 35.8 ms, a gap of 8.7 to
+9.9 ms (`round-structure.md` finding 6; one production log line settles which).
+
+The code reading (`docs/audit-2026-11-12/round-structure.md`) corrects two things this section first said. The verify
+table above (`TF_GLM_MULTI_PROFILE`) is production's one-stream-graph column; the served path runs the batched graphs
+(1: 20.29, 2: 25.65, 3: 31.72, 4: 36.90 ms), because `TF_GLM_KV_SHARD=1` forces the lone path off. And production's
+drafter is not hidden under the verify: it runs on the same stream after the commit, in about 2.3 ms of GPU time (one
+CUDA graph of 218 kernels, 328 MB read a rank against our 1,047 MB, launched at the end of the previous round).
+
+What the comparison does show: our verify is fully eager (no CUDA graph anywhere in the GLM family, about 1,400
+host launches a window), our all-gathers all go through NCCL, our drafter pass costs 5.4 to 5.9 ms, and a 4-row
+verify with section timers on is 38.6 ms against production's 36.9. The routed experts in our profile (13.2 ms at 2
+rows, 21.7 ms at 4) are close to the bandwidth floor computed from the checkpoint (about 12.6 MB an expert, 42 MoE
+layers, 8 of 288 per token, TP=3: 19 to 23 ms at 4 rows at the GB10's 273 GB/s peak, expert counts estimated), so the
+levers are the drafter pass, graphs and the gathers, not the expert kernel. The section timers add their own sync
+cost, so the profiled figures are upper bounds.
+
+The ranked list in `round-structure.md` section 5 is the work order: the drafter's 4-bit down projection and MLP split
+(measured on the fork at 2.9 to 3.9 ms a round, replies bit-exact), verify windows as CUDA graphs (an estimate of 1 to
+3 ms, bit-exact), RoCE gathers gated by size, and the routed-expert item plan (0044, +1.4% at one stream).
+
+## 12. A chat's later turns: upstream's request starts against our resume at any row
+
+`scripts/turns.py` sends one chat the way an agent grows it (a 11.3k-token system message, then four turns, each sending
+everything before it plus the reply), twice, one stream, drafts on, knobs off. First token of each turn, in ms:
+
+| | turn 1 (cold) | turn 2 | turn 3 | turn 4 | the same chat again, turns 1 to 4 |
+|---|---:|---:|---:|---:|---|
+| upstream v1.2.7 | 8,596 | 943 | 976 | 990 | 823, 940, 964, 999 |
+| v1.2.7 with `TF_GLM_REQUEST_STARTS=1` | 8,776 | 211 | 239 | 254 | 102, 213, 231, 252 |
+| our stack `ai-engine:all1` (resume at any row) | 7,711 | 249 | 190 | 198 | 64, 62, 64, 66 |
+
+All three give the same reply for every turn (digests equal). Upstream's request starts get a later turn of a chat to
+within 20 to 60 ms of ours, so resuming at any row is not needed for that case, and it is why the re-seat retires it.
+What it still wins is an exact repeat of a whole prompt (62 to 66 ms against 102 to 252). With request starts on, the
+cold first token is 180 ms slower than with them off in this run (8,776 against 8,596), one cell and not repeated.
