@@ -1,0 +1,360 @@
+old_patch	files	hunks	class	new_patch	new_name	reason
+0001-ovn-knob-registry.patch	zig/src/cuda/ovn.zig	all hunks	a	0005	ovn-knob-registry	core: the TF_GLM_OVN knob registry
+0001-ovn-knob-registry.patch	zig/src/cuda/root.zig	all hunks	a	0005	ovn-knob-registry	core: the TF_GLM_OVN knob registry
+0002-ovn-knobs-own-cache.patch	zig/src/cuda/ovn.zig	all hunks	b	0005	ovn-knob-registry	0002: the registry's cache key, so each knob gets its own statics
+0003-kda-pad-one-width.patch	zig/src/families/glm/cuda.zig	all hunks	a	0007	draft-knobs	0003: the three DFlash2 lines it carried - the dflash_ovn test import, prefillStart's snapshots.resumeDrafter and draftBlock's dflash.located - which name this patch's own code
+0003-kda-pad-one-width.patch	zig/src/families/glm/cuda_engine.zig	hunks 1	a	0006	kda-pad-one-width	glm: TF_GLM_KDA_PAD pads the KDA input stack at one width
+0003-kda-pad-one-width.patch	zig/src/families/glm/cuda_engine.zig	hunks 2,3	a	0007	draft-knobs	0003: the three DFlash2 lines it carried - the dflash_ovn test import, prefillStart's snapshots.resumeDrafter and draftBlock's dflash.located - which name this patch's own code
+0003-kda-pad-one-width.patch	zig/src/families/glm/cuda_kda_block.zig	all hunks	a	0006	kda-pad-one-width	glm: TF_GLM_KDA_PAD pads the KDA input stack at one width
+0003-kda-pad-one-width.patch	zig/src/families/glm/cuda_state.zig	all hunks	a	0006	kda-pad-one-width	glm: TF_GLM_KDA_PAD pads the KDA input stack at one width
+0003-kda-pad-one-width.patch	zig/src/families/glm/cuda_tile.zig	all hunks	a	0006	kda-pad-one-width	glm: TF_GLM_KDA_PAD pads the KDA input stack at one width
+0003-kda-pad-one-width.patch	zig/tests/cuda/glm_kda_pad_check.zig	all hunks	a	0006	kda-pad-one-width	glm: TF_GLM_KDA_PAD pads the KDA input stack at one width
+0004-draft-knobs.patch	zig/kernels/cuda/glm_dflash.cu	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/kernels/cuda/qmm_group.cu	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/cuda_engine_types.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/cuda_q4.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/cuda_snapshot_pages.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/cuda_snapshots.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/dflash.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/dflash_block.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/dflash_load.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/src/families/glm/dflash_ovn.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/tests/cuda/glm_draft_onepass_tests.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0004-draft-knobs.patch	zig/tests/cuda/main.zig	all hunks	a	0007	draft-knobs	glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*)
+0005-index-decode-windows.patch	zig/src/families/glm/cuda_index.zig	all hunks	a	0008	index-decode-windows	glm cuda: the index kernels take decode windows (TF_GLM_INDEX_CUDA)
+0005-index-decode-windows.patch	zig/tests/cuda/glm_index_check.zig	all hunks	a	0008	index-decode-windows	glm cuda: the index kernels take decode windows (TF_GLM_INDEX_CUDA)
+0006-kept-walk-prefix-helper.patch	zig/build/lane_halt_host.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/engine_api_test.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_cache.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_cache_fork.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_cache_index.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_cache_policy.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_imprint.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_interior.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_prefix.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_prefix_bench.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_prefix_count_test.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/prompt_prefix_test.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/rows_select.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0006-kept-walk-prefix-helper.patch	zig/src/core/rows_store.zig	all hunks	a	0009	kept-walk-prefix-helper	core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_WALK)
+0007-resume-any-row.patch	zig/src/families/glm/cuda_engine.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/src/families/glm/cuda_follow.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/src/families/glm/cuda_native.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/src/families/glm/cuda_pages.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/src/families/glm/cuda_prompt_pair.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/src/native/cuda_kv_pool.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/tests/cuda/glm_resume_tests.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0007-resume-any-row.patch	zig/tests/cuda/main.zig	all hunks	a	0010	resume-any-row	glm cuda: prompt states keep and resume at any row
+0008-reply-prefill.patch	zig/src/core/lane_host.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/core/lane_host_warm_test.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/families/glm/cuda.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/families/glm/cuda_follow.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/families/glm/cuda_kda_chunk.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/families/glm/cuda_lanes_step.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/families/glm/cuda_native.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/families/glm/cuda_reply_prefill.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/native/cuda.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/native/cuda_snaps.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/src/native/cuda_warm_serve_test.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0008-reply-prefill.patch	zig/tests/cuda/glm_reply_prefill_check.zig	all hunks	a	0012	reply-prefill	glm: TF_GLM_OVN_REPLY_PREFILL, the finished reply prefilled between turns
+0009-index-sched-decode-pools32.patch	zig/kernels/cuda/glm_index.cu	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/kernels/cuda/glm_index_sched.cuh	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/kernels/cuda/glm_index_split.cuh	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/kernels/cuda/glm_ops.cu	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/src/families/glm/cuda_index.zig	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/src/families/glm/cuda_sparse.zig	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/src/families/glm/cuda_state.zig	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0009-index-sched-decode-pools32.patch	zig/tests/cuda/glm_index_ovn_check.zig	all hunks	a	0013	index-sched-decode-pools32	glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+0010-index-regroup.patch	zig/kernels/cuda/glm_index.cu	all hunks	a	0014	index-regroup	glm index: TF_GLM_OVN_INDEX_REGROUP, the reduce-scatter head sum
+0010-index-regroup.patch	zig/kernels/cuda/glm_index_regroup.cuh	all hunks	a	0014	index-regroup	glm index: TF_GLM_OVN_INDEX_REGROUP, the reduce-scatter head sum
+0010-index-regroup.patch	zig/src/families/glm/cuda_index.zig	all hunks	a	0014	index-regroup	glm index: TF_GLM_OVN_INDEX_REGROUP, the reduce-scatter head sum
+0010-index-regroup.patch	zig/tests/cuda/glm_index_regroup_check.zig	all hunks	a	0014	index-regroup	glm index: TF_GLM_OVN_INDEX_REGROUP, the reduce-scatter head sum
+0011-one-chunk.patch	zig/src/families/glm/cuda.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0011-one-chunk.patch	zig/src/families/glm/cuda_engine.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0011-one-chunk.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0011-one-chunk.patch	zig/src/families/glm/cuda_kda_block.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0011-one-chunk.patch	zig/src/families/glm/cuda_native.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0011-one-chunk.patch	zig/src/families/glm/cuda_one_chunk.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0011-one-chunk.patch	zig/src/families/glm/cuda_one_chunk_keep.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0011-one-chunk.patch	zig/src/families/glm/cuda_snapshots.zig	all hunks	a	0015	one-chunk	glm: TF_GLM_OVN_ONE_CHUNK keeps marks from inside a prompt chunk
+0012-plain-margin.patch	zig/src/core/lanes/config.zig	all hunks	a	0016	plain-margin	lanes: TF_GLM_OVN_PLAIN_MARGIN, the draft-over-plain margin as a knob
+0012-plain-margin.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	a	0016	plain-margin	lanes: TF_GLM_OVN_PLAIN_MARGIN, the draft-over-plain margin as a knob
+0013-exchange-kb.patch	zig/src/families/glm/cuda_relay.zig	all hunks	a	0017	exchange-kb	glm relay: TF_GLM_OVN_EXCHANGE_KB, a direct exchange posted in pieces
+0014-router-warm.patch	zig/src/families/glm/cuda.zig	all hunks	a	0018	router-warm	glm: TF_GLM_OVN_ROUTER_WARM warms the router kernels at boot
+0014-router-warm.patch	zig/src/families/glm/cuda_engine.zig	all hunks	a	0018	router-warm	glm: TF_GLM_OVN_ROUTER_WARM warms the router kernels at boot
+0014-router-warm.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0018	router-warm	glm: TF_GLM_OVN_ROUTER_WARM warms the router kernels at boot
+0014-router-warm.patch	zig/src/families/glm/cuda_router_warm.zig	all hunks	a	0018	router-warm	glm: TF_GLM_OVN_ROUTER_WARM warms the router kernels at boot
+0015-win-free.patch	zig/src/core/lanes/config.zig	all hunks	a	0019	win-free	glm lanes: TF_GLM_OVN_WIN_FREE, shared rounds fill with no cost model
+0015-win-free.patch	zig/src/core/lanes/free_shared_test.zig	all hunks	a	0019	win-free	glm lanes: TF_GLM_OVN_WIN_FREE, shared rounds fill with no cost model
+0015-win-free.patch	zig/src/core/lanes/lanes.zig	all hunks	a	0019	win-free	glm lanes: TF_GLM_OVN_WIN_FREE, shared rounds fill with no cost model
+0015-win-free.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	a	0019	win-free	glm lanes: TF_GLM_OVN_WIN_FREE, shared rounds fill with no cost model
+0016-sparse-onepass.patch	zig/kernels/cuda/glm_onepass.cu	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0016-sparse-onepass.patch	zig/src/cuda/kernels.zig	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0016-sparse-onepass.patch	zig/src/families/glm/cuda.zig	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0016-sparse-onepass.patch	zig/src/families/glm/cuda_dsa_block.zig	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0016-sparse-onepass.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0016-sparse-onepass.patch	zig/src/families/glm/cuda_forward_pair.zig	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0016-sparse-onepass.patch	zig/src/families/glm/cuda_glue.zig	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0016-sparse-onepass.patch	zig/src/families/glm/cuda_onepass.zig	all hunks	a	0020	sparse-onepass	glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention
+0017-onepass-pipe.patch	zig/kernels/cuda/glm_onepass_common.cuh	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0017-onepass-pipe.patch	zig/kernels/cuda/glm_onepass_pipe.cu	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0017-onepass-pipe.patch	zig/kernels/cuda/glm_onepass_pipe.cuh	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0017-onepass-pipe.patch	zig/src/cuda/kernels.zig	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0017-onepass-pipe.patch	zig/src/families/glm/cuda_dsa_block.zig	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0017-onepass-pipe.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0017-onepass-pipe.patch	zig/src/families/glm/cuda_glue.zig	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0017-onepass-pipe.patch	zig/src/families/glm/cuda_onepass.zig	all hunks	a	0021	onepass-pipe	glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches
+0018-shared-drafts.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	a	0022	shared-drafts	glm lanes: TF_GLM_OVN_SHARED_DRAFTS, the shared allocator behind a knob
+0018-shared-drafts.patch	zig/src/families/glm/cuda_lanes_test.zig	all hunks	a	0022	shared-drafts	glm lanes: TF_GLM_OVN_SHARED_DRAFTS, the shared allocator behind a knob
+0019-kda-chunked.patch	zig/kernels/cuda/glm_kda_chunk.cu	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/kernels/cuda/glm_kda_chunk.cuh	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/src/cuda/kernels.zig	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/src/families/glm/cuda.zig	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/src/families/glm/cuda_kda_block.zig	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/src/families/glm/cuda_kda_chunk.zig	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/src/families/glm/cuda_shared.zig	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0019-kda-chunked.patch	zig/src/native/cuda_snaps.zig	all hunks	a	0023	kda-chunked	glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel
+0020-mm-knobs.patch	zig/kernels/cuda/glm_glue_bmm.cuh	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/kernels/cuda/glm_glue_moe.cuh	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/kernels/cuda/glm_mm.cu	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/kernels/cuda/glm_swiglu.cuh	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/src/families/glm/cuda_b16.zig	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/src/families/glm/cuda_glue.zig	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/src/families/glm/cuda_mlp.zig	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/src/families/glm/cuda_mm.zig	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0020-mm-knobs.patch	zig/src/families/glm/cuda_moe.zig	all hunks	a	0024	mm-knobs	glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE
+0021-mla-knobs.patch	zig/kernels/cuda/glm_glue.cu	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/kernels/cuda/glm_glue_attn_ovn.cuh	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/kernels/cuda/glm_glue_latent_ovn.cuh	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_dsa_block.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_glue.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_kvb.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_latent.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_mla_ovn_test.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_shared.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_state.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0021-mla-knobs.patch	zig/src/families/glm/cuda_weights.zig	all hunks	a	0025	mla-knobs	glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8
+0022-glue-fuse.patch	zig/kernels/cuda/glm_glue_bmm.cuh	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/kernels/cuda/glm_glue_hc.cuh	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/kernels/cuda/glm_glue_moe.cuh	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/kernels/cuda/glm_glue_norm.cuh	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/kernels/cuda/glm_glue_rows.cuh	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/src/families/glm/cuda_forward.zig	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/src/families/glm/cuda_forward_glue.zig	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/src/families/glm/cuda_glue.zig	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/src/families/glm/cuda_shared.zig	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0022-glue-fuse.patch	zig/src/families/glm/cuda_state.zig	all hunks	a	0026	glue-fuse	glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY
+0023-shared-round-era.patch	zig/kernels/cuda/glm_glue_rows.cuh	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/kernels/cuda/glm_kda.cu	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/kernels/cuda/sample.cu	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/kernels/cuda/sample_cands.cuh	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/core/lanes/backend.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/core/lanes/open.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_commit_seg.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_cost_time.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_disk_image.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_disk_image_test.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_disk_ranks.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_draw1.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_engine.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_engine_ovn.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_engine_prof.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_engine_shared.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_engine_wait.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_follow.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_kda_seg.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_lanes_fill.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_lanes_shared.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_native.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_prompt_pieces.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_shared.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_snapshots.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0023-shared-round-era.patch	zig/src/families/glm/cuda_state.zig	all hunks	a	0027	shared-round-era	glm cuda: the shared-round era (prof, draws, costs, fills, segments)
+0024-test-cuda-host-repairs.patch	zig/exl3_prompt_host.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/glm_image_cache_host.zig	hunks 2	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/glm_image_cache_host.zig	hunks 1	b	0010	resume-any-row	0024: the host adapters take snap_min_rows and the slot at the capacity's own end
+0024-test-cuda-host-repairs.patch	zig/glm_pages_host.zig	all hunks	b	0010	resume-any-row	0024: the host adapters take snap_min_rows and the slot at the capacity's own end
+0024-test-cuda-host-repairs.patch	zig/glm_prompt_logprobs_host.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/glm_snapshot_host.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/glm_structured_host.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/residency_dsa_tests.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/residency_owner_tests.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/src/core/lanes/free_shared_test.zig	all hunks	b	0019	win-free	0024: free_shared_test drops the unported shared_depth_full arm
+0024-test-cuda-host-repairs.patch	zig/src/cuda/ovn.zig	all hunks	b	0005	ovn-knob-registry	0024: `ovn.fake`, the test-only override every knob test drives
+0024-test-cuda-host-repairs.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	b	0012	reply-prefill	0024: the Lanes.prefillStep shim the extracted step module needs
+0024-test-cuda-host-repairs.patch	zig/src/families/glm/cuda_lanes_test.zig	all hunks	b	0022	shared-drafts	0024: the knob tests pin the comptime bounds the port carries
+0024-test-cuda-host-repairs.patch	zig/src/families/glm/cuda_pages_test.zig	all hunks	b	0010	resume-any-row	0024: the host adapters take snap_min_rows and the slot at the capacity's own end
+0024-test-cuda-host-repairs.patch	zig/src/families/glm/cuda_snapshots.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0024-test-cuda-host-repairs.patch	zig/src/families/glm/cuda_tile.zig	all hunks	b	0006	kda-pad-one-width	0024: tileLinears calls padKdaInputs again, the KDA_DUMP hook moves into it, the staged download is back
+0024-test-cuda-host-repairs.patch	zig/src/native/cuda_warm_serve_test.zig	all hunks	b	0012	reply-prefill	0024: the Lanes.prefillStep shim the extracted step module needs
+0024-test-cuda-host-repairs.patch	zig/test_support/glm_snap_fixture.zig	all hunks	b	0007	draft-knobs	0024: windowBytes reads DRAFT_KEEPWIN before the drafter, and the host engines set `drafter`
+0025-warm-wait-wiring.patch	zig/src/native/cuda.zig	all hunks	b	0012	reply-prefill	0025: the family's warm wait and warm_alone reach the lane host
+0025-warm-wait-wiring.patch	zig/src/native/cuda_startup_phase.zig	all hunks	b	0012	reply-prefill	0025: the family's warm wait and warm_alone reach the lane host
+0025-warm-wait-wiring.patch	zig/src/native/cuda_warm_serve_test.zig	all hunks	b	0012	reply-prefill	0025: the family's warm wait and warm_alone reach the lane host
+0026-glm-knob-wiring.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	b	0027	shared-round-era	0026: facts() keeps WIN_FREE, SHARED_DRAFTS and PLAIN_MARGIN, which this rewrite dropped
+0027-shared-drafts-gating.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	b	0027	shared-round-era	0027: that gate is `drafting`, not `block`
+0027-shared-drafts-gating.patch	zig/src/families/glm/cuda_lanes_test.zig	all hunks	b	0022	shared-drafts	0027: the unported-lever test goes and copy_drafts takes GLM's new default
+0027-shared-drafts-gating.patch	zig/src/native/copy_drafts_cuda_test.zig	all hunks	b	0022	shared-drafts	0027: the unported-lever test goes and copy_drafts takes GLM's new default
+0028-pin-test-adaptations.patch	zig/glm_snapshot_host.zig	all hunks	b	0010	resume-any-row	0028: the TF_KV_SHARE adapter test asserts no grid
+0028-pin-test-adaptations.patch	zig/src/families/glm/backend.zig	all hunks	b	0022	shared-drafts	0028: the two shared-draft checks enable the knob they exercise
+0028-pin-test-adaptations.patch	zig/src/families/glm/cuda_onepass.zig	all hunks	b	0021	onepass-pipe	0028: the exact test's wide-tile floor is this base's
+0028-pin-test-adaptations.patch	zig/src/families/glm/cuda_zero_budget_test.zig	all hunks	b	0022	shared-drafts	0028: the two shared-draft checks enable the knob they exercise
+0029-dsa-double-launch.patch	zig/src/families/glm/cuda_dsa_block.zig	all hunks	b	0021	onepass-pipe	0029: the sparse-attention launch 0016 duplicated goes, one call a pass (its hunks sit on the form this patch gives the DSA block)
+0030-draft-confidence.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	b	0027	shared-round-era	0030: facts() keeps draft_confidence
+0031-head-block-rule.patch	zig/prefill_widths_glm_host.zig	all hunks	a	0012	reply-prefill	0031: prefill_widths_glm_host's stub gains chunkOf
+0031-head-block-rule.patch	zig/src/families/glm/cuda_dsa_block.zig	all hunks	a	0029	head-block-rule	glm latent: the head block takes the head count back (test-cuda-host green)
+0031-head-block-rule.patch	zig/src/families/glm/cuda_latent.zig	all hunks	a	0029	head-block-rule	glm latent: the head block takes the head count back (test-cuda-host green)
+0031-head-block-rule.patch	zig/src/families/glm/cuda_onepass.zig	all hunks	a	0029	head-block-rule	glm latent: the head block takes the head count back (test-cuda-host green)
+0032-fatbin-catalog.patch	zig/build/cuda_kernels.zig	lines (catalog_onepass)	b	0020	sparse-onepass	0032: glm_onepass's fatbin catalog entry
+0032-fatbin-catalog.patch	zig/build/cuda_kernels.zig	lines (catalog_onepass_pipe)	b	0021	onepass-pipe	0032: glm_onepass_pipe's fatbin catalog entry
+0032-fatbin-catalog.patch	zig/build/cuda_kernels.zig	lines (catalog_kda_chunk_l2pf)	b	0023	kda-chunked	0032: glm_l2pf.cu itself and the two fatbin catalog entries the registry's sites need
+0032-fatbin-catalog.patch	zig/kernels/cuda/glm_l2pf.cu	all hunks	b	0023	kda-chunked	0032: glm_l2pf.cu itself and the two fatbin catalog entries the registry's sites need
+0033-draft-onepass-shadow.patch	zig/tests/cuda/glm_draft_onepass_tests.zig	all hunks	b	0007	draft-knobs	0033: the DOWN4 check's capture no longer shadows the rng binding
+0034-tap-prefillchunk-arity.patch	zig/tests/cuda/glm_tap_tests.zig	all hunks	b	0010	resume-any-row	0034: glm_tap_tests passes prefillChunk's rows argument
+0035-top1-sums.patch	zig/kernels/cuda/glm_glue_rows.cuh	all hunks	b	0027	shared-round-era	0035: the top1 template is back, so tf_glm_top1_sums is in the image
+0036-chunk-step-start-len.patch	zig/src/families/glm/cuda_follow.zig	all hunks	b	0010	resume-any-row	0036: the chunk step carries its start and prompt length, so no follower sees length 0
+0037-kda-fill.patch	zig/src/families/glm/cuda_forward.zig	all hunks	b	0026	glue-fuse	0037: the KDA block writes its o_proj into `out` again (the line sits on this patch's l2pfFor)
+0038-router16-kernel.patch	zig/kernels/cuda/glm_glue_bmm.cuh	all hunks	b	0026	glue-fuse	0038: the 16-row router kernel this patch's graft dropped
+0039-glue-type-guard.patch	zig/src/families/glm/cuda_glue.zig	all hunks	b	0025	mla-knobs	0039: the kernel loop skips fields that are not plain functions
+0040-kda-pad-common-width.patch	zig/src/families/glm/cuda_kda_block.zig	all hunks	b	0006	kda-pad-one-width	0040: cuda_state rows take rowWidth's one common padded width, and padKdaInputs is called once
+0040-kda-pad-common-width.patch	zig/src/families/glm/cuda_state.zig	all hunks	b	0006	kda-pad-one-width	0040: cuda_state rows take rowWidth's one common padded width, and padKdaInputs is called once
+0040-kda-pad-common-width.patch	zig/src/families/glm/cuda_tile.zig	all hunks	b	0006	kda-pad-one-width	0040: cuda_state rows take rowWidth's one common padded width, and padKdaInputs is called once
+0041-restore-pin-forms.patch	zig/src/core/prompt_cache.zig	all hunks	b	0009	kept-walk-prefix-helper	0041: keepBorn is 'the same state again' only at the same length
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_dsa_block.zig	all hunks	b	0021	onepass-pipe	0041: Modules.load sets m.tiled and deinit undefines the struct again, and attendLastRow launches one row and takes the whole chunk's prompt flag
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_engine.zig	hunks 1	b	0006	kda-pad-one-width	0041: tileLinears synchronizes before the read-back; its restore of prompt_pair.wanted's TF_GLM_CHUNK_SOLO argument cancels the port's own change, so cuda_engine.zig is untouched here
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_engine.zig	hunks 2	b	0010	resume-any-row	0041: a pair runs only where the engine has one, and the pair clears the drafter's taps
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_engine.zig	hunks 3	b	0027	shared-round-era	0041: Engine.verifyShared is cuda_engine_shared's, draft_probabilities follows --mtp-confidence, and one own.lanes assignment carries every field
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_follow.zig	all hunks	b	0012	reply-prefill	0041: snapGridNow and snap_tail are declared again, and chunkOf takes a wide step only from a full chunk
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_forward.zig	hunks 5	b	0020	sparse-onepass	0041: the replay launch passes `keep` as the kernel's int
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_forward.zig	hunks 1,2	b	0021	onepass-pipe	0041: Modules.load sets m.tiled and deinit undefines the struct again, and attendLastRow launches one row and takes the whole chunk's prompt flag
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_forward.zig	hunks 3,4	b	0026	glue-fuse	0041: the OVN kernels load without an MLA knob, router() launches ROUTER16's kernel, Forward.set passes .mla, .onepass and .onepass_pipe, the L2 prefetch joins after the stream mean, and Kernels.wanted counts KVB8 (the copy this patch adds is the one the term belongs on)
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_glue.zig	lines (kvb8_in_kernels)	b	0026	glue-fuse	0041: the OVN kernels load without an MLA knob, router() launches ROUTER16's kernel, Forward.set passes .mla, .onepass and .onepass_pipe, the L2 prefetch joins after the stream mean, and Kernels.wanted counts KVB8 (the copy this patch adds is the one the term belongs on)
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_glue.zig	hunks 1,2,4	b	0026	glue-fuse	0041: the OVN kernels load without an MLA knob, router() launches ROUTER16's kernel, Forward.set passes .mla, .onepass and .onepass_pipe, the L2 prefetch joins after the stream mean, and Kernels.wanted counts KVB8 (the copy this patch adds is the one the term belongs on)
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_kda_block.zig	lines (fork_after_project)	b	0023	kda-chunked	0041: `body` matches bodyProfile's arity, and the L2 prefetch of site o forks after the projections (both lines sit on the bodyProfile this patch rebuilds)
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_kda_block.zig	lines (body_arity)	b	0023	kda-chunked	0041: `body` matches bodyProfile's arity, and the L2 prefetch of site o forks after the projections (both lines sit on the bodyProfile this patch rebuilds)
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	b	0027	shared-round-era	0041: Engine.verifyShared is cuda_engine_shared's, draft_probabilities follows --mtp-confidence, and one own.lanes assignment carries every field
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_native.zig	hunks 1	b	0012	reply-prefill	0041: snapGridNow and snap_tail are declared again, and chunkOf takes a wide step only from a full chunk
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_native.zig	hunks 2	b	0027	shared-round-era	0041: Engine.verifyShared is cuda_engine_shared's, draft_probabilities follows --mtp-confidence, and one own.lanes assignment carries every field
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_prompt_pair.zig	all hunks	b	0010	resume-any-row	0041: a pair runs only where the engine has one, and the pair clears the drafter's taps
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_q4.zig	all hunks	b	0007	draft-knobs	0041: cuda_q4.Kernels.module is set, and dflash_load keeps the pin's header and short-read checks and sets Drafter.tap_rows
+0041-restore-pin-forms.patch	zig/src/families/glm/cuda_tile.zig	all hunks	b	0006	kda-pad-one-width	0041: tileLinears synchronizes before the read-back; its restore of prompt_pair.wanted's TF_GLM_CHUNK_SOLO argument cancels the port's own change, so cuda_engine.zig is untouched here
+0041-restore-pin-forms.patch	zig/src/families/glm/dflash_load.zig	all hunks	b	0007	draft-knobs	0041: cuda_q4.Kernels.module is set, and dflash_load keeps the pin's header and short-read checks and sets Drafter.tap_rows
+0042-pair-fits-rings.patch	zig/src/families/glm/cuda_prompt_pair.zig	all hunks	b	0010	resume-any-row	0042: ringsAgree and State.ready refuse a pass that does not fit the index rings
+0042-pair-fits-rings.patch	zig/src/families/glm/cuda_state.zig	all hunks	b	0010	resume-any-row	0042: ringsAgree and State.ready refuse a pass that does not fit the index rings
+0043-lean-comments.patch	zig/kernels/cuda/glm_glue_bmm.cuh	all hunks	b	0026	glue-fuse	0043: the router16 comment on one line, for the lean gate
+0043-lean-comments.patch	zig/kernels/cuda/glm_l2pf.cu	all hunks	b	0023	kda-chunked	0043: glm_l2pf.cu's header on single lines, for the lean gate
+0043-lean-comments.patch	zig/src/families/glm/cuda_prompt_pair.zig	all hunks	b	0010	resume-any-row	0043: ringsAgree's comment on one line, for the lean gate
+0044-exl3-decode-items.patch	zig/src/cuda/exl3_experts.zig	all hunks	a	0011	exl3-decode-items	glm exl3: decode windows on the 16-pair item plan
+0044-exl3-decode-items.patch	zig/src/families/glm/cuda_exl3.zig	all hunks	a	0011	exl3-decode-items	glm exl3: decode windows on the 16-pair item plan
+0044-exl3-decode-items.patch	zig/tests/cuda/glm_exl3_items_tests.zig	all hunks	a	0011	exl3-decode-items	glm exl3: decode windows on the 16-pair item plan
+0044-exl3-decode-items.patch	zig/tests/cuda/main.zig	all hunks	a	0011	exl3-decode-items	glm exl3: decode windows on the 16-pair item plan
+0045-chunk-grid-end.patch	zig/src/families/glm/cuda_engine.zig	all hunks	b	0010	resume-any-row	0045: chunkEnd ends on the chunk grid, so chunks after an unaligned start pair again
+0045-chunk-grid-end.patch	zig/src/families/glm/cuda_prompt_pair.zig	all hunks	b	0010	resume-any-row	0045: chunkEnd ends on the chunk grid, so chunks after an unaligned start pair again
+0046-head-flag.patch	zig/glm_prompt_host.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0046-head-flag.patch	zig/glm_snapshot_host.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0046-head-flag.patch	zig/src/families/glm/cuda_engine.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0046-head-flag.patch	zig/src/families/glm/cuda_prompt_pair.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0046-head-flag.patch	zig/src/families/glm/cuda_prompt_pieces.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0046-head-flag.patch	zig/src/families/glm/cuda_prompts.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0046-head-flag.patch	zig/src/families/glm/cuda_snapshots.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0046-head-flag.patch	zig/test_support/glm_snap_fixture.zig	all hunks	a	0030	head-flag	glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+0047-whole-pass-steps.patch	zig/src/families/glm/cuda_engine.zig	all hunks	b	0012	reply-prefill	0047: a whole prompt pass steps at its marks, through Leader.chunkOf
+0047-whole-pass-steps.patch	zig/src/families/glm/cuda_follow.zig	all hunks	b	0012	reply-prefill	0047: a whole prompt pass steps at its marks, through Leader.chunkOf
+0047-whole-pass-steps.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	b	0012	reply-prefill	0047: a whole prompt pass steps at its marks, through Leader.chunkOf
+0047-whole-pass-steps.patch	zig/tests/cuda/glm_lanes_tests.zig	all hunks	b	0012	reply-prefill	0047: a whole prompt pass steps at its marks, through Leader.chunkOf
+0047-whole-pass-steps.patch	zig/tests/cuda/glm_paged_tests.zig	all hunks	b	0012	reply-prefill	0047: a whole prompt pass steps at its marks, through Leader.chunkOf
+0048-batch-mark-inside.patch	zig/glm_prompt_logprobs_host.zig	all hunks	b	0010	resume-any-row	0048: canBatch refuses a prompt with a mark inside it, with the chunkEnd walk beside it
+0048-batch-mark-inside.patch	zig/src/families/glm/cuda_lanes.zig	all hunks	b	0010	resume-any-row	0048: canBatch refuses a prompt with a mark inside it, with the chunkEnd walk beside it
+0049-follower-disk-bind.patch	zig/src/families/glm/cuda_follow.zig	all hunks	b	0027	shared-round-era	0049: a follower binds no slot on a disk step
+0050-one-chunk-wiring.patch	zig/build/glm_family_host.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/glm_one_chunk_host.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/src/families/glm/cuda_engine.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/src/families/glm/cuda_engine_ovn.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/src/families/glm/cuda_follow.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/src/families/glm/cuda_forward.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/src/families/glm/cuda_one_chunk.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/src/families/glm/cuda_one_chunk_keep.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0050-one-chunk-wiring.patch	zig/src/families/glm/cuda_snapshots.zig	all hunks	b	0028	one-chunk-wiring	folded into the lever it repairs
+0051-fp8-tile-ahead.patch	zig/kernels/cuda/glm_glue_attn.cuh	all hunks	a	0031	fp8-tile-ahead	glm cuda: FP8 latent keys fetched a tile ahead, in 8-byte loads
+0051-fp8-tile-ahead.patch	zig/src/core/contract/measurements/pending_133.zig	all hunks	a	0031	fp8-tile-ahead	glm cuda: FP8 latent keys fetched a tile ahead, in 8-byte loads
+0052-exl3-chunk-rows.patch	zig/src/families/glm/cuda_exl3.zig	all hunks	a	0032	exl3-chunk-rows	glm cuda: the EXL3 prompt experts take a whole 2,048-row chunk in one call
+0053-exl3-dec-order.patch	zig/kernels/cuda/exl3_experts.cu	all hunks	a	0033	exl3-dec-order	exl3: TF_EXL3_DEC_ORDER launches each k slice's blocks before the items
+0053-exl3-dec-order.patch	zig/kernels/cuda/exl3_grouped.cuh	all hunks	a	0033	exl3-dec-order	exl3: TF_EXL3_DEC_ORDER launches each k slice's blocks before the items
+0053-exl3-dec-order.patch	zig/src/cuda/exl3_experts.zig	all hunks	a	0033	exl3-dec-order	exl3: TF_EXL3_DEC_ORDER launches each k slice's blocks before the items
+0053-exl3-dec-order.patch	zig/tests/cuda/contract_exl3_grouped.zig	all hunks	a	0033	exl3-dec-order	exl3: TF_EXL3_DEC_ORDER launches each k slice's blocks before the items
+0054-logit-gather-blocks.patch	zig/glm_prompt_logprobs_host.zig	all hunks	c	0001	logit-gather-blocks	glm cuda: a logit gather broadcasts one block a rank, not one a row
+0054-logit-gather-blocks.patch	zig/src/families/glm/cuda_prompt_logprobs.zig	all hunks	c	0001	logit-gather-blocks	glm cuda: a logit gather broadcasts one block a rank, not one a row
+0054-logit-gather-blocks.patch	zig/src/families/glm/cuda_sampler.zig	all hunks	c	0001	logit-gather-blocks	glm cuda: a logit gather broadcasts one block a rank, not one a row
+0054-logit-gather-blocks.patch	zig/src/families/glm/cuda_structured.zig	all hunks	c	0001	logit-gather-blocks	glm cuda: a logit gather broadcasts one block a rank, not one a row
+0055-reply-prefill-spares.patch	zig/src/core/lane_host.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/core/lane_host_warm_test.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/core/lane_job.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/core/lane_stream.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/core/prompt_cache.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/core/prompt_cache_policy.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/families/glm/cuda_native.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/native/cuda.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/native/cuda_startup_phase.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0055-reply-prefill-spares.patch	zig/src/native/cuda_warm_serve_test.zig	all hunks	b	0012	reply-prefill	0055: the eviction guard, and no background pass beside admitted work
+0056-register-gpu-checks.patch	zig/tests/cuda/glm_index_check.zig	all hunks	b	0013	index-sched-decode-pools32	0056: glm-index-ovn-check is registered, and the declarations it reads are pub
+0056-register-gpu-checks.patch	zig/tests/cuda/glm_index_ovn_check.zig	all hunks	b	0014	index-regroup	0056: glm-index-regroup-check is registered, and the inputs it reads are pub
+0056-register-gpu-checks.patch	zig/tests/cuda/glm_ovn_checks.zig	lines (ovn_checks_1)	b	0012	reply-prefill	0056: glm-reply-prefill-check compiles and is registered
+0056-register-gpu-checks.patch	zig/tests/cuda/glm_ovn_checks.zig	lines (ovn_checks_2)	b	0013	index-sched-decode-pools32	0056: glm-index-ovn-check is registered, and the declarations it reads are pub
+0056-register-gpu-checks.patch	zig/tests/cuda/glm_ovn_checks.zig	lines (ovn_checks_3)	b	0014	index-regroup	0056: glm-index-regroup-check is registered, and the inputs it reads are pub
+0056-register-gpu-checks.patch	zig/tests/cuda/glm_reply_prefill_check.zig	all hunks	b	0012	reply-prefill	0056: glm-reply-prefill-check compiles and is registered
+0056-register-gpu-checks.patch	zig/tests/cuda/main.zig	all hunks	b	0012	reply-prefill	0056: glm-reply-prefill-check compiles and is registered
+0057-onepass-pipe-scale.patch	zig/build/glm_family_host.zig	all hunks	b	0021	onepass-pipe	0057: the DECODE scale is broadcast across the warp, with the reset check beside it
+0057-onepass-pipe-scale.patch	zig/kernels/cuda/glm_onepass_pipe.cuh	all hunks	b	0021	onepass-pipe	0057: the DECODE scale is broadcast across the warp, with the reset check beside it
+0057-onepass-pipe-scale.patch	zig/src/families/glm/cuda_onepass_order_test.zig	all hunks	b	0021	onepass-pipe	0057: the DECODE scale is broadcast across the warp, with the reset check beside it
+0057-onepass-pipe-scale.patch	zig/tests/cuda/glm_onepass_exact_check.zig	all hunks	b	0025	mla-knobs	0057: the one-pass base check, which calls the glue.Kernels.loadOvn this patch adds
+0057-onepass-pipe-scale.patch	zig/tests/cuda/glm_ovn_checks.zig	all hunks	b	0025	mla-knobs	0057: the one-pass base check, which calls the glue.Kernels.loadOvn this patch adds
+0057-onepass-pipe-scale.patch	zig/tests/cuda/main.zig	all hunks	b	0025	mla-knobs	0057: the one-pass base check, which calls the glue.Kernels.loadOvn this patch adds
+0058-draft-edge-noise.patch	zig/src/families/glm/dflash_select.zig	all hunks	b	0007	draft-knobs	0058: the selector reads DRAFT_EDGE, _NOISE and _BETA, which the port left unread
+0059-df-sumw-record.patch	zig/src/core/contract/glm_cuda_records.zig	all hunks	b	0007	draft-knobs	0059: df_sumw's kernel-contract record, which the port brought the kernel without
+0060-ring-past-refusal-test.patch	zig/glm_ring_host.zig	all hunks	b	0010	resume-any-row	0060: the unit test for error.PastRing
+0061-shared-window-width.patch	zig/tests/cuda/glm_lanes_tests.zig	all hunks	c	0002	shared-window-width	glm tests: the shared-window check sizes its rows from the engine, not a literal 4
+0062-rows-worker-and-quiesce-drain.patch	zig/src/core/rows_test.zig	all hunks	c	0003	rows-worker-and-quiesce-drain	core and server: the disk grid on the I/O worker, and a quiesce drain test
+0062-rows-worker-and-quiesce-drain.patch	zig/src/server/health_quiesce_test.zig	all hunks	c	0003	rows-worker-and-quiesce-drain	core and server: the disk grid on the I/O worker, and a quiesce drain test
+0062-rows-worker-and-quiesce-drain.patch	zig/src/server/health_test.zig	all hunks	c	0003	rows-worker-and-quiesce-drain	core and server: the disk grid on the I/O worker, and a quiesce drain test
+0062-rows-worker-and-quiesce-drain.patch	zig/src/server/root.zig	all hunks	c	0003	rows-worker-and-quiesce-drain	core and server: the disk grid on the I/O worker, and a quiesce drain test
+0063-snapshot-past-rings.patch	zig/glm_snapshot_host.zig	all hunks	b	0010	resume-any-row	0063: a kept state past the index rings, the paged tests split out for the 600-line rule
+0063-snapshot-past-rings.patch	zig/glm_snapshot_paged_host.zig	all hunks	b	0010	resume-any-row	0063: a kept state past the index rings, the paged tests split out for the 600-line rule
+0064-memo-equal-strindex.patch	zig/build/cuda.zig	all hunks	a	0034	memo-equal-strindex	host: byte equality by indexOfDiff, and a string index that stops counting at it
+0064-memo-equal-strindex.patch	zig/src/core/template/access.zig	all hunks	a	0034	memo-equal-strindex	host: byte equality by indexOfDiff, and a string index that stops counting at it
+0064-memo-equal-strindex.patch	zig/src/core/template/template.zig	all hunks	a	0034	memo-equal-strindex	host: byte equality by indexOfDiff, and a string index that stops counting at it
+0064-memo-equal-strindex.patch	zig/src/core/tokenizer/memo.zig	all hunks	a	0034	memo-equal-strindex	host: byte equality by indexOfDiff, and a string index that stops counting at it
+0065-prompt-bench.patch	build.zig	all hunks	d	0004	prompt-bench	host: the prompt-bench step, so request preparation can be timed on this tree
+0065-prompt-bench.patch	zig/build/server.zig	all hunks	d	0004	prompt-bench	host: the prompt-bench step, so request preparation can be timed on this tree
+0065-prompt-bench.patch	zig/src/server/root.zig	all hunks	d	0004	prompt-bench	host: the prompt-bench step, so request preparation can be timed on this tree
+0065-prompt-bench.patch	zig/tests/server/prompt_bench.zig	all hunks	d	0004	prompt-bench	host: the prompt-bench step, so request preparation can be timed on this tree
+0066-render-once-host-once.patch	zig/build/cuda_server_host.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/template/eval.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/template/generation.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/template/generation_test.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/template/template.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/template/watch.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/tokenizer/kept.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/tokenizer/kept_test.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/core/tokenizer/tokenizer.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/fixtures/glm53/chat_template.jinja	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/hf_text.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/hf_text_kept.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/messages.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/model_text.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/prompt.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/prompt_once_test.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/root.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/src/server/server.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0066-render-once-host-once.patch	zig/tests/server/prompt_bench.zig	all hunks	a	0035	render-once-host-once	server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+0067-glue-fuse-last-layer.patch	zig/src/families/glm/cuda_forward.zig	all hunks	b	0026	glue-fuse	0067: a fused glue's last layer glues the buffer the residual is in
+0067-glue-fuse-last-layer.patch	zig/src/families/glm/cuda_router_warm.zig	all hunks	b	0026	glue-fuse	0067: a fused glue's last layer glues the buffer the residual is in
+0068-pieces-resume-keepwin.patch	zig/src/families/glm/cuda_prompt_pieces.zig	all hunks	b	0027	shared-round-era	0068: a resumed prompt piece restores the drafter's kept window
