@@ -173,9 +173,11 @@ is not explained by any patch decided here.
 | 3. forward references | 0 missing imports; 5 identifier flags, all words (`knob`, `compares`, `onepass` in a string and a field name) |
 | 4. lean, each side's own `lean_check.py` | v1.2.7 6211 files / 386 problems, head 6253 / 386, **0 new**, no getenv finding |
 | 5. compile gates, `scripts/gates.sh` (C: 229-233 GB free) | v127base green; 0001-0010 green after the two fixes; final tree green on every step, fmt rc=0; `gate-names.sh v127base reseat`: 0 failing names on either side |
+| 6. CUDA units, this workstation's nvcc 13.3 with the build's flags | all 10 units the series touches compile (`glm_glue`, `glm_mm`, `mla`, `glm_kda_chunk`, `glm_onepass`, `glm_onepass_pipe`, `glm_index`, `glm_ops`, `exl3_experts`, `glm_l2pf`); ptxas gives 0032's chunk kernels 148/148/150/128/128 and 194/194/213/163/163 registers, `pending_133.zig`'s numbers exactly (v1.2.7: 64 x5, 128/128/127/130/130); neither spills |
+| 7. every prefix compiles | `check-native-cuda-host` rc=0 on all 32 prefix trees; the same command on the broken earlier form fails (`rc=1`, the `pieces` shadow), so the run can fail |
 
-Not compiled here: `.cu`/`.cuh` (the spark1 image build is that gate; most at risk: 0024's `glm_mm.cu` including
-`glm_swiglu.cuh`, 0026's trimmed glue headers, 0032's merged `chunks_wide`), and prefixes other than 0010 and the end.
+The kernels are compiled, not run: their bytes and the knobs' effects need the GPU receipts each patch header names,
+which this lane does not take (no GPU work, by its brief).
 
 ### For Main's round-time finding
 
@@ -191,4 +193,6 @@ SwiGLU twins deferred), 0030, and the deferred era. None of them has a GPU recei
 that assert their anchors), `mf.py` (function-level `git merge-file` for code upstream moved between files),
 `conf.py` (a step's conflicts in diff3 form with the default style's block count), `probe.py`, `show.py`,
 `heads.py`, `counts.py`, `comments.py`, `gate_tree.sh` (git archive of a tree object, then `scripts/gates.sh`),
-`fmt_diff.sh`, `envtest.sh`. `reseat.py --emit` rebuilds all 33 patches from v1.2.7 in about 40 seconds.
+`fmt_diff.sh`, `envtest.sh`, `nvcc_check.py` and `spill_check.py` (the CUDA units with the build's nvcc flags, ptxas
+registers and spills), `prefix_compile.sh` and `one_compile.sh` (every prefix, and the control that the command
+fails). `reseat.py --emit` rebuilds all 33 patches from v1.2.7 in about 40 seconds.

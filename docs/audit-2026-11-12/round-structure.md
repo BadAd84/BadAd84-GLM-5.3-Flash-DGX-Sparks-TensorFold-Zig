@@ -1,7 +1,7 @@
 # round-structure.md - production's one-stream decode round against ours at v1.2.7
 
-Lane `RoundStructure`, 2026-11-12. Read-only code reading: no build, no test, no GPU work. This file is the only one
-written.
+Lane `RoundStructure`, 2026-11-12. Read-only: code reading, plus today's cell results and production's boot log read
+on spark1 over SSH. No build, no test, no GPU work. This file is the only one written.
 
 ## Sources and conventions
 
@@ -16,6 +16,19 @@ written.
 - **Our measurements**: `docs/OVERNIGHT-2026-11-12.md` (`ON:`), `docs/PATCH-EVAL.md` (`PE:`), and the fork's
   `C:/Users/Adam/Gitea/ai-engine/docs/` (`AE:`). The fork's drafter and step protocol are v1.2.7's unless a row says
   otherwise, so its receipts are quoted as "measured on the fork", never as measured on v1.2.7.
+- **Today's cells, on spark1** (read over SSH, unchanged): `~/bench/<cell>/P<n>.jsonl` from `scripts/streams.py`
+  (`B:<cell>`), production's boot log of the profile run `~/bench/prodprof/log-P1.txt` (`BL:`), and our rank 0 log of
+  the profiled cell `~/bench/v127-prof/r0-P1.log` (`BR:`). `prodwin` and `prodprof` are production; `v127` is v1.2.7
+  as built, `v127-pad` adds `TF_GLM_KDA_PAD=1`, `v127-prof` adds `TF_GLM_PROF` to that; `roce1-pad` and
+  `roce1-pad-nccl` are the fork's stack through 0042 plus the RoCE gather (`ON:126-128`), on and off, with the pad,
+  and `roce1-nccl` is the off arm without it. Every cell is one prose prompt (`scripts/streams.py:32-33`), 400 tokens,
+  greedy (`ON:179`), three requests; `pyprod` is production's run of 2026-11-11 at one to eight streams (`ON:16`).
+- **A capture of our pad stack at one stream** (read-only `sqlite3` queries on spark1): `~/nsys/f5-pad-p1.sqlite`,
+  rank 0 of the stack through 0041 on the old pin with the KDA pad, 2026-11-12, the capture behind `ON:103-121`
+  (`NS:`). Its window is the 154 drafter passes: 153 rounds in 6,758 ms (44.2 ms a round, 3.92 rows); stream 18 is
+  the main stream, 20 the L2 prefetch. Its draw reads each row on its own (a 48-byte read 3.93 times a round, with a
+  gather and a synchronize each), where v1.2.7 reads all rows once (`Z:cuda_engine_pick.zig:14-42`, called at
+  `Z:cuda_engine.zig:534`), so it has about 2.9 more synchronizes and gathers a round than v1.2.7.
 - **MiaAI recipe (Zig engine 1.1.9 + patches)**: `work-recon/GLM-5.3-Flash-DGX-Sparks-1104/patches/engine/` (`MIA:`).
 - Every number is labelled **measured** (where), **derived** (arithmetic shown) or **estimate**.
 
@@ -25,9 +38,13 @@ written.
    (`ENV:48`) the decoder forces the lone-stream path off (`P:multi.py:344-354`, applied at `P:multi.py:869`; an
    explicit `TF_GLM_MULTI_LONE=1` is refused, `P:engine.py:1505-1508`). Every round, one stream included, goes
    through `BatchedVerify`: one CUDA graph per total row count, then one graph for the commit and the drafter's
-   context update. The table in `ON:190-192` is the one-stream column of `_compare_paths`
-   (`P:multi.py:1120-1150`); the live path is its batched column, which production's own start-up comparison puts
-   1.6 to 2.2% slower a window (`PN:GLM53-SPEED-CAMPAIGN-2026-10.md:82`).
+   context update. Its boot log says so: "lone stream on the one-stream graphs off" (`BL:`). The start-up line's two
+   columns (`P:multi.py:1120-1150`) time different graph sets: the one-stream column the dense graphs
+   (`P:graphs.py:56-59`, no token selection), the batched column the set that always runs the token selection
+   (`P:verify.py:180-181,225`). A window with no row at position 2,051 or later (`SPARSE_FROM`, `P:sparse.py:14-18`),
+   which is every window of the prose cell, replays a third set, `dense_graphs` (`P:verify.py:23-26,343-346`), that no
+   boot line times. The measured round puts it within 0.9 ms of the one-stream column (section 1.3), so `ON:202`'s
+   "38.6 against production's 36.9" compares against a set the prose round does not replay.
 2. **Production's drafter is not hidden under the verify.** It runs on the same stream, after the commit and
    before the next verify; it cannot start earlier because its pending token is a verify sample and its context
    rows are the verify's taps (`PN:notes/drafter-pass-DrafterFable.md:91-96`; the measured stream order is "sample
@@ -35,23 +52,31 @@ written.
    `PN:notes/decode-nsys-DecNsysMimo.md:38-40`). What production does instead: (a) a pass that reads 328.5 MB a
    rank against our 1,047 MB (TP-split drafter, every linear 4-bit), (b) one CUDA graph of 218 kernels, (c)
    launched at the end of the previous round (OTS 0087 prelaunch), so the host's round-end work and the next
-   message run under it (about 0.65 ms of host time hidden), (d) one pinned readback. Its pass costs about 2.3 ms
-   of GPU time a round, not 1 ms. The "about 1 ms" traces to MIA 0038's seed (`draft_ms 1.37`, measured on sm_120
+   message run under it (about 0.65 ms of host time hidden), (d) one pinned readback. Its pass costs 1.96 ms in
+   today's boot calibration, plus 0.033 ms a kept tap row (`BL:`, "drafter costs"), not 1 ms. The "about
+   1 ms" traces to MIA 0038's seed (`draft_ms 1.37`, measured on sm_120
    x8); MIA 0097 replaced it for GB10 with 5.92 ms for the Mia Zig engine, whose drafter is built like ours.
 3. **Our verify is fully eager.** There is no CUDA graph anywhere in `Z:` (`git grep -i graph v1.2.7 --
-   zig/src/families/glm` finds nothing). About 1,400 host launches a window on every rank (estimate, section 4),
-   and every all-gather goes through NCCL at TP=3 (`TF_GLM_ROCE_MULTI` defaults off, `Z:cuda_ranks.zig:27`), where
-   production replays one graph with RoCE one-shot gathers inside (`ENV:11`, `Pc:roce.py:584-606`).
+   zig/src/families/glm` finds nothing). About 1,400 host launches a window on every rank (estimate; 1,815 a
+   round in all measured on the pad stack, section 4), and every all-gather goes through NCCL at TP=3
+   (`TF_GLM_ROCE_MULTI` defaults off, `Z:cuda_ranks.zig:27`), where production replays one graph with RoCE one-shot
+   gathers inside (`ENV:11`, `Pc:roce.py:584-606`).
 4. **Our round has three cross-rank steps** (verify, keep, block), each a broadcast that every follower receives
    with a main-stream synchronize and a blocking read. Production sends one 4 KiB message a round, queued on the
-   GPU behind the prelaunched pass, and every rank computes the drafts and the samples itself.
+   GPU behind the prelaunched pass, and every rank computes the drafts and the samples itself. On rank 0 the three
+   step boundaries cost 0.07 ms a round in all (measured on the pad stack, section 1.3); the followers' side is not
+   measured.
 5. **Our DFlash2 windows are priced by a stale table** (52 ms + 6.8 ms a row "on two GB10s",
    `Z:cuda_copy_policy.zig:5-6`), because `facts()` drops the load-time prices whenever the drafter is loaded
    (`Z:cuda_lanes.zig:100,116`). This is why the window rule differs from production's, not the drafter pass.
-6. **Production's round is not settled.** `ON:187` derives 31.9 ms from aggregate counters (warm-up included) and
-   the cells' tok/s; the sum of production's own component measurements at 3.4 rows is about 34.6 to 35.8 ms
-   (section 1.3). The gap is 8.7 to 12.6 ms depending on which is right; one production log line settles it
-   (section 6).
+6. **Production's round is about 36.8 ms, not 31.9, and it verifies more rows than we do.** `ON:186-187` divide
+   aggregate counters with the warm-up included. Per request, production returns the same reply three times with 388
+   drafted and 266 accepted, so 399 - 266 = 133 decode rounds: 3.00 tokens and 3.92 rows a round, 36.7 to 37.4 ms at
+   81.67 (`B:prodwin`) and 81.37, 81.29, 80.33 tok/s (`B:prodprof`). The same rule gives our engine's own counter,
+   143 = 399 - 256 (`B:v127-pad`: 43.8 ms, 2.79 tokens, 3.80 rows; 44.5 ms with `TF_GLM_PROF`, so the profiler costs
+   0.7 ms a round). The round gap is 7.0 ms, and production also keeps 7.5% more tokens a round; the two replies
+   differ (`8347edfe4ee6` against `323d3f5bcb55`), so that 7.5% is not yet attributable to the drafter (section
+   1.3).
 
 ## 1. The order of work in a one-stream round
 
@@ -104,16 +129,53 @@ select (`:421-427`); it never computes drafts, which arrive as the next verify s
 
 | part of the round | production (served) | ours (v1.2.7, pad on) |
 |---|---|---|
-| verify | 31.1 ms at 3.4 rows on the one-stream graphs, 31.5 to 31.7 on the batched path the round uses (derived: 29.20 + 0.41 x 4.50 from `ON:191`, then +1.6 to 2.2%) | about 37.7 ms at 3.8 rows (derived: 29.4 + 0.9 x 9.2 from `ON:193`, `TF_GLM_PROF`) |
-| drafter | 2.29 ms (+0.042 a tap row) in production's boot calibration over RoCE (`PN:notes/drafter-pass-DrafterFable.md:36-39`) | 5.4 to 5.9 ms (`ON:194`; phases `PE:153-155`: ingest 0.47, tables 0.01, block 5.3 to 5.45, select 0.03) |
-| commit, taps, sample, message, idle | 1.84 ms at `dec35k` under NCCL, before RoundGraphs and the fixed message gather (derived: taps 0.376 + eager NCCL 0.528 + replay 0.183 + radix 0.041 + glue 0.048 + idle 0.667, `PN:notes/decode-nsys-DecNsysMimo.md:51-57`); less today (estimate 1.2 to 1.8) | 0.9 to 1.4 ms (derived: 44.5 minus the two rows above) |
-| round | 31.9 ms by `ON:187` (2.59 tokens a round, aggregate counters, warm-up included, at 80.8 tok/s); 34.6 to 35.8 ms by the components (derived) | 44.5 ms (`ON:187`) |
+| verify | 33.3 to 34.2 ms at 3.92 rows (derived: the 36.8 ms round less the two rows below; the one-stream column gives 33.3 at 3.92 rows, 29.20 + 0.92 x 4.50 from `BL:`; the always-select batched column would give 36.5 ms and a 39 to 40 ms round, which the measured round rules out) | 37.0 to 37.7 ms at 3.80 rows (derived: 29.41 + 0.9 x 9.23 from `BR:`, less up to the profiler's 0.7 ms) |
+| drafter | 2.0 to 2.2 ms: block pass 1.96 (+0.033 a kept tap row), a row bucket's update 0.265 at most, today's boot calibration over RoCE (`BL:`); 2.29 ms block in October's (`PN:notes/drafter-pass-DrafterFable.md:36-39`) | 5.4 to 6.2 ms: on v1.2.7 with the phases synchronized ingest 0.48, tables 0.01, block 5.69 to 5.71, select 0.04 (`BR:`); 5.4 to 5.9 in `ON:201` |
+| commit, sample, accept, message, emit, idle | 0.6 to 1.3 ms (estimate: about 1.0 in `PN:notes/prose-100-roofline-2026-10-09.md:105-108`, whose non-verify total is 3.8 ms with a 2.39 ms block; 1.84 ms at `dec35k` under NCCL before RoundGraphs and the message gather, `PN:notes/decode-nsys-DecNsysMimo.md:51-57`) | 0 to 1.4 ms (derived: 43.8 less the two rows above, both upper bounds) |
+| round | 36.7 to 37.4 ms: 133 rounds a request (399 - 266 accepted), 3.00 tokens and 3.92 rows a round (derived from `B:prodwin`, `B:prodprof`) | 43.8 ms: 143 rounds, 2.79 tokens, 3.80 rows (the engine's counters, `B:v127-pad`); 44.5 ms with `TF_GLM_PROF` (`B:v127-prof`) |
 
-If production's components are right, the measured 80.8 tok/s needs about 2.8 to 2.9 tokens a round in that cell
-(derived: 80.8 x 0.0346 to 0.0358), close to our 2.79, and the round gap is 8.7 to 9.9 ms rather than 12.6.
-If the counters are right, production's live verify would have to beat its own boot fastest-of-6 figure, which its
-earlier capture never showed (live equal at 2 rows, +10% at 8 rows: `PN:notes/decode-nsys-DecNsysMimo.md:215-218`).
-Either way the order of the levers below does not change.
+Production's round is 7.0 ms shorter (43.8 against 36.8) and carries 7.5% more tokens (3.00 against 2.79), which
+together make the 28% (derived: 81.2 / 63.6 = 1.28 = 43.8 / 36.8 x 3.00 / 2.79). Of the 7.0 ms, from the rows
+above: the drafter 3.2 to 4.2, the verify 2.8 to 4.4 at these rows (3.4 to 4.9 at equal rows, a row costing about
+4.6 ms in `BR:`), the rest within 1.3 ms either way. `ON:189-192`'s first reading is reversed on two counts:
+production verifies more rows than we do (3.92 against 3.80), not fewer, and its drafter costs it about 2 ms a round
+rather than being hidden. The tokens a round come from two different replies (`8347edfe4ee6` against
+`323d3f5bcb55`), and both the text and the drafter's settings move them: on reply `3ec88b6418f7` v1.2.7 without the
+pad drafts 398 and keeps 250 while the fork's stack drafts 421 and keeps 251 (`B:v127`, `B:roce1-nccl`); v1.2.7 with
+the pad, on reply `323d3f5bcb55`, drafts 401 and keeps 256 (`B:v127-pad`). No existing cell gives a same-text pair: at
+one to eight streams production's replies (`8347edfe4ee6`, `66b9fe5c1ea4`, `8ab1a46288e5`, `c01484b25e1f`,
+`B:pyprod`) and ours (`323d3f5bcb55`, `a903d540de88`, `3532ba23f928`, `a32f22d65d77`, `B:v127-pad`) differ on every
+prompt. So attributing the 7.5% (up to 3.3 ms of our round, derived: 43.8 x 0.075) takes both drafters scored on one
+fixed token sequence, which production's per-round recorder can give (`TF_GLM_ROUND_LOG`, built and not deployed:
+`PN:notes/prose-100-roofline-2026-10-09.md:153-155`).
+
+Measured without profilers on rank 0 of the pad stack at one stream (`NS:`; segments cut at each step's `put_words`
+kernel, 153 rounds, 44.2 ms a round at 3.92 rows):
+
+| step | span ms | busy ms | idle ms | NCCL ms | kernels | gap to the next step ms |
+|---|---:|---:|---:|---:|---:|---:|
+| verify, with this stack's per-row draw | 37.62 | 36.28 | 1.34 | 3.35 | 1,540 | 0.015 |
+| keep | 0.26 | 0.25 | 0.01 | 0.00 | 3.5 | 0.004 |
+| drafter | 5.95 | 5.79 | 0.16 | 0.36 | 139 | 0.052 |
+
+The keep row leaves out one 48 ms segment; four further segments (1.1 ms each) hold a marker without a verify, a
+commit or a drafter pass. So on rank 0 the steps cost almost nothing at their boundaries: the drafter step is its
+kernels (5.79 of 5.95 ms), and what a graph could take out of the verify step is its 1.3 ms of idle plus whatever
+of its 3.4 ms in NCCL is waiting for a later rank (section 3.3).
+
+Production's own round profile measured its split on the October images (read today on spark1, the one-stream
+reports with three rows or more): on v18-ots with the clocks locked (`~/prof/stages/profile-lines.log`, 95 reports,
+3.9 rows, 3.1 tokens) the wall is 39.89 ms, of which the verify's GPU time is 36.02 and the rest 3.9: propose 2.74
+(the drafter, before the prelaunch existed), message 0.77, commit 0.10, taps 0.10, sampling 0.12; on v110-ots99 under
+NCCL (`~/prof/night/rank0-prof.log`, 9 reports, 6.7 rows) the wall is 54.9 ms, of which the verify's GPU time is
+50.42 and the rest 4.5: message 3.34 (the gather queued behind the prelaunched pass, so the drafter's GPU time lands
+there), emit 0.47, propose 0.26, sampling 0.18, commit 0.12, taps 0.10. Today's 1.96 ms pass over RoCE puts the rest
+at 2.6 to 3.5 ms (the table above), in line with those. Today's image left no such line: `work/prod-prof.sh` arms
+`TF_GLM_MULTI_PROFILE=20` (`:8`), but `BL:` holds only the start-up line, because `RoundProfile` prints with a plain
+`print` (`P:multi_tune.py:281,333`), production's own plan says the profile "Needs `PYTHONUNBUFFERED=1` to reach
+`docker logs` live" (`scripts/glm53/v110/draftsim_plan.md:98-100,106` in the production repo), and the script removes
+the container with `docker rm -f` (`:12`), which drops the unwritten buffer (inference). With `PYTHONUNBUFFERED=1`
+beside the knob the same run prints the `multi profile (batched)` line (`P:multi_tune.py:328-339`).
 
 ### 1.4 Speculation, side streams, graphs
 
@@ -153,7 +215,7 @@ Either way the order of the levers below does not change.
 | readback | one pinned D2H queued with the pass, its event waited at the next propose (`P:dflash2_multi.py:533-537,579-580`) | two `stream.synchronize` + blocking D2H (`Z:dflash_block.zig:55-60`, `Z:dflash.zig:301-302`) |
 | when | launched at the end of the previous round | launched and read back inside the round's block step |
 | context update | taps graph per row bucket (`P:dflash2_multi.py:438-470`), on the served path inside the commit graph (`P:verify.py:416-566`) | eager ingest before the pass (`Z:dflash.zig:236-275`) |
-| time | 1.925 ms graph on one GB10, synthetic weights, no network (`DrafterFable.md:27`); 2.29 ms in production's calibration over RoCE, taps8 0.34 (`:36-37`); 3.24 to 3.46 ms traced under NCCL (`DecNsysMimo.md:52,67-69`) | block 5.3 to 5.45, ingest 0.47 ms (`PE:153-155`, phases synchronized) |
+| time | 1.96 ms block pass and 0.265 ms a row bucket's update in today's boot calibration over RoCE (`BL:`); 1.925 ms graph on one GB10, synthetic weights, no network (`DrafterFable.md:27`); 2.29 ms in October's calibration over RoCE, taps8 0.34 (`:36-37`); 3.24 to 3.46 ms traced under NCCL (`DecNsysMimo.md:52,67-69`) | block 5.3 to 5.45, ingest 0.47 ms (`PE:153-155`, phases synchronized); on v1.2.7 block 5.69 to 5.71, ingest 0.48 (`BR:`) |
 
 The kernel split of our pass (pin, knobs off, `PE:158-170`): `tf_qmm_group` 3.0 ms a round over 32 launches (the
 4-bit linears, fc, kv and the head) and `glm_mm16_16` 2.2 ms over 6 launches (the five bf16 downs and the selector
@@ -170,8 +232,8 @@ projection).
 - **Launched early: yes**, OTS 0087's prelaunch hides about 0.65 ms of host round-end work under it
   (`DrafterFable.md:64-65`).
 
-So production's drafter costs about 2.3 ms of GPU time a round on the critical path. Ours costs 5.4 to 5.9 ms, of
-which the bytes explain most: 1,047 MB at our measured 177 GB/s effective against 328.5 MB
+So production's drafter costs about 2.0 to 2.2 ms of GPU time a round on the critical path (`BL:`). Ours costs 5.4
+to 6.2 ms (`BR:`, `ON:201`), of which the bytes explain most: 1,047 MB at our measured 177 GB/s effective against 328.5 MB
 (`AE:research/overnight-2026-10-29/drafter.md:37-38`).
 
 ### 2.3 MIA 0036 / 0038 and their production equivalents
@@ -208,12 +270,16 @@ edge weight 1 (`Z:dflash_select.zig:55`), and the stale window table (finding 5)
 - Ours: `TF_GLM_PROF` on v1.2.7, live decode, the mean of 64 calls a row bucket. A section is the time between two
   CUDA events recorded on the main stream (`Z:cuda_prof.zig:61-102`), so it includes any idle between its kernels;
   the window records about 265 events (6 marks a MoE layer, 4 a dense one: `Z:cuda_forward.zig:446,452,468-484`,
-  `Z:cuda_moe.zig:63-64`), whose own cost is not measured. 29.4 ms at 2 rows,
-  38.6 at 4 (`ON:193`).
+  `Z:cuda_moe.zig:63-64`), whose own cost is not measured apart; the whole profiler costs 0.7 ms a round (43.8
+  against 44.5 ms, `B:v127-pad`, `B:v127-prof`). 29.41 ms at 2 rows, 38.64 at 4 (`BR:`).
 - Production: `_compare_paths` at start-up, the fastest of 6 replays, distinct timing tokens, slot 0 at near-zero
-  context (`P:multi.py:1120-1150`, `P:verify.py:212-239`), one-stream column: 24.82 at 2 rows, 33.70 at 4.
-- So the 4-row gap is 4.9 ms against the one-stream column and 4.2 to 4.4 ms against the batched path (derived:
-  33.70 x 1.016 to 1.022), before our profiler's own cost.
+  context (`P:multi.py:1120-1150`, `P:verify.py:212-239`). Today (`BL:`): one-stream 24.82 at 2 rows and 33.70 at 4,
+  batched 25.65 and 36.90. The one-stream column times the dense graphs (`P:graphs.py:56-59`), the batched one the set
+  that always runs the token selection (`P:verify.py:180-181,225`); the prose window replays the dense batched set,
+  which no boot line times, and the measured round puts it within 0.9 ms of the one-stream column (section 1.3).
+- So the 4-row gap is about 4.0 to 4.9 ms with our profiler on (38.6 against 33.7 to 34.6) and about 3.3 to 4.9 ms
+  without it (the profiler's 0.7 ms a round is not all in the verify). `ON:202`'s 1.7 ms uses the always-select
+  column.
 
 ### 3.2 Per section at 4 rows (ours from the task's v1.2.7 profile; the layer counts from `Z:config.zig:12-21,116-122`: 45 layers, DSA at 3, 7, ..., 43, so 34 KDA and 11 DSA; 3 dense, 42 MoE)
 
@@ -230,17 +296,17 @@ edge weight 1 (`Z:dflash_select.zig:55`), and the stale window table (finding 5)
 | gather_b (45) | 1.8 | the L2 fork, NCCL gather, `hc_post`, taps (`Z:cuda_forward.zig:480-484`) | RoCE in the graph, `hc_post` | as gather_a |
 | head | 1.0 | stream mean, final norm, 8-bit head (`Z:cuda_forward.zig:490,495-511`) | final norm and an FP8 head under `TF_GLM_DENSE=q4` (`P:weights.py:334-337`) | same bytes class |
 
-The routed experts are near their bandwidth floor (`ON:198-201`), so the gap is in the rest.
+The routed experts are near their bandwidth floor (`ON:202-205`), so the gap is in the rest.
 
-### 3.3 Where the 4.2 to 4.9 ms most likely goes (estimates)
+### 3.3 Where the 3.3 to 4.9 ms most likely goes (estimates)
 
 | cause | estimate | evidence |
 |---|---:|---|
-| gathers: NCCL ring LL plus the wait for followers, against RoCE in a graph | 1.4 to 2.5 ms | ours 3.8 ms for 90 (gather_a + gather_b, which also hold the L2 fork, `hc_post` and five taps copies); NCCL `AllGather_RING_LL` 38.9 us a launch (`ON:113`); production 1.35 to 2.4 ms for about 90 (`AE:PARITY.md:812-813`) |
-| eager launches starving the main stream | 0.5 to 1.6 ms | rank 0's main stream idle about 1.6 ms a round on the fork at 8-row windows (`AE:PARITY.md:808-811`); production's whole round idles 0.67 ms (`DecNsysMimo.md:50`) |
+| gathers: NCCL ring LL plus the wait for followers, against RoCE in a graph | 1.4 to 2.5 ms | on the pad stack 94.9 all-gathers and 3.7 ms a round, durations p10 11.5 us, p50 26.8, p90 58.5, p99 296, so 2.6 ms a round above the p10 time (`NS:`; derived: 3.7 - 94.9 x 0.0115); the `TF_GLM_PROF` sections hold 3.8 ms with the L2 fork, `hc_post` and five taps copies; production 1.35 to 2.4 ms for about 90 (`AE:PARITY.md:812-813`); RoCE in place of NCCL took 1.3 ms off our round with the pad (`B:roce1-pad`) |
+| main-stream idle | up to 1.7 ms | rank 0's main stream idles 1.7 ms a round on the pad stack (263.7 ms over 153 rounds) in about 1,600 gaps of a few us, the largest shares just before the all-gathers (0.18 and 0.16 ms a round after `glm_mm_reduce` and `tf_glm_combine`) (`NS:`); 1.6 ms on the fork at 8-row windows (`AE:PARITY.md:808-811`); production's whole round idles 0.67 ms (`DecNsysMimo.md:50`) |
 | routed item plan | about 0.6 ms | +1.4% tok/s at P1 with the pad on our stack (`patches/engine/0044-exl3-decode-items.patch` header), 2 to 4% of 21.7 ms in the bench (`AE:PARITY.md:828-852`) |
 | MoE glue (side stream, fused combine and route) | up to 0.3 ms | the fork's `SHARED_SIDE` alone was level at one stream (`AE:reports/SPEED-REPORT.md:854`) |
-| our profiler's own events | not measured | |
+| our profiler's own events | up to 0.7 ms | the whole profiler costs 0.7 ms a round (43.8 against 44.5 ms, `B:v127-pad`, `B:v127-prof`), not all of it in the verify |
 
 ## 4. Kernel launches and host waits a round (one stream, rank 0 unless stated)
 
@@ -248,9 +314,9 @@ The routed experts are near their bandwidth floor (`ON:198-201`), so the gap is 
 |---|---|---|
 | CUDA graph launches | 3: verify, commit+taps, drafter (`DecNsysMimo.md:109`; `P:verify.py:351,556`; `P:dflash2_multi.py:530`) | 0 |
 | kernels inside graphs | about 1,000 in the verify ("per-shape CUDA graphs replace ~1,000 launches a round with one replay", `PN:GLM53-SPEED-CAMPAIGN-2026-10.md:73`), 218 in the drafter | n/a |
-| eager kernels | the sampler's top-k, about 25 tiny kernels (`DecNsysMimo.md:206-209`), 2 gathers (sample, message) | verify about 1,400 (below) with 91 NCCL gathers; keep 2 or 3; drafter about 135 with 1 NCCL gather; 3 x (`put_words` + broadcast) |
+| eager kernels | the sampler's top-k, about 25 tiny kernels (`DecNsysMimo.md:206-209`), 2 gathers (sample, message) | verify about 1,400 (below) with 91 NCCL gathers; keep 2 or 3; drafter about 135 with 1 NCCL gather; 3 x (`put_words` + broadcast); on the pad stack 1,815 launches a round in all, 1,402.6 `cuLaunchKernel` and 412.0 `cuLaunchKernelEx`, 9.2 ms of host time (`NS:`) |
 | H2D copies | 3 pinned (window tables, commit table, drafter meta: `P:verify.py:293,553`, `P:dflash2_multi.py:527`) + message staging (`P:engine.py:924`) | ids (`Z:cuda_forward.zig:439`), 7 drafter uploads from host arrays (`Z:dflash.zig:251-252,291-295`), `setPos` memsets |
-| host waits, rank 0 | 2: candidates event, sample readback | 3: the draw, the candidates, the projections |
+| host waits, rank 0 | 2: candidates event, sample readback | 3: the draw, the candidates, the projections; the pad stack measured 5.9 `cuStreamSynchronize` a round with the host blocked 29.8 ms in them, its draw reading each row (`NS:`), so the host runs well ahead of the GPU |
 | host waits, each follower | 3: message, candidates, sample | 4: three step receives (broadcast + main-stream synchronize + read each) and the draw |
 | rank-to-rank rendezvous a round | 1 message, queued on the GPU | 3 steps (verify, keep, block) |
 
@@ -265,24 +331,36 @@ layer: 31 x 29 + 11 x 37 + 3 x 21, about 1,370, plus the head and the draw, abou
 
 ## 5. Ranked changes to our engine
 
-Ranked by the central estimate of ms saved a round at one stream. "Replies bit-exact" means reply digests equal;
+Ranked by the central estimate of ms saved a round at one stream; items 5 to 9 sit within 0.25 ms of each other once
+the capture bounds them, so their order among themselves is not significant. "Replies bit-exact" means reply digests equal;
 "drafts change" means the drafter's arithmetic moves, so acceptance can move, while no reply token can.
 
 | # | change | mirrors | ms at P1 | bits | 2 / 4 / 6 / 8 streams |
 |---|---|---|---:|---|---|
 | 1 | drafter MLP split at TP=3 and 4-bit down | `P:dflash2.py:435-441,476-508,602-610`; MIA 0109 | 2.9 to 3.9, measured on the fork | replies bit-exact, drafts change | 4-bit down about -2.0 ms at every level (fork estimate, `AE:research/overnight-2026-10-29/drafter.md:60`); the split's gathers grow with 8S rows, so gate it by stream count |
 | 2 | verify windows as CUDA graphs | `P:verify.py:176-208,325-365`; `P:graphs.py:44-83` | 1 to 3, estimate | bit-exact | shared windows by total rows to 32, as production's batched set |
-| 3 | RoCE all-gathers at TP=3, with a size gate | `ENV:11`; `Pc:roce.py:563-606` | about 0.9, measured on the fork | bit-exact | +1.7% / level / -0.6% / -1.3% measured, so gate by bytes as production does |
+| 3 | RoCE all-gathers at TP=3, with a size gate | `ENV:11`; `Pc:roce.py:563-606` | 1.3, measured with the pad (41.8 against 43.1 ms a round, the engine's counter, same reply) | bit-exact | +1.4 / +0.3 / -0.6 / -1.3% measured, so gate by bytes at our own break-even |
 | 4 | routed experts on the item plan (our `0044`, PR #2044) | `P:forward.py:1279-1292` | about 0.6, measured on our stack (+1.4% at P1 with the pad) | bit-exact | +1.4% (rerun) / +1.3% / +1.7% / +2.2% measured at 2 / 4 / 6 / 8 |
-| 5 | the drafter pass as one graph, launched at the round's end, one pinned readback | `P:dflash2_multi.py:390-408,519-591`; `P:multi.py:3684-3736` | 0.3 to 0.8, estimate | bit-exact | a graph per stream count; helps every level |
-| 6 | the keep rides the next step; followers skip the draw's read | MIA 0031; production has no such step at all | 0.1 to 0.3, estimate | bit-exact | the same steps happen at every level |
-| 7 | commit and drafter ingest as one graph | `P:verify.py:416-566` | 0.1 to 0.3, estimate | bit-exact | constant a round |
+| 5 | the drafter pass as one graph, launched at the round's end, one pinned readback | `P:dflash2_multi.py:390-408,519-591`; `P:multi.py:3684-3736` | 0.1 to 0.2, bounded by the capture (the drafter step's 0.16 ms idle and 0.05 ms boundary on rank 0, `NS:`) | bit-exact | a graph per stream count; helps every level |
+| 6 | the keep rides the next step; followers skip the draw's read | MIA 0031; production has no such step at all | 0 to 0.3, estimate (0.02 ms at rank 0's keep boundaries, `NS:`; the followers' receives not measured) | bit-exact | the same steps happen at every level |
+| 7 | commit and drafter ingest as one graph | `P:verify.py:416-566` | up to 0.15 (the keep step idles 0.01 ms; the ingest sits inside the drafter step's 0.16, `NS:`) | bit-exact | constant a round |
 | 8 | DFlash2 windows priced by measured costs, production's chain rule | `P:engine.py:15-17,442-470`; `P:dflash2.py:25-90` | 0 to 0.5 net, estimate | replies bit-exact, drafts change | shared rounds use their own static table today |
 | 9 | MoE glue: shared expert on a side stream, one combine kernel, route sum folded into top-k, fused gate/up + SwiGLU | `P:forward.py:1236-1309`; `P:glue.py:632-647,686-693`; MIA 0006 | up to 0.3 | bit-exact | the fork measured `SHARED_SIDE` level at P1, -0.6% at P4 |
 | 10 | `hc_partial` on 48 blocks a row for decode | `P:glue.py:189-224` | about 0 | bit-exact | the fork measured +0.4% at P4, +1.0% at P8 (`AE:SPEEDUPS.md:139`) |
 
-Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at 2.79 tokens, about 77 tok/s
-(derived; the items overlap, notably 2 with 3, 6, 7 and 9).
+Central estimates add to about 8 ms, which would bring 43.8 ms to about 35.8 ms, about 78 tok/s at our 2.79 tokens a
+round against production's 81.2 (derived; the items overlap, notably 2 with 3, 6, 7 and 9). At 2.79 tokens a round,
+matching production needs a 34.4 ms round; the rest of the difference is tokens a round (section 1.3).
+
+The levels these changes must not regress: production leads v1.2.7 with the pad by 31, 26 and 33% at one, two and
+four streams and trails it by 3 and 8% at six and eight (81.73 / 89.22 / 117.98 / 114.78 / 131.28 against 62.19 /
+70.57 / 88.91 / 118.29 / 143.25 tok/s, `ON:16`, `ON:168-169`). Item 3 measured slower at six and eight streams, item
+1's split is estimated to cost at eight (section 5.1) and item 9's side stream measured -0.6% at four, so those ship
+gated by bytes or stream count; items 2, 4, 5, 6 and 7 keep every reply bit and remove launches, waits or bytes at
+every level. At four streams the same stack's capture (`~/nsys/f5-pad-p4.sqlite`, rank 0, a window that includes
+prompt fills) idles 4.6% of the time (3.9% at one stream) and spends 6.1% in all-gathers with a median of 46.0 us
+(26.8 at one stream; 8.4% of the round there), so graphs keep their share of the round at four streams while RoCE's
+edge per gather narrows, as its measured +0.3% at four streams shows.
 
 ### 5.1 Drafter MLP split and 4-bit down
 
@@ -304,9 +382,9 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
   gather costs, positive after item 3 (`drafter.md:137-140`; production found the same, `DrafterFable.md:104-106`).
 - **Files.** `Z:dflash_load.zig`, `Z:dflash_block.zig`, `Z:dflash.zig` (`rawBytes`, `carve`), `Z:cuda_q4.zig`,
   `zig/kernels/cuda/glm_dflash.cu`, `zig/kernels/cuda/qmm_group.cu`.
-- **Confirm.** `TF_GLM_DFLASH2_PROF=1` block ms at P1 and P4 (5.3 should fall toward 2.5 to 3); the cell's
-  drafted, accepted and round counters; `scripts/bench-arm.sh` at 1/2/4/6/8 with reply digests equal to the
-  knob-off arm.
+- **Confirm.** `TF_GLM_DFLASH2_PROF=1` alone (with `TF_GLM_PROF` also on, v1.2.7 gives block 5.69 to 5.71 ms, `BR:`)
+  at P1 and P4: the block should fall toward 2.5 to 3 ms; the cell's drafted, accepted and round counters;
+  `scripts/bench-arm.sh` at 1/2/4/6/8 with reply digests equal to the knob-off arm.
 
 ### 5.2 Verify windows as CUDA graphs
 
@@ -321,8 +399,10 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
   which must rejoin before the capture ends (`Z:cuda_l2pf.zig:215-250`; production's `P:l2pf.py:298-303`).
 - **Template.** `zig/src/families/deepseek_v41/graphs.zig` (keys `{rows, ctx}`, the memory room rule at
   `:97-134`), `zig/src/cuda/graph_cache.zig`, `zig/src/families/deepseek_v41/lockstep.zig`.
-- **ms.** Estimate 1 to 3 at one stream: the main-stream idle (about 1.6 ms a round on the fork) and the part of
-  the 3.8 ms of gathers that is followers starting late or falling behind.
+- **ms.** Estimate 1 to 3 at one stream, bounded by the pad stack's capture (`NS:`): rank 0's main stream idles
+  1.7 ms a round, and the all-gathers spend 2.6 ms a round above their p10 time, mostly waiting for a later rank.
+  The host is ahead of the GPU (29.8 ms a round blocked in synchronizes), so the 9.2 ms of launch time is hidden
+  today; graphs buy the idle and the followers' lateness, not the launch time.
 - **Bits.** Exact when every captured launch is the eager one with the same arguments
   (`P:graphs.py:1`; `zig/src/families/deepseek_v41/graphs.zig:1`).
 - **Confirm.** First `scripts/nsys-rank0.sh` on rank 0 and on rank 1 at one stream with `TF_GLM_PROF` off, through
@@ -334,12 +414,15 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
 - **What.** The window's small all-gathers on RoCE: either v1.2.7's own `TF_GLM_ROCE_MULTI=1`
   (`Z:cuda_roce_multi.zig:1-26`; it needs `TF_TP_MASTER` and `TF_TP_KERNEL_IMAGE`, `Z:cuda_ranks.zig:175`), or the
   fork's worlds-2-to-4 gather (`060465305` and three follow-ups, `ON:123-128`).
-- **Measured on the fork's stack** (`ON:160-163`): +2.0 / +1.7% at one and two streams, level at four, -0.6 / -1.3%
-  at six and eight, replies identical. About -0.9 ms a round at one stream (derived: 2% of 44.5). v1.2.7's own
-  path has not been measured.
-- **Gate.** Production keeps NCCL above `TF_ROCE_MAX_KB` (256 KiB by default, `Pc:roce.py:568,584-606`; "past 16
-  rows a window's all-gathers ... go through NCCL", `P:engine.py:22-26`). Mirror that byte rule so six and eight
-  streams keep NCCL.
+- **Measured with the pad** (the fork's stack through 0042 plus the gather, `TF_ROCE` on against off, three requests
+  a cell, every reply identical): 65.68 against 63.87 tok/s at one stream (+2.8%; 41.8 against 43.1 ms a round, the
+  engine's counter), then +1.4 / +0.3 / -0.6 / -1.3% at two, four, six and eight streams (means of the three
+  requests, `B:roce1-pad`, `B:roce1-pad-nccl`). Without the pad `ON:160-163` reports +2.0% at one stream. v1.2.7's
+  own `TF_GLM_ROCE_MULTI` has not been measured.
+- **Gate.** This production serve sends "all-gathers up to 512 KiB over RoCE ..., larger ones over NCCL" (`BL:`;
+  `TF_ROCE_MAX_KB` defaults to 256 KiB, `Pc:roce.py:568`, 16 KiB a row, `P:engine.py:22-26`). Production's 512 KiB
+  would keep our six- and eight-stream windows on RoCE, where it measured slower, so set the byte gate at our own
+  break-even, between the four- and six-stream windows on these cells (estimate: about 16 rows, 256 KiB).
 - **Confirm.** ABBA of `TF_GLM_ROCE_MULTI=0/1` on v1.2.7 at 1/2/4/6/8; `TF_GLM_PROF` gather_a and gather_b.
 
 ### 5.4 Routed experts on the item plan
@@ -350,7 +433,7 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
 - **Measured on our stack** (the patch's header, spark1-3, TP=3, drafts on, every reply digest equal): with
   `TF_GLM_KDA_PAD=1`, 63.94 / 74.66 / 93.28 / 124.59 / 150.80 tok/s without and 64.81 / 74.23 / 94.45 / 126.65 /
   154.07 with at 1 / 2 / 4 / 6 / 8 streams (+1.4 / -0.6 / +1.3 / +1.7 / +2.2%; the two-stream cell rerun ABBA
-  gave +1.4%). At one stream that is about -0.6 ms a round (derived: 1.4% of 44.5). On upstream main the same
+  gave +1.4%). At one stream that is about -0.6 ms a round (derived: 1.4% of 43.8). On upstream main the same
   commits measured +1.2 / +0.2 / +0.1 / +0.7 / +2.1%. A both-engines kernel bench agrees in direction (-2 to -4%
   of the routed time at 8 rows or fewer, more at wider rows: `AE:PARITY.md:828-852`) and found it bit-identical
   (0 of 2,097,152 values).
@@ -364,8 +447,10 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
   candidates and projections with an event, and launch it right after the keep instead of inside the block step,
   reading it back when the lane core plans the next window.
 - **Ours today.** Eager pass, pageable uploads, two synchronizing reads (`Z:dflash.zig:257-314`).
-- **ms.** Estimate 0.3 to 0.8: about 135 eager launches and two waits become one launch and one wait, and the host's
-  round end runs under the pass (production measured 0.65 ms hidden by 0087, `DrafterFable.md:64-65`).
+- **ms.** 0.1 to 0.2, bounded by the pad stack's capture (`NS:`): on rank 0 the drafter step is 5.95 ms, 5.79 of it
+  kernels and 0.16 idle, and the host starts the next verify 0.05 ms after the pass ends, so a graph and a prelaunch
+  can take out at most that idle and gap there. Production's 0.65 ms hidden by 0087 (`DrafterFable.md:64-65`) was
+  Python host time, which our host does not spend. The follower side is not measured.
 - **Bits.** Exact.
 - **Confirm.** `TF_GLM_DFLASH2_PROF` (block ms), nsys gap between the keep's kernels and the next verify's first.
 
@@ -374,8 +459,10 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
 - **What.** MIA 0031's `keep_flag` (the keep's rows in the next verify or block header) and `discard_draws` (a
   follower joins the draw's gather and does not read it). Our keep is its own step (`Z:cuda_follow.zig:288-292,414`)
   and our followers read the draw (`Z:cuda_engine_pick.zig:32-35`).
-- **ms.** Estimate 0.1 to 0.3: one broadcast and one follower synchronize-and-read a round, plus one
-  synchronize-and-read a verify on each follower.
+- **ms.** 0 to 0.3, estimate. On rank 0 the keep's two boundaries cost 0.02 ms a round (0.015 after the verify,
+  0.004 after the keep, `NS:`); the rest is one broadcast receive with a main-stream synchronize and read a round on
+  each follower, plus one synchronize-and-read a verify, which no capture measures (spark2 and spark3 hold no nsys
+  file newer than 2026-11-01).
 - **Bits.** Exact ("No arithmetic changes", MIA 0031).
 - **Confirm.** nsys on rank 1: host gaps at step boundaries.
 
@@ -384,8 +471,9 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
 - **What.** Production's `commit_taps`: one pinned table and one graph for the KDA replay, conv shift, positions
   and the drafter's context update (`P:verify.py:416-566`). Ours: `forward.commit` (`Z:cuda_forward.zig:572-599`)
   then the eager ingest with two uploads (`Z:dflash.zig:236-254`).
-- **ms.** Estimate 0.1 to 0.3; production measured its own version of this fix at 0.09 / 0.11 / 0.22 ms a round
-  (`DecNsysMimo.md:201-205`).
+- **ms.** Up to 0.15: the keep step idles 0.01 ms a round and the ingest's share sits inside the drafter step's
+  0.16 ms of idle (`NS:`); production measured its own version of this fix at 0.09 / 0.11 / 0.22 ms a round with a
+  Python host (`DecNsysMimo.md:201-205`).
 - **Bits.** Exact.
 
 ### 5.8 DFlash2 window pricing and the chain rule
@@ -394,9 +482,9 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
   `fcost`, `P:engine.py:442-470`; `P:multi.py:1053`) instead of `copy_policy.window_costs` (52 + 6.8 ms a row,
   `Z:cuda_copy_policy.zig:5-6`), which `facts()` selects whenever a drafter is loaded (`Z:cuda_lanes.zig:100,116`);
   optionally production's edge weight and noise-aware cut (`P:dflash2.py:25-90`).
-- **Why the net is small.** The 0.4 extra rows cost about 1.8 ms of verify (`ON:195`) but also land tokens: ours
-  takes 2.79 tokens a round, production's aggregate 2.59. Fewer rows only win if the dropped drafts land rarely. The
-  fork's `DRAFT_EDGE=0.6` and `DRAFT_BETA=2` arms were inside the noise (`AE:reports/SPEED-REPORT.md:885-893`).
+- **Why the net is small.** Production verifies 3.92 rows a round against our 3.80 (section 1.3), so there is no
+  surplus of rows on our side to cut; the rule decides which drafts are offered, and its effect on one text is not
+  measured. The fork's `DRAFT_EDGE=0.6` and `DRAFT_BETA=2` arms were inside the noise (`AE:reports/SPEED-REPORT.md:885-893`).
 - **Bits.** Replies exact, drafts change.
 - **Confirm.** Tokens a round, drafts a round and ms a round from the cell's counters, not tok/s alone.
 
@@ -405,14 +493,3 @@ Central estimates add to about 8 ms, which would bring 44.5 ms to about 36 ms at
 Small and bit-exact (same kernels on disjoint buffers, or the same bits on a wider grid). Under item 2 the launch
 count they save stops mattering; the shared-expert overlap is the only part a graph does not give. MIA 0006
 measured 70.6 to 60.6 us a MoE layer at one row on sm_120; the fork measured level at one stream on GB10.
-
-## 6. Measurements that settle the open numbers
-
-1. **Production's real round.** One production boot with `TF_GLM_MULTI_PROFILE=20` at one stream: its
-   `multi profile (batched)` line gives wall, propose, verify, sample, accept, commit, taps and emit a round and the
-   verify's GPU ms (`P:multi_tune.py:274-339`); its start-up line gives the batched column of the window table
-   (`P:multi.py:1145`). With the cell's own tokens a round, this replaces both 31.9 and 34.6 to 35.8.
-2. **Our round without profilers.** `scripts/nsys-rank0.sh` at one stream with `TF_GLM_PROF` and
-   `TF_GLM_DFLASH2_PROF` off, rank 0 and rank 1: verify span, drafter span, the gaps at the three step boundaries,
-   launches a round, NCCL time a round.
-3. **Our drafter on v1.2.7 alone.** `TF_GLM_DFLASH2_PROF=1` without `TF_GLM_PROF`, then with items 1 and 5.
