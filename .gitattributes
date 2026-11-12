@@ -1,4 +1,7 @@
 # patch files are applied by git apply, which needs LF to match context
 *.patch text eol=lf
+# scripts/check-patch-packages.sh matches SHA256SUMS lines exactly and sha256sum -c reads them: CRLF breaks both
+SHA256SUMS text eol=lf
 # scripts run under bash on the Sparks; CRLF breaks their shebang
 *.sh text eol=lf
+*.py text eol=lf
