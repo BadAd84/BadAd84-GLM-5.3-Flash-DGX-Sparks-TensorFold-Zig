@@ -93,6 +93,56 @@ against the pin's own catalog and was shown to fail on a tree with a missing ker
 the fork changed that the port never brought. `scripts/port-leftover.py` lists every hunk the fork changed against
 its own upstream base (`9b2991d122c7` to `fork-ssh/ovn-up` 595e28743944) whose added lines our tree lacks or whose
 removed lines our tree still has. On the 0001..0007 tree it prints `ringsAgree`. On the current tree: 186 files,
-479 hunks the fork rewrote and we left, 3,783 fork lines we lack. Most will be features we did not port or places
-upstream has since rewritten; four read-only lanes are classifying every hunk (step and state, forward and kernels,
-core and native, tests), looking for more of this defect class and for default-on speed work the fork has and we lack.
+479 hunks the fork rewrote and we left, 3,783 fork lines we lack. Four read-only lanes classified every hunk (step
+and state, forward and kernels, core and native, tests). Result, enumerated in `docs/PORT-LEFTOVER.md` with the
+lanes' full reports beside it in `docs/audit-2026-11-12/`: 12 defects (three more on the default path: no prompt step
+pairs after a mark, a prompt-logprobs hang at three ranks that the pin has too, and a kept state lost when prompts
+are batched) and 9 speed changes the fork has on by default that the port never brought. Most of the 3,783 lines
+are features we did not port, behind knobs.
+
+## 6. Where a round goes with the pad: the profile, and the largest thing the port lacks
+
+Rank 0 under Nsight Systems, `fix5` with `TF_GLM_KDA_PAD=1`, one stream, 400 tokens (63.2 tok/s under the profiler):
+7,523 ms of GPU kernel time in 280,855 launches.
+
+| kernel | share | total ms | launches | mean us |
+|---|---:|---:|---:|---:|
+| `tf_exl3_grouped_1` (routed experts) | 39.5% | 2,974.7 | 12,936 | 230.0 |
+| `glm_mm4_16` (4-bit dense, the pad's path) | 11.7% | 882.0 | 41,580 | 21.2 |
+| `dsv41_l2pace::paced_kernel` (L2 prefetch pacing) | 9.9% | 744.6 | 13,706 | 54.3 |
+| `ncclDevKernel_AllGather_RING_LL` | 7.6% | 569.1 | 14,622 | 38.9 |
+| `tf_qmm_group` | 6.0% | 454.4 | 4,940 | 92.0 |
+| `glm_mm16_16` | 4.3% | 323.6 | 924 | 350.3 |
+| `tfl2pf::segments_kernel` | 2.4% | 178.0 | 5,236 | 34.0 |
+| `glm_mm8_16` | 2.0% | 152.5 | 154 | 990.5 |
+
+Without the pad `tf_glm_bmm_decode` held 12.8 ms of each round; with it that kernel is gone from the table and
+`glm_mm4_16` takes its place at under half the time, which is the pad's gain. At four streams (`f5-pad-p4`, 93.2
+tok/s) the routed experts are 52.3% of kernel time at 573 us a launch.
+
+**The NCCL row is the finding.** About a hundred all-gathers a round go through NCCL. The pin has a one-shot RoCE
+gather for exactly these, but it serves two ranks only (`if (group.world != 2) return error.PeerRefused`), so a
+three-rank serve falls back to NCCL for every one, silently. The fork extended that gather to worlds 2 to 4
+(`060465305` and three follow-ups); the pin's `roce.zig` is byte-identical to the fork's base, and the four commits
+apply to our tree without a reject. Image `ai-engine:roce1` (the stack through 0042 plus those four) is queued with
+`TF_ROCE=0` on the same image as its control.
+
+## 7. Two smaller measurements
+
+- **A resumed drafter starts with an empty window.** After a kept-state resume near the prompt's end the DFlash2
+  drafter has only the rows after the resume point as context. Same reply (`d0b0076e1126`), one stream: acceptance
+  0.702 on the pin (which resumes up to 2,048 rows earlier), 0.677 through 0042, 0.698 with
+  `TF_GLM_OVN_DRAFT_KEEPWIN=1` (kept states carry the drafter's window). At two streams the knob's round is 0.5 ms
+  longer (36.8 against 36.3 ms, the first stream at 38.6 against 39.1 tok/s), so it is a mixed result and stays a knob.
+- **Pairing is worth 1.6 to 2.6% of a cold prompt pass at 10.9k tokens**: 8,449 ms paired against 8,674 ms not on
+  the pin, 8,473 against 8,606 through 0042. `scripts/streams.py` now records the warm-up pass's first-token time
+  (`cold_ttft_ms`), the only cold pass of a cell.
+
+## 8. The CPU gates, run again
+
+`scripts/gates.sh` runs the README's gates from WSL. On the tree through 0042: `check-native-cuda-host` exit 0,
+`zig fmt --check zig/` exit 0, `test-cuda-host` 5,553 of 5,606 passed with 26 named failures, every one a
+file-permission, symlink or FIFO test (`auth*`, `benchmark_*`, `request_log`, `drama_voice_tool`, `slide_key`) that a
+tree on the Windows-mounted filesystem cannot pass; none is in the GLM family. The unpatched pin run in the same
+place fails the same 26 names (5,494 of 5,547 passed) and `scripts/gate-names.sh pin fix6` prints no name that only
+the stack fails, so the stack through 0042 is at the pin's result with 59 more tests, all passing.
