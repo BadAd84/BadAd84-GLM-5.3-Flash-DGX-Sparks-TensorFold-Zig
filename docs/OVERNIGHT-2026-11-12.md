@@ -252,3 +252,38 @@ apply --check` fails in `zig/src/native/cuda_kv_pool.zig:68`): v1.2.7 rewrote th
 bytes a row, `ca83a689a` kept-state budgets scaled after streams are counted, `949ae97fe` and `4a0e38afd` on naming a
 `--prompt-cache-gib`). Carry it only if a measurement on `glm53-zig:rs1` shows the cache taking pages the streams need
 at a stream count we serve; no such cell exists.
+
+## 15. Two levers that did not pay: verify windows as CUDA graphs, and a lower draft confidence cut
+
+Production's one-stream decode, measured today from its own counters (`/health` rounds, drafts and tokens around each
+400-token request, five requests, identical): 133 rounds, 2.92 drafts and 3.01 tokens a round, acceptance 0.686, 35.6
+ms a round, 80.8 tok/s. Ours on v1.2.7 with the pad: 143 rounds, 2.80 drafts and 2.79 tokens a round, acceptance 0.638,
+44.5 ms a round, 62.7 tok/s. So production is 8.8 ms (20%) faster a round and takes 8% more tokens from each (section 11's
+first reading of 32 ms a round used counters that included other requests and is withdrawn). Its older nsys captures
+(`DecNsysMimo`, image `v110-ots99`) show its GPU busy 98.5% of the round, so the difference is GPU time, not host gaps.
+
+**Verify windows as CUDA graphs** (`docs/audit-2026-11-12/verify-graph.md`; the patch applied to the re-seated tree
+and passed every host gate). Image `vg1`, `TF_GLM_KDA_PAD=1`, one fresh boot a level, replies byte-identical to the
+same image with the graph off:
+
+| | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| graph off | 64.45 | - | - | - | 152.88 |
+| graph on (a graph per key, 11 or more captured) | 63.42 | 73.74 | 93.93 | 126.36 | 153.22 |
+
+No gain (-1.6% at one stream, +0.2% at eight): the eager launches already overlap the GPU's work, so the round is
+GPU-bound and the roughly 1,400 host launches were not its cost. The patch is not landed.
+
+**A lower draft confidence cut** (`TF_GLM_DRAFT_CONFIDENCE`, upstream's own switch; ours defaults to 0.7, production
+runs lower), image `rs1`, pad on, replies equal to the default's:
+
+| cut | 1 | 2 | 4 | 6 | 8 | tokens a round | ms a round | acceptance |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.7 (default) | 64.45 | - | - | - | 152.88 | 2.79 | 42.4 | 0.638 |
+| 0.5 | 62.11 | 71.29 | 90.77 | 122.49 | 149.42 | 3.00 | 47.3 | 0.504 |
+| 0.3 | 60.73 | 65.22 | 86.90 | 119.87 | 149.04 | 3.17 | 51.1 | 0.441 |
+| 0.2 | 58.11 | 63.66 | 86.11 | 119.40 | 149.41 | 3.19 | 53.8 | 0.395 |
+
+More drafts per round buy 5 to 14% more tokens a round and cost more ms a round than they return, so the default stays.
+Production gets 3.01 tokens a round at 0.686 acceptance, which is a better drafter (4-bit down projection, TP-split
+MLP, one graph), not a different cut. The drafter arms of the re-seated series are the next measurements.
