@@ -1,0 +1,475 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: restore the pin's and the source tree's forms the port lost
+
+Found by reading every line patches 0002-0039 remove or rewrite against the
+pin and against the tree they were ported from (scripts/patch-removals.py).
+Each item below puts back the pin's line, or the source tree's where the pin
+has no such code. None adds behaviour of its own.
+
+Default path:
+- cuda_dsa_block.attendLastRow launched the sparse pass over `rows` rows where
+  the pin launches 1 (0016 added a second call, 0029 deleted the pin's one):
+  on a prompt MTP chunk past the dense limit it read and wrote rows - 1 rows
+  past the scratch's row.
+- cuda_prompt_pair.prefill ran with the drafter's taps set. 0007 lets a pair
+  run while the drafter is idle but did not port the two lines that clear the
+  taps, and pairBody refuses a forward with taps: a lone prompt of 6,144 tokens
+  or more with --drafter took that step.
+- cuda_follow.chunkOf took a wide step when a mark had cut the first chunk
+  short; the source tree requires the first chunk to be a full 2,048 rows.
+- cuda_native: a second `own.lanes = ...` overwrote the first and dropped
+  --mtp-confidence. One assignment now, the source tree's.
+- cuda_forward.whole joined the L2 prefetch before the stream mean and for
+  every forward; the pin joins after it and only where it forked. The unused
+  three-argument `prefetch` went with it.
+- cuda_kda_block.bodyProfile forked the L2 prefetch of site o before the
+  projections; the pin forks between the projections and the chain.
+- cuda_tile.tileLinears read a linear back without the pin's synchronize.
+- dflash_load read the drafter's safetensors header with unchecked JSON and
+  ignored short reads; the pin's header checks, read checks and their test are
+  back, and Drafter.tap_rows is set from the prompt buffers again.
+- cuda_forward.Modules: `m.tiled = false` at load and `m.* = undefined` at
+  deinit; commit passes `keep` as the kernel's int again.
+- cuda_lanes: draft_probabilities also follows --mtp-confidence.
+- core/prompt_cache.keepBorn: an entry is "the same state again" only at the
+  same length, as the pin's slice comparison required.
+
+Knobs that did nothing or failed when set:
+- Forward.set() passes .mla, .onepass and .onepass_pipe again (0022 dropped
+  them): TF_GLM_OVN_SPARSE_ONEPASS, _ONEPASS_PIPE, _ABSORB_VEC and
+  _MLA_FUSEMERGE changed no launch, while MLA_FUSEMERGE still sized the partial
+  buffers for fused launches.
+- cuda_glue.Kernels: the GLUE_FUSE, GLUE_ROW and PDL_EARLY kernels sit before
+  chunks_16_skip again, so they load without an MLA knob; router() launches
+  TF_GLM_OVN_ROUTER16's kernel again; Mla.wanted() counts KVB8.
+- Engine.verifyShared is cuda_engine_shared's, so TF_GLM_OVN_DRAW1 and
+  TF_GLM_OVN_SHARED_PROF reach shared rounds.
+- cuda_q4.Kernels.module is set, so loadF32 (DRAFT_DOWN4 with MLPSPLIT) finds
+  its module.
+- cuda_native.snapGridNow (TF_GLM_OVN_KDA_CHUNKED's 32-row grid) and snap_tail
+  (TF_GLM_PROMPT_TAIL) are declared again; cuda_engine keeps a solo pass off
+  the pair path (TF_GLM_CHUNK_SOLO); cuda_kda_block.body matches bodyProfile.
+
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -463,7 +463,7 @@
+         if (at == 0 or n > prompt.len or s.hold) return false;
+         s.clock += 1;
+         const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
+-        for (s.entries.items) |e| if (!e.expired and e.at == at and prefix.starts(prompt, e.tokens) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
++        for (s.entries.items) |e| if (!e.expired and e.at == at and e.tokens.len == n and prefix.starts(prompt, e.tokens) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
+             e.used = s.clock; // the same state again: no copy
+             e.shared = e.shared or shared;
+             if (shared) learned.learn(s, e, starts);
+diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
+--- a/zig/src/families/glm/cuda_dsa_block.zig
++++ b/zig/src/families/glm/cuda_dsa_block.zig
+@@ -223,11 +223,10 @@
+         try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
+         var stamp = prof.span(k.prof, stream, .mla);
+         defer stamp.end();
+-        // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows in one pass a row (production's kernel and bits), no partials or merge
+-        if (k.set.onepass) |f| {
+-            if (onepass.takes(false, c.ls, l.heads, l.lw)) return onepass.run(f, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, rows, l.heads, scale);
++        if (k.set.onepass) |f| { // TF_GLM_OVN_SPARSE_ONEPASS: the kernel the whole chunk's row would have taken
++            if (onepass.takes(k.set.prompt, c.ls, l.heads, l.lw)) return onepass.run(f, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, 1, l.heads, scale);
+         }
+-        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
++        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, 1, l.heads, l.lw, scale);
+     }
+ }
+ 
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -167,7 +167,7 @@
+         const block32 = !exl3.isExl3(gpa, text) and try @import("cuda_experts.zig").wantsBlock32(gpa, text);
+         var m = try fw.Modules.load(d, ctx, block32);
+         errdefer m.deinit();
+-        const pair = prompt_pair.wanted(o.settings.pair, false, world);
++        const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
+         var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
+         errdefer pieces.deinit();
+         if (o.settings.layers > c.layers) return error.BadLayers;
+@@ -382,7 +382,7 @@
+         e.index_split = false;
+         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
+         if (start >= len or rows == 0 or rows > len - start) return error.BadChunk;
+-        if (rows > fw.prefill_rows) return prompt_pair.prefill(e, part, start, rows, len, cancel, marks, split);
++        if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, rows, len, cancel, marks, split);
+         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
+         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
+         var one: [1]fw.Rank = undefined;
+@@ -478,31 +478,9 @@
+ 
+     const verifyLabel = @import("cuda_engine_prof.zig").verifyLabel;
+ 
+-    /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
+-    pub fn verifyShared(e: *Engine, parts: []const Part) !void {
+-        const b = if (e.bs) |*x| x else return error.NoSharedWindows;
+-        if (parts.len == 0 or parts.len > max_shared) return error.WindowTooWide;
+-        var segs: [max_shared]fw.Seg = undefined;
+-        var ids: [shared_rows]u32 = undefined;
+-        var rows: usize = 0;
+-        for (parts, 0..) |p, i| {
+-            if (p.ids.len == 0 or p.ids.len > fw.window_rows or rows + p.ids.len > shared_rows) return error.WindowTooWide;
+-            for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
+-            try e.bind(p.slot);
+-            segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
+-            @memcpy(ids[rows..][0..p.ids.len], p.ids);
+-            rows += p.ids.len;
+-        }
+-        var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
+-        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null };
+-        try f.run(@ptrCast(ids[0..rows]));
+-        if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
+-        for (parts, segs[0..parts.len]) |p, g| {
+-            try e.bind(p.slot);
+-            e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
+-            try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
+-        }
+-    }
++    /// Several streams' windows in one forward (cuda_engine_shared: its round profile and packed draws are there).
++    pub const verifyShared = @import("cuda_engine_shared.zig").verifyShared;
++
+     /// DFlash2's round (every rank, the same `reqs`): each stream's kept rows into its context, then the block pass.
+     pub fn draftBlock(e: *Engine, reqs: []dflash.Req) !void {
+         const dr = e.drafter orelse return error.NoDrafter;
+diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
+--- a/zig/src/families/glm/cuda_follow.zig
++++ b/zig/src/families/glm/cuda_follow.zig
+@@ -243,7 +243,7 @@
+         try x.flush();
+         const at: []const u32 = if (marks) |m| m.at else &.{};
+         const a_end = @import("cuda_reply_prefill.zig").capEnd(start, engine.chunkEnd(start, ids.len, at), cap);
+-        const wide = alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
++        const wide = alone and a_end == start + engine.prompt_rows and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
+         const n = (if (wide) engine.chunkEnd(a_end, ids.len, at) else a_end) - start; // this step's rows
+         const part = ids[start..@min(ids.len, start + n + 1)];
+         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world); // a paired step's chunks share it
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -108,6 +108,7 @@
+         };
+         m.pools32 = cuda.ovn.on("POOLS32");
+         m.packs = null; // `m` starts undefined: the field default does not apply
++        m.tiled = false;
+         m.onepass_pipe = onepass_mod.openPipe(d, k.glm_onepass_pipe, @intCast(try ctx.attribute(.compute_capability_major)));
+         m.glue_row = try cuda.ovn.int("GLUE_ROW", 0);
+         m.pdl_early = try cuda.ovn.int("PDL_EARLY", 0);
+@@ -131,6 +132,7 @@
+         m.lane.unload();
+         m.prompt.unload();
+         m.experts.unload();
++        m.* = undefined;
+     }
+ };
+ 
+@@ -224,7 +226,7 @@
+ 
+     pub fn set(f: *const Forward) glue.Set {
+         const pdl = f.m.pdl_early >= @as(u64, if (f.ranks[0].b.prefill) 2 else 1);
+-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .pdl_early = pdl };
++        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .pdl_early = pdl, .mla = f.m.mla, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.exact else null };
+     }
+ 
+     /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
+@@ -476,15 +478,8 @@
+                 .mla => di += 1,
+             }
+         }
+-        if (f.l2pf) |p| try p.join(f.stream); // the side stream's forks rejoin before the window ends
+         for (f.ranks) |r| try glue.streamMean(f.set(), f.stream, hc_glue.xAt(r, alt), r.b.hidden, R, c.hidden, c.hc);
+-    }
+-
+-    /// TF_GLM_L2PF site `which` of layer `j` (a decode window's weight prefetch; off for prompt chunks).
+-    fn prefetch(f: *const Forward, j: usize, which: usize) !void {
+-        const p = f.l2pf orelse return;
+-        if (f.ranks[0].b.prefill) return;
+-        try p.site(f.stream, @intCast(j), which);
++        if (pf) |p| try p.join(f.stream);
+     }
+ 
+     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).
+@@ -579,7 +574,9 @@
+                     a.add(st.recAt(cur, 0));
+                     a.add(@as(usize, st.rec_layer / 4));
+                     for ([_]u64{ st.save_k, st.save_v, st.save_g, st.save_b }) |x| a.add(x);
+-                    for ([_]usize{ window_rows * h * kda.dk, window_rows * h, @intCast(keep) }) |x| a.add(x);
++                    a.add(@as(usize, window_rows * h * kda.dk));
++                    a.add(@as(usize, window_rows * h));
++                    a.add(@as(c_int, @intCast(keep)));
+                     a.add(st.recAt(1 - cur, 0));
+                     try cuda.launch.launch(f.m.kda.replay_layers, .{ .grid = .{ .x = @intCast(st.kda_layers * h) }, .block = .{ .x = 1024 } }, f.stream, &a);
+                 }
+diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+--- a/zig/src/families/glm/cuda_glue.zig
++++ b/zig/src/families/glm/cuda_glue.zig
+@@ -80,18 +80,6 @@
+     chunks_32_fp8: cuda.Function,
+     merge: cuda.Function,
+     scores: cuda.Function,
+-    // TF_GLM_OVN_* forms (glm_glue_attn_ovn.cuh, glm_glue_latent_ovn.cuh), launched only with their knob on
+-    chunks_16_skip: cuda.Function,
+-    chunks_32_skip: cuda.Function,
+-    chunks_16_fp8_skip: cuda.Function,
+-    chunks_32_fp8_skip: cuda.Function,
+-    chunks_32_fused: cuda.Function,
+-    chunks_32_fp8_fused: cuda.Function,
+-    absorb_q_vec: cuda.Function,
+-    expand_v_vec: cuda.Function,
+-    absorb_q8: cuda.Function,
+-    expand_v8: cuda.Function,
+-    router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
+     // TF_GLM_OVN_GLUE_FUSE (hcGlue), TF_GLM_OVN_GLUE_ROW (hcRow) and TF_GLM_OVN_PDL_EARLY's variants (Set.pdl_early)
+     hc_glue: cuda.Function,
+     hc_glue_f32w: cuda.Function,
+@@ -110,6 +98,18 @@
+     rmsnorm_1536_pdl: cuda.Function,
+     rmsnorm_512_pdl: cuda.Function,
+     rmsnorm_4096_f32w_pdl: cuda.Function,
++    // TF_GLM_OVN_* forms (glm_glue_attn_ovn.cuh, glm_glue_latent_ovn.cuh), launched only with their knob on
++    chunks_16_skip: cuda.Function,
++    chunks_32_skip: cuda.Function,
++    chunks_16_fp8_skip: cuda.Function,
++    chunks_32_fp8_skip: cuda.Function,
++    chunks_32_fused: cuda.Function,
++    chunks_32_fp8_fused: cuda.Function,
++    absorb_q_vec: cuda.Function,
++    expand_v_vec: cuda.Function,
++    absorb_q8: cuda.Function,
++    expand_v8: cuda.Function,
++    router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
+ 
+     pub fn load(m: cuda.Module) !Kernels {
+         return loadOvn(m, Mla.wanted());
+@@ -145,9 +145,9 @@
+         return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC") };
+     }
+ 
+-    /// Whether any knob whose kernels sit in glm_glue is set (MLA_FUSEMERGE, ABSORB_VEC).
++    /// Whether any knob whose kernels sit in glm_glue is set (MLA_FUSEMERGE, ABSORB_VEC, KVB8).
+     pub fn wanted() bool {
+-        return cuda.ovn.on("MLA_FUSEMERGE") or cuda.ovn.on("ABSORB_VEC");
++        return cuda.ovn.on("MLA_FUSEMERGE") or cuda.ovn.on("ABSORB_VEC") or cuda.ovn.on("KVB8");
+     }
+ };
+ 
+@@ -250,8 +250,12 @@
+     var a: cuda.Args = .{};
+     inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
+     if (x % 16 == 0 and x_stride % 8 == 0) { // rows on 16 bytes: 64-row tiles staged by cp.async (decode's rows past m load as zeros)
+-        const f = if (set.pdl_early) set.glue.router_tile_pdl else set.glue.router_tile; // _pdl: launched dependent
+-        try cuda.launch.launch(f, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .pdl = set.pdl_early }, stream, &a);
++        if (set.glue.router16) |f| if (m <= 16) { // TF_GLM_OVN_ROUTER16: 16-row tiles, each warp 8 experts
++            try cuda.launch.launch(f, .{ .grid = .{ .x = 1, .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
++            return sliceSum(set, stream, part, out, m * ne, router_ks, true);
++        };
++        const tile = if (set.pdl_early) set.glue.router_tile_pdl else set.glue.router_tile; // _pdl: launched dependent
++        try cuda.launch.launch(tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .pdl = set.pdl_early }, stream, &a);
+     } else {
+         try cuda.launch.launch(set.glue.router_part, .{ .grid = .{ .x = cdiv(m, 16), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
+     }
+diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
+--- a/zig/src/families/glm/cuda_kda_block.zig
++++ b/zig/src/families/glm/cuda_kda_block.zig
+@@ -82,15 +82,15 @@
+ 
+ /// The block up to its out_proj: the projections, the chain, and a prompt chunk's conv window commit.
+ pub fn body(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool) !void {
+-    return bodyProfile(set, ks, stream, l, s, x, x_stride, rows, conv_state, state_in, wide, prompt, null, null);
++    return bodyProfile(set, ks, stream, l, s, x, x_stride, rows, conv_state, state_in, wide, prompt, null, null, null);
+ }
+ 
+ /// `chunked`: a prompt chunk's chain on TF_GLM_OVN_KDA_CHUNKED's kernel (null: the serial chain).
+ pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, profile: ?*prof.Prof, chunked: ?kda_chunk.Prompt, o_site: ?l2pf.At) !void {
+     var stamp = prof.span(profile, stream, .projections);
+-    if (o_site) |at| try at.fork(stream); // TF_GLM_L2PF: o read into L2 while the chain runs
+     try project(set, stream, l, s, x, x_stride, rows);
+     stamp.end();
++    if (o_site) |at| try at.fork(stream); // TF_GLM_L2PF: o read into L2 while the chain runs
+     stamp = prof.span(profile, stream, .kda);
+     defer stamp.end();
+     try chainRows(ks, stream, l, s, rows, conv_state, state_in, wide, chunked);
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -130,7 +130,7 @@
+             .drafts = if (block) max_held else engine.max_drafts,
+             .draft_streams = block, // one block pass drafts every stream of the round
+             .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0,
+-            .draft_probabilities = block, // the selector's chances size each window against the costs below
++            .draft_probabilities = block or self.mtp_confidence != null, // the selector's chances size each window
+             .draft_confidence = if (block) null else self.mtp_confidence, // a drafter ignores it; otherwise --mtp-confidence
+             .window_costs = if (block) (if (self.timed) |*t| &t.window else &gb10_window_costs) else &.{},
+             .shared_costs = if (block) (if (self.timed) |*t| &t.shared else &gb10_shared_costs) else &.{},
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -26,6 +26,11 @@
+ pub const prompt_rows: u32 = fw.prefill_rows;
+ /// No snap_grid: states keep and resume at any row (cuda_engine.chunkEnd cuts chunks at marks).
+ pub const snap_min_rows: u32 = prompt_rows;
++pub const snap_tail = "TF_GLM_PROMPT_TAIL"; // the setting that turns the tail rule on at 1 (cuda_snaps.cacheRules)
++/// TF_GLM_OVN_KDA_CHUNKED: prompt rows depend on 32-row sub-chunk alignment, so states keep and resume on that grid.
++pub fn snapGridNow() ?u32 {
++    return @import("cuda_kda_chunk.zig").snapGrid();
++}
+ /// TF_GLM_OVN_REPLY_PREFILL: a reply's background pass prefills the next turn; its quiet wait, ns.
+ pub fn warmQuietNow() ?u64 {
+     return @import("cuda_reply_prefill.zig").quietNs();
+@@ -357,8 +362,7 @@
+         }
+     }.get;
+     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
+-    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .alone = off("TF_GLM_SHARED"), .mtp_confidence = o.mtp_confidence };
+-    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .together = !off("TF_GLM_PROMPT_MANY"), .alone = off("TF_GLM_SHARED") };
++    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = off("TF_GLM_PROMPT_STEPS"), .together = !off("TF_GLM_PROMPT_MANY"), .alone = off("TF_GLM_SHARED"), .mtp_confidence = o.mtp_confidence };
+     own.lanes.multi = cuda.ovn.on("MULTI_FILL"); // TF_GLM_OVN_MULTI_FILL: marked and resumed prompts in batched passes
+     if (cost_time.wanted(own.e)) { // TF_GLM_OVN_COST_TIME: before the layout, so the timed slots are freed by then
+         own.lanes.timed = try own.lanes.x.costs();
+diff --git a/zig/src/families/glm/cuda_prompt_pair.zig b/zig/src/families/glm/cuda_prompt_pair.zig
+--- a/zig/src/families/glm/cuda_prompt_pair.zig
++++ b/zig/src/families/glm/cuda_prompt_pair.zig
+@@ -102,6 +102,8 @@
+     var fb = e.view(&pair.bp, &two);
+     fa.prof = null;
+     fb.prof = null;
++    fa.taps = null; // drafterIdle: the drafter ingests none of these rows, so a chunk at a time's taps go unread too
++    fb.taps = null;
+     fa.index_split = split; // the step's choice (TF_GLM_INDEX_SPLIT) for both chunks
+     fb.index_split = split;
+     const st = &e.cur.st;
+diff --git a/zig/src/families/glm/cuda_q4.zig b/zig/src/families/glm/cuda_q4.zig
+--- a/zig/src/families/glm/cuda_q4.zig
++++ b/zig/src/families/glm/cuda_q4.zig
+@@ -37,6 +37,7 @@
+     pub fn load(group_mod: cuda.Module, ops: cuda.Module, ctx: *const cuda.Context) !Kernels {
+         const k: Kernels = .{
+             .group = try group_mod.function(group_symbol),
++            .module = group_mod,
+             .pack_dense = try ops.function("tf_pack_dense"),
+             .transpose = try ops.function("tf_transpose_pad16"),
+             .gb10 = try ctx.attribute(.compute_capability_major) == 12 and try ctx.attribute(.compute_capability_minor) == 1,
+diff --git a/zig/src/families/glm/cuda_tile.zig b/zig/src/families/glm/cuda_tile.zig
+--- a/zig/src/families/glm/cuda_tile.zig
++++ b/zig/src/families/glm/cuda_tile.zig
+@@ -178,6 +178,7 @@
+             continue;
+         }
+         try host.resize(gpa, n * k);
++        try s.synchronize();
+         try cuda.memory.download(d, ptr, std.mem.sliceAsBytes(host.items)[0 .. n * k * 2]); // staged: the copy is checked
+         try words.resize(gpa, n * k * bits / 32);
+         try scales.resize(gpa, n * (k / 64));
+diff --git a/zig/src/families/glm/dflash_load.zig b/zig/src/families/glm/dflash_load.zig
+--- a/zig/src/families/glm/dflash_load.zig
++++ b/zig/src/families/glm/dflash_load.zig
+@@ -1,6 +1,7 @@
+ //! DFlash2's checkpoint onto the device: the config checked, linears tiled for glm_mm, scratch carved from one buffer.
+ const std = @import("std");
+ const cuda = @import("cuda");
++const core = @import("core");
+ const mm = @import("cuda_mm.zig");
+ const q4 = @import("cuda_q4.zig");
+ const quant = @import("cuda_quant.zig");
+@@ -47,7 +48,7 @@
+             return error.DrafterTensorShape;
+         }
+         try l.buf.resize(l.gpa, e.n);
+-        _ = try l.file.readPositionalAll(l.io, l.buf.items, e.off);
++        if (try l.file.readPositionalAll(l.io, l.buf.items, e.off) != e.n) return error.BadDrafterHeader;
+         return l.buf.items;
+     }
+ 
+@@ -108,6 +109,15 @@
+     }
+ };
+ 
++/// The drafter's tensors from `json`, a header of `data_len` data bytes: core's checks, then every tensor BF16.
++fn addEntries(arena: std.mem.Allocator, json: []const u8, data_len: u64, ents: *std.StringHashMap(Ent)) !void {
++    const names = try core.safetensors.parseHeader(arena, json, std.math.cast(usize, data_len) orelse return error.BadDrafterHeader);
++    for (names.keys(), names.values()) |name, e| {
++        if (e.dtype != .bf16) return error.DrafterNotBf16;
++        try ents.put(name, .{ .off = 8 + json.len + e.begin, .n = e.end - e.begin });
++    }
++}
++
+ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
+     return std.fmt.bufPrint(b, "layers.{d}.{s}", .{ li, s });
+ }
+@@ -147,24 +157,18 @@
+     defer gpa.free(path);
+     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+     defer file.close(io);
++    const size = try file.length(io);
+     var lenb: [8]u8 = undefined;
+-    _ = try file.readPositionalAll(io, &lenb, 0);
+-    const hlen = std.mem.readInt(u64, &lenb, .little);
++    if (size < 8 or try file.readPositionalAll(io, &lenb, 0) != 8) return error.BadDrafterHeader;
++    const hlen = core.safetensors.headerSize(std.mem.readInt(u64, &lenb, .little), size) catch return error.BadDrafterHeader;
+     if (hlen > 1 << 20) return error.BadDrafterHeader;
+-    const text = try gpa.alloc(u8, hlen);
+-    defer gpa.free(text);
+-    _ = try file.readPositionalAll(io, text, 8);
+-    const hdr = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+-    defer hdr.deinit();
++    var names: std.heap.ArenaAllocator = .init(gpa);
++    defer names.deinit();
++    const text = try names.allocator().alloc(u8, hlen);
++    if (try file.readPositionalAll(io, text, 8) != hlen) return error.BadDrafterHeader;
+     var ents = std.StringHashMap(Ent).init(gpa);
+     defer ents.deinit();
+-    var it = hdr.value.object.iterator();
+-    while (it.next()) |x| {
+-        if (std.mem.eql(u8, x.key_ptr.*, "__metadata__")) continue;
+-        if (!std.mem.eql(u8, x.value_ptr.object.get("dtype").?.string, "BF16")) return error.DrafterNotBf16;
+-        const offs = x.value_ptr.object.get("data_offsets").?.array.items;
+-        try ents.put(x.key_ptr.*, .{ .off = 8 + hlen + @as(u64, @intCast(offs[0].integer)), .n = @intCast(offs[1].integer - offs[0].integer) });
+-    }
++    try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
+     var temp: f64 = 1.0;
+     const knobs = try @import("dflash_ovn.zig").Knobs.read(&temp);
+     const split = world == 2;
+@@ -194,7 +198,7 @@
+     }
+     const dr = try gpa.create(Drafter);
+     errdefer gpa.destroy(dr);
+-    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .knobs = knobs, .temp = temp, .sff = sff };
++    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .knobs = knobs, .temp = temp, .sff = sff, .tap_rows = df.tapRows(e.bp.rows) };
+     if (down4 and (split or sff != 0)) dr.wide4 = try e.m.q4.loadF32();
+     defer @import("cuda_load_owner.zig").drain(e.stream, d);
+     var nb: [4][96]u8 = undefined;
+@@ -329,3 +333,30 @@
+     if (taps.len != taps_mod.layers.len) return error.DrafterConfigUnexpected;
+     for (taps, taps_mod.layers) |t, w| if (t.integer != w) return error.DrafterConfigUnexpected;
+ }
++
++test "a malformed drafter header is refused with an error, and a range past the data is refused" {
++    const bad = [_][]const u8{
++        "[]",
++        "{\"a\":1}",
++        "{\"a\":{\"shape\":[1],\"data_offsets\":[0,2]}}",
++        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0]}}",
++        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[4,2]}}",
++        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0.0,2]}}",
++        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,999999]}}",
++    };
++    for (bad) |json| {
++        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
++        defer arena.deinit();
++        var ents = std.StringHashMap(Ent).init(std.testing.allocator);
++        defer ents.deinit();
++        try std.testing.expectError(error.BadSafetensors, addEntries(arena.allocator(), json, 4, &ents));
++    }
++    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
++    defer arena.deinit();
++    var ents = std.StringHashMap(Ent).init(std.testing.allocator);
++    defer ents.deinit();
++    const json = "{\"a\":{\"dtype\":\"BF16\",\"shape\":[2],\"data_offsets\":[0,4]}}";
++    try addEntries(arena.allocator(), json, 4, &ents);
++    try std.testing.expectEqual(Ent{ .off = 8 + json.len, .n = 4 }, ents.get("a").?);
++    try std.testing.expectError(error.DrafterNotBf16, addEntries(arena.allocator(), "{\"f\":{\"dtype\":\"F16\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4, &ents));
++}

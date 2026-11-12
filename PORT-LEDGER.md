@@ -236,3 +236,26 @@ cuModuleGetFunction NOT_FOUND.
   it in one pass: the error's name is the literal string passed to `m.function`, so the bare name
   proved a *different* caller than the suffixed one, and `strings` on the built binary showed no
   router16 literal at all because the loop builds it with `++`.
+
+- **The pin's own knobs are not drop-ins (measured 2026-11-11).** Setting `TF_GLM_L2PF=1`,
+  `TF_GLM_PREFILL_ROWS=4096` and `TF_GLM_FILL_ROWS=4096` together in the measured set killed every boot
+  of the combined arm (the container was created and gone inside 60 s, five levels, no cells). L2PF
+  already reports its own sizing at boot ("134 rows, 820 MiB a decode window"), so an explicit value
+  needs its own A/B, not a guess from production's file. They are out of `DEFS` until each is measured.
+
+## The port against the pin, line by line: 0040 and 0041 (measured 2026-11-12)
+
+- **0040: the pin's `TF_GLM_KDA_PAD` sizing, back.** The pin already has the pad and sizes the KDA state rows with
+  one common width for every rank (8,728 columns at TP=3). Patch 0003 replaced that with an older form that gave
+  the two 21-head ranks 8,344 columns while every consumer used 8,728. With the pad on, the stack through 0039
+  returned 4 distinct digests for 2 prompts and 8 for 4; through 0041 it returns one a prompt at every level, and
+  the pad measures 63.94 / 74.66 / 93.28 / 124.59 / 150.80 tok/s at 1 / 2 / 4 / 6 / 8 streams against 51.01 /
+  59.84 / 81.04 / 110.38 / 135.75 without it (+25.3 / +24.8 / +15.1 / +12.9 / +11.1%), 2.75 tokens a round at one
+  stream against 2.68. Cells: `~/bench/fix5`, `~/bench/f5-pad`, `~/bench/k-kda_pad` on spark1.
+- **0041: sixteen places where the port lost the pin's or the fork's form** (`docs/PATCH-AUDIT.md`). Found by reading
+  all 557 lines patches 0002-0039 remove or rewrite. With every knob off the image through 0041 returns the pin's
+  digests at 1 / 2 / 4 / 6 / 8 streams and measures level with the image through 0039 (51.01 against 51.06, 59.84
+  against 59.42, 81.04 against 81.35, 110.38 against 110.30, 135.75 against 133.82).
+- **The lesson for the next port:** a patch squashed from an older state of the fork can silently replace newer
+  upstream lines. `scripts/patch-removals.py` lists what each patch takes away; every line it prints is read against
+  the pin before the patch lands.
