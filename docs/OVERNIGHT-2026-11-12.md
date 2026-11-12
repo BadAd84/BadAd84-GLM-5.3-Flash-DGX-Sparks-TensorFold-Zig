@@ -287,3 +287,20 @@ runs lower), image `rs1`, pad on, replies equal to the default's:
 More drafts per round buy 5 to 14% more tokens a round and cost more ms a round than they return, so the default stays.
 Production gets 3.01 tokens a round at 0.686 acceptance, which is a better drafter (4-bit down projection, TP-split
 MLP, one graph), not a different cut. The drafter arms of the re-seated series are the next measurements.
+
+## 16. The drafter knobs of the re-seated series, with the pad
+
+Image `rs1`, `TF_GLM_KDA_PAD=1` on every arm, one fresh boot a level, 400 tokens a stream, replies byte-identical to the
+pad-only arm at every level. `DOWN4` is `TF_GLM_OVN_DRAFT_DOWN4=1` (the drafter's down projection in 4 bits), `d4s` adds
+`TF_GLM_OVN_DRAFT_ONEPASS=1` and `TF_GLM_OVN_DRAFT_MLPSPLIT=4` (one pass for all rows, the MLP split over the ranks up to
+four streams):
+
+| arm | 1 | 2 | 4 | 6 | 8 | tokens a round | ms a round | acceptance |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pad only | 64.57 | 73.71 | 93.66 | 126.18 | 153.75 | 2.79 | 42.3 | 0.638 |
+| pad + DOWN4 | 67.95 (+5.2%) | 77.04 (+4.5%) | 95.33 (+1.8%) | 127.28 (+0.9%) | 154.78 (+0.7%) | 2.77 | 39.8 | 0.647 |
+| pad + DOWN4 + ONEPASS + MLPSPLIT=4 | 69.78 (+8.1%) | 78.17 (+6.1%) | 98.83 (+5.5%) | 133.80 (+6.0%) | 160.25 (+4.2%) | 2.77 | 38.8 | 0.651 |
+
+No level regresses, so the set is a win by the fleet rule and goes into the recipe's measured knob set (`scripts/serve.sh`).
+Against production (81.73 / 89.22 / 117.98 / 114.78 / 131.28) the best arm is now -14.6%, -12.4%, -16.2% at one, two and
+four streams and +16.6% and +22.1% at six and eight. The round is 38.8 ms against production's 35.6.

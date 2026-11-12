@@ -41,21 +41,19 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
 
 ## State (2026-11-12)
 
-Pin `9c9bf542`. Decode in tok/s at 1, 2, 4, 6 and 8 streams, one fresh boot a level, 400 tokens a stream. The
-replies of the three plain Zig rows are byte-identical to each other; `TF_GLM_KDA_PAD=1` is the setting production
-runs, and it changes numerics, so the last row is the like-for-like one against production:
+Base: upstream v1.2.7 (`93a2e93e`) plus the 33 patches of `patches/engine/`. Decode in tok/s at 1, 2, 4, 6 and 8
+streams, one fresh boot a level, 400 tokens a stream. `TF_GLM_KDA_PAD=1` is the setting production runs and it changes
+numerics, so the pad rows are the like-for-like ones against production; replies are byte-identical between the rows of
+one group.
 
 | serve | 1 | 2 | 4 | 6 | 8 |
 |---|---:|---:|---:|---:|---:|
 | production (Python engine) | 81.73 | 89.22 | 117.98 | 114.78 | 131.28 |
-| the pin, no patches | 51.38 | 58.16 | 72.26 | 95.19 | 115.18 |
-| patches through 0042 | 51.51 | 59.56 | 80.99 | 110.01 | 134.09 |
-| through 0044 | 52.02 | 60.26 | 82.67 | 113.29 | 137.01 |
-| through 0044, `TF_GLM_KDA_PAD=1` | 64.81 | 74.23 | 94.45 | 126.65 | 154.07 |
-| upstream v1.2.7, no patches | 50.16 | 58.57 | 79.23 | 106.37 | 129.66 |
-| upstream v1.2.7, `TF_GLM_KDA_PAD=1` | 62.19 | 70.57 | 88.91 | 118.29 | 143.25 |
-| re-seated series on v1.2.7, switches off | 51.55 | 60.88 | 83.11 | 111.63 | 137.43 |
+| upstream v1.2.7, no pad | 50.16 | 58.57 | 79.23 | 106.37 | 129.66 |
+| this series, switches off | 51.55 | 60.88 | 83.11 | 111.63 | 137.43 |
+| this series, pad | 64.57 | 73.71 | 93.66 | 126.18 | 153.75 |
+| this series, pad + drafter knobs | 69.78 | 78.17 | 98.83 | 133.80 | 160.25 |
 
-So with production's own setting the Zig engine leads at 6 and 8 streams and trails at 1, 2 and 4. The gap at low
-stream counts is the time of one decode round; `docs/speed_target.md` has its breakdown. The series is being
-re-seated on upstream v1.2.7 (`93a2e93e`), after which every row is measured again on that base.
+With production's own setting and the drafter knobs the Zig engine leads at 6 and 8 streams (+16.6%, +22.1%) and trails
+at 1, 2 and 4 (-14.6%, -12.4%, -16.2%). Production's one-stream round is 35.6 ms against our 38.8; the rest of the gap
+is in `docs/OVERNIGHT-2026-11-12.md` sections 11 to 16 and `docs/audit-2026-11-12/round-structure.md`.
