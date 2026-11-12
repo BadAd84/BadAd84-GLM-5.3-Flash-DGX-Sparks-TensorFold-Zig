@@ -11,7 +11,7 @@ re-seated on v1.2.7 (`docs/audit-2026-11-12/reseat-v127.md`: what upstream chang
 for each). Every patch header names its provenance and its receipts. Every switch defaults off, is a row of the
 `.glm` or `.cuda` scope of `zig/src/platform/environment.zig`, and has a line in `docs/environment.md`.
 
-Proof the series rebuilds: `scripts/apply.sh` on the tag gives tree `93a99447e7030697ca29b93cc1410871bb34c98a`; all
+Proof the series rebuilds: `scripts/apply.sh` on the tag gives tree `7d98e90edd1f2ae411e9f5df218229634d8b4cb4`; all
 patches apply with plain `git apply --check`, no file passes 600 lines at any prefix, and lean base against head is
 386 problems against 386. With every switch off the image decodes 51.55 / 60.88 / 83.11 / 111.63 / 137.43 tok/s at
 1 / 2 / 4 / 6 / 8 streams against 50.16 / 58.57 / 79.23 / 106.37 / 129.66 on the clean tag, replies byte-identical

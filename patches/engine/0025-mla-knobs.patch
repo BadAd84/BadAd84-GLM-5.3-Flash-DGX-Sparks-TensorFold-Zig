@@ -29,6 +29,18 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - glm-onepass-exact-check joins glm_ovn_checks.zig.
 - source: work/fold/0025-mla-knobs.patch
 
+Boot fix, 2026-11-12 (docs/audit-2026-11-12/mla-boot-fix.md): tf_glm_chunks_16_fp8_skip and
+tf_glm_chunks_32_fp8_skip came from the fork with its FP8-on-pages parameter list (16 parameters, ending pt and
+pstep), while latent.chunks passes an E4M3 entry the 14 arguments tf_glm_chunks_*_fp8 take, so the launch read two
+argument slots the host never wrote and a TF_GLM_OVN_MLA_FUSEMERGE=1 boot with an FP8 latent cache failed with
+CUDA_ERROR_INVALID_VALUE on tf_glm_chunks_32_fp8_skip. Shared memory was never short: every chunk entry needs
+wide_smem<HB>() (83,328 or 101,120 bytes, no static shared) and gets exactly that as attribute and launch size.
+Fixed here: both entries take tf_glm_chunks_*_fp8's list, tf_glm_chunks_32_fp8_fused takes no page table either and
+fused() passes pt and pstep to the BF16 form only and refuses FP8 on pages as chunks() does, the fork's FP8 page
+branch is out of glm_attn_ovn::chunks (its FP8 fetch is now chunks_wide's slab-only one), static_asserts tie each
+bounded entry's parameters to its default form's (nvcc fails on the old lists), and glm-mla-skip-check runs the
+bounded and fused launches against today's chunk programs and merge, byte for byte, on BF16 and FP8 caches.
+
 diff --git a/zig/kernels/cuda/glm_glue.cu b/zig/kernels/cuda/glm_glue.cu
 index 06f2ba94ccf8a596ded32541dd0307c85d6894b8..2626aa25928b4d17acb1c8c93ed13034bbe5c3b5 100644
 --- a/zig/kernels/cuda/glm_glue.cu
@@ -41,10 +53,10 @@ index 06f2ba94ccf8a596ded32541dd0307c85d6894b8..2626aa25928b4d17acb1c8c93ed13034
 +#include "glm_glue_latent_ovn.cuh"
 diff --git a/zig/kernels/cuda/glm_glue_attn_ovn.cuh b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3743ef0f3aceddecc9d5929caf5ebe0d8d0426b
+index 0000000000000000000000000000000000000000..dc3f1b307a4c3f0d17f29b641eda2e254d4a90bf
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,344 @@
 +// TF_GLM_OVN_MLA_FUSEMERGE: the chunk pass stops at a chunk's last live key tile; merge walks the row's chunks.
 +#pragma once
 +
@@ -92,7 +104,6 @@ index 0000000000000000000000000000000000000000..d3743ef0f3aceddecc9d5929caf5ebe0
 +  constexpr int PER = FP8 ? KT * (LW / 8) / 256 : 1;
 +  uint2 pre_c[PER];
 +  float pre_s[PER];
-+  const uint32_t page_rows = pt ? (uint32_t)(pstep / LW) : 1u;
 +  auto fetch = [&](int tile) {  // FP8: a tile's codes and scales into registers, as chunks_wide's fetch
 +    const int64_t first = start + tile * KT;
 +#pragma unroll
@@ -101,17 +112,10 @@ index 0000000000000000000000000000000000000000..d3743ef0f3aceddecc9d5929caf5ebe0
 +      const int64_t ki = first + key;
 +      const bool ok = sparse ? ki < n : ki <= limit;
 +      const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
++      // a slab row's codes at src and its scale at scales[src]; this tree refuses an FP8 cache on pages
 +      const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc) + src * LW;
-+      const float* row_scales = scales + src;
-+      if (pt && ok) {
-+        const uint32_t off = sparse ? (uint32_t)src % page_rows : (uint32_t)(ki - start);
-+        const unsigned char* page = sparse ? codes - (int64_t)off * LW
-+                                           : reinterpret_cast<const unsigned char*>(lc) + (int64_t)pt[c] * pstep;
-+        codes = page + (int64_t)off * LW;
-+        row_scales = reinterpret_cast<const float*>(page + CH * LW) + off;
-+      }
 +      pre_c[p] = ok ? *reinterpret_cast<const uint2*>(codes + u * 8) : make_uint2(0u, 0u);
-+      pre_s[p] = ok ? *row_scales : 1.0f;
++      pre_s[p] = ok ? scales[src] : 1.0f;
 +    }
 +  };
 +  auto store = [&](int tile) {
@@ -331,6 +335,16 @@ index 0000000000000000000000000000000000000000..d3743ef0f3aceddecc9d5929caf5ebe0
 +  }
 +}
 +
++// Whether two kernel entries declare the same parameters (a bounded entry takes its default form's argument list).
++template <class A, class B>
++struct same_params {
++  static constexpr bool value = false;
++};
++template <class A>
++struct same_params<A, A> {
++  static constexpr bool value = true;
++};
++
 +}  // namespace glm_attn_ovn
 +
 +// Bounded tile loops (decode windows and unfused prompt launches): tf_glm_chunks_*'s arguments and partials, same bits.
@@ -351,17 +365,26 @@ index 0000000000000000000000000000000000000000..d3743ef0f3aceddecc9d5929caf5ebe0
 +extern "C" __global__ void __launch_bounds__(256)
 +    tf_glm_chunks_16_fp8_skip(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
 +                              const int* tok, const int* cnt, float* po, float* pm, float* pl, int64_t rows,
-+                              int64_t heads, int64_t w, float scale, int sparse, const int* pt, int64_t pstep) {
++                              int64_t heads, int64_t w, float scale, int sparse) {
 +  glm_attn_ovn::chunks<16, true, false>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, po, pm,
-+                                        pl, nullptr, 1, rows, heads, w, scale, sparse, pt, pstep);
++                                        pl, nullptr, 1, rows, heads, w, scale, sparse, nullptr, 0);
 +}
 +extern "C" __global__ void __launch_bounds__(256)
 +    tf_glm_chunks_32_fp8_skip(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
 +                              const int* tok, const int* cnt, float* po, float* pm, float* pl, int64_t rows,
-+                              int64_t heads, int64_t w, float scale, int sparse, const int* pt, int64_t pstep) {
++                              int64_t heads, int64_t w, float scale, int sparse) {
 +  glm_attn_ovn::chunks<32, true, false>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, po, pm,
-+                                        pl, nullptr, 1, rows, heads, w, scale, sparse, pt, pstep);
++                                        pl, nullptr, 1, rows, heads, w, scale, sparse, nullptr, 0);
 +}
++// latent.chunks launches a bounded entry with its default form's arguments: a longer list reads past them.
++static_assert(glm_attn_ovn::same_params<decltype(tf_glm_chunks_16_skip), decltype(tf_glm_chunks_16)>::value,
++              "tf_glm_chunks_16_skip and tf_glm_chunks_16 take one argument list");
++static_assert(glm_attn_ovn::same_params<decltype(tf_glm_chunks_32_skip), decltype(tf_glm_chunks_32)>::value,
++              "tf_glm_chunks_32_skip and tf_glm_chunks_32 take one argument list");
++static_assert(glm_attn_ovn::same_params<decltype(tf_glm_chunks_16_fp8_skip), decltype(tf_glm_chunks_16_fp8)>::value,
++              "tf_glm_chunks_16_fp8_skip and tf_glm_chunks_16_fp8 take one argument list");
++static_assert(glm_attn_ovn::same_params<decltype(tf_glm_chunks_32_fp8_skip), decltype(tf_glm_chunks_32_fp8)>::value,
++              "tf_glm_chunks_32_fp8_skip and tf_glm_chunks_32_fp8 take one argument list");
 +
 +// Chunks and merge in one launch (grid rows x head blocks): out bf16 [rows][heads][512] as tf_glm_merge writes it.
 +extern "C" __global__ void __launch_bounds__(256)
@@ -374,9 +397,9 @@ index 0000000000000000000000000000000000000000..d3743ef0f3aceddecc9d5929caf5ebe0
 +extern "C" __global__ void __launch_bounds__(256)
 +    tf_glm_chunks_32_fp8_fused(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
 +                               const int* tok, const int* cnt, __nv_bfloat16* out, int64_t rows, int64_t heads,
-+                               int64_t w, float scale, int sparse, const int* pt, int64_t pstep, int nch) {
++                               int64_t w, float scale, int sparse, int nch) {
 +  glm_attn_ovn::chunks<32, true, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, nullptr,
-+                                       nullptr, nullptr, out, nch, rows, heads, w, scale, sparse, pt, pstep);
++                                       nullptr, nullptr, out, nch, rows, heads, w, scale, sparse, nullptr, 0);
 +}
 diff --git a/zig/kernels/cuda/glm_glue_latent_ovn.cuh b/zig/kernels/cuda/glm_glue_latent_ovn.cuh
 new file mode 100644
@@ -747,7 +770,7 @@ index 0000000000000000000000000000000000000000..b701b20e949f96671cd6ac0c37baf36c
 +    try std.testing.expectError(error.NonFiniteKvb, quantize(&bits, &codes, &scales));
 +}
 diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
-index 8cc7b2eeb925e19f9bbde7d3d2e761e9d02ff2cb..56057b3c4edcc7ee5f8f71123a2d70d843e8bc40 100644
+index 8cc7b2eeb925e19f9bbde7d3d2e761e9d02ff2cb..781843f0f9420d3e4a3398f45b51aad783a1d20f 100644
 --- a/zig/src/families/glm/cuda_latent.zig
 +++ b/zig/src/families/glm/cuda_latent.zig
 @@ -26,24 +26,35 @@ fn cdiv(a: usize, b: usize) u32 {
@@ -817,7 +840,7 @@ index 8cc7b2eeb925e19f9bbde7d3d2e761e9d02ff2cb..56057b3c4edcc7ee5f8f71123a2d70d8
          else => return error.HeadBlock,
      };
      var a: cuda.Args = .{};
-@@ -108,6 +122,23 @@ fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64,
+@@ -108,6 +122,29 @@ fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64,
      try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, hb), .z = @intCast(nch) }, .block = .{ .x = 256 }, .shared = shared }, stream, &a);
  }
  
@@ -829,19 +852,25 @@ index 8cc7b2eeb925e19f9bbde7d3d2e761e9d02ff2cb..56057b3c4edcc7ee5f8f71123a2d70d8
 +/// chunks then merge as one launch (glm_glue_attn_ovn.cuh): a block a row and 32 heads walks the chunks, no partials.
 +fn fused(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, pos: u64, tokens: u64, counts: u64, out: u64, rows: usize, heads: usize, lw: usize, nch: usize, w: usize, scale: f32, sparse: bool) !void {
 +    if (lw != 512) return error.LatentShape;
++    if (scales != 0 and t.pt != 0) return error.Fp8OnPages; // as chunks(): the E4M3 entries take no page table
 +    const f = if (scales == 0) set.glue.chunks_32_fused else set.glue.chunks_32_fp8_fused;
 +    var a: cuda.Args = .{};
 +    a.add(qa);
 +    a.add(cache);
 +    if (scales != 0) a.add(scales);
-+    inline for (.{ pos, tokens, counts, out, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(w)), scale, @as(c_int, @intFromBool(sparse)), t.pt, @as(i64, @intCast(t.ps)), @as(c_int, @intCast(nch)) }) |v| a.add(v);
++    inline for (.{ pos, tokens, counts, out, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(w)), scale, @as(c_int, @intFromBool(sparse)) }) |v| a.add(v);
++    if (scales == 0) {
++        a.add(t.pt);
++        a.add(@as(i64, @intCast(t.ps)));
++    }
++    a.add(@as(c_int, @intCast(nch)));
 +    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, heads_tile_wide) }, .block = .{ .x = 256 }, .shared = glue.chunksSmem(heads_tile_wide) }, stream, &a);
 +}
 +
  /// latent.sparse_attention: rows with counts > 0 over their selected tokens (i32 [rows][w]); others left alone.
  pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
      return sparseAttentionFormat(set, stream, qa, cache, 0, t, tokens, counts, w, p, out, rows, heads, lw, scale);
-@@ -115,7 +146,9 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
+@@ -115,7 +152,9 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
  
  pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
      const nch = chunksFor(w);
@@ -1021,6 +1050,121 @@ index ac9f7aea111396814975c01b503a4cfe7f8e6164..645f01d948659e6a0f1141e774258ff3
      /// An NVFP4 linear's rows [lo, hi), inputs [klo, khi) as Fp4Linear.from_checkpoint (tf_pack_dense, packScales).
      fn fp4(L: *Loader, comptime fmt: []const u8, i: u32, lo: usize, hi: usize, klo: usize, khi: usize) !cuda.qmmf.Weight {
          const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ fmt, .{i});
+diff --git a/zig/tests/cuda/glm_mla_skip_check.zig b/zig/tests/cuda/glm_mla_skip_check.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..344155fa52e4c1ff6289494537b4f7f6c7b4323b
+--- /dev/null
++++ b/zig/tests/cuda/glm_mla_skip_check.zig
+@@ -0,0 +1,109 @@
++//! glm-mla-skip-check (GPU): TF_GLM_OVN_MLA_FUSEMERGE's bounded and fused launches against today's, byte for byte.
++const std = @import("std");
++const cuda = @import("cuda");
++const check = @import("check.zig");
++const qr = @import("quant_ref_tests.zig");
++const glm = @import("glm_cuda");
++const Rig = qr.RigT;
++const latent = glm.latent;
++const glue = glm.glue;
++
++const lw = 512;
++const heads = 22; // a TP=3 rank's heads
++const keys = 2100;
++const width = 2051; // sparse.width: five 512-key chunks, the last with 3 keys
++const scale: f32 = 0.0625;
++
++/// A latent cache: BF16 rows (scales 0), or the FP8 writer's E4M3 rows followed by their scales.
++const Cache = struct { lc: u64, scales: u64, name: []const u8 };
++
++/// One attention call: dense from position `pos` on `hb`-head blocks, or sparse over token lists (`pos` null).
++const Call = struct { rows: usize, pos: ?usize = null, hb: usize = latent.heads_tile };
++
++fn position(r: *Rig, v: usize) !u64 {
++    const p: i32 = @intCast(v);
++    return r.dev(std.mem.asBytes(&p));
++}
++
++fn caches(r: *Rig, set: glue.Set) ![2]Cache {
++    const bf = try r.dev(std.mem.sliceAsBytes(try r.bfs(keys * lw, 1.0)));
++    const fp = try r.zeros(try latent.cacheBytes(keys, lw, true));
++    const scales = fp + keys * lw;
++    try latent.latentWriteFormat(set, r.s, bf, lw, fp, scales, .{}, try position(r, 0), keys, lw);
++    return .{ .{ .lc = bf, .scales = 0, .name = "bf16" }, .{ .lc = fp, .scales = scales, .name = "fp8" } };
++}
++
++/// Token lists of `rows` rows: counts at the chunk and tile edges, count 0 included, keys at random.
++fn lists(r: *Rig, rows: usize) !struct { u64, u64 } {
++    const edges = [_]i32{ 0, 1, 31, 32, 33, 511, 512, 513, 1024, 2048, 2051, 3 };
++    const tok = try r.a.alloc(i32, rows * width);
++    @memset(tok, -1);
++    const cnt = try r.a.alloc(i32, rows);
++    for (cnt, 0..) |*n, row| {
++        n.* = edges[row % edges.len];
++        for (tok[row * width ..][0..@intCast(n.*)]) |*t| t.* = @intCast(r.rng.uintLessThan(usize, keys));
++    }
++    return .{ try r.dev(std.mem.sliceAsBytes(tok)), try r.dev(std.mem.sliceAsBytes(cnt)) };
++}
++
++/// One call's output on `set`, written into fresh 0xff bytes (a row the call leaves alone stays 0xff).
++fn attend(r: *Rig, set: glue.Set, c: Cache, q: u64, x: Call, tok: u64, cnt: u64, s: f32) ![]u8 {
++    const bytes = x.rows * heads * lw * 2;
++    const out = try r.zeros(bytes);
++    const nch = latent.chunksFor(if (x.pos) |p| p + x.rows else width);
++    const n = nch * x.rows * heads;
++    const part: latent.Partials = .{ .po = try r.zeros(n * lw * 4), .pm = try r.zeros(n * 4), .pl = try r.zeros(n * 4) };
++    if (x.pos) |p| {
++        const dp = try position(r, p);
++        try latent.attentionFormat(set, r.s, q, c.lc, c.scales, .{}, dp, part, out, dp, x.rows, heads, lw, nch, s, x.hb);
++    } else try latent.sparseAttentionFormat(set, r.s, q, c.lc, c.scales, .{}, tok, cnt, width, part, out, x.rows, heads, lw, s);
++    return r.back(out, bytes);
++}
++
++pub fn run(gpu: check.Gpu) !void {
++    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
++    defer arena.deinit();
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var prng = std.Random.DefaultPrng.init(0x5c1);
++    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = s, .rng = prng.random() };
++    defer {
++        for (r.bufs.items) |*b| b.free();
++        r.bufs.deinit(gpu.gpa);
++    }
++    var mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer mod.unload();
++    const ks = try glue.Kernels.loadOvn(mod, true);
++    const off: glue.Set = .{ .glue = &ks };
++    const arms = [_]struct { []const u8, glue.Set }{
++        .{ "bounded", .{ .glue = &ks, .mla = .{ .skip = true } } },
++        .{ "fused", .{ .glue = &ks, .mla = .{ .fuse_rows = 1, .skip = true } } },
++    };
++    const cs = try caches(&r, off);
++    // dense on both head blocks with dead key tiles in the last chunk; sparse at 3, 16 and 70 rows (headBlock's pick)
++    const calls = [_]Call{ .{ .rows = 3, .pos = 1100 }, .{ .rows = 3, .pos = 1100, .hb = latent.heads_tile_wide }, .{ .rows = 70, .pos = 1500, .hb = latent.heads_tile_wide }, .{ .rows = 70, .pos = 0 }, .{ .rows = 3 }, .{ .rows = 16 }, .{ .rows = 70 } };
++    var name: [96]u8 = undefined;
++    var fails: usize = 0;
++    var cases: usize = 0;
++    for (cs) |c| for (calls) |x| {
++        const q = try r.dev(std.mem.sliceAsBytes(try r.bfs(x.rows * heads * lw, 0.5)));
++        const tok, const cnt = try lists(&r, x.rows);
++        const want = try attend(&r, off, c, q, x, tok, cnt, scale);
++        for (arms) |arm| {
++            const what = try std.fmt.bufPrint(&name, "{s} == today's: {s} cache, {d} rows, {s}", .{ arm[0], c.name, x.rows, if (x.pos == null) "sparse" else "dense" });
++            check.sameBytes(what, try attend(&r, arm[1], c, q, x, tok, cnt, scale), want) catch {
++                fails += 1;
++            };
++            cases += 1;
++        }
++    };
++    const cq = try r.dev(std.mem.sliceAsBytes(try r.bfs(16 * heads * lw, 0.5)));
++    const ctok, const ccnt = try lists(&r, 16);
++    const base = try attend(&r, off, cs[1], cq, .{ .rows = 16 }, ctok, ccnt, scale);
++    const moved = try attend(&r, off, cs[1], cq, .{ .rows = 16 }, ctok, ccnt, scale * 1.5);
++    check.expect(!std.mem.eql(u8, base, moved), "glm-mla-skip-check: a 1.5x scale left the bytes alone (the red control must differ)", .{}) catch {
++        fails += 1;
++    };
++    try check.expect(fails == 0, "glm-mla-skip-check: {d} of {d} checks failed", .{ fails, cases + 1 });
++    check.pass("glm-mla-skip-check: bounded and fused launches == today's chunk programs and merge on {d} calls; the control differs", .{cases});
++}
 diff --git a/zig/tests/cuda/glm_onepass_exact_check.zig b/zig/tests/cuda/glm_onepass_exact_check.zig
 new file mode 100644
 index 0000000000000000000000000000000000000000..6958cd1093fe8caea617a17733071dc7f0d64222
@@ -1129,13 +1273,14 @@ index 0000000000000000000000000000000000000000..6958cd1093fe8caea617a17733071dc7
 +    check.pass("glm-onepass-exact-check: pipe exact == chunk programs + merge byte for byte on {d} shapes; pipe off == the one-pass; the one-pass differs", .{5});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index 1e1e882d968634e3ea66dbf2cd063848345dffe1..dbf3edf9e65ae455f818262a3cb5dd3560750c1f 100644
+index 1e1e882d968634e3ea66dbf2cd063848345dffe1..0b523dcdd760a5190f43ba5b8175e51c5e0907c9 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -4,12 +4,14 @@ const check = @import("check.zig");
+@@ -4,12 +4,16 @@ const check = @import("check.zig");
  const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
  const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
  const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
++const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
 +const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
  
  /// The lines these commands add to `main.zig`'s usage, after its own.
@@ -1143,14 +1288,17 @@ index 1e1e882d968634e3ea66dbf2cd063848345dffe1..dbf3edf9e65ae455f818262a3cb5dd35
      \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
      \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
      \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
++    \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
 +    \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
      \\
  ;
  
-@@ -22,6 +24,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+@@ -22,6 +26,10 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
          try glm_index_ovn_check.run(gpu);
      } else if (std.mem.eql(u8, cmd, "glm-index-regroup-check")) {
          try glm_index_regroup_check.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-mla-skip-check")) {
++        try glm_mla_skip_check.run(gpu);
 +    } else if (std.mem.eql(u8, cmd, "glm-onepass-exact-check")) {
 +        try glm_onepass_exact_check.run(gpu);
      } else return false;
