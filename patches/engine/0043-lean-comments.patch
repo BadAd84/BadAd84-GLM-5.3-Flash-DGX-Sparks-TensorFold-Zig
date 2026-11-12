@@ -1,0 +1,86 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: single-line comments where the stack added multi-line ones
+
+The lean gate (tools/zig/lean_check.py on the pin and on the patched tree,
+each from inside its own tree, diffed by lean_new.py) counted 11 problems the
+pin does not have, all "multi-line comment": 9 in glm_l2pf.cu's header (0032),
+1 in glm_glue_bmm.cuh above router16 (0038) and 1 on ringsAgree in
+cuda_prompt_pair.zig (0042). Each block becomes one comment line, with the
+rest of what it said moved onto the code lines it describes. No code changes.
+
+Receipt: scripts/lean.sh work/pin/tree <tree> printed "127 problems, 116 on
+the base, 11 new" before this patch (5,941 files against 5,991).
+
+diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.cuh
+--- a/zig/kernels/cuda/glm_glue_bmm.cuh
++++ b/zig/kernels/cuda/glm_glue_bmm.cuh
+@@ -428,8 +428,7 @@
+ }  // namespace glm_bmm
+ 
+ // TF_GLM_OVN_ROUTER16 (decode, up to 16 rows): 16 x 32 a block, each warp one 16 x 8 tile, ST stages (glue.py's bm 16).
+-// Every output's chain is tf_glm_router_tile's: one mma per 16 inputs from zero, K ascending in its slice.
+-namespace glm_bmm {
++namespace glm_bmm {  // every output's chain is tf_glm_router_tile's: one mma per 16 inputs from zero, K ascending
+ template <int ST>
+ __device__ __forceinline__ void router16(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows,
+                                          int64_t x_stride, int64_t d, int64_t ne, int ks) {
+diff --git a/zig/kernels/cuda/glm_l2pf.cu b/zig/kernels/cuda/glm_l2pf.cu
+--- a/zig/kernels/cuda/glm_l2pf.cu
++++ b/zig/kernels/cuda/glm_l2pf.cu
+@@ -1,22 +1,13 @@
+-// L2 prefetch of weight ranges for GLM-5.3-Flash's decode windows (glm_cuda's port of the glm5_next family's
+-// l2pf.cu, v1.8): a small kernel on a side stream asks the memory system to bring the next kernels' weights
+-// into L2 while the main stream waits on an all-gather or runs latency-bound glue. It only loads or prefetches
+-// (no store, atomic or reduction), so no result can change.
+-//
+-// TABLE [n, 2] i64: (address, bytes) pieces, each 16-byte aligned and at most 32 KiB (the host splits).
+-// MODE 0 ("bulk"): one cp.async.bulk.prefetch.L2 a piece (the TMA unit walks it; sm_90+).
+-// MODE 1 ("lines"): prefetch.global.L2::evict_last on every 128-byte line of a piece, a warp's lanes on
+-// adjacent lines. MODE 2 ("touch"): ld.global.cg of every line's first 16 bytes (a real load: the kernel
+-// lasts as long as the reads).
++// L2 prefetch of weight ranges for GLM decode windows on a side stream: loads and prefetches only, no result changes.
+ 
+ #include <stdint.h>
+ 
+-extern "C" __global__ void __launch_bounds__(512) tf_glm_l2pf(
+-    const long long* __restrict__ table, int n, int mode, unsigned* __restrict__ sink) {
++extern "C" __global__ void __launch_bounds__(512) tf_glm_l2pf(  // table [n, 2] i64: (address, bytes), 16-byte aligned
++    const long long* __restrict__ table, int n, int mode, unsigned* __restrict__ sink) {  // pieces of at most 32 KiB
+     const int lane = threadIdx.x & 31;
+     const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+     const int warps = (gridDim.x * blockDim.x) >> 5;
+-    if (mode == 0) {
++    if (mode == 0) {  // "bulk": one cp.async.bulk.prefetch.L2 a piece, which the TMA unit walks (sm_90+)
+         for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
+             const unsigned long long a = (unsigned long long)table[2 * i];
+             const unsigned bytes = (unsigned)table[2 * i + 1];
+@@ -34,9 +25,9 @@
+         const unsigned long long a = (unsigned long long)table[2 * i];
+         const unsigned bytes = (unsigned)table[2 * i + 1];
+         for (unsigned o = lane * 128u; o < bytes; o += 32u * 128u) {
+-            if (mode == 1) {
++            if (mode == 1) {  // "lines": every 128-byte line of a piece, a warp's lanes on adjacent lines
+                 asm volatile("prefetch.global.L2::evict_last [%0];" :: "l"(a + o));
+-            } else {
++            } else {  // "touch": a real load of each line's first 16 bytes, so the kernel lasts as long as the reads
+                 unsigned x, y, z, w;
+                 asm volatile("ld.global.cg.v4.u32 {%0, %1, %2, %3}, [%4];"
+                              : "=r"(x), "=r"(y), "=r"(z), "=r"(w) : "l"(a + o));
+diff --git a/zig/src/families/glm/cuda_prompt_pair.zig b/zig/src/families/glm/cuda_prompt_pair.zig
+--- a/zig/src/families/glm/cuda_prompt_pair.zig
++++ b/zig/src/families/glm/cuda_prompt_pair.zig
+@@ -53,12 +53,11 @@
+     return std.mem.indexOfScalar(u32, marks, @intCast(next)) == null;
+ }
+ 
+-/// Whether a pair at `start` (b of `rb` rows) rebases the index rings where chunks one at a time do: at a, or not; and
+-/// fits them from there (State.ready rebases to a's pool, so a's rows into that pool count too).
++/// Whether a pair at `start` (b of `rb` rows) rebases the index rings where chunks one at a time do: at a, or not.
+ pub fn ringsAgree(base: usize, ring: usize, start: usize, rb: usize) bool {
+     const ra = fw.prefill_rows;
+     if (start + ra + rb <= base + ring) return true;
+-    return start + ra > base + ring and start % pool + ra + rb <= ring;
++    return start + ra > base + ring and start % pool + ra + rb <= ring; // and fits from a's pool, where ready rebases
+ }
+ 
+ /// The pieces a forward over `b` exchanges in: the engine's, or the pair's for its twin; none for other buffers.
