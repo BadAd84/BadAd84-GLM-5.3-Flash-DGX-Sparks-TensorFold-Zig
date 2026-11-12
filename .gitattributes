@@ -5,3 +5,6 @@ SHA256SUMS text eol=lf
 # scripts run under bash on the Sparks; CRLF breaks their shebang
 *.sh text eol=lf
 *.py text eol=lf
+# the archived forks: a bundle is a pack, and the ref lists beside it are parsed line by line by the check scripts
+*.bundle binary
+archive/**/*.txt text eol=lf

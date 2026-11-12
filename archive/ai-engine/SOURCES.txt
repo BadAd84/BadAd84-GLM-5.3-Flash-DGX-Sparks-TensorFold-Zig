@@ -1,0 +1,523 @@
+# every ref that existed in a source when the archive was taken.
+# tab separated: sha, where it was, its name there, the name it has in this archive.
+394cc988784221592d14eadf5001858b81279a0c	gitea ots/ai-engine	HEAD	refs/heads/master
+394cc988784221592d14eadf5001858b81279a0c	gitea ots/ai-engine	refs/heads/master	refs/heads/master
+3c9bf195d3f195e9acaf67a82c7c62ffe42d15c2	gitea ots/ai-engine	refs/heads/ots-1050-l39-diag	refs/heads/ots-1050-l39-diag
+8984324b7072277d40de1a83aa91e65b878f5787	gitea ots/ai-engine	refs/heads/ots-1050-l39-diag-onmaster	refs/heads/ots-1050-l39-diag-onmaster
+6cca1561252e75c55bd8f1c498bfeb0c120aa5a1	gitea ots/ai-engine	refs/heads/ots-1102-spark2-cleanup	refs/heads/ots-1102-spark2-cleanup
+addd2ee68f33044bfddcebcfb79779c98491b972	gitea ots/ai-engine	refs/heads/ots-1142-g3-layout	refs/heads/ots-1142-g3-layout
+5e6e109a4e11c7439c8b5fbfba83765fcf5783c0	gitea ots/ai-engine	refs/heads/ots-1197-armC-boot	refs/heads/ots-1197-armC-boot
+e6d0823812ee9aa8b722d91b1da0c08675cc84c8	gitea ots/ai-engine	refs/heads/ots-1197-armC-consume	refs/heads/ots-1197-armC-consume
+ad5036c8e96bd15d5e698681856632a4ceb3c6d9	gitea ots/ai-engine	refs/heads/ots-1197-armC-gate-points	refs/heads/ots-1197-armC-gate-points
+236e75cb7f3b655d45fbda989d4ecb9d7824bcc9	gitea ots/ai-engine	refs/heads/ots-1197-armC-gpu	refs/heads/ots-1197-armC-gpu
+5a45d7abba39f016854ae0b678db68bd67958d36	gitea ots/ai-engine	refs/heads/ots-1197-armC-gpu-run	refs/heads/ots-1197-armC-gpu-run
+57da5732b11b88cab6c4b85660b6e6cfdd5b92c1	gitea ots/ai-engine	refs/heads/ots-1197-armC-gpu-run-tf32	refs/heads/ots-1197-armC-gpu-run-tf32
+df67ad87bd3bc6f1e63caaf0d798869180abdaff	gitea ots/ai-engine	refs/heads/ots-1197-armC-gpu-run-tf32-tpl	refs/heads/ots-1197-armC-gpu-run-tf32-tpl
+3d03c00c7a332f04046a1bbcacac49b99bac279e	gitea ots/ai-engine	refs/heads/ots-1197-armC-pyref	refs/heads/ots-1197-armC-pyref
+10b3308933fdb581e6e553fc80f05bdfc817e00c	gitea ots/ai-engine	refs/heads/ots-1204-table-decode	refs/heads/ots-1204-table-decode
+de783294e14c786fe9d964784e164f5b33ffde56	gitea ots/ai-engine	refs/heads/ots-1205-qual-driver	refs/heads/ots-1205-qual-driver
+d1c9e35a97b871946f9778e664fa328f96d97578	gitea ots/ai-engine	refs/heads/ots-1260-armC-stack	refs/heads/ots-1260-armC-stack
+fa7030d3d052837f4c05875cece0dcbf3bd4750f	gitea ots/ai-engine	refs/heads/ots-1260-bf16x9	refs/heads/ots-1260-bf16x9
+6fdf707b0575f414f4013869782689bd3983e846	gitea ots/ai-engine	refs/heads/ots-1260-c69	refs/heads/ots-1260-c69
+8b3b6a0ed2f29de363efdf32b9a2c7d66ea36d63	gitea ots/ai-engine	refs/heads/ots-1260-cublas-probe	refs/heads/ots-1260-cublas-probe
+e1d877882389cf5b24805d1755c89073cfe83ca3	gitea ots/ai-engine	refs/heads/ots-1260-dump-bf16	refs/heads/ots-1260-dump-bf16
+98450a1c5e255f732d8d5935f156c854c1a5b523	gitea ots/ai-engine	refs/heads/ots-1260-g2-diag	refs/heads/ots-1260-g2-diag
+834f18b6535b1f3b4b7e0ed610f36faef1eb10b0	gitea ots/ai-engine	refs/heads/ots-1260-g2-xcheck	refs/heads/ots-1260-g2-xcheck
+71ddb2d4a65bc402317a38d525aa3229a6f9bbc1	gitea ots/ai-engine	refs/heads/ots-1260-g2-zig	refs/heads/ots-1260-g2-zig
+547917b1ed9ac24c9e33df0089cf1407f4fb97de	gitea ots/ai-engine	refs/heads/ots-1260-mathmode-log	refs/heads/ots-1260-mathmode-log
+f30fa8dc6c37b80517805d597944d2ebbd2dbb80	gitea ots/ai-engine	refs/heads/ots-1260-order	refs/heads/ots-1260-order
+c350b867a6f51f1a1e035b08991eaa9a4a55f72a	gitea ots/ai-engine	refs/heads/ots-1260-order2	refs/heads/ots-1260-order2
+c32f73d86f2416c22484ceb3ab7f440aeeb4a6e4	gitea ots/ai-engine	refs/heads/ots-1260-pedantic	refs/heads/ots-1260-pedantic
+de8e89dcbfecb7136dc29ac0f876652d93c076b7	gitea ots/ai-engine	refs/heads/ots-1260-pedantic-gpu	refs/heads/ots-1260-pedantic-gpu
+c373987b165fbac21fe02449e804c6fe105b9a9a	gitea ots/ai-engine	refs/heads/ots-1260-seed-gate	refs/heads/ots-1260-seed-gate
+5d7620dc5f9cc4cb8306c06a36ccb395b5906267	gitea ots/ai-engine	refs/heads/ots-1260-seed-gate-c69	refs/heads/ots-1260-seed-gate-c69
+86a8d5009f60b06d5a3875b75da9cb0f33c08454	gitea ots/ai-engine	refs/heads/ots-1260-seed-rec	refs/heads/ots-1260-seed-rec
+a6437ecef2dc4dbb09f5a2e8ea08dbe5ef367ad3	gitea ots/ai-engine	refs/heads/ots-1260-seed-rec-c69	refs/heads/ots-1260-seed-rec-c69
+d8fa97d083c2a18f86a115e393e6b1c56f71e7b4	gitea ots/ai-engine	refs/heads/ots-1262-q40-stack-p4-spark6	refs/heads/ots-1262-q40-stack-p4-spark6
+b830df5b80834c00c8ef2ddef0cc86b8f62ce953	gitea ots/ai-engine	refs/heads/ots-1264-q41-4arm	refs/heads/ots-1264-q41-4arm
+5ed9ad69c0301435cf57ea99f453bfb98c156796	gitea ots/ai-engine	refs/heads/ots-1290-kernel-candidates	refs/heads/ots-1290-kernel-candidates
+7d0e788bc73c756172e591963b3e5d5c8c6ede0a	gitea ots/ai-engine	refs/heads/ots-1313-miazig-window	refs/heads/ots-1313-miazig-window
+08d617c45f44d9cf37aace466e92648edb47a07a	gitea ots/ai-engine	refs/heads/ots-1331-armC-baseline68	refs/heads/ots-1331-armC-baseline68
+65cacb358a90f3dc05a3a0c9e5e98ba8043327ee	gitea ots/ai-engine	refs/heads/ots-1332-armC-c69-ab	refs/heads/ots-1332-armC-c69-ab
+4cbef909fe36e4cfcd2c2cdf55f88cfdf0ca3608	gitea ots/ai-engine	refs/heads/ots-1333-wk-oracle	refs/heads/ots-1333-wk-oracle
+0070e16dab54bb3706eceb9a3acc3b8ae0c4568f	gitea ots/ai-engine	refs/heads/ots-1336-kernel-candidates-r4	refs/heads/ots-1336-kernel-candidates-r4
+8b9589081c51e1228137a831ec13d9b01460ed7e	gitea ots/ai-engine	refs/heads/ots-171-0118-spark4	refs/heads/ots-171-0118-spark4
+7034339ee14d68675845fba4fc4b389f956d8c55	gitea ots/ai-engine	refs/heads/ots-223-ownenv-spark5	refs/heads/ots-223-ownenv-spark5
+5b1556637c3f83ef6b0e405d8a5855dfef280ecc	gitea ots/ai-engine	refs/heads/ots-258-gate-outer-int	refs/heads/ots-258-gate-outer-int
+bfd4817763aa7d219c4bd5c71cf702d8bb1a6f08	gitea ots/ai-engine	refs/heads/ots-297-timing-patch-spark5	refs/heads/ots-297-timing-patch-spark5
+dd2dc3f50634bad4c7386df2b9900f33c74110ba	gitea ots/ai-engine	refs/heads/ots-377-0102-stackc-spark5	refs/heads/ots-377-0102-stackc-spark5
+2933b9556bdce087eb6ed5808cbf70a1bfd909ce	gitea ots/ai-engine	refs/heads/ots-380-0127-wait-spark5	refs/heads/ots-380-0127-wait-spark5
+bcb84d03afc8aa21ec341496b79d331fd48a648c	gitea ots/ai-engine	refs/heads/ots-384-warm-split-spark6	refs/heads/ots-384-warm-split-spark6
+d32c55d08bf9aedc08d5b0986d002bf155876ba2	gitea ots/ai-engine	refs/heads/ots-396-d3-doc-fix	refs/heads/ots-396-d3-doc-fix
+f790d05a5fa88e2846e8fce00ee8e06fc14e0ae9	gitea ots/ai-engine	refs/heads/ots-396-glm-harness-fix	refs/heads/ots-396-glm-harness-fix
+8ad308403ad1b2d21a0af55e6de5d97fd0dc37fd	gitea ots/ai-engine	refs/heads/ots-396-glm-profile	refs/heads/ots-396-glm-profile
+124e4d80c637b6cde5adc5853dab64a66d2295f3	gitea ots/ai-engine	refs/heads/ots-402-classify-selfreinvoke	refs/heads/ots-402-classify-selfreinvoke
+e5cfa905ef7b2aaf297d8c03168b03c6ed7ca5f0	gitea ots/ai-engine	refs/heads/ots-409-0121-falsifier-spark6	refs/heads/ots-409-0121-falsifier-spark6
+435f2d261fb9ab52c47c54537cce074ca05126d9	gitea ots/ai-engine	refs/heads/ots-418-miaai-boot	refs/heads/ots-418-miaai-boot
+f03d2366ae7eb60a4f33096ec26dd5cd3e3536e3	gitea ots/ai-engine	refs/heads/ots-419-miaai-speed-kit	refs/heads/ots-419-miaai-speed-kit
+501e3d19aead94ddec75cfc1d249f001764381ba	gitea ots/ai-engine	refs/heads/ots-424-warm-gate-spark4	refs/heads/ots-424-warm-gate-spark4
+cf4ba08d1d1407b4496744046e41b854808f2c3e	gitea ots/ai-engine	refs/heads/ots-570-d2-5-fullforward	refs/heads/ots-570-d2-5-fullforward
+ddece1d907b5e23e1c94ebd969932eebbb1f2e47	gitea ots/ai-engine	refs/heads/ots-576-glm-profile-s1	refs/heads/ots-576-glm-profile-s1
+cff1c1636384264707654f2cf007e30444bea4be	gitea ots/ai-engine	refs/heads/ots-609-glm-ab	refs/heads/ots-609-glm-ab
+0c2a19b3ad7ab9a41f8061a53a3bbaf34178c7cd	gitea ots/ai-engine	refs/heads/ots-610-glm-profile-fix	refs/heads/ots-610-glm-profile-fix
+61d9ef7f12b48c9c7dd087890a43bc38225e6542	gitea ots/ai-engine	refs/heads/ots-634-glm-edit-resume	refs/heads/ots-634-glm-edit-resume
+9c34880a474e3520db7d592e8dab99bcf6b6187f	gitea ots/ai-engine	refs/heads/ots-635-glm-ab-fix	refs/heads/ots-635-glm-ab-fix
+8f65965d57ce0db4a690d55575d3380f18399e2a	gitea ots/ai-engine	refs/heads/ots-635-mgr-raw5logs	refs/heads/ots-635-mgr-raw5logs
+b54ca9006791c3d717d92f23cc9668597c625f73	gitea ots/ai-engine	refs/heads/ots-636-gate3-fix	refs/heads/ots-636-gate3-fix
+b82e583639d7827e98bcd9355948c3ef49c6bcd2	gitea ots/ai-engine	refs/heads/ots-644-u7-glm-newbase	refs/heads/ots-644-u7-glm-newbase
+04553ec4cb6c0de0a7ef51379850c8b43c0d3aef	gitea ots/ai-engine	refs/heads/ots-647-glm-ab-fix3	refs/heads/ots-647-glm-ab-fix3
+178140195c52b04b9b5ed9af01fa959a23a5fad7	gitea ots/ai-engine	refs/heads/ots-653-glm-ab5	refs/heads/ots-653-glm-ab5
+79c84c60344b4aaf1f112644752c4e7338d46a37	gitea ots/ai-engine	refs/heads/ots-728-code2-stack	refs/heads/ots-728-code2-stack
+ad6c52293cd083ea5289bee19a4e4e9e8c20980c	gitea ots/ai-engine	refs/heads/ots-843-plan-eb	refs/heads/ots-843-plan-eb
+67a31f20a44d574124997ba996c6d8bbc0e50c48	gitea ots/ai-engine	refs/heads/ots-860-pool-from-parallel	refs/heads/ots-860-pool-from-parallel
+6a502ea14439db507f87f45cba32bcfeaec2a370	gitea ots/ai-engine	refs/heads/ots-868-dsv41-prefill-step	refs/heads/ots-868-dsv41-prefill-step
+fe91a5b1c5cf9ef50fc8cf92f36f6228eb9f93bf	gitea ots/ai-engine	refs/heads/ots-875-dsv41-split-step	refs/heads/ots-875-dsv41-split-step
+503f6380527907cf9edb70bc37a7702e131938c4	gitea ots/ai-engine	refs/heads/ots-g3-b-transport	refs/heads/ots-g3-b-transport
+da752bc915a68c5fcb297cc05e3aa0eedd118e77	gitea ots/ai-engine	refs/heads/ots-q36-0131-p26-spark5	refs/heads/ots-q36-0131-p26-spark5
+d390a0ae14d03f7d93cc474369ce279b12170c58	gitea ots/ai-engine	refs/heads/ots-q37-nt1-p1-spark4	refs/heads/ots-q37-nt1-p1-spark4
+f92d7f9e7c7d92119e1ab6b932c664b7c1339809	gitea ots/ai-engine	refs/heads/ots-q9-int4-decode-nt	refs/heads/ots-q9-int4-decode-nt
+3cfe5abf7e25fc44edf9cc973fbddc592c1a2f63	gitea ots/ai-engine	refs/heads/ovn-cachesalt	refs/heads/ovn-cachesalt
+bf4fc303d3fbcc3277e210dad9b2085f17c67708	gitea ots/ai-engine	refs/heads/ovn-catchup	refs/heads/ovn-catchup
+a3cf67306e69181ea2d328c175ff411aacd5d6ed	gitea ots/ai-engine	refs/heads/ovn-fair	refs/heads/ovn-fair
+35b9011e00c0f6c7754e87e48cb6f6123f1de282	gitea ots/ai-engine	refs/heads/ovn-prefixwait	refs/heads/ovn-prefixwait
+5a281dfc241bc09e55e2965195249e49daf23704	gitea ots/ai-engine	refs/heads/ovn-solo	refs/heads/ovn-solo
+06fdcc8bd18e6ed8dccf2e1eef5f0e367846b4c8	gitea ots/ai-engine	refs/heads/pr-exl3-items-unconditional	refs/heads/pr-exl3-items-unconditional
+61b6670a75ab590c821da190dbe49c7b5c17ca01	gitea ots/ai-engine	refs/heads/workspace-notes-2026-10-24	refs/heads/workspace-notes-2026-10-24
+913a922b67a59409dbf9f5ad5fa4e942f899cf52	gitea ots/ai-engine	refs/pull/1/head	refs/pull/1/head
+ae13885fa945e3fc4ca518403fc36fb2ba0ef534	gitea ots/ai-engine	refs/pull/10/head	refs/pull/10/head
+2ac783492fc0909cc2b32184a64acbd1c3a5020d	gitea ots/ai-engine	refs/pull/11/head	refs/pull/11/head
+0fa3df466d47b7f35ec459a9a28d19f4a404553e	gitea ots/ai-engine	refs/pull/12/head	refs/pull/12/head
+c737de12f05682fd298b2ef7ffbd9a527fe400c5	gitea ots/ai-engine	refs/pull/13/head	refs/pull/13/head
+cd9fe8ada6f67a0fea058c8761f51414b8a978ab	gitea ots/ai-engine	refs/pull/2/head	refs/pull/2/head
+607a0df032b4378e610934d7da6b87809e0e0942	gitea ots/ai-engine	refs/pull/3/head	refs/pull/3/head
+897621760ccacc61ec975fd979c4b818252cc6fc	gitea ots/ai-engine	refs/pull/4/head	refs/pull/4/head
+b7770b23f528277e02af54aea3e16490d2b5f5b7	gitea ots/ai-engine	refs/pull/5/head	refs/pull/5/head
+e81750bc45d413560af669f6fb4875541d89be84	gitea ots/ai-engine	refs/pull/6/head	refs/pull/6/head
+4484daafb7cd4ad0003ffd1ec509047b1dbcd366	gitea ots/ai-engine	refs/pull/7/head	refs/pull/7/head
+f1da8962b7494e544cb18b219ab4e5874a2d9be2	gitea ots/ai-engine	refs/pull/8/head	refs/pull/8/head
+cd8d77cdaad0ca8670b8cd4385afe40a36c6707d	gitea ots/ai-engine	refs/pull/9/head	refs/pull/9/head
+b7da2df86ba6ccd679ace7d5d0d8170e257c98aa	gitea ots/ai-engine	refs/tags/archive/master	refs/tags/archive/master
+a8b4cf15fb40f0f85f13546c2daa6b78d7952d93	gitea ots/ai-engine	refs/tags/archive/ots-101-d3-boot	refs/tags/archive/ots-101-d3-boot
+e25bd190aff4b6296dbd521995e4f98d36ba21d1	gitea ots/ai-engine	refs/tags/archive/ots-102-dsv41-speed	refs/tags/archive/ots-102-dsv41-speed
+ddd01d68e9857a2bb62aa7a1025f7107bfa8cda9	gitea ots/ai-engine	refs/tags/archive/ots-105-d3-gates	refs/tags/archive/ots-105-d3-gates
+3c9bf195d3f195e9acaf67a82c7c62ffe42d15c2	gitea ots/ai-engine	refs/tags/archive/ots-1050-l39-diag	refs/tags/archive/ots-1050-l39-diag
+8984324b7072277d40de1a83aa91e65b878f5787	gitea ots/ai-engine	refs/tags/archive/ots-1050-l39-diag-onmaster	refs/tags/archive/ots-1050-l39-diag-onmaster
+9200cc6f09e4ddc618a741368b6bb866c232e7f1	gitea ots/ai-engine	refs/tags/archive/ots-110-9200cc6	refs/tags/archive/ots-110-9200cc6
+6cca1561252e75c55bd8f1c498bfeb0c120aa5a1	gitea ots/ai-engine	refs/tags/archive/ots-1102-spark2-cleanup	refs/tags/archive/ots-1102-spark2-cleanup
+3413618fd0a3c1ed89e5ad2962083481f5724c82	gitea ots/ai-engine	refs/tags/archive/ots-112-dsv41-speed-fix	refs/tags/archive/ots-112-dsv41-speed-fix
+addd2ee68f33044bfddcebcfb79779c98491b972	gitea ots/ai-engine	refs/tags/archive/ots-1142-g3-layout	refs/tags/archive/ots-1142-g3-layout
+5e6e109a4e11c7439c8b5fbfba83765fcf5783c0	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-boot	refs/tags/archive/ots-1197-armC-boot
+e6d0823812ee9aa8b722d91b1da0c08675cc84c8	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-consume	refs/tags/archive/ots-1197-armC-consume
+ad5036c8e96bd15d5e698681856632a4ceb3c6d9	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-gate-points	refs/tags/archive/ots-1197-armC-gate-points
+236e75cb7f3b655d45fbda989d4ecb9d7824bcc9	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-gpu	refs/tags/archive/ots-1197-armC-gpu
+5a45d7abba39f016854ae0b678db68bd67958d36	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-gpu-run	refs/tags/archive/ots-1197-armC-gpu-run
+57da5732b11b88cab6c4b85660b6e6cfdd5b92c1	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-gpu-run-tf32	refs/tags/archive/ots-1197-armC-gpu-run-tf32
+df67ad87bd3bc6f1e63caaf0d798869180abdaff	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-gpu-run-tf32-tpl	refs/tags/archive/ots-1197-armC-gpu-run-tf32-tpl
+3d03c00c7a332f04046a1bbcacac49b99bac279e	gitea ots/ai-engine	refs/tags/archive/ots-1197-armC-pyref	refs/tags/archive/ots-1197-armC-pyref
+1cb8b6398aff1ad1a4d96366af0c7ca5f93e61c5	gitea ots/ai-engine	refs/tags/archive/ots-120-dsv41-speed-fix2	refs/tags/archive/ots-120-dsv41-speed-fix2
+10b3308933fdb581e6e553fc80f05bdfc817e00c	gitea ots/ai-engine	refs/tags/archive/ots-1204-table-decode	refs/tags/archive/ots-1204-table-decode
+de783294e14c786fe9d964784e164f5b33ffde56	gitea ots/ai-engine	refs/tags/archive/ots-1205-qual-driver	refs/tags/archive/ots-1205-qual-driver
+67b3f69abadfed467b20ff761dd9817c5a87b0d4	gitea ots/ai-engine	refs/tags/archive/ots-121-d3-gate-collection	refs/tags/archive/ots-121-d3-gate-collection
+a552f3275927045eb674ca95159c20a0d408e543	gitea ots/ai-engine	refs/tags/archive/ots-123-dsv41-speed-fix3	refs/tags/archive/ots-123-dsv41-speed-fix3
+d1c9e35a97b871946f9778e664fa328f96d97578	gitea ots/ai-engine	refs/tags/archive/ots-1260-armC-stack	refs/tags/archive/ots-1260-armC-stack
+fa7030d3d052837f4c05875cece0dcbf3bd4750f	gitea ots/ai-engine	refs/tags/archive/ots-1260-bf16x9	refs/tags/archive/ots-1260-bf16x9
+6fdf707b0575f414f4013869782689bd3983e846	gitea ots/ai-engine	refs/tags/archive/ots-1260-c69	refs/tags/archive/ots-1260-c69
+8b3b6a0ed2f29de363efdf32b9a2c7d66ea36d63	gitea ots/ai-engine	refs/tags/archive/ots-1260-cublas-probe	refs/tags/archive/ots-1260-cublas-probe
+e1d877882389cf5b24805d1755c89073cfe83ca3	gitea ots/ai-engine	refs/tags/archive/ots-1260-dump-bf16	refs/tags/archive/ots-1260-dump-bf16
+98450a1c5e255f732d8d5935f156c854c1a5b523	gitea ots/ai-engine	refs/tags/archive/ots-1260-g2-diag	refs/tags/archive/ots-1260-g2-diag
+834f18b6535b1f3b4b7e0ed610f36faef1eb10b0	gitea ots/ai-engine	refs/tags/archive/ots-1260-g2-xcheck	refs/tags/archive/ots-1260-g2-xcheck
+71ddb2d4a65bc402317a38d525aa3229a6f9bbc1	gitea ots/ai-engine	refs/tags/archive/ots-1260-g2-zig	refs/tags/archive/ots-1260-g2-zig
+547917b1ed9ac24c9e33df0089cf1407f4fb97de	gitea ots/ai-engine	refs/tags/archive/ots-1260-mathmode-log	refs/tags/archive/ots-1260-mathmode-log
+f30fa8dc6c37b80517805d597944d2ebbd2dbb80	gitea ots/ai-engine	refs/tags/archive/ots-1260-order	refs/tags/archive/ots-1260-order
+c350b867a6f51f1a1e035b08991eaa9a4a55f72a	gitea ots/ai-engine	refs/tags/archive/ots-1260-order2	refs/tags/archive/ots-1260-order2
+c32f73d86f2416c22484ceb3ab7f440aeeb4a6e4	gitea ots/ai-engine	refs/tags/archive/ots-1260-pedantic	refs/tags/archive/ots-1260-pedantic
+de8e89dcbfecb7136dc29ac0f876652d93c076b7	gitea ots/ai-engine	refs/tags/archive/ots-1260-pedantic-gpu	refs/tags/archive/ots-1260-pedantic-gpu
+c373987b165fbac21fe02449e804c6fe105b9a9a	gitea ots/ai-engine	refs/tags/archive/ots-1260-seed-gate	refs/tags/archive/ots-1260-seed-gate
+5d7620dc5f9cc4cb8306c06a36ccb395b5906267	gitea ots/ai-engine	refs/tags/archive/ots-1260-seed-gate-c69	refs/tags/archive/ots-1260-seed-gate-c69
+86a8d5009f60b06d5a3875b75da9cb0f33c08454	gitea ots/ai-engine	refs/tags/archive/ots-1260-seed-rec	refs/tags/archive/ots-1260-seed-rec
+a6437ecef2dc4dbb09f5a2e8ea08dbe5ef367ad3	gitea ots/ai-engine	refs/tags/archive/ots-1260-seed-rec-c69	refs/tags/archive/ots-1260-seed-rec-c69
+d8fa97d083c2a18f86a115e393e6b1c56f71e7b4	gitea ots/ai-engine	refs/tags/archive/ots-1262-q40-stack-p4-spark6	refs/tags/archive/ots-1262-q40-stack-p4-spark6
+b830df5b80834c00c8ef2ddef0cc86b8f62ce953	gitea ots/ai-engine	refs/tags/archive/ots-1264-q41-4arm	refs/tags/archive/ots-1264-q41-4arm
+5ed9ad69c0301435cf57ea99f453bfb98c156796	gitea ots/ai-engine	refs/tags/archive/ots-1290-kernel-candidates	refs/tags/archive/ots-1290-kernel-candidates
+7d0e788bc73c756172e591963b3e5d5c8c6ede0a	gitea ots/ai-engine	refs/tags/archive/ots-1313-miazig-window	refs/tags/archive/ots-1313-miazig-window
+e981d144dc213e51f1901e6dbcb6c99b21ddb459	gitea ots/ai-engine	refs/tags/archive/ots-133-b3-e981d14	refs/tags/archive/ots-133-b3-e981d14
+08d617c45f44d9cf37aace466e92648edb47a07a	gitea ots/ai-engine	refs/tags/archive/ots-1331-armC-baseline68	refs/tags/archive/ots-1331-armC-baseline68
+65cacb358a90f3dc05a3a0c9e5e98ba8043327ee	gitea ots/ai-engine	refs/tags/archive/ots-1332-armC-c69-ab	refs/tags/archive/ots-1332-armC-c69-ab
+4cbef909fe36e4cfcd2c2cdf55f88cfdf0ca3608	gitea ots/ai-engine	refs/tags/archive/ots-1333-wk-oracle	refs/tags/archive/ots-1333-wk-oracle
+0070e16dab54bb3706eceb9a3acc3b8ae0c4568f	gitea ots/ai-engine	refs/tags/archive/ots-1336-kernel-candidates-r4	refs/tags/archive/ots-1336-kernel-candidates-r4
+f126ebbb9c402b94fb9f96dc2b2c5ce3596a9cf5	gitea ots/ai-engine	refs/tags/archive/ots-153-0118-gate	refs/tags/archive/ots-153-0118-gate
+8b9589081c51e1228137a831ec13d9b01460ed7e	gitea ots/ai-engine	refs/tags/archive/ots-171-0118-spark4	refs/tags/archive/ots-171-0118-spark4
+d087796852ae864c3fb57c541014cc96e185fede	gitea ots/ai-engine	refs/tags/archive/ots-197-harness-recovered	refs/tags/archive/ots-197-harness-recovered
+b683113e0be232dd20d0a70da9fae65a9aa0cde4	gitea ots/ai-engine	refs/tags/archive/ots-199-harness	refs/tags/archive/ots-199-harness
+7034339ee14d68675845fba4fc4b389f956d8c55	gitea ots/ai-engine	refs/tags/archive/ots-223-ownenv-spark5	refs/tags/archive/ots-223-ownenv-spark5
+5b1556637c3f83ef6b0e405d8a5855dfef280ecc	gitea ots/ai-engine	refs/tags/archive/ots-258-gate-outer-int	refs/tags/archive/ots-258-gate-outer-int
+eaeaf2b8da805f8ca245c4fff127ba85bd67aae2	gitea ots/ai-engine	refs/tags/archive/ots-277-t14c-fix	refs/tags/archive/ots-277-t14c-fix
+bfd4817763aa7d219c4bd5c71cf702d8bb1a6f08	gitea ots/ai-engine	refs/tags/archive/ots-297-timing-patch-spark5	refs/tags/archive/ots-297-timing-patch-spark5
+a2bba8f33fb08ae42052d6e669385755c88a2f2f	gitea ots/ai-engine	refs/tags/archive/ots-308-admission-stamp-spark5	refs/tags/archive/ots-308-admission-stamp-spark5
+8a28b214f22a3c1e0b61eba991205bb6911e8857	gitea ots/ai-engine	refs/tags/archive/ots-316-warm0-control-spark5	refs/tags/archive/ots-316-warm0-control-spark5
+ce1f659d7e500e3ebaae55d18fa221f20b1ad783	gitea ots/ai-engine	refs/tags/archive/ots-321-admission-repl-spark4	refs/tags/archive/ots-321-admission-repl-spark4
+6432816110c1fb1317186f243bd829b3dd304df3	gitea ots/ai-engine	refs/tags/archive/ots-332-warm-yield-spark5	refs/tags/archive/ots-332-warm-yield-spark5
+dd2dc3f50634bad4c7386df2b9900f33c74110ba	gitea ots/ai-engine	refs/tags/archive/ots-377-0102-stackc-spark5	refs/tags/archive/ots-377-0102-stackc-spark5
+2933b9556bdce087eb6ed5808cbf70a1bfd909ce	gitea ots/ai-engine	refs/tags/archive/ots-380-0127-wait-spark5	refs/tags/archive/ots-380-0127-wait-spark5
+bcb84d03afc8aa21ec341496b79d331fd48a648c	gitea ots/ai-engine	refs/tags/archive/ots-384-warm-split-spark6	refs/tags/archive/ots-384-warm-split-spark6
+d32c55d08bf9aedc08d5b0986d002bf155876ba2	gitea ots/ai-engine	refs/tags/archive/ots-396-d3-doc-fix	refs/tags/archive/ots-396-d3-doc-fix
+f790d05a5fa88e2846e8fce00ee8e06fc14e0ae9	gitea ots/ai-engine	refs/tags/archive/ots-396-glm-harness-fix	refs/tags/archive/ots-396-glm-harness-fix
+8ad308403ad1b2d21a0af55e6de5d97fd0dc37fd	gitea ots/ai-engine	refs/tags/archive/ots-396-glm-profile	refs/tags/archive/ots-396-glm-profile
+124e4d80c637b6cde5adc5853dab64a66d2295f3	gitea ots/ai-engine	refs/tags/archive/ots-402-classify-selfreinvoke	refs/tags/archive/ots-402-classify-selfreinvoke
+e5cfa905ef7b2aaf297d8c03168b03c6ed7ca5f0	gitea ots/ai-engine	refs/tags/archive/ots-409-0121-falsifier-spark6	refs/tags/archive/ots-409-0121-falsifier-spark6
+435f2d261fb9ab52c47c54537cce074ca05126d9	gitea ots/ai-engine	refs/tags/archive/ots-418-miaai-boot	refs/tags/archive/ots-418-miaai-boot
+f03d2366ae7eb60a4f33096ec26dd5cd3e3536e3	gitea ots/ai-engine	refs/tags/archive/ots-419-miaai-speed-kit	refs/tags/archive/ots-419-miaai-speed-kit
+501e3d19aead94ddec75cfc1d249f001764381ba	gitea ots/ai-engine	refs/tags/archive/ots-424-warm-gate-spark4	refs/tags/archive/ots-424-warm-gate-spark4
+cf4ba08d1d1407b4496744046e41b854808f2c3e	gitea ots/ai-engine	refs/tags/archive/ots-570-d2-5-fullforward	refs/tags/archive/ots-570-d2-5-fullforward
+ddece1d907b5e23e1c94ebd969932eebbb1f2e47	gitea ots/ai-engine	refs/tags/archive/ots-576-glm-profile-s1	refs/tags/archive/ots-576-glm-profile-s1
+cff1c1636384264707654f2cf007e30444bea4be	gitea ots/ai-engine	refs/tags/archive/ots-609-glm-ab	refs/tags/archive/ots-609-glm-ab
+0c2a19b3ad7ab9a41f8061a53a3bbaf34178c7cd	gitea ots/ai-engine	refs/tags/archive/ots-610-glm-profile-fix	refs/tags/archive/ots-610-glm-profile-fix
+61d9ef7f12b48c9c7dd087890a43bc38225e6542	gitea ots/ai-engine	refs/tags/archive/ots-634-glm-edit-resume	refs/tags/archive/ots-634-glm-edit-resume
+9c34880a474e3520db7d592e8dab99bcf6b6187f	gitea ots/ai-engine	refs/tags/archive/ots-635-glm-ab-fix	refs/tags/archive/ots-635-glm-ab-fix
+8f65965d57ce0db4a690d55575d3380f18399e2a	gitea ots/ai-engine	refs/tags/archive/ots-635-mgr-raw5logs	refs/tags/archive/ots-635-mgr-raw5logs
+b54ca9006791c3d717d92f23cc9668597c625f73	gitea ots/ai-engine	refs/tags/archive/ots-636-gate3-fix	refs/tags/archive/ots-636-gate3-fix
+b82e583639d7827e98bcd9355948c3ef49c6bcd2	gitea ots/ai-engine	refs/tags/archive/ots-644-u7-glm-newbase	refs/tags/archive/ots-644-u7-glm-newbase
+04553ec4cb6c0de0a7ef51379850c8b43c0d3aef	gitea ots/ai-engine	refs/tags/archive/ots-647-glm-ab-fix3	refs/tags/archive/ots-647-glm-ab-fix3
+178140195c52b04b9b5ed9af01fa959a23a5fad7	gitea ots/ai-engine	refs/tags/archive/ots-653-glm-ab5	refs/tags/archive/ots-653-glm-ab5
+79c84c60344b4aaf1f112644752c4e7338d46a37	gitea ots/ai-engine	refs/tags/archive/ots-728-code2-stack	refs/tags/archive/ots-728-code2-stack
+ad6c52293cd083ea5289bee19a4e4e9e8c20980c	gitea ots/ai-engine	refs/tags/archive/ots-843-plan-eb	refs/tags/archive/ots-843-plan-eb
+67a31f20a44d574124997ba996c6d8bbc0e50c48	gitea ots/ai-engine	refs/tags/archive/ots-860-pool-from-parallel	refs/tags/archive/ots-860-pool-from-parallel
+6a502ea14439db507f87f45cba32bcfeaec2a370	gitea ots/ai-engine	refs/tags/archive/ots-868-dsv41-prefill-step	refs/tags/archive/ots-868-dsv41-prefill-step
+fe91a5b1c5cf9ef50fc8cf92f36f6228eb9f93bf	gitea ots/ai-engine	refs/tags/archive/ots-875-dsv41-split-step	refs/tags/archive/ots-875-dsv41-split-step
+cef2bf8e603e4c3d1cf6d236f8f307e50a962566	gitea ots/ai-engine	refs/tags/archive/ots-91-s1-table-verdicts	refs/tags/archive/ots-91-s1-table-verdicts
+95c819f382eb4331d8222bc159032044b68d9602	gitea ots/ai-engine	refs/tags/archive/ots-91-s2-glm-regress-diag	refs/tags/archive/ots-91-s2-glm-regress-diag
+31f4d09a9cfea1f65b5ae4753791c704cc6d594f	gitea ots/ai-engine	refs/tags/archive/ots-94-e1-b1-nvme-kv	refs/tags/archive/ots-94-e1-b1-nvme-kv
+d5d2fd336d13e8833f478b4d3f4e48170d4b78da	gitea ots/ai-engine	refs/tags/archive/ots-94-e2a-c1-glm-kernels	refs/tags/archive/ots-94-e2a-c1-glm-kernels
+d069fa092149cddd1919f68d44f8c2c6fd996abb	gitea ots/ai-engine	refs/tags/archive/ots-94-e2b-c1-part2	refs/tags/archive/ots-94-e2b-c1-part2
+168f730d8073ab73223406dd8eabe59578cb28b6	gitea ots/ai-engine	refs/tags/archive/ots-98	refs/tags/archive/ots-98
+28acecd482c63c272362721e7b51913d29d71fdb	gitea ots/ai-engine	refs/tags/archive/ots-G3-glm-speed	refs/tags/archive/ots-G3-glm-speed
+9dc80b5b0942634d830265c57c48f9609fe5f500	gitea ots/ai-engine	refs/tags/archive/ots-Q3-qwen-ttft	refs/tags/archive/ots-Q3-qwen-ttft
+503f6380527907cf9edb70bc37a7702e131938c4	gitea ots/ai-engine	refs/tags/archive/ots-g3-b-transport	refs/tags/archive/ots-g3-b-transport
+da752bc915a68c5fcb297cc05e3aa0eedd118e77	gitea ots/ai-engine	refs/tags/archive/ots-q36-0131-p26-spark5	refs/tags/archive/ots-q36-0131-p26-spark5
+d390a0ae14d03f7d93cc474369ce279b12170c58	gitea ots/ai-engine	refs/tags/archive/ots-q37-nt1-p1-spark4	refs/tags/archive/ots-q37-nt1-p1-spark4
+f92d7f9e7c7d92119e1ab6b932c664b7c1339809	gitea ots/ai-engine	refs/tags/archive/ots-q9-int4-decode-nt	refs/tags/archive/ots-q9-int4-decode-nt
+61b6670a75ab590c821da190dbe49c7b5c17ca01	gitea ots/ai-engine	refs/tags/archive/workspace-notes-2026-10-24	refs/tags/archive/workspace-notes-2026-10-24
+3c9bf195d3f195e9acaf67a82c7c62ffe42d15c2	gitea ots/ai-engine	refs/tags/wip/ots-1050-l39-diag	refs/tags/wip/ots-1050-l39-diag
+8984324b7072277d40de1a83aa91e65b878f5787	gitea ots/ai-engine	refs/tags/wip/ots-1050-l39-diag-onmaster	refs/tags/wip/ots-1050-l39-diag-onmaster
+addd2ee68f33044bfddcebcfb79779c98491b972	gitea ots/ai-engine	refs/tags/wip/ots-1142-g3-layout	refs/tags/wip/ots-1142-g3-layout
+5e6e109a4e11c7439c8b5fbfba83765fcf5783c0	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-boot	refs/tags/wip/ots-1197-armC-boot
+e6d0823812ee9aa8b722d91b1da0c08675cc84c8	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-consume	refs/tags/wip/ots-1197-armC-consume
+ad5036c8e96bd15d5e698681856632a4ceb3c6d9	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-gate-points	refs/tags/wip/ots-1197-armC-gate-points
+236e75cb7f3b655d45fbda989d4ecb9d7824bcc9	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-gpu	refs/tags/wip/ots-1197-armC-gpu
+5a45d7abba39f016854ae0b678db68bd67958d36	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-gpu-run	refs/tags/wip/ots-1197-armC-gpu-run
+57da5732b11b88cab6c4b85660b6e6cfdd5b92c1	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-gpu-run-tf32	refs/tags/wip/ots-1197-armC-gpu-run-tf32
+df67ad87bd3bc6f1e63caaf0d798869180abdaff	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-gpu-run-tf32-tpl	refs/tags/wip/ots-1197-armC-gpu-run-tf32-tpl
+3d03c00c7a332f04046a1bbcacac49b99bac279e	gitea ots/ai-engine	refs/tags/wip/ots-1197-armC-pyref	refs/tags/wip/ots-1197-armC-pyref
+d1c9e35a97b871946f9778e664fa328f96d97578	gitea ots/ai-engine	refs/tags/wip/ots-1260-armC-stack	refs/tags/wip/ots-1260-armC-stack
+fa7030d3d052837f4c05875cece0dcbf3bd4750f	gitea ots/ai-engine	refs/tags/wip/ots-1260-bf16x9	refs/tags/wip/ots-1260-bf16x9
+6fdf707b0575f414f4013869782689bd3983e846	gitea ots/ai-engine	refs/tags/wip/ots-1260-c69	refs/tags/wip/ots-1260-c69
+8b3b6a0ed2f29de363efdf32b9a2c7d66ea36d63	gitea ots/ai-engine	refs/tags/wip/ots-1260-cublas-probe	refs/tags/wip/ots-1260-cublas-probe
+e1d877882389cf5b24805d1755c89073cfe83ca3	gitea ots/ai-engine	refs/tags/wip/ots-1260-dump-bf16	refs/tags/wip/ots-1260-dump-bf16
+98450a1c5e255f732d8d5935f156c854c1a5b523	gitea ots/ai-engine	refs/tags/wip/ots-1260-g2-diag	refs/tags/wip/ots-1260-g2-diag
+834f18b6535b1f3b4b7e0ed610f36faef1eb10b0	gitea ots/ai-engine	refs/tags/wip/ots-1260-g2-xcheck	refs/tags/wip/ots-1260-g2-xcheck
+71ddb2d4a65bc402317a38d525aa3229a6f9bbc1	gitea ots/ai-engine	refs/tags/wip/ots-1260-g2-zig	refs/tags/wip/ots-1260-g2-zig
+547917b1ed9ac24c9e33df0089cf1407f4fb97de	gitea ots/ai-engine	refs/tags/wip/ots-1260-mathmode-log	refs/tags/wip/ots-1260-mathmode-log
+f30fa8dc6c37b80517805d597944d2ebbd2dbb80	gitea ots/ai-engine	refs/tags/wip/ots-1260-order	refs/tags/wip/ots-1260-order
+c350b867a6f51f1a1e035b08991eaa9a4a55f72a	gitea ots/ai-engine	refs/tags/wip/ots-1260-order2	refs/tags/wip/ots-1260-order2
+c32f73d86f2416c22484ceb3ab7f440aeeb4a6e4	gitea ots/ai-engine	refs/tags/wip/ots-1260-pedantic	refs/tags/wip/ots-1260-pedantic
+de8e89dcbfecb7136dc29ac0f876652d93c076b7	gitea ots/ai-engine	refs/tags/wip/ots-1260-pedantic-gpu	refs/tags/wip/ots-1260-pedantic-gpu
+c373987b165fbac21fe02449e804c6fe105b9a9a	gitea ots/ai-engine	refs/tags/wip/ots-1260-seed-gate	refs/tags/wip/ots-1260-seed-gate
+5d7620dc5f9cc4cb8306c06a36ccb395b5906267	gitea ots/ai-engine	refs/tags/wip/ots-1260-seed-gate-c69	refs/tags/wip/ots-1260-seed-gate-c69
+86a8d5009f60b06d5a3875b75da9cb0f33c08454	gitea ots/ai-engine	refs/tags/wip/ots-1260-seed-rec	refs/tags/wip/ots-1260-seed-rec
+a6437ecef2dc4dbb09f5a2e8ea08dbe5ef367ad3	gitea ots/ai-engine	refs/tags/wip/ots-1260-seed-rec-c69	refs/tags/wip/ots-1260-seed-rec-c69
+5ed9ad69c0301435cf57ea99f453bfb98c156796	gitea ots/ai-engine	refs/tags/wip/ots-1290-kernel-candidates	refs/tags/wip/ots-1290-kernel-candidates
+7d0e788bc73c756172e591963b3e5d5c8c6ede0a	gitea ots/ai-engine	refs/tags/wip/ots-1313-miazig-window	refs/tags/wip/ots-1313-miazig-window
+08d617c45f44d9cf37aace466e92648edb47a07a	gitea ots/ai-engine	refs/tags/wip/ots-1331-armC-baseline68	refs/tags/wip/ots-1331-armC-baseline68
+65cacb358a90f3dc05a3a0c9e5e98ba8043327ee	gitea ots/ai-engine	refs/tags/wip/ots-1332-armC-c69-ab	refs/tags/wip/ots-1332-armC-c69-ab
+4cbef909fe36e4cfcd2c2cdf55f88cfdf0ca3608	gitea ots/ai-engine	refs/tags/wip/ots-1333-wk-oracle	refs/tags/wip/ots-1333-wk-oracle
+0070e16dab54bb3706eceb9a3acc3b8ae0c4568f	gitea ots/ai-engine	refs/tags/wip/ots-1336-kernel-candidates-r4	refs/tags/wip/ots-1336-kernel-candidates-r4
+394cc988784221592d14eadf5001858b81279a0c	laptop clone ai-engine	refs/heads/master	refs/laptop/heads/master
+7b349f4e6457cbb8853c025705af5af471e03298	laptop clone ai-engine	refs/heads/pr-exl3-items	refs/laptop/heads/pr-exl3-items
+610ce288bcdf8d229af43114168fe7dded147980	laptop clone ai-engine	refs/heads/pr-exl3-items-unconditional	refs/laptop/heads/pr-exl3-items-unconditional
+499b20bafaaa5a6b07997665a13ad0074f3308d8	laptop clone ai-engine	refs/remotes/fork-ssh/HEAD	refs/laptop/remotes/fork-ssh/HEAD
+9565378a122c5170ba0a2896ec2e1fa959297557	laptop clone ai-engine	refs/remotes/fork-ssh/carveout-dispram	refs/laptop/remotes/fork-ssh/carveout-dispram
+19350d61ed0faad5d037495da27d3444cb0b804c	laptop clone ai-engine	refs/remotes/fork-ssh/fill-short-resume	refs/laptop/remotes/fork-ssh/fill-short-resume
+fff2a874a4f59b9f17b73a8dc5c081eb61afe836	laptop clone ai-engine	refs/remotes/fork-ssh/lead/kvh-bw	refs/laptop/remotes/fork-ssh/lead/kvh-bw
+3750e6b4762d35214dc1f1f72dbe8e4af0d67c0f	laptop clone ai-engine	refs/remotes/fork-ssh/lead/latent-mma-exact	refs/laptop/remotes/fork-ssh/lead/latent-mma-exact
+1a44a1620131fcce5bfd55f4cdf2dc8e8c849753	laptop clone ai-engine	refs/remotes/fork-ssh/lead/latent-tile	refs/laptop/remotes/fork-ssh/lead/latent-tile
+baa02875875c2ee8c82a6a8d4f0a4d7464be1588	laptop clone ai-engine	refs/remotes/fork-ssh/lead/win-catchup	refs/laptop/remotes/fork-ssh/lead/win-catchup
+84a12974d7d224d6f4d5b7056271eefd21a317c6	laptop clone ai-engine	refs/remotes/fork-ssh/lead/win-fair	refs/laptop/remotes/fork-ssh/lead/win-fair
+499b20bafaaa5a6b07997665a13ad0074f3308d8	laptop clone ai-engine	refs/remotes/fork-ssh/main	refs/laptop/remotes/fork-ssh/main
+595e28743944245b72cb58231a9606c3c17ebbb3	laptop clone ai-engine	refs/remotes/fork-ssh/ovn-up	refs/laptop/remotes/fork-ssh/ovn-up
+ad65c84c387781a41ea5aaa6ea22142eb30f4cf3	laptop clone ai-engine	refs/remotes/fork-ssh/pr-dflash-prompt-taps	refs/laptop/remotes/fork-ssh/pr-dflash-prompt-taps
+610ce288bcdf8d229af43114168fe7dded147980	laptop clone ai-engine	refs/remotes/fork-ssh/pr-exl3-items-unconditional	refs/laptop/remotes/fork-ssh/pr-exl3-items-unconditional
+93475cf7e26df8cc4a5dbe4091c9de5bd424a21b	laptop clone ai-engine	refs/remotes/fork-ssh/window-48-rows	refs/laptop/remotes/fork-ssh/window-48-rows
+5483705f5881077f2c171840971677d707e6f318	laptop clone ai-engine	refs/remotes/fork-ssh/window-48-rows-receipt	refs/laptop/remotes/fork-ssh/window-48-rows-receipt
+394cc988784221592d14eadf5001858b81279a0c	laptop clone ai-engine	refs/remotes/origin/HEAD	refs/laptop/remotes/origin/HEAD
+394cc988784221592d14eadf5001858b81279a0c	laptop clone ai-engine	refs/remotes/origin/master	refs/laptop/remotes/origin/master
+3c9bf195d3f195e9acaf67a82c7c62ffe42d15c2	laptop clone ai-engine	refs/remotes/origin/ots-1050-l39-diag	refs/laptop/remotes/origin/ots-1050-l39-diag
+8984324b7072277d40de1a83aa91e65b878f5787	laptop clone ai-engine	refs/remotes/origin/ots-1050-l39-diag-onmaster	refs/laptop/remotes/origin/ots-1050-l39-diag-onmaster
+6cca1561252e75c55bd8f1c498bfeb0c120aa5a1	laptop clone ai-engine	refs/remotes/origin/ots-1102-spark2-cleanup	refs/laptop/remotes/origin/ots-1102-spark2-cleanup
+addd2ee68f33044bfddcebcfb79779c98491b972	laptop clone ai-engine	refs/remotes/origin/ots-1142-g3-layout	refs/laptop/remotes/origin/ots-1142-g3-layout
+5e6e109a4e11c7439c8b5fbfba83765fcf5783c0	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-boot	refs/laptop/remotes/origin/ots-1197-armC-boot
+e6d0823812ee9aa8b722d91b1da0c08675cc84c8	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-consume	refs/laptop/remotes/origin/ots-1197-armC-consume
+ad5036c8e96bd15d5e698681856632a4ceb3c6d9	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-gate-points	refs/laptop/remotes/origin/ots-1197-armC-gate-points
+236e75cb7f3b655d45fbda989d4ecb9d7824bcc9	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-gpu	refs/laptop/remotes/origin/ots-1197-armC-gpu
+5a45d7abba39f016854ae0b678db68bd67958d36	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-gpu-run	refs/laptop/remotes/origin/ots-1197-armC-gpu-run
+57da5732b11b88cab6c4b85660b6e6cfdd5b92c1	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-gpu-run-tf32	refs/laptop/remotes/origin/ots-1197-armC-gpu-run-tf32
+df67ad87bd3bc6f1e63caaf0d798869180abdaff	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-gpu-run-tf32-tpl	refs/laptop/remotes/origin/ots-1197-armC-gpu-run-tf32-tpl
+3d03c00c7a332f04046a1bbcacac49b99bac279e	laptop clone ai-engine	refs/remotes/origin/ots-1197-armC-pyref	refs/laptop/remotes/origin/ots-1197-armC-pyref
+10b3308933fdb581e6e553fc80f05bdfc817e00c	laptop clone ai-engine	refs/remotes/origin/ots-1204-table-decode	refs/laptop/remotes/origin/ots-1204-table-decode
+de783294e14c786fe9d964784e164f5b33ffde56	laptop clone ai-engine	refs/remotes/origin/ots-1205-qual-driver	refs/laptop/remotes/origin/ots-1205-qual-driver
+d1c9e35a97b871946f9778e664fa328f96d97578	laptop clone ai-engine	refs/remotes/origin/ots-1260-armC-stack	refs/laptop/remotes/origin/ots-1260-armC-stack
+fa7030d3d052837f4c05875cece0dcbf3bd4750f	laptop clone ai-engine	refs/remotes/origin/ots-1260-bf16x9	refs/laptop/remotes/origin/ots-1260-bf16x9
+6fdf707b0575f414f4013869782689bd3983e846	laptop clone ai-engine	refs/remotes/origin/ots-1260-c69	refs/laptop/remotes/origin/ots-1260-c69
+8b3b6a0ed2f29de363efdf32b9a2c7d66ea36d63	laptop clone ai-engine	refs/remotes/origin/ots-1260-cublas-probe	refs/laptop/remotes/origin/ots-1260-cublas-probe
+e1d877882389cf5b24805d1755c89073cfe83ca3	laptop clone ai-engine	refs/remotes/origin/ots-1260-dump-bf16	refs/laptop/remotes/origin/ots-1260-dump-bf16
+98450a1c5e255f732d8d5935f156c854c1a5b523	laptop clone ai-engine	refs/remotes/origin/ots-1260-g2-diag	refs/laptop/remotes/origin/ots-1260-g2-diag
+834f18b6535b1f3b4b7e0ed610f36faef1eb10b0	laptop clone ai-engine	refs/remotes/origin/ots-1260-g2-xcheck	refs/laptop/remotes/origin/ots-1260-g2-xcheck
+71ddb2d4a65bc402317a38d525aa3229a6f9bbc1	laptop clone ai-engine	refs/remotes/origin/ots-1260-g2-zig	refs/laptop/remotes/origin/ots-1260-g2-zig
+547917b1ed9ac24c9e33df0089cf1407f4fb97de	laptop clone ai-engine	refs/remotes/origin/ots-1260-mathmode-log	refs/laptop/remotes/origin/ots-1260-mathmode-log
+f30fa8dc6c37b80517805d597944d2ebbd2dbb80	laptop clone ai-engine	refs/remotes/origin/ots-1260-order	refs/laptop/remotes/origin/ots-1260-order
+c350b867a6f51f1a1e035b08991eaa9a4a55f72a	laptop clone ai-engine	refs/remotes/origin/ots-1260-order2	refs/laptop/remotes/origin/ots-1260-order2
+c32f73d86f2416c22484ceb3ab7f440aeeb4a6e4	laptop clone ai-engine	refs/remotes/origin/ots-1260-pedantic	refs/laptop/remotes/origin/ots-1260-pedantic
+de8e89dcbfecb7136dc29ac0f876652d93c076b7	laptop clone ai-engine	refs/remotes/origin/ots-1260-pedantic-gpu	refs/laptop/remotes/origin/ots-1260-pedantic-gpu
+c373987b165fbac21fe02449e804c6fe105b9a9a	laptop clone ai-engine	refs/remotes/origin/ots-1260-seed-gate	refs/laptop/remotes/origin/ots-1260-seed-gate
+5d7620dc5f9cc4cb8306c06a36ccb395b5906267	laptop clone ai-engine	refs/remotes/origin/ots-1260-seed-gate-c69	refs/laptop/remotes/origin/ots-1260-seed-gate-c69
+86a8d5009f60b06d5a3875b75da9cb0f33c08454	laptop clone ai-engine	refs/remotes/origin/ots-1260-seed-rec	refs/laptop/remotes/origin/ots-1260-seed-rec
+a6437ecef2dc4dbb09f5a2e8ea08dbe5ef367ad3	laptop clone ai-engine	refs/remotes/origin/ots-1260-seed-rec-c69	refs/laptop/remotes/origin/ots-1260-seed-rec-c69
+d8fa97d083c2a18f86a115e393e6b1c56f71e7b4	laptop clone ai-engine	refs/remotes/origin/ots-1262-q40-stack-p4-spark6	refs/laptop/remotes/origin/ots-1262-q40-stack-p4-spark6
+b830df5b80834c00c8ef2ddef0cc86b8f62ce953	laptop clone ai-engine	refs/remotes/origin/ots-1264-q41-4arm	refs/laptop/remotes/origin/ots-1264-q41-4arm
+5ed9ad69c0301435cf57ea99f453bfb98c156796	laptop clone ai-engine	refs/remotes/origin/ots-1290-kernel-candidates	refs/laptop/remotes/origin/ots-1290-kernel-candidates
+7d0e788bc73c756172e591963b3e5d5c8c6ede0a	laptop clone ai-engine	refs/remotes/origin/ots-1313-miazig-window	refs/laptop/remotes/origin/ots-1313-miazig-window
+08d617c45f44d9cf37aace466e92648edb47a07a	laptop clone ai-engine	refs/remotes/origin/ots-1331-armC-baseline68	refs/laptop/remotes/origin/ots-1331-armC-baseline68
+65cacb358a90f3dc05a3a0c9e5e98ba8043327ee	laptop clone ai-engine	refs/remotes/origin/ots-1332-armC-c69-ab	refs/laptop/remotes/origin/ots-1332-armC-c69-ab
+4cbef909fe36e4cfcd2c2cdf55f88cfdf0ca3608	laptop clone ai-engine	refs/remotes/origin/ots-1333-wk-oracle	refs/laptop/remotes/origin/ots-1333-wk-oracle
+0070e16dab54bb3706eceb9a3acc3b8ae0c4568f	laptop clone ai-engine	refs/remotes/origin/ots-1336-kernel-candidates-r4	refs/laptop/remotes/origin/ots-1336-kernel-candidates-r4
+8b9589081c51e1228137a831ec13d9b01460ed7e	laptop clone ai-engine	refs/remotes/origin/ots-171-0118-spark4	refs/laptop/remotes/origin/ots-171-0118-spark4
+7034339ee14d68675845fba4fc4b389f956d8c55	laptop clone ai-engine	refs/remotes/origin/ots-223-ownenv-spark5	refs/laptop/remotes/origin/ots-223-ownenv-spark5
+5b1556637c3f83ef6b0e405d8a5855dfef280ecc	laptop clone ai-engine	refs/remotes/origin/ots-258-gate-outer-int	refs/laptop/remotes/origin/ots-258-gate-outer-int
+bfd4817763aa7d219c4bd5c71cf702d8bb1a6f08	laptop clone ai-engine	refs/remotes/origin/ots-297-timing-patch-spark5	refs/laptop/remotes/origin/ots-297-timing-patch-spark5
+dd2dc3f50634bad4c7386df2b9900f33c74110ba	laptop clone ai-engine	refs/remotes/origin/ots-377-0102-stackc-spark5	refs/laptop/remotes/origin/ots-377-0102-stackc-spark5
+2933b9556bdce087eb6ed5808cbf70a1bfd909ce	laptop clone ai-engine	refs/remotes/origin/ots-380-0127-wait-spark5	refs/laptop/remotes/origin/ots-380-0127-wait-spark5
+bcb84d03afc8aa21ec341496b79d331fd48a648c	laptop clone ai-engine	refs/remotes/origin/ots-384-warm-split-spark6	refs/laptop/remotes/origin/ots-384-warm-split-spark6
+d32c55d08bf9aedc08d5b0986d002bf155876ba2	laptop clone ai-engine	refs/remotes/origin/ots-396-d3-doc-fix	refs/laptop/remotes/origin/ots-396-d3-doc-fix
+f790d05a5fa88e2846e8fce00ee8e06fc14e0ae9	laptop clone ai-engine	refs/remotes/origin/ots-396-glm-harness-fix	refs/laptop/remotes/origin/ots-396-glm-harness-fix
+8ad308403ad1b2d21a0af55e6de5d97fd0dc37fd	laptop clone ai-engine	refs/remotes/origin/ots-396-glm-profile	refs/laptop/remotes/origin/ots-396-glm-profile
+124e4d80c637b6cde5adc5853dab64a66d2295f3	laptop clone ai-engine	refs/remotes/origin/ots-402-classify-selfreinvoke	refs/laptop/remotes/origin/ots-402-classify-selfreinvoke
+e5cfa905ef7b2aaf297d8c03168b03c6ed7ca5f0	laptop clone ai-engine	refs/remotes/origin/ots-409-0121-falsifier-spark6	refs/laptop/remotes/origin/ots-409-0121-falsifier-spark6
+435f2d261fb9ab52c47c54537cce074ca05126d9	laptop clone ai-engine	refs/remotes/origin/ots-418-miaai-boot	refs/laptop/remotes/origin/ots-418-miaai-boot
+f03d2366ae7eb60a4f33096ec26dd5cd3e3536e3	laptop clone ai-engine	refs/remotes/origin/ots-419-miaai-speed-kit	refs/laptop/remotes/origin/ots-419-miaai-speed-kit
+501e3d19aead94ddec75cfc1d249f001764381ba	laptop clone ai-engine	refs/remotes/origin/ots-424-warm-gate-spark4	refs/laptop/remotes/origin/ots-424-warm-gate-spark4
+cf4ba08d1d1407b4496744046e41b854808f2c3e	laptop clone ai-engine	refs/remotes/origin/ots-570-d2-5-fullforward	refs/laptop/remotes/origin/ots-570-d2-5-fullforward
+ddece1d907b5e23e1c94ebd969932eebbb1f2e47	laptop clone ai-engine	refs/remotes/origin/ots-576-glm-profile-s1	refs/laptop/remotes/origin/ots-576-glm-profile-s1
+cff1c1636384264707654f2cf007e30444bea4be	laptop clone ai-engine	refs/remotes/origin/ots-609-glm-ab	refs/laptop/remotes/origin/ots-609-glm-ab
+0c2a19b3ad7ab9a41f8061a53a3bbaf34178c7cd	laptop clone ai-engine	refs/remotes/origin/ots-610-glm-profile-fix	refs/laptop/remotes/origin/ots-610-glm-profile-fix
+61d9ef7f12b48c9c7dd087890a43bc38225e6542	laptop clone ai-engine	refs/remotes/origin/ots-634-glm-edit-resume	refs/laptop/remotes/origin/ots-634-glm-edit-resume
+9c34880a474e3520db7d592e8dab99bcf6b6187f	laptop clone ai-engine	refs/remotes/origin/ots-635-glm-ab-fix	refs/laptop/remotes/origin/ots-635-glm-ab-fix
+8f65965d57ce0db4a690d55575d3380f18399e2a	laptop clone ai-engine	refs/remotes/origin/ots-635-mgr-raw5logs	refs/laptop/remotes/origin/ots-635-mgr-raw5logs
+b54ca9006791c3d717d92f23cc9668597c625f73	laptop clone ai-engine	refs/remotes/origin/ots-636-gate3-fix	refs/laptop/remotes/origin/ots-636-gate3-fix
+b82e583639d7827e98bcd9355948c3ef49c6bcd2	laptop clone ai-engine	refs/remotes/origin/ots-644-u7-glm-newbase	refs/laptop/remotes/origin/ots-644-u7-glm-newbase
+04553ec4cb6c0de0a7ef51379850c8b43c0d3aef	laptop clone ai-engine	refs/remotes/origin/ots-647-glm-ab-fix3	refs/laptop/remotes/origin/ots-647-glm-ab-fix3
+178140195c52b04b9b5ed9af01fa959a23a5fad7	laptop clone ai-engine	refs/remotes/origin/ots-653-glm-ab5	refs/laptop/remotes/origin/ots-653-glm-ab5
+79c84c60344b4aaf1f112644752c4e7338d46a37	laptop clone ai-engine	refs/remotes/origin/ots-728-code2-stack	refs/laptop/remotes/origin/ots-728-code2-stack
+ad6c52293cd083ea5289bee19a4e4e9e8c20980c	laptop clone ai-engine	refs/remotes/origin/ots-843-plan-eb	refs/laptop/remotes/origin/ots-843-plan-eb
+67a31f20a44d574124997ba996c6d8bbc0e50c48	laptop clone ai-engine	refs/remotes/origin/ots-860-pool-from-parallel	refs/laptop/remotes/origin/ots-860-pool-from-parallel
+6a502ea14439db507f87f45cba32bcfeaec2a370	laptop clone ai-engine	refs/remotes/origin/ots-868-dsv41-prefill-step	refs/laptop/remotes/origin/ots-868-dsv41-prefill-step
+fe91a5b1c5cf9ef50fc8cf92f36f6228eb9f93bf	laptop clone ai-engine	refs/remotes/origin/ots-875-dsv41-split-step	refs/laptop/remotes/origin/ots-875-dsv41-split-step
+503f6380527907cf9edb70bc37a7702e131938c4	laptop clone ai-engine	refs/remotes/origin/ots-g3-b-transport	refs/laptop/remotes/origin/ots-g3-b-transport
+da752bc915a68c5fcb297cc05e3aa0eedd118e77	laptop clone ai-engine	refs/remotes/origin/ots-q36-0131-p26-spark5	refs/laptop/remotes/origin/ots-q36-0131-p26-spark5
+d390a0ae14d03f7d93cc474369ce279b12170c58	laptop clone ai-engine	refs/remotes/origin/ots-q37-nt1-p1-spark4	refs/laptop/remotes/origin/ots-q37-nt1-p1-spark4
+f92d7f9e7c7d92119e1ab6b932c664b7c1339809	laptop clone ai-engine	refs/remotes/origin/ots-q9-int4-decode-nt	refs/laptop/remotes/origin/ots-q9-int4-decode-nt
+3cfe5abf7e25fc44edf9cc973fbddc592c1a2f63	laptop clone ai-engine	refs/remotes/origin/ovn-cachesalt	refs/laptop/remotes/origin/ovn-cachesalt
+bf4fc303d3fbcc3277e210dad9b2085f17c67708	laptop clone ai-engine	refs/remotes/origin/ovn-catchup	refs/laptop/remotes/origin/ovn-catchup
+a3cf67306e69181ea2d328c175ff411aacd5d6ed	laptop clone ai-engine	refs/remotes/origin/ovn-fair	refs/laptop/remotes/origin/ovn-fair
+35b9011e00c0f6c7754e87e48cb6f6123f1de282	laptop clone ai-engine	refs/remotes/origin/ovn-prefixwait	refs/laptop/remotes/origin/ovn-prefixwait
+5a281dfc241bc09e55e2965195249e49daf23704	laptop clone ai-engine	refs/remotes/origin/ovn-solo	refs/laptop/remotes/origin/ovn-solo
+06fdcc8bd18e6ed8dccf2e1eef5f0e367846b4c8	laptop clone ai-engine	refs/remotes/origin/pr-exl3-items-unconditional	refs/laptop/remotes/origin/pr-exl3-items-unconditional
+61b6670a75ab590c821da190dbe49c7b5c17ca01	laptop clone ai-engine	refs/remotes/origin/workspace-notes-2026-10-24	refs/laptop/remotes/origin/workspace-notes-2026-10-24
+673a34b3bdc40e436787c8f12886078f34cd9815	laptop clone ai-engine	refs/remotes/up/main	refs/laptop/remotes/up/main
+b7da2df86ba6ccd679ace7d5d0d8170e257c98aa	laptop clone ai-engine	refs/tags/archive/master	refs/laptop/tags/archive/master
+a8b4cf15fb40f0f85f13546c2daa6b78d7952d93	laptop clone ai-engine	refs/tags/archive/ots-101-d3-boot	refs/laptop/tags/archive/ots-101-d3-boot
+e25bd190aff4b6296dbd521995e4f98d36ba21d1	laptop clone ai-engine	refs/tags/archive/ots-102-dsv41-speed	refs/laptop/tags/archive/ots-102-dsv41-speed
+ddd01d68e9857a2bb62aa7a1025f7107bfa8cda9	laptop clone ai-engine	refs/tags/archive/ots-105-d3-gates	refs/laptop/tags/archive/ots-105-d3-gates
+3c9bf195d3f195e9acaf67a82c7c62ffe42d15c2	laptop clone ai-engine	refs/tags/archive/ots-1050-l39-diag	refs/laptop/tags/archive/ots-1050-l39-diag
+8984324b7072277d40de1a83aa91e65b878f5787	laptop clone ai-engine	refs/tags/archive/ots-1050-l39-diag-onmaster	refs/laptop/tags/archive/ots-1050-l39-diag-onmaster
+9200cc6f09e4ddc618a741368b6bb866c232e7f1	laptop clone ai-engine	refs/tags/archive/ots-110-9200cc6	refs/laptop/tags/archive/ots-110-9200cc6
+6cca1561252e75c55bd8f1c498bfeb0c120aa5a1	laptop clone ai-engine	refs/tags/archive/ots-1102-spark2-cleanup	refs/laptop/tags/archive/ots-1102-spark2-cleanup
+3413618fd0a3c1ed89e5ad2962083481f5724c82	laptop clone ai-engine	refs/tags/archive/ots-112-dsv41-speed-fix	refs/laptop/tags/archive/ots-112-dsv41-speed-fix
+addd2ee68f33044bfddcebcfb79779c98491b972	laptop clone ai-engine	refs/tags/archive/ots-1142-g3-layout	refs/laptop/tags/archive/ots-1142-g3-layout
+5e6e109a4e11c7439c8b5fbfba83765fcf5783c0	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-boot	refs/laptop/tags/archive/ots-1197-armC-boot
+e6d0823812ee9aa8b722d91b1da0c08675cc84c8	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-consume	refs/laptop/tags/archive/ots-1197-armC-consume
+ad5036c8e96bd15d5e698681856632a4ceb3c6d9	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-gate-points	refs/laptop/tags/archive/ots-1197-armC-gate-points
+236e75cb7f3b655d45fbda989d4ecb9d7824bcc9	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-gpu	refs/laptop/tags/archive/ots-1197-armC-gpu
+5a45d7abba39f016854ae0b678db68bd67958d36	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-gpu-run	refs/laptop/tags/archive/ots-1197-armC-gpu-run
+57da5732b11b88cab6c4b85660b6e6cfdd5b92c1	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-gpu-run-tf32	refs/laptop/tags/archive/ots-1197-armC-gpu-run-tf32
+df67ad87bd3bc6f1e63caaf0d798869180abdaff	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-gpu-run-tf32-tpl	refs/laptop/tags/archive/ots-1197-armC-gpu-run-tf32-tpl
+3d03c00c7a332f04046a1bbcacac49b99bac279e	laptop clone ai-engine	refs/tags/archive/ots-1197-armC-pyref	refs/laptop/tags/archive/ots-1197-armC-pyref
+1cb8b6398aff1ad1a4d96366af0c7ca5f93e61c5	laptop clone ai-engine	refs/tags/archive/ots-120-dsv41-speed-fix2	refs/laptop/tags/archive/ots-120-dsv41-speed-fix2
+10b3308933fdb581e6e553fc80f05bdfc817e00c	laptop clone ai-engine	refs/tags/archive/ots-1204-table-decode	refs/laptop/tags/archive/ots-1204-table-decode
+de783294e14c786fe9d964784e164f5b33ffde56	laptop clone ai-engine	refs/tags/archive/ots-1205-qual-driver	refs/laptop/tags/archive/ots-1205-qual-driver
+67b3f69abadfed467b20ff761dd9817c5a87b0d4	laptop clone ai-engine	refs/tags/archive/ots-121-d3-gate-collection	refs/laptop/tags/archive/ots-121-d3-gate-collection
+a552f3275927045eb674ca95159c20a0d408e543	laptop clone ai-engine	refs/tags/archive/ots-123-dsv41-speed-fix3	refs/laptop/tags/archive/ots-123-dsv41-speed-fix3
+d1c9e35a97b871946f9778e664fa328f96d97578	laptop clone ai-engine	refs/tags/archive/ots-1260-armC-stack	refs/laptop/tags/archive/ots-1260-armC-stack
+fa7030d3d052837f4c05875cece0dcbf3bd4750f	laptop clone ai-engine	refs/tags/archive/ots-1260-bf16x9	refs/laptop/tags/archive/ots-1260-bf16x9
+6fdf707b0575f414f4013869782689bd3983e846	laptop clone ai-engine	refs/tags/archive/ots-1260-c69	refs/laptop/tags/archive/ots-1260-c69
+8b3b6a0ed2f29de363efdf32b9a2c7d66ea36d63	laptop clone ai-engine	refs/tags/archive/ots-1260-cublas-probe	refs/laptop/tags/archive/ots-1260-cublas-probe
+e1d877882389cf5b24805d1755c89073cfe83ca3	laptop clone ai-engine	refs/tags/archive/ots-1260-dump-bf16	refs/laptop/tags/archive/ots-1260-dump-bf16
+98450a1c5e255f732d8d5935f156c854c1a5b523	laptop clone ai-engine	refs/tags/archive/ots-1260-g2-diag	refs/laptop/tags/archive/ots-1260-g2-diag
+834f18b6535b1f3b4b7e0ed610f36faef1eb10b0	laptop clone ai-engine	refs/tags/archive/ots-1260-g2-xcheck	refs/laptop/tags/archive/ots-1260-g2-xcheck
+71ddb2d4a65bc402317a38d525aa3229a6f9bbc1	laptop clone ai-engine	refs/tags/archive/ots-1260-g2-zig	refs/laptop/tags/archive/ots-1260-g2-zig
+547917b1ed9ac24c9e33df0089cf1407f4fb97de	laptop clone ai-engine	refs/tags/archive/ots-1260-mathmode-log	refs/laptop/tags/archive/ots-1260-mathmode-log
+f30fa8dc6c37b80517805d597944d2ebbd2dbb80	laptop clone ai-engine	refs/tags/archive/ots-1260-order	refs/laptop/tags/archive/ots-1260-order
+c350b867a6f51f1a1e035b08991eaa9a4a55f72a	laptop clone ai-engine	refs/tags/archive/ots-1260-order2	refs/laptop/tags/archive/ots-1260-order2
+c32f73d86f2416c22484ceb3ab7f440aeeb4a6e4	laptop clone ai-engine	refs/tags/archive/ots-1260-pedantic	refs/laptop/tags/archive/ots-1260-pedantic
+de8e89dcbfecb7136dc29ac0f876652d93c076b7	laptop clone ai-engine	refs/tags/archive/ots-1260-pedantic-gpu	refs/laptop/tags/archive/ots-1260-pedantic-gpu
+c373987b165fbac21fe02449e804c6fe105b9a9a	laptop clone ai-engine	refs/tags/archive/ots-1260-seed-gate	refs/laptop/tags/archive/ots-1260-seed-gate
+5d7620dc5f9cc4cb8306c06a36ccb395b5906267	laptop clone ai-engine	refs/tags/archive/ots-1260-seed-gate-c69	refs/laptop/tags/archive/ots-1260-seed-gate-c69
+86a8d5009f60b06d5a3875b75da9cb0f33c08454	laptop clone ai-engine	refs/tags/archive/ots-1260-seed-rec	refs/laptop/tags/archive/ots-1260-seed-rec
+a6437ecef2dc4dbb09f5a2e8ea08dbe5ef367ad3	laptop clone ai-engine	refs/tags/archive/ots-1260-seed-rec-c69	refs/laptop/tags/archive/ots-1260-seed-rec-c69
+d8fa97d083c2a18f86a115e393e6b1c56f71e7b4	laptop clone ai-engine	refs/tags/archive/ots-1262-q40-stack-p4-spark6	refs/laptop/tags/archive/ots-1262-q40-stack-p4-spark6
+b830df5b80834c00c8ef2ddef0cc86b8f62ce953	laptop clone ai-engine	refs/tags/archive/ots-1264-q41-4arm	refs/laptop/tags/archive/ots-1264-q41-4arm
+5ed9ad69c0301435cf57ea99f453bfb98c156796	laptop clone ai-engine	refs/tags/archive/ots-1290-kernel-candidates	refs/laptop/tags/archive/ots-1290-kernel-candidates
+7d0e788bc73c756172e591963b3e5d5c8c6ede0a	laptop clone ai-engine	refs/tags/archive/ots-1313-miazig-window	refs/laptop/tags/archive/ots-1313-miazig-window
+e981d144dc213e51f1901e6dbcb6c99b21ddb459	laptop clone ai-engine	refs/tags/archive/ots-133-b3-e981d14	refs/laptop/tags/archive/ots-133-b3-e981d14
+08d617c45f44d9cf37aace466e92648edb47a07a	laptop clone ai-engine	refs/tags/archive/ots-1331-armC-baseline68	refs/laptop/tags/archive/ots-1331-armC-baseline68
+65cacb358a90f3dc05a3a0c9e5e98ba8043327ee	laptop clone ai-engine	refs/tags/archive/ots-1332-armC-c69-ab	refs/laptop/tags/archive/ots-1332-armC-c69-ab
+4cbef909fe36e4cfcd2c2cdf55f88cfdf0ca3608	laptop clone ai-engine	refs/tags/archive/ots-1333-wk-oracle	refs/laptop/tags/archive/ots-1333-wk-oracle
+0070e16dab54bb3706eceb9a3acc3b8ae0c4568f	laptop clone ai-engine	refs/tags/archive/ots-1336-kernel-candidates-r4	refs/laptop/tags/archive/ots-1336-kernel-candidates-r4
+f126ebbb9c402b94fb9f96dc2b2c5ce3596a9cf5	laptop clone ai-engine	refs/tags/archive/ots-153-0118-gate	refs/laptop/tags/archive/ots-153-0118-gate
+8b9589081c51e1228137a831ec13d9b01460ed7e	laptop clone ai-engine	refs/tags/archive/ots-171-0118-spark4	refs/laptop/tags/archive/ots-171-0118-spark4
+7034339ee14d68675845fba4fc4b389f956d8c55	laptop clone ai-engine	refs/tags/archive/ots-223-ownenv-spark5	refs/laptop/tags/archive/ots-223-ownenv-spark5
+5b1556637c3f83ef6b0e405d8a5855dfef280ecc	laptop clone ai-engine	refs/tags/archive/ots-258-gate-outer-int	refs/laptop/tags/archive/ots-258-gate-outer-int
+bfd4817763aa7d219c4bd5c71cf702d8bb1a6f08	laptop clone ai-engine	refs/tags/archive/ots-297-timing-patch-spark5	refs/laptop/tags/archive/ots-297-timing-patch-spark5
+dd2dc3f50634bad4c7386df2b9900f33c74110ba	laptop clone ai-engine	refs/tags/archive/ots-377-0102-stackc-spark5	refs/laptop/tags/archive/ots-377-0102-stackc-spark5
+2933b9556bdce087eb6ed5808cbf70a1bfd909ce	laptop clone ai-engine	refs/tags/archive/ots-380-0127-wait-spark5	refs/laptop/tags/archive/ots-380-0127-wait-spark5
+bcb84d03afc8aa21ec341496b79d331fd48a648c	laptop clone ai-engine	refs/tags/archive/ots-384-warm-split-spark6	refs/laptop/tags/archive/ots-384-warm-split-spark6
+d32c55d08bf9aedc08d5b0986d002bf155876ba2	laptop clone ai-engine	refs/tags/archive/ots-396-d3-doc-fix	refs/laptop/tags/archive/ots-396-d3-doc-fix
+f790d05a5fa88e2846e8fce00ee8e06fc14e0ae9	laptop clone ai-engine	refs/tags/archive/ots-396-glm-harness-fix	refs/laptop/tags/archive/ots-396-glm-harness-fix
+8ad308403ad1b2d21a0af55e6de5d97fd0dc37fd	laptop clone ai-engine	refs/tags/archive/ots-396-glm-profile	refs/laptop/tags/archive/ots-396-glm-profile
+124e4d80c637b6cde5adc5853dab64a66d2295f3	laptop clone ai-engine	refs/tags/archive/ots-402-classify-selfreinvoke	refs/laptop/tags/archive/ots-402-classify-selfreinvoke
+e5cfa905ef7b2aaf297d8c03168b03c6ed7ca5f0	laptop clone ai-engine	refs/tags/archive/ots-409-0121-falsifier-spark6	refs/laptop/tags/archive/ots-409-0121-falsifier-spark6
+435f2d261fb9ab52c47c54537cce074ca05126d9	laptop clone ai-engine	refs/tags/archive/ots-418-miaai-boot	refs/laptop/tags/archive/ots-418-miaai-boot
+f03d2366ae7eb60a4f33096ec26dd5cd3e3536e3	laptop clone ai-engine	refs/tags/archive/ots-419-miaai-speed-kit	refs/laptop/tags/archive/ots-419-miaai-speed-kit
+501e3d19aead94ddec75cfc1d249f001764381ba	laptop clone ai-engine	refs/tags/archive/ots-424-warm-gate-spark4	refs/laptop/tags/archive/ots-424-warm-gate-spark4
+cf4ba08d1d1407b4496744046e41b854808f2c3e	laptop clone ai-engine	refs/tags/archive/ots-570-d2-5-fullforward	refs/laptop/tags/archive/ots-570-d2-5-fullforward
+ddece1d907b5e23e1c94ebd969932eebbb1f2e47	laptop clone ai-engine	refs/tags/archive/ots-576-glm-profile-s1	refs/laptop/tags/archive/ots-576-glm-profile-s1
+cff1c1636384264707654f2cf007e30444bea4be	laptop clone ai-engine	refs/tags/archive/ots-609-glm-ab	refs/laptop/tags/archive/ots-609-glm-ab
+0c2a19b3ad7ab9a41f8061a53a3bbaf34178c7cd	laptop clone ai-engine	refs/tags/archive/ots-610-glm-profile-fix	refs/laptop/tags/archive/ots-610-glm-profile-fix
+61d9ef7f12b48c9c7dd087890a43bc38225e6542	laptop clone ai-engine	refs/tags/archive/ots-634-glm-edit-resume	refs/laptop/tags/archive/ots-634-glm-edit-resume
+9c34880a474e3520db7d592e8dab99bcf6b6187f	laptop clone ai-engine	refs/tags/archive/ots-635-glm-ab-fix	refs/laptop/tags/archive/ots-635-glm-ab-fix
+8f65965d57ce0db4a690d55575d3380f18399e2a	laptop clone ai-engine	refs/tags/archive/ots-635-mgr-raw5logs	refs/laptop/tags/archive/ots-635-mgr-raw5logs
+b54ca9006791c3d717d92f23cc9668597c625f73	laptop clone ai-engine	refs/tags/archive/ots-636-gate3-fix	refs/laptop/tags/archive/ots-636-gate3-fix
+b82e583639d7827e98bcd9355948c3ef49c6bcd2	laptop clone ai-engine	refs/tags/archive/ots-644-u7-glm-newbase	refs/laptop/tags/archive/ots-644-u7-glm-newbase
+04553ec4cb6c0de0a7ef51379850c8b43c0d3aef	laptop clone ai-engine	refs/tags/archive/ots-647-glm-ab-fix3	refs/laptop/tags/archive/ots-647-glm-ab-fix3
+178140195c52b04b9b5ed9af01fa959a23a5fad7	laptop clone ai-engine	refs/tags/archive/ots-653-glm-ab5	refs/laptop/tags/archive/ots-653-glm-ab5
+79c84c60344b4aaf1f112644752c4e7338d46a37	laptop clone ai-engine	refs/tags/archive/ots-728-code2-stack	refs/laptop/tags/archive/ots-728-code2-stack
+ad6c52293cd083ea5289bee19a4e4e9e8c20980c	laptop clone ai-engine	refs/tags/archive/ots-843-plan-eb	refs/laptop/tags/archive/ots-843-plan-eb
+67a31f20a44d574124997ba996c6d8bbc0e50c48	laptop clone ai-engine	refs/tags/archive/ots-860-pool-from-parallel	refs/laptop/tags/archive/ots-860-pool-from-parallel
+6a502ea14439db507f87f45cba32bcfeaec2a370	laptop clone ai-engine	refs/tags/archive/ots-868-dsv41-prefill-step	refs/laptop/tags/archive/ots-868-dsv41-prefill-step
+fe91a5b1c5cf9ef50fc8cf92f36f6228eb9f93bf	laptop clone ai-engine	refs/tags/archive/ots-875-dsv41-split-step	refs/laptop/tags/archive/ots-875-dsv41-split-step
+cef2bf8e603e4c3d1cf6d236f8f307e50a962566	laptop clone ai-engine	refs/tags/archive/ots-91-s1-table-verdicts	refs/laptop/tags/archive/ots-91-s1-table-verdicts
+95c819f382eb4331d8222bc159032044b68d9602	laptop clone ai-engine	refs/tags/archive/ots-91-s2-glm-regress-diag	refs/laptop/tags/archive/ots-91-s2-glm-regress-diag
+31f4d09a9cfea1f65b5ae4753791c704cc6d594f	laptop clone ai-engine	refs/tags/archive/ots-94-e1-b1-nvme-kv	refs/laptop/tags/archive/ots-94-e1-b1-nvme-kv
+d5d2fd336d13e8833f478b4d3f4e48170d4b78da	laptop clone ai-engine	refs/tags/archive/ots-94-e2a-c1-glm-kernels	refs/laptop/tags/archive/ots-94-e2a-c1-glm-kernels
+d069fa092149cddd1919f68d44f8c2c6fd996abb	laptop clone ai-engine	refs/tags/archive/ots-94-e2b-c1-part2	refs/laptop/tags/archive/ots-94-e2b-c1-part2
+168f730d8073ab73223406dd8eabe59578cb28b6	laptop clone ai-engine	refs/tags/archive/ots-98	refs/laptop/tags/archive/ots-98
+28acecd482c63c272362721e7b51913d29d71fdb	laptop clone ai-engine	refs/tags/archive/ots-G3-glm-speed	refs/laptop/tags/archive/ots-G3-glm-speed
+9dc80b5b0942634d830265c57c48f9609fe5f500	laptop clone ai-engine	refs/tags/archive/ots-Q3-qwen-ttft	refs/laptop/tags/archive/ots-Q3-qwen-ttft
+503f6380527907cf9edb70bc37a7702e131938c4	laptop clone ai-engine	refs/tags/archive/ots-g3-b-transport	refs/laptop/tags/archive/ots-g3-b-transport
+da752bc915a68c5fcb297cc05e3aa0eedd118e77	laptop clone ai-engine	refs/tags/archive/ots-q36-0131-p26-spark5	refs/laptop/tags/archive/ots-q36-0131-p26-spark5
+d390a0ae14d03f7d93cc474369ce279b12170c58	laptop clone ai-engine	refs/tags/archive/ots-q37-nt1-p1-spark4	refs/laptop/tags/archive/ots-q37-nt1-p1-spark4
+f92d7f9e7c7d92119e1ab6b932c664b7c1339809	laptop clone ai-engine	refs/tags/archive/ots-q9-int4-decode-nt	refs/laptop/tags/archive/ots-q9-int4-decode-nt
+61b6670a75ab590c821da190dbe49c7b5c17ca01	laptop clone ai-engine	refs/tags/archive/workspace-notes-2026-10-24	refs/laptop/tags/archive/workspace-notes-2026-10-24
+50a584854aab5a15aa4f977450667ea244190090	laptop clone ai-engine	refs/tags/v0.2.0	refs/laptop/tags/v0.2.0
+3283e59b0e205a579b4554d15d4107b9577fe685	laptop clone ai-engine	refs/tags/v0.3.0	refs/laptop/tags/v0.3.0
+d7470ed8f6365ad3c7c7268f3c32da548eb1c343	laptop clone ai-engine	refs/tags/v0.3.1	refs/laptop/tags/v0.3.1
+a83ed1ef4a243c8b817077fa4731c0e246afb707	laptop clone ai-engine	refs/tags/v0.3.2	refs/laptop/tags/v0.3.2
+b08e0141cecd06408cfe16be56cecd9b65342dac	laptop clone ai-engine	refs/tags/v0.3.3	refs/laptop/tags/v0.3.3
+2f8e514b0b7d615df7c971627ce3c0fb7e55d93a	laptop clone ai-engine	refs/tags/v0.3.4	refs/laptop/tags/v0.3.4
+bb4b4a35863af562fc4ccb2586300d8f94b5d6de	laptop clone ai-engine	refs/tags/v0.3.4.1	refs/laptop/tags/v0.3.4.1
+ff1d923473a3172d049812c6cebde7e2e274d1f6	laptop clone ai-engine	refs/tags/v0.3.5	refs/laptop/tags/v0.3.5
+9db8605828d2e0b356d564d071c847cea8966d26	laptop clone ai-engine	refs/tags/v0.3.5.1	refs/laptop/tags/v0.3.5.1
+ff9872de309bef4f585614a735a404c62082ffcf	laptop clone ai-engine	refs/tags/v0.3.6	refs/laptop/tags/v0.3.6
+defc6e7e1e94e7e9ed00017d090cadeb9ee01054	laptop clone ai-engine	refs/tags/v0.3.6.1	refs/laptop/tags/v0.3.6.1
+9dcd0e59ecc691d7d1d42d4b79e825c1cb1fb876	laptop clone ai-engine	refs/tags/v0.3.6.2	refs/laptop/tags/v0.3.6.2
+ffa3202c7966e724b4d6e22cb10ab46db6204060	laptop clone ai-engine	refs/tags/v0.3.6.3	refs/laptop/tags/v0.3.6.3
+02b726f3fb5e67723cb6f4e0315adf85e4b91033	laptop clone ai-engine	refs/tags/v0.3.7	refs/laptop/tags/v0.3.7
+c6c86d8a96b887e68e1f9077ac9a241b6e1c20aa	laptop clone ai-engine	refs/tags/v0.4.0	refs/laptop/tags/v0.4.0
+eeb6746459a3e8d36236fafa67ae72cc0e813343	laptop clone ai-engine	refs/tags/v0.5.0	refs/laptop/tags/v0.5.0
+c812f8b65b34e4d0290b6326e9d5416688ed56ab	laptop clone ai-engine	refs/tags/v0.6.0	refs/laptop/tags/v0.6.0
+413707409fc9be154735e70116e2fb0fa364eace	laptop clone ai-engine	refs/tags/v0.6.1	refs/laptop/tags/v0.6.1
+c60d0ae7d804a523fa5e53d7cc2e6209d4283abd	laptop clone ai-engine	refs/tags/v0.6.2	refs/laptop/tags/v0.6.2
+5107f021b39f26e7c72ad76803a9226bf6274611	laptop clone ai-engine	refs/tags/v0.6.3	refs/laptop/tags/v0.6.3
+676de9f71277f28654dca73f744b602163d8f5c1	laptop clone ai-engine	refs/tags/v0.6.4	refs/laptop/tags/v0.6.4
+c965e247ed8ae66b6e2418a7dfb665eb6ad627cb	laptop clone ai-engine	refs/tags/v0.6.5	refs/laptop/tags/v0.6.5
+cb2ebf0540f42604e2759b2ddef497861e928248	laptop clone ai-engine	refs/tags/v0.6.6	refs/laptop/tags/v0.6.6
+53696815747c539686bca5135a96b7284f891c18	laptop clone ai-engine	refs/tags/v1.0.0	refs/laptop/tags/v1.0.0
+43654de12681e1b9a9dea711b55142bf4d1a261b	laptop clone ai-engine	refs/tags/v1.0.0-beta.5	refs/laptop/tags/v1.0.0-beta.5
+64b7068f47420d85e5f00b2d328dd3db3efb7049	laptop clone ai-engine	refs/tags/v1.0.0-beta.6	refs/laptop/tags/v1.0.0-beta.6
+46a08c18608153bfc566703a88acc883bc6140f4	laptop clone ai-engine	refs/tags/v1.0.0-beta.7	refs/laptop/tags/v1.0.0-beta.7
+b7ce81219d7059944d2030d4779659c377a3ecda	laptop clone ai-engine	refs/tags/v1.0.0-beta.8	refs/laptop/tags/v1.0.0-beta.8
+4b187b5c59b6bb43754f868a3e985df5c598c29e	laptop clone ai-engine	refs/tags/v1.0.0-beta.9	refs/laptop/tags/v1.0.0-beta.9
+be206f7247f1d8fe8fac90d34581509b17830628	laptop clone ai-engine	refs/tags/v1.0.1	refs/laptop/tags/v1.0.1
+d419caf8963710bbe9cc43471cf7d8883db10cd1	laptop clone ai-engine	refs/tags/v1.0.10	refs/laptop/tags/v1.0.10
+ffa85fd52fa55c76c9230e3f6189f3efd652de52	laptop clone ai-engine	refs/tags/v1.0.11	refs/laptop/tags/v1.0.11
+9264fe894f1283ad2e808b45452a791c59b4e820	laptop clone ai-engine	refs/tags/v1.0.12	refs/laptop/tags/v1.0.12
+a2465928231535586b77f921b08bd3863338f8e8	laptop clone ai-engine	refs/tags/v1.0.2	refs/laptop/tags/v1.0.2
+b04912bda8b48a8430266e9e34585bf4ff184598	laptop clone ai-engine	refs/tags/v1.0.3	refs/laptop/tags/v1.0.3
+0ebd723ee78c3c193bb31f3a7a1085b00fd04876	laptop clone ai-engine	refs/tags/v1.0.4	refs/laptop/tags/v1.0.4
+e9d910ecafa86ccff720825f39e36210140b9c6d	laptop clone ai-engine	refs/tags/v1.0.5	refs/laptop/tags/v1.0.5
+64f01101a9cf5690eb2ad874b08b4effc719d2fa	laptop clone ai-engine	refs/tags/v1.0.6	refs/laptop/tags/v1.0.6
+dee65c75b1bffca5a1a2ba811c3b96017140c3c1	laptop clone ai-engine	refs/tags/v1.0.7	refs/laptop/tags/v1.0.7
+0b53e173c94c7227f2da45057c1e68eee20ab0bc	laptop clone ai-engine	refs/tags/v1.0.8	refs/laptop/tags/v1.0.8
+371e67f5fbe6e38bb1874fb8c1f301711f165a38	laptop clone ai-engine	refs/tags/v1.0.9	refs/laptop/tags/v1.0.9
+41c6b532628b7768a783d47c2f58b02490390131	laptop clone ai-engine	refs/tags/v1.1.0	refs/laptop/tags/v1.1.0
+92d71a3cf4fd1d566d71f443874cf5345a226aba	laptop clone ai-engine	refs/tags/v1.1.1	refs/laptop/tags/v1.1.1
+7c22033d67ab5c6b44d8045e93855bcbf2fded2b	laptop clone ai-engine	refs/tags/v1.1.2	refs/laptop/tags/v1.1.2
+9c3b5ecacf005b70f726e1d3e036e884e53a69df	laptop clone ai-engine	refs/tags/v1.1.3	refs/laptop/tags/v1.1.3
+585df8ba3e307d9e4bcea1d6c28a58c8dc1b5682	laptop clone ai-engine	refs/tags/v1.1.4	refs/laptop/tags/v1.1.4
+280ef3d4d0d0b063b352c83bc298758713115612	laptop clone ai-engine	refs/tags/v1.1.5	refs/laptop/tags/v1.1.5
+c425f4cc773049827ffd63c9de3ddf39f76c6749	laptop clone ai-engine	refs/tags/v1.1.6	refs/laptop/tags/v1.1.6
+c5953415e37c61613ecc95ecd8125596bdf4d0cb	laptop clone ai-engine	refs/tags/v1.1.7	refs/laptop/tags/v1.1.7
+812fb0404b1856df29dcb4a285d25dddf469288d	laptop clone ai-engine	refs/tags/v1.1.8	refs/laptop/tags/v1.1.8
+f3fd37959a1d9ce39445b0a52faa89b3952584e2	laptop clone ai-engine	refs/tags/v1.1.9	refs/laptop/tags/v1.1.9
+c5604413131cf4e437966df8ff7c57cd05a0192e	laptop clone ai-engine	refs/tags/v1.2.0	refs/laptop/tags/v1.2.0
+ef27f74fdd2325153d7b3a325188484246cd3c5f	laptop clone ai-engine	refs/tags/v1.2.1	refs/laptop/tags/v1.2.1
+e45cca703994af0363fd6cb5ffb7b21049b21a7c	laptop clone ai-engine	refs/tags/v1.2.2	refs/laptop/tags/v1.2.2
+abcdefb500f956a2b553b4dc08c7e00256616c9d	laptop clone ai-engine	refs/tags/v1.2.3	refs/laptop/tags/v1.2.3
+a6720beda114b1b243ed01128590d5d192e2ceae	laptop clone ai-engine	refs/tags/v1.2.4	refs/laptop/tags/v1.2.4
+b392ffceec672aa0e204fef992dbba4c78c64641	laptop clone ai-engine	refs/tags/v1.2.5	refs/laptop/tags/v1.2.5
+fbbc0f30c3c66eef324931f1d4711cd3c303219b	laptop clone ai-engine	refs/tags/v1.2.6	refs/laptop/tags/v1.2.6
+3c9bf195d3f195e9acaf67a82c7c62ffe42d15c2	laptop clone ai-engine	refs/tags/wip/ots-1050-l39-diag	refs/laptop/tags/wip/ots-1050-l39-diag
+8984324b7072277d40de1a83aa91e65b878f5787	laptop clone ai-engine	refs/tags/wip/ots-1050-l39-diag-onmaster	refs/laptop/tags/wip/ots-1050-l39-diag-onmaster
+addd2ee68f33044bfddcebcfb79779c98491b972	laptop clone ai-engine	refs/tags/wip/ots-1142-g3-layout	refs/laptop/tags/wip/ots-1142-g3-layout
+5e6e109a4e11c7439c8b5fbfba83765fcf5783c0	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-boot	refs/laptop/tags/wip/ots-1197-armC-boot
+e6d0823812ee9aa8b722d91b1da0c08675cc84c8	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-consume	refs/laptop/tags/wip/ots-1197-armC-consume
+ad5036c8e96bd15d5e698681856632a4ceb3c6d9	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-gate-points	refs/laptop/tags/wip/ots-1197-armC-gate-points
+236e75cb7f3b655d45fbda989d4ecb9d7824bcc9	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-gpu	refs/laptop/tags/wip/ots-1197-armC-gpu
+5a45d7abba39f016854ae0b678db68bd67958d36	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-gpu-run	refs/laptop/tags/wip/ots-1197-armC-gpu-run
+57da5732b11b88cab6c4b85660b6e6cfdd5b92c1	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-gpu-run-tf32	refs/laptop/tags/wip/ots-1197-armC-gpu-run-tf32
+df67ad87bd3bc6f1e63caaf0d798869180abdaff	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-gpu-run-tf32-tpl	refs/laptop/tags/wip/ots-1197-armC-gpu-run-tf32-tpl
+3d03c00c7a332f04046a1bbcacac49b99bac279e	laptop clone ai-engine	refs/tags/wip/ots-1197-armC-pyref	refs/laptop/tags/wip/ots-1197-armC-pyref
+d1c9e35a97b871946f9778e664fa328f96d97578	laptop clone ai-engine	refs/tags/wip/ots-1260-armC-stack	refs/laptop/tags/wip/ots-1260-armC-stack
+fa7030d3d052837f4c05875cece0dcbf3bd4750f	laptop clone ai-engine	refs/tags/wip/ots-1260-bf16x9	refs/laptop/tags/wip/ots-1260-bf16x9
+6fdf707b0575f414f4013869782689bd3983e846	laptop clone ai-engine	refs/tags/wip/ots-1260-c69	refs/laptop/tags/wip/ots-1260-c69
+8b3b6a0ed2f29de363efdf32b9a2c7d66ea36d63	laptop clone ai-engine	refs/tags/wip/ots-1260-cublas-probe	refs/laptop/tags/wip/ots-1260-cublas-probe
+e1d877882389cf5b24805d1755c89073cfe83ca3	laptop clone ai-engine	refs/tags/wip/ots-1260-dump-bf16	refs/laptop/tags/wip/ots-1260-dump-bf16
+98450a1c5e255f732d8d5935f156c854c1a5b523	laptop clone ai-engine	refs/tags/wip/ots-1260-g2-diag	refs/laptop/tags/wip/ots-1260-g2-diag
+834f18b6535b1f3b4b7e0ed610f36faef1eb10b0	laptop clone ai-engine	refs/tags/wip/ots-1260-g2-xcheck	refs/laptop/tags/wip/ots-1260-g2-xcheck
+71ddb2d4a65bc402317a38d525aa3229a6f9bbc1	laptop clone ai-engine	refs/tags/wip/ots-1260-g2-zig	refs/laptop/tags/wip/ots-1260-g2-zig
+547917b1ed9ac24c9e33df0089cf1407f4fb97de	laptop clone ai-engine	refs/tags/wip/ots-1260-mathmode-log	refs/laptop/tags/wip/ots-1260-mathmode-log
+f30fa8dc6c37b80517805d597944d2ebbd2dbb80	laptop clone ai-engine	refs/tags/wip/ots-1260-order	refs/laptop/tags/wip/ots-1260-order
+c350b867a6f51f1a1e035b08991eaa9a4a55f72a	laptop clone ai-engine	refs/tags/wip/ots-1260-order2	refs/laptop/tags/wip/ots-1260-order2
+c32f73d86f2416c22484ceb3ab7f440aeeb4a6e4	laptop clone ai-engine	refs/tags/wip/ots-1260-pedantic	refs/laptop/tags/wip/ots-1260-pedantic
+de8e89dcbfecb7136dc29ac0f876652d93c076b7	laptop clone ai-engine	refs/tags/wip/ots-1260-pedantic-gpu	refs/laptop/tags/wip/ots-1260-pedantic-gpu
+c373987b165fbac21fe02449e804c6fe105b9a9a	laptop clone ai-engine	refs/tags/wip/ots-1260-seed-gate	refs/laptop/tags/wip/ots-1260-seed-gate
+5d7620dc5f9cc4cb8306c06a36ccb395b5906267	laptop clone ai-engine	refs/tags/wip/ots-1260-seed-gate-c69	refs/laptop/tags/wip/ots-1260-seed-gate-c69
+86a8d5009f60b06d5a3875b75da9cb0f33c08454	laptop clone ai-engine	refs/tags/wip/ots-1260-seed-rec	refs/laptop/tags/wip/ots-1260-seed-rec
+a6437ecef2dc4dbb09f5a2e8ea08dbe5ef367ad3	laptop clone ai-engine	refs/tags/wip/ots-1260-seed-rec-c69	refs/laptop/tags/wip/ots-1260-seed-rec-c69
+5ed9ad69c0301435cf57ea99f453bfb98c156796	laptop clone ai-engine	refs/tags/wip/ots-1290-kernel-candidates	refs/laptop/tags/wip/ots-1290-kernel-candidates
+7d0e788bc73c756172e591963b3e5d5c8c6ede0a	laptop clone ai-engine	refs/tags/wip/ots-1313-miazig-window	refs/laptop/tags/wip/ots-1313-miazig-window
+08d617c45f44d9cf37aace466e92648edb47a07a	laptop clone ai-engine	refs/tags/wip/ots-1331-armC-baseline68	refs/laptop/tags/wip/ots-1331-armC-baseline68
+65cacb358a90f3dc05a3a0c9e5e98ba8043327ee	laptop clone ai-engine	refs/tags/wip/ots-1332-armC-c69-ab	refs/laptop/tags/wip/ots-1332-armC-c69-ab
+4cbef909fe36e4cfcd2c2cdf55f88cfdf0ca3608	laptop clone ai-engine	refs/tags/wip/ots-1333-wk-oracle	refs/laptop/tags/wip/ots-1333-wk-oracle
+0070e16dab54bb3706eceb9a3acc3b8ae0c4568f	laptop clone ai-engine	refs/tags/wip/ots-1336-kernel-candidates-r4	refs/laptop/tags/wip/ots-1336-kernel-candidates-r4
+7b349f4e6457cbb8853c025705af5af471e03298	laptop worktree up-items	HEAD (detached or checked out)	refs/laptop/worktree/work-aie-up-items
+610ce288bcdf8d229af43114168fe7dded147980	laptop worktree up-items-uncond	HEAD (detached or checked out)	refs/laptop/worktree/work-aie-up-items-uncond
+673a34b3bdc40e436787c8f12886078f34cd9815	laptop worktree up-main	HEAD (detached or checked out)	refs/laptop/worktree/work-aie-up-main
