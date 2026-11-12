@@ -46,7 +46,7 @@ Tables are `scripts/cells.py` output: mean aggregate tok/s over a cell's rounds.
 The pin resumes a repeated prompt from the last 2,048-row grid point and runs the rest again; the stack resumes at
 the prompt's own last row. The aggregate tok/s differences in this table are that first-token time, not decode.
 
-## 4. Open defect: the stack's paired prompt step is not bit-equal to the pin's
+## 4. A paired prompt step wrote past the index rings (found, bisected, fixed: patch 0042)
 
 One stream, the 10.9k-token prompt, the reply's digest:
 
@@ -54,9 +54,45 @@ One stream, the 10.9k-token prompt, the reply's digest:
 |---|---|---|---|
 | pin | off | `d0b0076e1126` | `d0b0076e1126` |
 | pin | on (the pin never pairs then) | `d0b0076e1126` | - |
-| fix5 | off | `34deaa541eee` | `d0b0076e1126` |
-| fix5 | on | `bfe55367a26a` | `d0b0076e1126` |
+| through 0041 (`fix5`) | off | `34deaa541eee` | `d0b0076e1126` |
+| through 0041 (`fix5`) | on | `bfe55367a26a` | `d0b0076e1126` |
+| pin + 0001..0006 (`s0006`) | off | `d0b0076e1126` | - |
+| pin + 0001..0007 (`s0007`) | off | `34deaa541eee` | - |
+| through 0042 (`fix6`) | off | `d0b0076e1126` | `d0b0076e1126` |
+| through 0042 (`fix6`) | on | `d0b0076e1126` | - |
 
-The pin's pair equals chunk-at-a-time; the stack's does not, and its reply also changes with the drafter, which a
-correct prompt pass cannot do. Chunk-at-a-time on the stack matches the pin, so until the cause is fixed a serve
-that must match the pin on long lone prompts sets `TF_GLM_PROMPT_PAIR=0`.
+At two streams `fix6` with the drafter returns the pin's two digests (`c2c75fcb1015`, `d0b0076e1126`).
+
+**Cause.** The index rings hold 4,096 rows (`index_ring = 2 * prefill_rows`) and a rebase moves a ring's base
+down to a multiple of the 4-row pool. The pin starts every prompt step on the 2,048-row grid, so a 4,096-row pair
+rebased at its own start fits exactly. Patch 0007 lets a step start at any row (chunks end at marks) but kept the
+pin's `ringsAgree` and `State.ready`: a pair starting at a row that is not a multiple of 4 rebased to the pool
+below it and wrote up to 3 rows past each ring into the neighbouring ring. Single chunks always fit, which is why
+`TF_GLM_PROMPT_PAIR=0` matched the pin. This was on the default path for any long lone prompt whose first mark
+falls on such a row, and it gave wrong replies with no error.
+
+**Fix.** The fork has both guards (ref `fork-ssh/ovn-up`); the port had left them out because they live in
+functions 0007's own change did not need to touch. 0042 takes them: `ringsAgree` also requires
+`start % pool + ra + rb <= ring` (such a step runs as single chunks), and `ready` / `readyMtp` return
+`error.PastRing` instead of writing past the ring.
+
+**Cost of the fix.** None measured. Short prompts: `fix6` returns the pin's digests at every level and measures
+51.51 / 59.56 / 80.99 / 110.01 / 134.09 tok/s against `fix5`'s 51.01 / 59.84 / 81.04 / 110.38 / 135.75. The long
+prompt's cold pass (first token, drafter off): 8,473 ms on `fix6`, 8,459 ms on `s0006` (the pin's pairing), 8,606 ms
+with pairing off, so pairing is worth 1.6% of a cold pass at this length.
+
+**How the bisect went wrong twice, and what now prevents it.** The first two bisect images failed to build: my arm
+builder applied repair patches (0032, 0034) to trees that did not yet hold what they repair, and my first check of
+the kernel catalog matched nothing and printed "none missing". `scripts/arm-tree.sh` now carries the rules (it
+reproduces the hand-repaired trees: 0 differing paths for the 0017 arm), and `scripts/catalog-check.py` compares
+against the pin's own catalog and was shown to fail on a tree with a missing kernel source before it was trusted.
+
+## 5. The port read in the other direction: `scripts/port-leftover.py`
+
+`docs/PATCH-AUDIT.md` read what the patches take away from the pin. The ring defect is the opposite kind: something
+the fork changed that the port never brought. `scripts/port-leftover.py` lists every hunk the fork changed against
+its own upstream base (`9b2991d122c7` to `fork-ssh/ovn-up` 595e28743944) whose added lines our tree lacks or whose
+removed lines our tree still has. On the 0001..0007 tree it prints `ringsAgree`. On the current tree: 186 files,
+479 hunks the fork rewrote and we left, 3,783 fork lines we lack. Most will be features we did not port or places
+upstream has since rewritten; four read-only lanes are classifying every hunk (step and state, forward and kernels,
+core and native, tests), looking for more of this defect class and for default-on speed work the fork has and we lack.

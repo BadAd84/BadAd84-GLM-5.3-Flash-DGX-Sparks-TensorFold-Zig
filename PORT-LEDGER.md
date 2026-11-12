@@ -259,3 +259,25 @@ cuModuleGetFunction NOT_FOUND.
 - **The lesson for the next port:** a patch squashed from an older state of the fork can silently replace newer
   upstream lines. `scripts/patch-removals.py` lists what each patch takes away; every line it prints is read against
   the pin before the patch lands.
+
+## A paired prompt step wrote past the index rings: 0042 (measured 2026-11-12)
+
+- **The defect.** The index rings hold 4,096 rows and a rebase moves a ring's base down to a multiple of the 4-row
+  pool. On the pin every prompt step starts on the 2,048-row grid, so a 4,096-row pair rebased at its own start
+  fits. 0007 lets a step start at any row (chunks end at marks) and took `cuda_prompt_pair.zig`'s mark rules from
+  the fork, but left `ringsAgree` and `State.ready` in the pin's form. A pair starting at a row that is not a
+  multiple of 4 then wrote up to 3 rows past each ring, into its neighbour. Default path, one long lone prompt.
+- **How it showed.** One stream, a 10,929-token prompt: the pin replies `d0b0076e1126` with pairing on and off;
+  the stack through 0041 replied `34deaa541eee` with the drafter off, `bfe55367a26a` with it on, and the pin's
+  digest with `TF_GLM_PROMPT_PAIR=0`. Bisected by image: pin + 0001..0006 clean, pin + 0001..0007 dirty.
+- **The fix** is the fork's own two guards (ref `fork-ssh/ovn-up`): `ringsAgree` also requires
+  `start % pool + ra + rb <= ring`, and `ready` / `readyMtp` return `error.PastRing` when a pass still does not fit
+  after the rebase. Through 0042 (`ai-engine:fix6`) the same prompt replies `d0b0076e1126` with the drafter off
+  (pairing on and off) and on, and the pin's two digests at two streams; short prompts return the pin's digests at
+  1 / 2 / 4 / 6 / 8 streams at 51.51 / 59.56 / 80.99 / 110.01 / 134.09 tok/s against 51.01 / 59.84 / 81.04 /
+  110.38 / 135.75 through 0041. Cells: `~/bench/fix6`, `f6-nd-long`, `f6-nd-long-nopair`, `f6-long`, `bis-s0006`,
+  `bis-s0007` on spark1.
+- **The lesson for the next port:** a feature that widens an invariant (here: where a step may start) has
+  dependents in files and functions its own diff does not touch. `scripts/port-leftover.py` reads the port in that
+  direction: every place the fork changed against its own upstream base that our tree lacks, with the hunks the
+  fork rewrote and we left as upstream wrote them listed first. On the 0001..0007 tree it prints this defect.

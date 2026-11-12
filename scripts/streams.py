@@ -15,7 +15,8 @@ Each round sends N different prompts at once (prompt i = PROMPTS[i % len]), thin
 include_usage. Per stream: TTFT (first content chunk), decode tok/s = (completion_tokens - 1) / (last content chunk -
 first content chunk) (sparkDash's DecodeBench rule, as sdbench.py), the reply's sha256. Per round: aggregate tok/s =
 sum(completion_tokens) / (last finish - first send) and decode-phase aggregate = sum(completion_tokens - 1) / (last
-content - earliest first content). One warm-up round of 32 tokens first (not recorded).
+content - earliest first content). One warm-up round of 32 tokens first: the only cold prompt pass, so its first-token
+times are kept as cold_ttft_ms on round 0's row and nothing else of it is recorded.
 Round 0 (N streams) replies are compared across arms and against the solo replies (concurrent == solo).
 
 Draft accounting (the spec-decoding record, per round): /metrics' mtp_drafted_total, mtp_accepted_total and
@@ -201,11 +202,13 @@ def main(argv):
     port, n = argv[1], int(argv[2])
     base = f"http://127.0.0.1:{port}"
     model = model_id(base)
-    wave(base, model, prompts, n, 32)       # warm-up
+    cold = wave(base, model, prompts, n, 32)       # warm-up
     rows = []
     for k in range(rounds):
         w = wave(base, model, prompts, n, max_tokens)
         row = round_row(tag, n, k, w, prompts)
+        if k == 0:
+            row["cold_ttft_ms"] = [round((s["ttft_s"] or 0) * 1e3) for s in cold["streams"]]
         rows.append(row)
         print(json.dumps(row), flush=True)
     if each:                 # each of the N prompts alone, one after another: the solo replies concurrent ones must equal
