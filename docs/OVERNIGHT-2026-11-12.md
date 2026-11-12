@@ -140,9 +140,36 @@ apply to our tree without a reject. Image `ai-engine:roce1` (the stack through 0
 
 ## 8. The CPU gates, run again
 
-`scripts/gates.sh` runs the README's gates from WSL. On the tree through 0042: `check-native-cuda-host` exit 0,
-`zig fmt --check zig/` exit 0, `test-cuda-host` 5,553 of 5,606 passed with 26 named failures, every one a
-file-permission, symlink or FIFO test (`auth*`, `benchmark_*`, `request_log`, `drama_voice_tool`, `slide_key`) that a
-tree on the Windows-mounted filesystem cannot pass; none is in the GLM family. The unpatched pin run in the same
-place fails the same 26 names (5,494 of 5,547 passed) and `scripts/gate-names.sh pin fix6` prints no name that only
-the stack fails, so the stack through 0042 is at the pin's result with 59 more tests, all passing.
+`scripts/gates.sh` copies the tree to the WSL filesystem (`~/gt/NAME`) and runs the README's gates there. On a
+copy the 26 file-permission, symlink and FIFO tests that fail on a Windows-mounted tree pass: the pin gives 343 of 345
+steps and 2,652 of 2,671 tests with one failing test (`health_test`, a benchmark-manifest case, in no GLM file; it
+failed on the pin only), the stack through 0042 gives 345 of 345 steps and 2,660 of 2,678 tests with none failing,
+and through 0044 the same. `compile-cuda-tests`, `test-glm-ring-host`, `test-glm-logprobs-host`, `test-rows-host` and
+`zig fmt --check zig/` are rc 0 on the 0044 tree. A mutant that makes 0044's new host test fail on its first line
+makes `test-cuda-host` fail with that test named, so the gate does run it. The restacked 0043 to 0068 tree has no
+valid gate result yet: the first run was killed after a hung in-place run on the Windows mount, and the second died
+when C: filled.
+
+## 9. Every port patch together, and the RoCE gather
+
+`ai-engine:all1` (the stack through 0042 plus the 25 ported patches, before the item plan and RoCE) at 1, 2, 4, 6
+and 8 streams, replies byte-identical to `fix6` at every level: 51.55, 60.44, 82.54, 112.25 and 137.77 tok/s against
+51.51, 59.56, 80.99, 110.01 and 134.09 (+0.1, +1.5, +1.9, +2.0, +2.7%). The 10,929-token prompt (`d0b0076e1126`):
+first token of the cold pass 7,326 ms against 8,473 ms through 0042 (-13.5%); warm resumes stay 62 to 66 ms.
+
+The RoCE gather (`TF_ROCE`) at 8 streams with the KDA pad, ABBA, tok/s of one stream: A (`TF_ROCE=0`) 22.9 and 22.5,
+B (RoCE) 22.5 and 22.5, about -0.9% for RoCE, replies identical. With the earlier cells (+2.0 and +1.7% at one and two
+streams, level at four, -0.6 and -1.3% at six and eight) the patch is a trade, so it needs the rewrite-or-gate step
+before it lands.
+
+## 10. The clean upstream v1.2.7 base
+
+`glm53-zig:v127`, built from the tag with none of our patches, same boot settings: decode in tok/s at 1, 2, 4, 6 and
+8 streams 50.16, 58.57, 79.23, 106.37 and 129.66 (the old pin: 51.38, 58.16, 72.26, 95.19 and 115.18), and with
+`TF_GLM_KDA_PAD=1` 62.19, 70.57, 88.91, 118.29 and 143.25 with different replies. Upstream alone gained 9.6, 11.7 and
+12.6% at four, six and eight streams in the 600 commits since the pin, so the series has to be measured against this
+image. The 10,929-token prompt: first token of the cold pass 8,576 ms and 620 to 640 ms for a repeat of it, where our
+series resumes in 62 to 66 ms; the mid prompt 2,964 ms cold and 1,455 ms repeated against 2,577 and 62 ms.
+`docs/audit-2026-11-12/v127-drift.md` says what upstream changed (decode windows 8 to 32 rows and MTP chains 3 to 15
+drafts by default, load-time round pricing, prompt cuts, a registry for GLM switches) and
+`docs/audit-2026-11-12/fold-series.md` the 35-lever form of our series the re-seat starts from.

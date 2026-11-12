@@ -51,6 +51,8 @@ runs, and it changes numerics, so the last row is the like-for-like one against 
 | patches through 0042 | 51.51 | 59.56 | 80.99 | 110.01 | 134.09 |
 | through 0044 | 52.02 | 60.26 | 82.67 | 113.29 | 137.01 |
 | through 0044, `TF_GLM_KDA_PAD=1` | 64.81 | 74.23 | 94.45 | 126.65 | 154.07 |
+| upstream v1.2.7, no patches | 50.16 | 58.57 | 79.23 | 106.37 | 129.66 |
+| upstream v1.2.7, `TF_GLM_KDA_PAD=1` | 62.19 | 70.57 | 88.91 | 118.29 | 143.25 |
 
 So with production's own setting the Zig engine leads at 6 and 8 streams and trails at 1, 2 and 4. The gap at low
 stream counts is the time of one decode round; `docs/speed_target.md` has its breakdown. The series is being
