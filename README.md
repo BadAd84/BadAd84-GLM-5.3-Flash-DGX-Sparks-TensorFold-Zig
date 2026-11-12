@@ -33,7 +33,7 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
   `SHA256SUMS` the hashes, and `scripts/check-patch-packages.sh` fails when either is out of step.
 - `scripts/` - apply, build, boot, the gates (`gates.sh`, `lean.sh`, `gate-names.sh`) and the measurement tools
   (`streams.py`, `bench-arm.sh`, `abba.sh`, `rounds.py`).
-- `docs/` - measurements and audits, dated. `PORT-LEDGER.md` records what is landed, what is parked and why.
+- `docs/` - measurements and audits, dated: `docs/OVERNIGHT-2026-11-12.md` is the running record of what was measured.
 - `archive/` - the two retired forks this work came from (`ots/ai-engine`, `ots/tensorfold-gb10`) as git bundles
   with their ref lists and check scripts.
 - `AGENTS.md` - the rules of this repo: how a patch is cut, gated, measured and landed, what a version bump of

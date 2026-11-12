@@ -243,3 +243,12 @@ starts are the way to resume a chat, section 12). The 3.6k-token prompt: 2,517 m
 1,183 against 1,455.
 An earlier try of this bench failed at every boot because the image had not been copied to spark2 and spark3 (rank 0
 waited for ranks that could not start); `scripts/dist-image.sh TAG` copies an image to spark2 and spark3 and checks the ids agree; a bench needs it after every build.
+
+## 14. Mia's `TF_PROMPT_CACHE_FIRST` (patch 0112 of the MiaAI recipe): not carried
+
+An opt-in that sets the prompt cache (`--prompt-cache-gib`) aside before the KV room is counted in whole windows. It is
+in neither the old pin, nor upstream v1.2.7, nor any patch of ours, and it does not apply to the re-seated tree (`git
+apply --check` fails in `zig/src/native/cuda_kv_pool.zig:68`): v1.2.7 rewrote the pool plan since (groups sized by
+bytes a row, `ca83a689a` kept-state budgets scaled after streams are counted, `949ae97fe` and `4a0e38afd` on naming a
+`--prompt-cache-gib`). Carry it only if a measurement on `glm53-zig:rs1` shows the cache taking pages the streams need
+at a stream count we serve; no such cell exists.

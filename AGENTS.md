@@ -27,14 +27,16 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
   `TF_REF` by `scripts/apply.sh`. `RECORD.md` says where each patch's text comes from, `SHA256SUMS` pins the files.
 - `scripts/` - the serve and bench files, AUTHORED here and COPIED to spark1 `~/work/glm53-zig/`; the repo copy is
   the source. Serve: `serve.sh` (one rank), `zig-tp3.sh` / `zig-tp3-stop.sh` (the whole TP=3 from spark1),
-  `build-image.sh`. Bench: `streams.py` (the instrument), `bench-arm.sh` (five levels, a fresh boot each),
-  `arms-file.sh` (a list of arms), `series-chain.sh` (build, distribute, bench per tag), `abba.sh`, `cells.py` and
-  `rounds.py` (tables), `nsys-rank0.sh` (kernel profile). Stack tools: `arm-tree.sh` (pin + patches through N),
-  `mkpatch.sh`, `restack.sh`, `reseat-survey.sh`, `patch-removals.py` and `port-leftover.py` (the two audits),
-  `catalog-check.py`. Gates: below.
-- `docs/` - `speed_target.md` (the target as measured here), `BENCH.md`, `PATCH-EVAL.md`, `PATCH-AUDIT.md`,
-  `PORT-LEFTOVER.md`, the dated overnight records and `audit-*/` (the lanes' full reports).
-- `PORT-LEDGER.md` - what is landed, what is parked and why, the lessons of each port.
+  `build-image.sh`, `dist-image.sh` (copy the image to spark2 and spark3: every rank needs it). Bench: `streams.py`
+  (the instrument), `turns.py` (first token of each turn of a growing chat), `bench-arm.sh` (five levels, a fresh boot
+  each), `arms-file.sh` (a list of arms), `abba.sh`, `cells.py` and `rounds.py` (tables), `nsys-rank0.sh` (kernel
+  profile). Stack tools: `mkpatch.sh`, `reseat-survey.sh` (how a series sits on a new upstream base, before any
+  re-seat work), `catalog-check.py`. Gates: below.
+- `docs/` - `speed_target.md` (the target as measured here), `BENCH.md`, the dated overnight records and
+  `audit-2026-11-12/` (the lanes' full reports: the fold, what upstream v1.2.7 changed under each patch, the re-seat,
+  the round-structure comparison with production, the verify-graph design). Documents of the old-pin series
+  (`PATCH-AUDIT`, `PATCH-EVAL`, `PORT-LEFTOVER`, `PORT-LEDGER`, the per-port reports) were removed at the re-seat;
+  they are in git history before the commit that removed them.
 - `archive/` - the retired engine forks as bundles.
 - `work/` - scratch, ignored: trees, tars, lane directories, queue scripts. Nothing in it is a source of truth.
 
@@ -209,25 +211,27 @@ Run on the applied tree, from WSL on the workstation:
 - **Do not gate a tree on `/mnt/c`.** There 26 upstream tests that need POSIX file modes, symlinks or FIFOs fail on
   the pin itself, and under load the test binary that spawns child processes hangs (three runs sat until killed).
   `scripts/gates.sh` copies the tree to the WSL filesystem for that reason.
-- **A port can leave a dependent place in upstream's form.** Patch 0007 let a prompt step start at any row and left
-  `ringsAgree` and `State.ready` as the pin had them; a paired step then wrote past the index rings and replies on
-  long prompts were wrong with no error (fixed by 0042). `scripts/port-leftover.py` reads a port in that direction,
-  `scripts/patch-removals.py` in the other (the base's lines a patch takes away); run both on a new port.
-- **A repair patch does not belong on every arm.** An arm tree cut from the middle of the stack must not take a
-  repair whose target is not in it (0034 compiles only from 0007 on; 0032 names kernels later patches add).
-  `scripts/arm-tree.sh` carries those rules.
+- **A change that widens an invariant has dependents its own diff does not touch.** An earlier port let a prompt step
+  start at any row and left the pairing check and `State.ready` in upstream's form; a paired step then wrote past the
+  index rings and replies on long prompts were wrong with no error. Read every caller and every guard of what a patch
+  widens, and keep a host test beside each.
+- **A repair belongs inside the lever it repairs.** The series is one lever a patch with its repairs folded in, so every
+  prefix compiles and is correct alone; an arm tree cut from the middle of it takes whole patches only.
 - **A check that prints "none missing" has to be shown failing first.** The first catalog check here matched nothing.
 - **Tests taken from the fork can encode the fork's 4,096-row prompt chunk** (ours is 2,048): a prompt of 2,088
   tokens is "one chunk" there and refused for its length here.
 - **`SHA256SUMS` and the patches must be LF** (`.gitattributes` pins them): a checkout under `core.autocrlf` otherwise
   makes the package gate report every patch as unlisted.
 - **A queued script is replaced atomically** (`scp` to `stage/`, then `mv`): a waiting bash holds the old file.
-- **Knobs are off by default and three were broken until 2026-11-12**: `TF_GLM_OVN_GLUE_FUSE` gave wrong replies,
-  `TF_GLM_OVN_ONE_CHUNK` could not be switched on, `TF_GLM_OVN_ONEPASS_PIPE` scaled 16 of 512 dims. A knob arm run on
-  an image older than their repairs measures the defect.
-- **The pin's one-shot RoCE gather serves two ranks only**; at TP=3 every small all-gather is an NCCL collective
-  unless the worlds-2-to-4 patch is in. The boot log says which: `RoCE all-gather: 3 rank(s) ...`.
+- **Every image must be on all three boxes before a bench uses it.** `scripts/build-image.sh` builds on spark1 only;
+  `scripts/dist-image.sh TAG` copies it to spark2 and spark3. Without that rank 0 waits for ranks that cannot start and
+  every boot of the bench fails after five minutes.
+- **Do not run Zig tests or builds in place on `/mnt/c`.** A hung test there left two real files of 100 GB and 70 GB
+  in a cache directory and filled the disk; the WSL disk file (`ext4.vhdx`) only grows, and a full C: puts it
+  read-only. `scripts/gates.sh` copies to the WSL filesystem.
+- **Production and the Zig serve cannot share the GPUs.** Stop production (`docker rm -f glm53-flash-tf samplers
+  pwcap`) before a Zig boot and restore it with `setsid nohup bash ~/glm-v110-start.sh`; both GLM watchdogs stay
+  stopped for the whole window.
 - **`TF_GLM_L2PF`, prefill and fill rows are not environment switches on this engine** the way they are in
   production's file: setting production's values killed every boot of that arm.
-- **The audit lanes' and port lanes' full reports are in `docs/audit-*/`**; a status table quotes them, it does not
-  replace them.
+- **The lanes' full reports are in `docs/audit-2026-11-12/`**; a status table quotes them, it does not replace them.

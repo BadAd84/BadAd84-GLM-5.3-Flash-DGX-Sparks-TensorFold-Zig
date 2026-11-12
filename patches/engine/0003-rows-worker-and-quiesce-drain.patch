@@ -1,0 +1,244 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] core and server: the disk grid on the I/O worker, and a quiesce drain test
+
+Two host gates the port shipped without, both from our fork `ai-engine` at
+fork-ssh/ovn-up.
+
+zig/src/core/rows_test.zig, the fork's hunks unchanged. Every case in the file sets
+`sync_writes = true` (its `options` helper, line 18), so the grid round trip only ever
+covered the writer that runs on the caller's thread. GLM's store uses the other one:
+lane_host_rows.zig steps the I/O worker when `!r.sync_writes`. The fork turns the test
+body into `gridRoundTrip(sync, tag)`, drains with
+`rows.write.drain(r, rows.write.nowNs() + 3 s)` instead of the file's
+`while (rows.write.step(r)) {}` helper, and adds a second case with the worker. The
+original test keeps its name and calls the helper with true.
+
+zig/src/server/health_test.zig and a new zig/src/server/health_quiesce_test.zig. `quiesce`
+spun with a 5 second panic and no test ever made a connection outlive the accept loop, so
+nothing proved that quiesce waits before the server is freed. This takes the fork's change
+to quiesce (the wall-clock panic goes: a loaded host makes the wait slower, never wrong),
+its `dial` and `closeAfter` helpers and its test, which opens a bare socket, waits for
+`open_connections` to rise, closes it from another thread after 200 ms, and asserts
+`open_connections` is zero the moment quiesce returns.
+
+The fork puts that test in health_test.zig. Ours is 558 lines and tools/zig/lean_check.py
+fails any file in zig/ over 600, so the fork's shape would make 611 and cost the lean gate
+a new problem. The test and its two helpers go in health_quiesce_test.zig instead,
+registered beside health_test.zig in zig/src/server/root.zig's test block, and
+health_test.zig ends at 556: the only changes left in it are the fork's quiesce body and
+`pub` on the five declarations the new file reads (`Idle` with its `engine`, `Bytes` with
+its `text`, `WithGpu`, `key` and `quiesce`). A test file reading another's fixtures is the
+tree's own habit: lane_review_test.zig and lane_rounds_test.zig already take `FakeLearner`
+and `LearnBox` out of lane_host_test.zig.
+
+Nothing else changes. Our health_test.zig already imports `posix`, `Threaded`, `listener`,
+`auth` and `build_identity`, and its Server.init shape is the one the new test uses.
+
+Gates: both files are in modules test-cuda-host runs (zig/build/cuda.zig:344 runs every
+test of core, lanes, api and native; the server tests run through their own module), and
+zig build test-rows-host passes with this patch.
+
+What a GPU run must show: nothing. Both are host tests with no device in them.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- v1.2.7's rows_test.zig and health_test.zig are the pin's (no commit in range); applies as is.
+- source: work/fold/0003-rows-worker-and-quiesce-drain.patch
+
+diff --git a/zig/src/core/rows_test.zig b/zig/src/core/rows_test.zig
+index e809569c9cb42db46adf67e5599590de3dc72327..d14a8c2b7b19174c435277565e3e50e682a0d1f4 100644
+--- a/zig/src/core/rows_test.zig
++++ b/zig/src/core/rows_test.zig
+@@ -247,16 +247,18 @@ fn gridRequest(a: Allocator, s: *pc.Store, f: *Fake, p: []const u32, history: u3
+     return .{ .from = plan.from, .sum = f.sum };
+ }
+ 
+-test "a grid family's requests name no chunk starts: its states go to disk on the grid and resume after a restart" {
++/// A grid family's states through one writer (`sync`: the test's thread, else the I/O worker), read after a restart.
++fn gridRoundTrip(sync: bool, tag: []const u8) !void {
+     const gpa = std.testing.allocator;
+     var arena: std.heap.ArenaAllocator = .init(gpa);
+     defer arena.deinit();
+     const a = arena.allocator();
+     var buf: [128]u8 = undefined;
+-    const dir = root(&buf, "grid");
++    const dir = root(&buf, tag);
+     defer rmTree(dir);
+     const grid: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1, .planned = true, .grid = 512 };
+     var o = options(dir);
++    o.sync_writes = sync;
+     o.planned = true;
+     o.grid = 512;
+     const p = try prompt(a, 0, 5, 1300); // the engine cuts its chunks on the grid: 512 and 1024
+@@ -268,7 +270,7 @@ test "a grid family's requests name no chunk starts: its states go to disk on th
+         defer s.deinit();
+         s.disk = r;
+         _ = try gridRequest(a, &s, &f, p, 1200);
+-        drain(r);
++        _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s); // the worker publishes the states
+         try std.testing.expect(r.states.items.len > 0);
+         for (r.states.items) |st| {
+             try std.testing.expectEqual(@as(u32, 0), st.at % 512);
+@@ -289,6 +291,14 @@ test "a grid family's requests name no chunk starts: its states go to disk on th
+     try std.testing.expectEqual(@as(u64, 1), r.counts.reads);
+ }
+ 
++test "a grid family's requests name no chunk starts: its states go to disk on the grid and resume after a restart" {
++    try gridRoundTrip(true, "grid");
++}
++
++test "a grid family's chunk starts reach the I/O worker's writes as well, the writer GLM's store uses" {
++    try gridRoundTrip(false, "grid-worker");
++}
++
+ test "an entry evicted before its write leaves the queue; once written, an eviction costs nothing" {
+     const gpa = std.testing.allocator;
+     var arena: std.heap.ArenaAllocator = .init(gpa);
+diff --git a/zig/src/server/health_quiesce_test.zig b/zig/src/server/health_quiesce_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..c071901e9dcbaeb186cda04f644825dc8d92db40
+--- /dev/null
++++ b/zig/src/server/health_quiesce_test.zig
+@@ -0,0 +1,64 @@
++//! quiesce waits for the connection threads, so a server freed after it never frees one out from under a reply.
++const std = @import("std");
++const auth = @import("auth.zig");
++const build_identity = @import("identity.zig");
++const listener = @import("listener.zig");
++const server = @import("server.zig");
++const health = @import("health_test.zig");
++const posix = @import("sys").posix;
++const Threaded = std.Io.Threaded;
++
++fn dial(port: u16) !posix.socket_t {
++    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
++    var storage: Threaded.PosixAddress = undefined;
++    const len = Threaded.addressToPosix(&address, &storage);
++    const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
++    if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
++    const fd: posix.socket_t = @intCast(rc);
++    if (posix.errno(posix.system.connect(fd, &storage.any, len)) != .SUCCESS) {
++        _ = posix.system.close(fd);
++        return error.ConnectFailed;
++    }
++    return fd;
++}
++
++fn closeAfter(fd: posix.socket_t, ms: u32) void {
++    std.Io.sleep(std.testing.io, .fromMilliseconds(ms), .awake) catch {};
++    _ = posix.system.close(fd);
++}
++
++test "quiesce waits for an open connection to drain before the server is freed" {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var problem: []const u8 = "";
++    var keys = try auth.Store.init(std.testing.allocator, &.{health.key}, "", null, false, &problem);
++    defer keys.deinit();
++    var engine: health.Idle = .{};
++    var text: health.Bytes = .{};
++    const identity = build_identity.of(health.WithGpu, a, "9.8.7", 1);
++    const srv = try server.Server.init(
++        std.testing.allocator,
++        std.testing.io,
++        engine.engine(),
++        text.text(),
++        .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity },
++        &keys,
++    );
++    defer srv.deinit();
++    const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
++    defer lis.close();
++    var stop: std.atomic.Value(bool) = .init(false);
++    const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
++    // a slow participant: a bare connection a worker thread keeps open until the closer shuts it after 200 ms
++    const fd = try dial(lis.port());
++    while (srv.open_connections.load(.acquire) == 0)
++        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
++    const closer = try std.Thread.spawn(.{}, closeAfter, .{ fd, 200 });
++    health.quiesce(srv, &stop, accept);
++    const drained = srv.open_connections.load(.acquire); // zero only if quiesce waited for the close
++    closer.join();
++    while (srv.open_connections.load(.acquire) > 0)
++        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
++    try std.testing.expectEqual(@as(u32, 0), drained);
++}
+diff --git a/zig/src/server/health_test.zig b/zig/src/server/health_test.zig
+index f2c6620df8df44d4b35111f5f339fa8213135ae3..1a35eac479f93b36370a41e6d60c7ea13f49b18d 100644
+--- a/zig/src/server/health_test.zig
++++ b/zig/src/server/health_test.zig
+@@ -16,13 +16,13 @@ const Allocator = std.mem.Allocator;
+ const earlier = [_][]const u8{ "status", "model", "model_ids", "max_batch_size", "warming", "memory", "live" };
+ 
+ /// Four lanes, some memory, nothing running.
+-const Idle = struct {
++pub const Idle = struct {
+     healthy: bool = true,
+     benchmark: api.Benchmark = .{ .ranks = 1 },
+     resets: std.atomic.Value(u32) = .init(0),
+     scores: std.atomic.Value(u32) = .init(0),
+     submits: std.atomic.Value(u32) = .init(0),
+-    fn engine(e: *Idle) api.Engine {
++    pub fn engine(e: *Idle) api.Engine {
+         return .{ .ctx = e, .vtable = &.{
+             .info = info,
+             .submit = submit,
+@@ -62,8 +62,8 @@ const Idle = struct {
+ };
+ 
+ /// A template-free vocabulary of bytes.
+-const Bytes = struct {
+-    fn text(t: *Bytes) model_text.Text {
++pub const Bytes = struct {
++    pub fn text(t: *Bytes) model_text.Text {
+         return .{ .ctx = t, .vtable = &.{
+             .encode = encode,
+             .decode = decode,
+@@ -118,7 +118,7 @@ const Bytes = struct {
+ };
+ 
+ /// An engine module with a GPU, as native/metal.zig and native/cuda.zig are; its name says which device was asked for.
+-const WithGpu = struct {
++pub const WithGpu = struct {
+     pub const backends: []const []const u8 = &.{"cuda"};
+ 
+     pub fn deviceName(a: Allocator, device: ?u32) ?[]const u8 {
+@@ -193,7 +193,7 @@ test "the open health always names the release, and leaves out a backend or GPU
+     for (earlier, test_server.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+ }
+ 
+-const key = "sk-health-test";
++pub const key = "sk-health-test";
+ const health_open = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+ const health_keyed = "GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " ++ key ++
+     "\r\nConnection: close\r\n\r\n";
+@@ -235,14 +235,12 @@ fn bodyOf(reply: []const u8) ![]const u8 {
+ }
+ 
+ /// Stops the accept loop and waits for the connection threads, so the server can be freed.
+-fn quiesce(srv: *server.Server, stop: *std.atomic.Value(bool), accept: std.Thread) void {
++pub fn quiesce(srv: *server.Server, stop: *std.atomic.Value(bool), accept: std.Thread) void {
+     stop.store(true, .release);
+     accept.join();
+-    var waited: u32 = 0;
+-    while (srv.open_connections.load(.acquire) > 0) : (waited += 1) {
+-        if (waited == 500) @panic("a connection thread still runs 5 s after the last reply"); // never free it under one
++    // wait on the causal quantity with no wall-clock limit: a loaded host makes this slower, never wrong
++    while (srv.open_connections.load(.acquire) > 0)
+         std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+-    }
+ }
+ 
+ test "with keys configured, /health sends only its status, with and without a valid key, whatever the identity" {
+diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 1a9e2c805345abb9840b82a8682e076ca0f96493..93e1d91daff90bdfb17ded16ebcd1a6ba2a0e41c 100644
+--- a/zig/src/server/root.zig
++++ b/zig/src/server/root.zig
+@@ -97,6 +97,7 @@ test {
+     if (comptime @import("builtin").os.tag != .windows) _ = @import("pdf_worker.zig"); // spawns /bin/sh workers
+     _ = @import("drama_prompt.zig");
+     _ = @import("health_test.zig");
++    _ = @import("health_quiesce_test.zig");
+     _ = @import("clef_encode_test.zig");
+     _ = @import("clef_tokens_test.zig");
+     _ = @import("clef_answer_test.zig");

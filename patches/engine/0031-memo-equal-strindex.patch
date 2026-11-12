@@ -1,0 +1,153 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] host: byte equality by indexOfDiff, and a string index that stops counting at it
+
+Fork ai-engine, ref fork-ssh/ovn-up, commit ef81b4a49 "server: render and
+tokenize a request once; TF_GLM_OVN_HOST_ONCE": the two standalone measured
+optimisations inside it. The rest of that commit is the next two patches.
+
+memo.equal: the tokenizer's segment cache confirms a hit by comparing the
+stored bytes with the caller's. The fork replaced std.mem.eql with
+std.mem.indexOfDiff and kept the measurement in the comment above it, 0.23 ms
+against 2.1 ms on 1.4 MB. Both call sites take it, the one in append and the
+one in same. The two forms agree on every input: indexOfDiff returns null
+exactly when the slices are equal.
+
+access.strIndex: a chat template reading content.0 makes getitem evaluate
+index(i, uni.count(s.s)), which walks the whole string before indexing its
+first code point. strIndex walks only as far as the requested index for a
+non-negative one and falls back to the counted form for a negative one. The
+fork's own randomised test comes with it: 2,000 strings of mixed ASCII,
+multi-byte and malformed bytes, every index from -n-2 to n+2 compared against
+index(i, uni.count(s)).
+
+No patch in this stack touches either file, so this completes nothing earlier;
+it is the first piece of the fork's host-side work to land here.
+
+What is not the fork's own lines, and why:
+- memo.zig is the fork's hunk applied as it stands.
+- access.zig is hand-placed. The fork's hunk carries getitem's list arm as
+  l.items.len and l.items[k] where the pin has l.count() and l.at(k), so the
+  hunk is refused and only the str arm's call site changes here. strIndex and
+  its test are the fork's lines unchanged.
+- the fuzz test needs a binary that runs it. template.zig's test block gains
+  the access.zig import, and zig/build/cuda.zig puts the template module in
+  the list of modules whose own tests test-cuda-host runs, which is the fork's
+  change to that line. In our tree the template module is built by
+  cuda_server_host.zig and returned to that caller, so the list is the only
+  edit needed. Before this the chat template's own tests ran in the macOS
+  build alone; the 36 they add all pass here.
+
+What a GPU run has to say: nothing about correctness. Both changes are
+host-side and leave ids and rendered text identical, which the tokenizer and
+template host tests prove. A serve receipt would only show time saved, and the
+time this commit was written for arrives with patch 03.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- memo.zig: a56c63daf set min_bytes to 64 ("keep segments of 64 bytes or more, not 1,024"); the 3-way merge keeps v1.2.7's 64 and takes the fold's std.mem.indexOfDiff at both call sites.
+- zig/build/cuda.zig: the template module joins the test list on v1.2.7's line, whose cuda_server_host.steps call gained build_options.
+- source: work/fold/0034-memo-equal-strindex.patch
+
+diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
+index a414481ba32658199f1f0e52a4a09d23d2e037e5..a66a919a5c705bd25dbc510a9d3d1f45b3b1c195 100644
+--- a/zig/build/cuda.zig
++++ b/zig/build/cuda.zig
+@@ -347,8 +347,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
+     b.step("test-save-reopen-host", "Unresolved save through actual checkpoint admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"Save recovery:"} })).step);
+     b.step("test-trainer-close-host", "Actual native close and real Flash Next trainer ownership sentinels").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"Save recovery:"} })).step);
+     const template, const server_tests = @import("cuda_server_host.zig").steps(b, host, cuda, mods, native_modules, build_options, windows_port, step, server_steps);
+-    // the tokenizer's own tests (memo, steps, regex, unicode) run here: no other test binary reaches them
+-    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
++    // the tokenizer's and the chat template's own tests (memo, regex, provenance): no other test binary reaches them
++    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, template, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+     const selected = b.option([]const u8, "modelopt-host-filter", "One portable ModelOpt regression") orelse "modelopt host:";
+     const run = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{selected} }));
+     run.has_side_effects = true;
+diff --git a/zig/src/core/template/access.zig b/zig/src/core/template/access.zig
+index 0ad8edcdfa86b5cc9e2f35c06fbb53e8f7d609ca..aefe177dc78340899a5257d02e002897c574e58f 100644
+--- a/zig/src/core/template/access.zig
++++ b/zig/src/core/template/access.zig
+@@ -103,6 +103,31 @@ fn index(i: i64, n: usize) ?usize {
+     return if (k >= 0 and k < @as(i64, @intCast(n))) @intCast(k) else null;
+ }
+ 
++/// `index(i, uni.count(s))`, a non-negative index counting only the code points up to it (a chat's `content.0`).
++fn strIndex(s: []const u8, i: i64) ?usize {
++    if (i < 0) return index(i, uni.count(s));
++    var seen: usize = 0;
++    for (s) |c| {
++        seen += @intFromBool(c & 0xC0 != 0x80);
++        if (seen > i) return @intCast(i);
++    }
++    return null;
++}
++
++test "string index: counting to the index equals counting every code point" {
++    var prng = std.Random.DefaultPrng.init(0x737472);
++    const r = prng.random();
++    var buf: [24]u8 = undefined;
++    for (0..2000) |_| {
++        const s = buf[0..r.uintLessThan(usize, buf.len)];
++        // UTF-8 leads, continuations and ASCII mixed, malformed sequences included
++        for (s) |*c| c.* = ([_]u8{ 'a', 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x80, 0xFF })[r.uintLessThan(usize, 10)];
++        const n: i64 = @intCast(s.len);
++        var i = -n - 2;
++        while (i <= n + 2) : (i += 1) try std.testing.expectEqual(index(i, uni.count(s)), strIndex(s, i));
++    }
++}
++
+ fn intKey(key: Value) ?i64 {
+     return switch (key) {
+         .int => |i| i,
+@@ -120,7 +145,7 @@ pub fn getitem(rt: *Rt, obj: Value, key: Value) Error!Value {
+             if (index(i, l.count())) |k| return l.at(k);
+         },
+         .str => |s| if (intKey(key)) |i| {
+-            if (index(i, uni.count(s.s))) |k| {
++            if (strIndex(s.s, i)) |k| {
+                 const at = uni.offset(s.s, k);
+                 var end = at;
+                 _ = uni.next(s.s, &end);
+diff --git a/zig/src/core/template/template.zig b/zig/src/core/template/template.zig
+index 58e558dc36c9041c986edae094b6f979f740a604..5c4e62addc13792333b02f72cd2371534474ee9b 100644
+--- a/zig/src/core/template/template.zig
++++ b/zig/src/core/template/template.zig
+@@ -166,4 +166,5 @@ test {
+     _ = @import("unicode.zig");
+     _ = @import("value.zig");
+     _ = @import("provenance_test.zig");
++    _ = @import("access.zig");
+ }
+diff --git a/zig/src/core/tokenizer/memo.zig b/zig/src/core/tokenizer/memo.zig
+index 7d499f98bcd9bb21957fba7311c792484ef4e1ae..d51a76863ffebe32787b331e69ab6145b2e48e38 100644
+--- a/zig/src/core/tokenizer/memo.zig
++++ b/zig/src/core/tokenizer/memo.zig
+@@ -5,6 +5,11 @@ const Allocator = std.mem.Allocator;
+ /// Segments shorter than this are tokenized each time: their lookup would cost about what their encode does.
+ pub const min_bytes = 64;
+ 
++/// Byte equality: indexOfDiff took 0.23 ms where mem.eql took 2.1 on 1.4 MB (ReleaseFast, x86_64 laptop).
++pub fn equal(x: []const u8, y: []const u8) bool {
++    return std.mem.indexOfDiff(u8, x, y) == null;
++}
++
+ const Entry = struct { text: []u8, first: bool, ids: []u32, previous: ?u64 = null, next: ?u64 = null };
+ /// Bytes a kept segment costs beyond its text and ids: its entry and its key in the map.
+ pub const overhead = @sizeOf(Entry) + @sizeOf(u64);
+@@ -45,7 +50,7 @@ pub const Memo = struct {
+         defer m.unlock();
+         const k = key(text, first);
+         const e = m.map.get(k) orelse return false;
+-        if (e.first != first or !std.mem.eql(u8, e.text, text)) return false;
++        if (e.first != first or !equal(e.text, text)) return false;
+         try ids.appendSlice(a, e.ids);
+         m.touch(k);
+         m.hits +|= 1;
+@@ -80,7 +85,7 @@ pub const Memo = struct {
+ 
+     fn same(m: *const Memo, k: u64, text: []const u8, first: bool) bool {
+         const e = m.map.get(k) orelse return false;
+-        return e.first == first and std.mem.eql(u8, e.text, text);
++        return e.first == first and equal(e.text, text);
+     }
+ 
+     fn unlink(m: *Memo, k: u64) void {

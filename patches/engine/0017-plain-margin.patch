@@ -1,0 +1,85 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] lanes: TF_GLM_OVN_PLAIN_MARGIN, the draft-over-plain margin as a knob
+
+ai-engine 59604d959 applied onto the pin stack (two conflicts, both unions). The
+core's Config gains `plain_margin` (unset: the core's 1.05, asserted by the source's
+own test), and GLM's facts() reads TF_GLM_OVN_PLAIN_MARGIN in hundredths, so a
+drafted depth must beat plain rounds' tokens a ms by that much. Knob unset: the value
+is 0 and the core's constant stands, so every launch and every decision is unchanged.
+
+The source commit also carried a TF_GLM_OVN_DRAFT_FIXED arm in the same facts()
+block; that knob is a separate lever and is left out here, so the pin's
+draft_confidence line stands unchanged.
+
+Gates on pin+0001..0012: check-native-cuda-host green, test-lane-api-host green,
+whole-tree fmt green, lean base-vs-head 0 new.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- lean_check.py's DIRECT_GETENV/HIDDEN_GETENV: every TF_* setting this patch reads is a row of platform/environment.zig with a line in docs/environment.md, read through cuda.ovn or environment, never getenv. Row: TF_GLM_OVN_PLAIN_MARGIN (u64, hundredths).
+- facts() is v1.2.7's (6d4191a95, d7d559944, 55a95af06, cc2fa8d23): the plain_margin field follows its shared_drafts line, one line with its comment. The core default moved to depth_constants.zig:9 (Constants.plain_margin 1.05); config.zig's Model/Config lines apply unchanged.
+- source: work/fold/0016-plain-margin.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index 270f8c5aaf01af52da48f12ebcaaa333f05dd9ba..d0eb6c4e9f122618201abfbf44cf8177c1814acd 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -56,6 +56,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
+ | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
+ | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
++| `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
+index a9af579d588e94f0302acce28c3924208934b763..80fd6957fbb10f4577c2f2cae12a138c392a7231 100644
+--- a/zig/src/core/lanes/config.zig
++++ b/zig/src/core/lanes/config.zig
+@@ -27,6 +27,7 @@ pub const Model = struct {
+     speculate_early: bool = true, // draft every row's first draft behind the verify
+     draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
+     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
++    plain_margin: f64 = 0, // how much a drafted depth must beat plain rounds' tokens a ms by (0: the core's 1.05)
+     plain_guard: bool = false, // plain rounds compete with drafted depths
+     draft_confidence: ?f64 = null,
+     drafts: u32 = 1, // head drafts a round at most
+@@ -186,6 +187,7 @@ pub const Config = struct {
+                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
+                 .copy_first = m.copy_first and !m.context_copies,
+                 .hold_costs = m.hold_costs,
++                .plain_margin = if (m.plain_margin > 0) m.plain_margin else (Constants{}).plain_margin,
+             },
+             .draft_step_ms = m.draft_step_ms,
+             .shared_drafts = m.shared_drafts,
+@@ -209,6 +211,7 @@ test "setup derives widths like Python" {
+     try std.testing.expectEqual(@as(u32, 4), c.most_drafts);
+     try std.testing.expect(c.family_mtp and c.family_streams);
+     try std.testing.expectEqual(@as(f64, 0.15), c.k.depth_rate);
++    try std.testing.expectEqual(@as(f64, 1.05), c.k.plain_margin); // unset: the core's
+     var steady = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .depth_rate = 0.08 }, 16, 15);
+     defer steady.deinit(gpa);
+     try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index 9fc547247a4c8f1263b867434e9090f5f5cefc31..afae092cb63837a0762c248cd755a8f9f4fdbd99 100644
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -117,6 +117,7 @@ pub const Lanes = struct {
+             .shared_costs = if (block) &copy_policy.shared_costs else &.{}, // DFlash2's shared rounds keep main's prices
+             .window_costs_lone = costs != null, // timed windows are one stream's: shared rounds keep the rule they had
+             .shared_drafts = if (block) 0 else shared_head_drafts,
++            .plain_margin = @as(f64, @floatFromInt(cuda.ovn.int("PLAIN_MARGIN", 0) catch 0)) / 100.0, // TF_GLM_OVN_PLAIN_MARGIN, in hundredths
+             .hidden_rows = sharing,
+             .batch_rows = if (sharing) engine.shared_rows else 0,
+             .max_streams = if (sharing) engine.max_shared else 1,
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index a5728bb19ac1e7c8eacf2db7145e185a1a8e28fe..2de3e7e484e60eb5493212c406a00c4a8d638dc9 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -90,6 +90,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },

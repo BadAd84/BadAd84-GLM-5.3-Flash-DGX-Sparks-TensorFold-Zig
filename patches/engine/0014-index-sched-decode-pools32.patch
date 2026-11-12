@@ -1,0 +1,1042 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32
+
+ai-engine 94b93e567 applied clean onto the pin stack (no conflicts). DECODE_INDEX=N:
+decode windows of fewer than N rows score with shared key tiles and select with the
+split select (glm_index_split.cuh, the port of prod-src select_split, Apache-2.0);
+INDEX_SCHED: production's prompt scorer schedule (glm_index_sched.cuh, from prod-src
+prompt_scores.cu, Apache-2.0); POOLS32: int32 pool gathers. Default off and bit-exact;
+glm-index-ovn-check compares them against today's kernels. Third-party provenance is
+kept in the .cuh headers per the repo rule.
+
+Gates on pin+0001..0009: check-native-cuda-host green, whole-tree fmt green, lean
+base-vs-head 0 new (era comment lines single-lined, attribution kept; the piece consts
+moved beside ranges in cuda_forward.zig for the 600-line rule), fatbins green for the
+touched .cu files.
+
+Folded in by the 2026-11-12 fold (work/fold/MAP.tsv), each hunk where it belongs:
+- 0056: glm-index-ovn-check is registered, and the declarations it reads are pub
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- lean_check.py's DIRECT_GETENV/HIDDEN_GETENV: every TF_* setting this patch reads is a row of platform/environment.zig with a line in docs/environment.md, read through cuda.ovn or environment, never getenv. Rows: TF_GLM_OVN_DECODE_INDEX (u64), _INDEX_SCHED and _POOLS32 (flags).
+- cuda_index.zig: Kernels.load keeps index-decode-windows' registry read of TF_GLM_INDEX_DECODE_FROM (profile.lookup) beside the new split and sched fields.
+- glm-index-ovn-check joins glm_ovn_checks.zig (the check table), not main.zig: the fold created that file in reply-prefill, which this re-seat defers.
+- source: work/fold/0013-index-sched-decode-pools32.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index 79f4b7af8fe4540639743b6471197710d0b98127..e91310a2ad67f868ee83d87bd00b5f2f0843dacd 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -52,6 +52,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_DFLASH2_WIN` | Whole count from 0 through 2048 of the context positions a DFlash2 draft attends to; drafts only, never replies; default 2048 |
+ | `TF_GLM_INDEX_DECODE_FROM` | Whole native-size context position; with `TF_GLM_INDEX_CUDA=all`, a decode window takes the index kernels only once its pools reach this position; default 0 (any depth) |
+ | `TF_GLM_OVN_KEPT_WALK` | Exactly `0` or `1`; default off (kept-state walks compare the last id first and in blocks) |
++| `TF_GLM_OVN_DECODE_INDEX` | Whole row count; a decode window of fewer rows scores with shared key tiles and selects with the split select; default 0 (off) |
++| `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
++| `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/kernels/cuda/glm_index.cu b/zig/kernels/cuda/glm_index.cu
+index 128f942821295327cde935c7f765996d9d5d6b00..f4e65c5e2cec6d9487f62f16328187761f8bc608 100644
+--- a/zig/kernels/cuda/glm_index.cu
++++ b/zig/kernels/cuda/glm_index.cu
+@@ -1,3 +1,5 @@
+ // GLM-5.3-Flash's prompt-chunk DSA indexer in CUDA (cuda_index.zig): pool scores, then each row's top-K pools.
+ #include "glm_index_scores.cuh"
+ #include "glm_index_pools.cuh"
++#include "glm_index_split.cuh"
++#include "glm_index_sched.cuh"
+diff --git a/zig/kernels/cuda/glm_index_sched.cuh b/zig/kernels/cuda/glm_index_sched.cuh
+new file mode 100644
+index 0000000000000000000000000000000000000000..eba790c40c1757ddec130c69d09a6c201a8fe1e9
+--- /dev/null
++++ b/zig/kernels/cuda/glm_index_sched.cuh
+@@ -0,0 +1,103 @@
++// GLM-5.3-Flash DSA indexer: tf_glm_index_scores with production's 0084 v2 stores (TF_GLM_OVN_INDEX_SCHED).
++#pragma once
++
++#include "glm_index_scores.cuh"
++
++// tf_glm_index_scores bit for bit; only the stores and the register bound differ. Grid (cdiv(rows, 8), cdiv(nb, loop)).
++extern "C" __global__ void __launch_bounds__(glm_index::RB * 32, 2)
++    tf_glm_index_scores_sched(const __nv_bfloat16* qi, const __nv_bfloat16* wts, int64_t w_stride,
++                              const __nv_bfloat16* pk, float* out, const int* pos, int64_t rows, int64_t np, int64_t nb,
++                              float scale, float wscale, int64_t heads, int loop, const int* pt, int64_t ps) {
++  using namespace glm_index;
++  __shared__ __align__(16) __nv_bfloat16 tile[2][BP * D];  // two key tiles
++  __shared__ __align__(16) float stage_out[RB][BP];         // a warp's 64 scores of a tile before the row's store
++  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
++  const int64_t r = (int64_t)blockIdx.x * RB + warp, P = pos[0];
++  const bool live = r < rows;
++  const int64_t npool = live ? (P + r + 1) / 4 : 0;
++  const int64_t last = min(rows, (int64_t)(blockIdx.x + 1) * RB) - 1, nmax = (P + last + 1) / 4;  // the CTA's largest
++  uint32_t aq[KQ][2][4];
++#pragma unroll
++  for (int kq = 0; kq < KQ; ++kq)
++#pragma unroll
++    for (int i = 0; i < 2; ++i) {
++      const int h0 = i * 16 + g, h1 = h0 + 8;
++      const __nv_bfloat16* b0 = qi + ((live ? r : 0) * heads + (h0 < heads ? h0 : 0)) * D + kq * 16 + 2 * q;
++      const __nv_bfloat16* b1 = qi + ((live ? r : 0) * heads + (h1 < heads ? h1 : 0)) * D + kq * 16 + 2 * q;
++      const bool o0 = live && h0 < heads, o1 = live && h1 < heads;
++      aq[kq][i][0] = o0 ? *reinterpret_cast<const uint32_t*>(b0) : 0u;
++      aq[kq][i][1] = o1 ? *reinterpret_cast<const uint32_t*>(b1) : 0u;
++      aq[kq][i][2] = o0 ? *reinterpret_cast<const uint32_t*>(b0 + 8) : 0u;
++      aq[kq][i][3] = o1 ? *reinterpret_cast<const uint32_t*>(b1 + 8) : 0u;
++    }
++  float wv[4];
++  for (int i = 0; i < 4; ++i) {
++    const int64_t hh = g + 8 * i;
++    wv[i] = live && hh < heads ? __fmul_rn(__bfloat162float(wts[r * w_stride + hh]), wscale) : 0.0f;
++  }
++  auto stage = [&](int buf, int64_t pb) {
++    for (int idx = threadIdx.x; idx < BP * (D / 8); idx += RB * 32) {
++      const int row = idx / (D / 8), u = idx % (D / 8);
++      const int64_t p = pb * BP + row;
++      const bool ok = p < nmax;
++      cp16(&tile[buf][tile_at(row, u)], pk + key_at(pt, ps / 2, ok ? p : 0) + u * 8, ok);
++    }
++  };
++  // the warp's staged scores into row r's columns p0 .. p0 + 63 (as one float2 a lane where the row allows it)
++  float* st = stage_out[warp];
++  auto store = [&](int64_t p0) {
++    __syncwarp();
++    float* o = out + r * np + p0;
++    if (p0 + BP <= np && (np & 1) == 0)
++      *reinterpret_cast<float2*>(o + 2 * lane) = *reinterpret_cast<const float2*>(&st[2 * lane]);
++    else
++      for (int e = 0; e < 2; ++e)
++        if (p0 + 2 * lane + e < np) o[2 * lane + e] = st[2 * lane + e];
++    __syncwarp();  // every lane has read st before the next tile writes it
++  };
++  const int64_t first = (int64_t)blockIdx.y * loop;
++  auto any = [&](int j) { return j < loop && first + j < nb && (first + j) * BP < nmax; };
++  if (any(0)) stage(0, first);
++  cp_commit();
++  for (int j = 0; j < loop; ++j) {
++    const int64_t pb = first + j, p0 = pb * BP;
++    if (pb >= nb) break;
++    cp_wait<0>();
++    __syncthreads();  // tile j is in, and every warp is done with tile j - 1
++    if (any(j + 1)) stage((j + 1) & 1, pb + 1);
++    cp_commit();
++    if (!live) continue;
++    if (p0 >= npool) {  // the row sees none of these pools: -inf
++      st[2 * lane] = -INFINITY;
++      st[2 * lane + 1] = -INFINITY;
++      store(p0);
++      continue;
++    }
++    for (int gi = 0; gi < BP / 16; ++gi) {
++      float acc[2][2][4] = {};
++      const __nv_bfloat16* keys = tile[j & 1] + gi * 16 * D;
++#pragma unroll
++      for (int kq = 0; kq < KQ; ++kq) {
++        uint32_t b[4];
++        ldm4(b, keys + tile_at((lane >> 4) * 8 + (lane & 7), kq * 2 + ((lane >> 3) & 1)));
++        for (int nt = 0; nt < 2; ++nt)
++          for (int i = 0; i < 2; ++i) mma16816(acc[i][nt], aq[kq][i], b + 2 * nt);
++      }
++      for (int nt = 0; nt < 2; ++nt)
++        for (int e = 0; e < 2; ++e) {
++          const float v0 = fmaxf(__fmul_rn(acc[0][nt][e], scale), 0.0f),
++                      v1 = fmaxf(__fmul_rn(acc[0][nt][e + 2], scale), 0.0f);
++          const float v2 = fmaxf(__fmul_rn(acc[1][nt][e], scale), 0.0f),
++                      v3 = fmaxf(__fmul_rn(acc[1][nt][e + 2], scale), 0.0f);
++          float s = __fmul_rn(wv[1], v1);
++          s = __fmaf_rn(wv[0], v0, s);
++          s = __fmaf_rn(wv[2], v2, s);
++          s = __fmaf_rn(wv[3], v3, s);
++          for (int o = 16; o >= 4; o >>= 1) s = s + __shfl_xor_sync(0xffffffffu, s, o);
++          const int c = gi * 16 + nt * 8 + q * 2 + e;
++          if (g == 0) st[c] = p0 + c < npool ? s : -INFINITY;
++        }
++    }
++    store(p0);
++  }
++}
+diff --git a/zig/kernels/cuda/glm_index_split.cuh b/zig/kernels/cuda/glm_index_split.cuh
+new file mode 100644
+index 0000000000000000000000000000000000000000..6a49a976ae434cd4e6fbc6d61e4e5ebe5b5b8e45
+--- /dev/null
++++ b/zig/kernels/cuda/glm_index_split.cuh
+@@ -0,0 +1,231 @@
++// A decode window's top-K pools over chunk CTAs (TF_GLM_OVN_DECODE_INDEX); port of prod-src select_split (Apache-2.0).
++#pragma once
++
++#include <cuda_runtime.h>
++#include <stdint.h>
++
++#include "glm_index_pools.cuh"
++
++namespace glm_split {
++
++constexpr int T = 128, WARPS = T / 32, PER = 8, SPAN = T * PER;  // threads, warps, keys a thread a scan, a scan
++constexpr long long PAGE = 512;                                   // rows a KV page holds (tf_glm_dsa_tokens' PAGE)
++
++struct Sh {
++  int hist[256];
++  int wsum[2][WARPS];  // block_scan's warp totals, two slots taken in turn
++  int red[2][WARPS];   // block_sum2's warp totals
++  uint32_t prefix, fixed;
++  int need, digit;
++};
++
++// a and b summed over the block (integers: any order); every thread calls it and gets the totals.
++__device__ __forceinline__ void block_sum2(Sh& sh, int& a, int& b) {
++  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
++  for (int o = 16; o > 0; o >>= 1) {
++    a += __shfl_xor_sync(0xffffffffu, a, o);
++    b += __shfl_xor_sync(0xffffffffu, b, o);
++  }
++  if (lane == 0) {
++    sh.red[0][w] = a;
++    sh.red[1][w] = b;
++  }
++  __syncthreads();
++  a = 0;
++  b = 0;
++  for (int i = 0; i < WARPS; ++i) {
++    a += sh.red[0][i];
++    b += sh.red[1][i];
++  }
++  __syncthreads();  // every thread has read sh.red before a later call writes it
++}
++
++// Exclusive sum of v in thread order and the block's total, via slot `slot` (two slots, used in turn per scan).
++__device__ __forceinline__ int block_scan(Sh& sh, int v, int slot, int& total) {
++  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
++  int inc = v;
++  for (int o = 1; o < 32; o <<= 1) {
++    const int u = __shfl_up_sync(0xffffffffu, inc, o);
++    if (lane >= o) inc += u;
++  }
++  if (lane == 31) sh.wsum[slot][w] = inc;
++  __syncthreads();
++  int before = inc - v;
++  total = 0;
++  for (int i = 0; i < WARPS; ++i) {
++    if (i < w) before += sh.wsum[slot][i];
++    total += sh.wsum[slot][i];
++  }
++  return before;
++}
++
++// sparse._split_digits from the row's totals [4][256]: the digit is the highest bin whose top count reaches need.
++__device__ __forceinline__ void digits(Sh& sh, const int* __restrict__ tot, int steps, int K) {
++  if (threadIdx.x < 32) {
++    const int lane = threadIdx.x;
++    uint32_t prefix = 0, fixed = 0;
++    int need = K, digit = 0;
++    for (int p = 0; p < steps; ++p) {
++      int h[8], own = 0;
++      for (int j = 0; j < 8; ++j) own += h[j] = tot[p * 256 + 255 - 8 * lane - j];
++      int upto = own;
++      for (int o = 1; o < 32; o <<= 1) {
++        const int v = __shfl_up_sync(0xffffffffu, upto, o);
++        if (lane >= o) upto += v;
++      }
++      const unsigned hit = __ballot_sync(0xffffffffu, upto >= need);
++      const int src = hit ? __ffs(hit) - 1 : 31;
++      int dg = 0, left = 0;
++      if (lane == src) {
++        int above = upto - own;
++        for (int j = 0; j < 8; ++j) {
++          if (above + h[j] >= need) {
++            dg = 255 - 8 * lane - j;
++            break;
++          }
++          above += h[j];
++        }
++        left = need - above;
++      }
++      digit = __shfl_sync(0xffffffffu, dg, src);
++      need = __shfl_sync(0xffffffffu, left, src);
++      prefix |= (uint32_t)digit << (24 - 8 * p);
++      fixed |= 0xFFu << (24 - 8 * p);
++    }
++    if (lane == 0) {
++      sh.prefix = prefix;
++      sh.fixed = fixed;
++      sh.need = need;
++      sh.digit = digit;
++    }
++  }
++  __syncthreads();
++}
++
++// The order keys of the chunk's scores i0 .. i0 + PER - 1 (0 past n).
++__device__ __forceinline__ void keys(const float* __restrict__ s, int n, int i0, uint32_t (&u)[PER]) {
++  if (i0 + PER <= n && ((uintptr_t)(s + i0) & 15) == 0) {
++    const float4 a = *reinterpret_cast<const float4*>(s + i0), b = *reinterpret_cast<const float4*>(s + i0 + 4);
++    const float v[PER] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
++#pragma unroll
++    for (int j = 0; j < PER; ++j) u[j] = glm_index::order_key(v[j]);
++  } else {
++#pragma unroll
++    for (int j = 0; j < PER; ++j) u[j] = i0 + j < n ? glm_index::order_key(s[i0 + j]) : 0u;
++  }
++}
++
++// Token t's row: in order (pt null), or row t % PAGE of page pt[t / PAGE] (tf_glm_dsa_tokens' `at`).
++__device__ __forceinline__ int token_at(const int* __restrict__ pt, long long page_rows, long long t) {
++  return static_cast<int>(pt ? pt[t / PAGE] * page_rows + t % PAGE : t);
++}
++
++}  // namespace glm_split
++
++// Program (row, chunk) of radix-select steps 0..3 (GT, HIST, TOT) or step 4 (the chunk's picks as token rows).
++extern "C" __global__ void __launch_bounds__(glm_split::T)
++    tf_glm_index_split(const float* __restrict__ S, int64_t np, const int* __restrict__ pos, int K, int chs, int cp,
++                       int step, int* __restrict__ TOT, int* __restrict__ HIST, int* __restrict__ GT,
++                       int* __restrict__ TOK, int* __restrict__ CNT, const int* __restrict__ pt, int64_t page_rows) {
++  using namespace glm_split;
++  __shared__ Sh sh;
++  const int64_t r = blockIdx.x;
++  const int c = blockIdx.y;
++  const int64_t q = (int64_t)pos[0] + r, npool = (q + 1) / 4;
++  const int64_t NP = min(np, max(npool, (int64_t)K));  // sparse._visible_bound
++  const int64_t i0 = (int64_t)c * chs;
++  if (i0 >= NP) return;  // a chunk past the row's bound: the whole block leaves
++  const int n = (int)min((int64_t)chs, NP - i0);
++  const float* row = S + r * np + i0;
++  int* own = HIST + (r * cp + c) * 256;
++  int* tot = TOT + r * 1024;
++  digits(sh, tot, step, K);
++  const uint32_t prefix = sh.prefix, fixed = sh.fixed;
++  const int need = sh.need, d = sh.digit;
++  if (step < 4) {
++    if (step > 0) {  // the chunk's scores above the prefix first at the byte just fixed (its last histogram)
++      int a = 0, none = 0;
++      for (int b = threadIdx.x; b < 256; b += T) a += b > d ? own[b] : 0;
++      block_sum2(sh, a, none);
++      if (threadIdx.x == 0) GT[r * cp + c] = a + (step > 1 ? GT[r * cp + c] : 0);
++    }
++    for (int b = threadIdx.x; b < 256; b += T) sh.hist[b] = 0;
++    __syncthreads();  // also: every read of `own` above is done before it is rewritten below
++    const int lane = threadIdx.x & 31, shift = 24 - 8 * step;
++    const unsigned below = (1u << lane) - 1;
++    for (int k0 = 0; k0 < n; k0 += SPAN) {
++      const int ib = k0 + (int)threadIdx.x * PER;
++      uint32_t u[PER];
++      keys(row, n, ib, u);
++#pragma unroll
++      for (int j = 0; j < PER; ++j) {
++        const int b = ib + j < n && (u[j] & fixed) == prefix ? (int)((u[j] >> shift) & 0xFFu) : 256;
++        if (__any_sync(0xffffffffu, b < 256)) {
++          const unsigned same = __match_any_sync(0xffffffffu, b);
++          if (b < 256 && (same & below) == 0) atomicAdd(&sh.hist[b], __popc(same));
++        }
++      }
++    }
++    __syncthreads();
++    for (int b = threadIdx.x; b < 256; b += T) {
++      const int v = sh.hist[b];
++      own[b] = v;
++      if (v != 0) atomicAdd(&tot[step * 256 + b], v);
++    }
++    return;
++  }
++  // step 4: the earlier chunks' scores above the K-th best's key (GT and their last histograms) and equal to it
++  int above = 0, equal = 0;
++  for (int i = threadIdx.x; i < c * 256; i += T) {
++    const int b = i & 255, v = HIST[(r * cp + (i >> 8)) * 256 + b];
++    above += b > d ? v : 0;
++    equal += b == d ? v : 0;
++  }
++  for (int i = threadIdx.x; i < c; i += T) above += GT[r * cp + i];
++  block_sum2(sh, above, equal);
++  int* out = TOK + r * (4 * K + 3);
++  int run_take = above + min(equal, need), run_eq = equal;
++  for (int k0 = 0; k0 < n; k0 += SPAN) {  // in pool order: every key above the prefix, and the first `need` equal
++    const int ib = k0 + (int)threadIdx.x * PER;
++    uint32_t u[PER];
++    keys(row, n, ib, u);
++    bool eq[PER], gt[PER];
++    int eqs = 0;
++#pragma unroll
++    for (int j = 0; j < PER; ++j) {
++      const bool in = ib + j < n;
++      eq[j] = in && u[j] == prefix;
++      gt[j] = in && u[j] > prefix;
++      eqs += eq[j];
++    }
++    int all_eq, all_take;
++    int seen = run_eq + block_scan(sh, eqs, 0, all_eq);
++    bool take[PER];
++    int takes = 0;
++#pragma unroll
++    for (int j = 0; j < PER; ++j) {
++      take[j] = gt[j] || (eq[j] && seen < need);
++      seen += eq[j];
++      takes += take[j];
++    }
++    int at = run_take + block_scan(sh, takes, 1, all_take);
++#pragma unroll
++    for (int j = 0; j < PER; ++j)
++      if (take[j]) {
++        const long long p = i0 + ib + j;
++        for (int t = 0; t < 4; ++t) out[4 * at + t] = token_at(pt, page_rows, p * 4 + t);
++        at++;
++      }
++    run_eq += all_eq;
++    run_take += all_take;
++  }
++  if (c == 0 && threadIdx.x < 3) {  // the incomplete pool's visible tokens, as tf_glm_dsa_tokens writes them
++    const long long t = npool * 4 + threadIdx.x;
++    out[4 * K + threadIdx.x] = t <= q ? token_at(pt, page_rows, t) : -1;
++  }
++  if (c == 0 && threadIdx.x == 0) {
++    int tail = 0;
++    for (int t = 0; t < 3; ++t) tail += npool * 4 + t <= q;
++    CNT[r] = npool > K ? 4 * K + tail : 0;
++  }
++}
+diff --git a/zig/kernels/cuda/glm_ops.cu b/zig/kernels/cuda/glm_ops.cu
+index b2fbee106c8564548d9c11bbcf6e84225a9a1fe7..8d2b51a3384dff024cb1031680fa7b31495513a5 100644
+--- a/zig/kernels/cuda/glm_ops.cu
++++ b/zig/kernels/cuda/glm_ops.cu
+@@ -6,9 +6,10 @@
+ constexpr long long PAGE = 512;  // rows a KV page holds
+ 
+ // sparse.select_tokens' assembly, a block a row: K pools' 4 tokens, then the tail; on pages each token's row in them.
+-extern "C" __global__ void tf_glm_dsa_tokens(const long long* __restrict__ pools, const int* __restrict__ pos, int K,
+-                                             int* __restrict__ tokens, int* __restrict__ counts,
+-                                             const int* __restrict__ pt, long long page_rows) {
++template <class Pool>
++__device__ __forceinline__ void dsa_tokens(const Pool* __restrict__ pools, const int* __restrict__ pos, int K,
++                                           int* __restrict__ tokens, int* __restrict__ counts,
++                                           const int* __restrict__ pt, long long page_rows) {
+     const int r = blockIdx.x;
+     const long long q = static_cast<long long>(*pos) + r;
+     const long long npool = (q + 1) / 4;
+@@ -16,7 +17,7 @@ extern "C" __global__ void tf_glm_dsa_tokens(const long long* __restrict__ pools
+     int* row = tokens + static_cast<long long>(r) * width;
+     auto at = [&](long long t) { return static_cast<int>(pt ? pt[t / PAGE] * page_rows + t % PAGE : t); };
+     for (int i = threadIdx.x; i < 4 * K; i += blockDim.x)
+-        row[i] = at(pools[static_cast<long long>(r) * K + i / 4] * 4 + i % 4);
++        row[i] = at(static_cast<long long>(pools[static_cast<long long>(r) * K + i / 4]) * 4 + i % 4);
+     if (threadIdx.x < 3) {
+         const long long t = npool * 4 + threadIdx.x;
+         row[4 * K + threadIdx.x] = t <= q ? at(t) : -1;
+@@ -28,6 +29,25 @@ extern "C" __global__ void tf_glm_dsa_tokens(const long long* __restrict__ pools
+     }
+ }
+ 
++extern "C" __global__ void tf_glm_dsa_tokens(const long long* __restrict__ pools, const int* __restrict__ pos, int K,
++                                             int* __restrict__ tokens, int* __restrict__ counts,
++                                             const int* __restrict__ pt, long long page_rows) {
++    dsa_tokens(pools, pos, K, tokens, counts, pt, page_rows);
++}
++
++// tf_glm_dsa_tokens from int32 pools (TF_GLM_OVN_POOLS32: the prompt indexer split's gathered picks), the same bytes.
++extern "C" __global__ void tf_glm_dsa_tokens_i32(const int* __restrict__ pools, const int* __restrict__ pos, int K,
++                                                 int* __restrict__ tokens, int* __restrict__ counts,
++                                                 const int* __restrict__ pt, long long page_rows) {
++    dsa_tokens(pools, pos, K, tokens, counts, pt, page_rows);
++}
++
++// TF_GLM_OVN_POOLS32: n int64 pool ids (each below 2^31) as int32, for the prompt indexer split's gather.
++extern "C" __global__ void tf_glm_pools_i32(const long long* __restrict__ src, int* __restrict__ dst, long long n) {
++    const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
++    if (i < n) dst[i] = static_cast<int>(src[i]);
++}
++
+ // pos_dev + a (sparse.select_tokens' at = pos_dev + a for a row block past the first): one int32 on the device.
+ extern "C" __global__ void tf_glm_add_i32(const int* __restrict__ x, int a, int* __restrict__ out) {
+     if (threadIdx.x == 0 && blockIdx.x == 0) *out = *x + a;
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index 0f68d55c36b80b49ae6dc9cbf528c60704a3d2dc..dc72cbb6218ff9afe11cebf9aac3cf1b79f64acc 100644
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -44,6 +44,7 @@ pub const Modules = struct {
+     exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
+     mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
+     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
++    pools32: bool = false, // TF_GLM_OVN_POOLS32: a split prompt indexer gathers its picks as int32
+     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
+     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
+     copy_rows: cuda.Function,
+@@ -81,11 +82,13 @@ pub const Modules = struct {
+         m.index = null;
+         errdefer if (m.index) |*x| x.unload();
+         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
++        _ = index_mod.splitRows() catch return error.BadIndexSetting; // TF_GLM_OVN_DECODE_INDEX: a typo is refused
+         if (mode != .off) m.index = index_mod.Kernels.load(d, k.glm_index, mode) catch |err| blk: {
+             std.log.warn("TF_GLM_INDEX_CUDA: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores", .{err});
+             break :blk null;
+         };
+         m.tiled = false;
++        m.pools32 = cuda.ovn.on("POOLS32");
+         m.packs = null; // `m` starts undefined: the field default does not apply
+         return m;
+     }
+@@ -238,7 +241,7 @@ pub const Forward = struct {
+         if (!f.index_split or !r.b.prefill) return null;
+         return switch (f.exchange) {
+             .local => null,
+-            .nccl => |x| .{ .lib = x.lib, .comm = x.comm, .rank = r.w.share.rank, .world = r.w.share.world },
++            .nccl => |x| .{ .lib = x.lib, .comm = x.comm, .rank = r.w.share.rank, .world = r.w.share.world, .int32 = f.m.pools32 },
+         };
+     }
+ 
+diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_index.zig
+index cb2288c0355be28b0205f371e85f01c8b9fc8f71..a39ef927e4ca7246f54e9c72c543cf124141c89d 100644
+--- a/zig/src/families/glm/cuda_index.zig
++++ b/zig/src/families/glm/cuda_index.zig
+@@ -57,29 +57,67 @@ pub fn tile(np: usize) Tile {
+     return .{ .cap = cap_max, .target = 2048 };
+ }
+ 
++/// TF_GLM_OVN_DECODE_INDEX's split select (production's select_split): its block, and the buckets it starts at.
++pub const split_threads = 128;
++pub const split_from = 8192; // sparse.SPLIT_FROM: fewer pools select a row a CTA
++pub const split_floor_rows = 8; // sparse.SEG_FLOOR_ROWS: the knob's 1, windows of more rows take the one-pass floor
++
++/// sparse.split_chunk: the scores a chunk CTA takes (speed only).
++pub fn splitChunk(np: usize) usize {
++    return if (np <= 16384) 2048 else 4096;
++}
++
++/// sparse.split_chunks: chunk CTAs a row of np scores takes, a power of two (the chunk tables' row stride).
++pub fn splitChunks(np: usize) usize {
++    return std.math.ceilPowerOfTwoAssert(usize, @max(1, cdiv(np, splitChunk(np))));
++}
++
++/// sparse.split_scratch's bytes for `rows` rows of np scores: totals [rows][4][256], chunk histograms, chunk counts.
++pub fn splitBytes(rows: usize, np: usize) usize {
++    return rows * (1024 + splitChunks(np) * 257) * 4;
++}
++
++/// TF_GLM_OVN_DECODE_INDEX as the rows a window must stay under to take the split (unset or 0: off; 1: 8).
++pub fn splitRows() !usize {
++    return splitRowsOf(cuda.ovn.int("DECODE_INDEX", 0) catch return error.BadIndexMode);
++}
++
++fn splitRowsOf(v: u64) usize {
++    return if (v == 1) split_floor_rows else @intCast(@min(v, rows_from));
++}
++
+ pub const Kernels = struct {
+     module: cuda.Module,
+     scores_fn: cuda.Function,
+     pools_fn: cuda.Function,
+     /// Whether the pools kernel replaces tf_glm_select_rows (Mode.both, Mode.all).
+     select: bool,
+-    /// Whether decode windows (fewer than rows_from rows) take the kernels too (Mode.all).
++    /// Whether decode windows (fewer than rows_from rows) take the kernels too (Mode.all, TF_GLM_OVN_DECODE_INDEX).
+     decode: bool,
+     /// The pools a decode window needs before it takes them (TF_GLM_INDEX_DECODE_FROM, read at load; 0: any depth).
+     decode_from: usize = 0,
++    /// TF_GLM_OVN_DECODE_INDEX (read at load; 0: off): decode windows of fewer rows select by tf_glm_index_split.
++    split_rows: usize = 0,
++    split_fn: ?cuda.Function = null,
++    /// TF_GLM_OVN_INDEX_SCHED (read at load): prompt-sized launches score with tf_glm_index_scores_sched.
++    sched_fn: ?cuda.Function = null,
+ 
+     /// `image`: cuda.kernels.glm_index.
+     pub fn load(d: *const cuda.Driver, image: []const u8, mode: Mode) !Kernels {
+         if (image.len == 0) return error.NoIndexKernels;
+         var m = try cuda.Module.load(d, image);
+         errdefer m.unload();
++        const sr = try splitRows();
+         return .{
+             .module = m,
+             .scores_fn = try m.function("tf_glm_index_scores"),
+             .pools_fn = try m.function("tf_glm_index_pools"),
+             .select = mode == .both or mode == .all,
+-            .decode = mode == .all,
++            .decode = mode == .all or sr > 0,
+             .decode_from = try decodeFrom(@import("profile").lookup("TF_GLM_INDEX_DECODE_FROM")),
++            .split_rows = sr,
++            .split_fn = if (sr > 0) try m.function("tf_glm_index_split") else null,
++            .sched_fn = if (cuda.ovn.on("INDEX_SCHED")) try m.function("tf_glm_index_scores_sched") else null,
+         };
+     }
+ 
+@@ -92,12 +130,23 @@ pub const Kernels = struct {
+         return (rows >= rows_from or (k.decode and np >= k.decode_from)) and np >= topk and pk % 16 == 0 and ps % 16 == 0;
+     }
+ 
++    /// Whether a decode window of `rows` rows the kernels take selects its pools with them (TF_GLM_OVN_DECODE_INDEX).
++    pub fn decodeSelect(k: *const Kernels, rows: usize) bool {
++        return k.split_rows > 0 and rows < rows_from;
++    }
++
++    /// Whether `rows` rows over `np` pools take tf_glm_index_split (fewer than split_rows rows, np past split_from).
++    pub fn splits(k: *const Kernels, rows: usize, np: usize) bool {
++        return k.split_fn != null and rows < k.split_rows and rows < rows_from and np >= split_from;
++    }
++
+     /// tf_glm_scores' launch for `rows` rows at `at` into out [rows][np]; the first `nb` 64-pool blocks are written.
+     pub fn scores(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64) !void {
+         const g = scoresGrid(rows, nb);
+         var a: cuda.Args = .{};
+         inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(tileLoop(rows))), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
+-        try cuda.launch.launch(k.scores_fn, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
++        const f = if (k.sched_fn) |x| (if (rows >= rows_from) x else k.scores_fn) else k.scores_fn;
++        try cuda.launch.launch(f, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
+     }
+ 
+     /// tf_glm_select_rows' launch: each row's 512 best pools of scores [rows][np] ascending into out [rows][512] int64.
+@@ -107,6 +156,21 @@ pub const Kernels = struct {
+         inline for (.{ scores_ptr, out, @as(i64, @intCast(np)), at, @as(c_int, topk), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), path }) |v| a.add(v);
+         try cuda.launch.launch(k.pools_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = pool_threads } }, s, &a);
+     }
++
++    /// tf_glm_index_split's five steps over scores [rows][np]: tokens and counts; scratch holds splitBytes(rows, np).
++    pub fn selectSplit(k: *const Kernels, s: cuda.Stream, scores_ptr: u64, at: u64, rows: usize, np: usize, scratch: u64, tokens: u64, counts: u64, pt: u64, page_rows: u64) !void {
++        const f = k.split_fn orelse return error.NoIndexKernels;
++        const chs = splitChunk(np);
++        const cp = splitChunks(np);
++        const hist = scratch + rows * 1024 * 4;
++        const gt = hist + rows * cp * 256 * 4;
++        try s.d.check(s.d.api.cuMemsetD32Async(scratch, 0, rows * 1024, s.handle), "cuMemsetD32Async");
++        for (0..5) |step| {
++            var a: cuda.Args = .{};
++            inline for (.{ scores_ptr, @as(i64, @intCast(np)), at, @as(c_int, topk), @as(c_int, @intCast(chs)), @as(c_int, @intCast(cp)), @as(c_int, @intCast(step)), scratch, hist, gt, tokens, counts, pt, @as(i64, @intCast(page_rows)) }) |v| a.add(v);
++            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(cp) }, .block = .{ .x = split_threads } }, s, &a);
++        }
++    }
+ };
+ 
+ /// TF_GLM_INDEX_DECODE_FROM's text by its row, a context position, as the pools a decode window must reach (0: any).
+@@ -163,6 +227,28 @@ test "GLM index: the candidate cap follows the pool count and stays in shared me
+     try std.testing.expect(tile(1 << 30).cap <= cap_max);
+ }
+ 
++test "GLM index: TF_GLM_OVN_DECODE_INDEX's split takes production's chunks and its 1 means 8 rows" {
++    try std.testing.expectEqual(@as(usize, 2048), splitChunk(16384));
++    try std.testing.expectEqual(@as(usize, 4096), splitChunk(16385));
++    try std.testing.expectEqual(@as(usize, 4), splitChunks(8192));
++    try std.testing.expectEqual(@as(usize, 8), splitChunks(16385)); // 5 chunks of 4,096, rounded up
++    try std.testing.expectEqual(@as(usize, 64), splitChunks(262144)); // 1M tokens' pools
++    try std.testing.expectEqual(@as(usize, 3 * (1024 + 64 * 257) * 4), splitBytes(3, 262144));
++    try std.testing.expectEqual(@as(usize, 0), splitRowsOf(0));
++    try std.testing.expectEqual(@as(usize, split_floor_rows), splitRowsOf(1));
++    try std.testing.expectEqual(@as(usize, 4), splitRowsOf(4));
++    try std.testing.expectEqual(@as(usize, rows_from), splitRowsOf(1 << 20));
++    var k: Kernels = undefined;
++    k.split_rows = 8;
++    k.split_fn = null;
++    try std.testing.expect(!k.splits(4, 1 << 16)); // no kernel loaded
++    k.split_fn = @as(cuda.Function, undefined);
++    try std.testing.expect(k.splits(7, split_from));
++    try std.testing.expect(!k.splits(8, split_from));
++    try std.testing.expect(!k.splits(7, split_from - 1));
++    try std.testing.expect(k.decodeSelect(rows_from - 1) and !k.decodeSelect(rows_from));
++}
++
+ test "GLM index: prompt-sized launches on aligned key caches take the kernels, decode windows only with Mode.all" {
+     var k: Kernels = undefined;
+     k.decode = false;
+diff --git a/zig/src/families/glm/cuda_sparse.zig b/zig/src/families/glm/cuda_sparse.zig
+index 29521924a7aa391a2ee255e06bfc58deaf3dd21b..5eb415f71a8dc72af2f019d55b11a35bfa295104 100644
+--- a/zig/src/families/glm/cuda_sparse.zig
++++ b/zig/src/families/glm/cuda_sparse.zig
+@@ -54,11 +54,19 @@ pub fn headScale(heads: usize) f32 {
+     return @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(heads))));
+ }
+ 
+-/// The scratch of one selectTokens: scores fp32 [min(rows, 512)][np], and with np past select_list the list rows.
++/// One selectTokens' scratch: scores [min(rows, 512)][np], then list rows while np passes select_list (ovnListBytes).
+ pub const Scratch = struct { scores: u64, ls: u64, li: u64, pools: u64, at: u64 };
+ 
+-/// A prompt chunk's indexer rows split across the ranks (TF_GLM_INDEX_SPLIT): a block each, the picks all-gathered.
+-pub const Split = struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize };
++/// The bytes the TF_GLM_OVN_ knobs need at Scratch.ls (0 with them off): seg the most selectTokens rows, np_max pools.
++pub fn ovnListBytes(rows: usize, seg: usize, prefill: bool, world: usize, np_max: usize) !usize {
++    const index = @import("cuda_index.zig");
++    const sr = try index.splitRows();
++    const tables = if (sr > 0) index.splitBytes(@min(seg, sr - 1), np_max) else 0;
++    return @max(tables, if (prefill and cuda.ovn.on("POOLS32")) (rows + world) * topk_pools * 4 else 0);
++}
++
++/// A prompt chunk's indexer rows split across the ranks (TF_GLM_INDEX_SPLIT); POOLS32 gathers int32 at Scratch.ls.
++pub const Split = struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, int32: bool = false };
+ 
+ /// Whether rank 0 splits a prompt chunk's indexer rows at `start`: from `from` on (0: never), over two ranks or more.
+ pub fn splitAt(start: usize, from: usize, world: usize) bool {
+@@ -102,11 +110,18 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
+         if (quick) |k| try k.scores(stream, qi + a * heads * d * 2, wts + a * w_stride * 2, w_stride, pk, s.scores, at, n, np_max, nb, scale, headScale(heads), heads, t.pt, t.ps) else try cuda.launch.launch(set.glue.scores, .{ .grid = .{ .x = @intCast(n), .y = @intCast(cdiv(nb, loop)) }, .block = .{ .x = 128 } }, stream, &sa);
+         stamp.end();
+         stamp = prof.span(profile, stream, .index_select);
+-        if (quick) |k| if (k.select) {
+-            try k.pools(stream, s.scores, s.pools + a * topk_pools * 8, at, n, np_max, 0);
+-            stamp.end();
+-            continue;
+-        };
++        if (quick) |k| {
++            if (split == null and k.splits(rows, np_max)) { // TF_GLM_OVN_DECODE_INDEX: the window's tokens directly
++                try k.selectSplit(stream, s.scores, at, n, np_max, s.ls, tokens, counts, t.pt, t.page_rows);
++                stamp.end();
++                return;
++            }
++            if (k.select or k.decodeSelect(rows)) {
++                try k.pools(stream, s.scores, s.pools + a * topk_pools * 8, at, n, np_max, 0);
++                stamp.end();
++                continue;
++            }
++        }
+         var sel: cuda.Args = .{};
+         inline for (.{ s.scores, s.pools + a * topk_pools * 8, @as(i64, @intCast(np_max)), at, @as(c_int, topk_pools) }) |v| sel.add(v);
+         const wide = wideSelect(n, np_max);
+@@ -115,13 +130,24 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
+     }
+     const stamp = prof.span(profile, stream, .index_select);
+     defer stamp.end();
++    var picks = s.pools; // the pools the tokens are read from: int64, or the int32 ones gathered at s.ls
++    var assemble = try ops.function("tf_glm_dsa_tokens");
+     if (split) |x| { // in place: each rank's equal block (the prefill buffers' pools hold world rows more), rank order
+-        const bytes = per * topk_pools * 8;
+-        try x.lib.check(x.lib.api.ncclAllGather(s.pools + x.rank * bytes, s.pools, bytes, .u8, x.comm, stream.handle), "ncclAllGather");
++        if (x.int32) { // this rank's block packed to int32 at its place in s.ls, gathered there: half the bytes
++            const n32 = per * topk_pools;
++            var pa: cuda.Args = .{};
++            inline for (.{ s.pools + x.rank * n32 * 8, s.ls + x.rank * n32 * 4, @as(i64, @intCast(n32)) }) |v| pa.add(v);
++            try cuda.launch.launch(try ops.function("tf_glm_pools_i32"), .{ .grid = .{ .x = @intCast(cdiv(n32, 256)) }, .block = .{ .x = 256 } }, stream, &pa);
++            try x.lib.check(x.lib.api.ncclAllGather(s.ls + x.rank * n32 * 4, s.ls, n32 * 4, .u8, x.comm, stream.handle), "ncclAllGather");
++            picks = s.ls;
++            assemble = try ops.function("tf_glm_dsa_tokens_i32");
++        } else {
++            const bytes = per * topk_pools * 8;
++            try x.lib.check(x.lib.api.ncclAllGather(s.pools + x.rank * bytes, s.pools, bytes, .u8, x.comm, stream.handle), "ncclAllGather");
++        }
+     }
+-    const assemble = try ops.function("tf_glm_dsa_tokens");
+     var args: cuda.Args = .{};
+-    args.add(s.pools);
++    args.add(picks);
+     args.add(pos);
+     args.add(@as(c_int, topk_pools));
+     args.add(tokens);
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index 1c818278edfd4a2e7f78c4f4050d762208dace07..0e142d92b1cf5f1734bcda426c13392548f5f5ce 100644
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -243,7 +243,7 @@ pub const Buffers = struct {
+             partial_rows * HL * 4,
+             4, // dummy
+             @min(seg, sparse.select_rows) * np_max * 4,
+-            rows * sparse.select_list * 4,
++            @max(rows * sparse.select_list * 4, try sparse.ovnListBytes(rows, seg, prefill, s.world, np_max)),
+             rows * sparse.select_list * 4,
+             (if (prefill) rows + s.world else rows) * sparse.topk_pools * 8, // pools; a split's equal blocks end at most world - 1 rows past them
+             4,
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 459e38727b5df7caa064e75301bd81e5d0aaf823..c260903bc69c250fd670aa87f6fc725f68d1a5eb 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -86,6 +86,9 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_DFLASH2_WIN", .scope = .glm, .kind = .u64, .trim = " ", .max = 2048, .forms = "a whole count of context positions from 0 to 2048 (default 2048)" },
+     .{ .name = "TF_GLM_INDEX_DECODE_FROM", .scope = .glm, .kind = .size, .forms = "a whole context position from which decode windows take the index kernels (0: any depth)" },
+     .{ .name = "TF_GLM_OVN_KEPT_WALK", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_DECODE_INDEX", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows below which a decode window scores with shared key tiles and the split select" },
++    .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
+diff --git a/zig/tests/cuda/glm_index_check.zig b/zig/tests/cuda/glm_index_check.zig
+index 9d24f3869948122360ffa03204e3b4305dd4b3d8..44e7e2272923e5e0fcd679f0cf11a4b04b0c0690 100644
+--- a/zig/tests/cuda/glm_index_check.zig
++++ b/zig/tests/cuda/glm_index_check.zig
+@@ -5,10 +5,10 @@ const check = @import("check.zig");
+ const glm = @import("glm_cuda");
+ const sp = glm.sparse;
+ 
+-const d = 128;
+-const page_bytes = 65536; // a page's stride: 128 pools of keys in its first half, as a page that also holds other rows
++pub const d = 128;
++pub const page_bytes = 65536; // a page's stride: 128 pools of keys in its first half, as pages holding other rows
+ 
+-const Case = struct { cap: usize, pos: usize, rows: usize, heads: usize = 32, paged: bool = false, bits: bool = false };
++pub const Case = struct { cap: usize, pos: usize, rows: usize, heads: usize = 32, paged: bool = false, bits: bool = false };
+ const cases = [_]Case{
+     .{ .cap = 4096, .pos = 300, .rows = 512 }, // few visible pools: the rows select over their first 512
+     .{ .cap = 1024, .pos = 4 * 1024 - 520, .rows = 512 },
+@@ -31,15 +31,15 @@ const cases = [_]Case{
+     .{ .cap = 262144, .pos = 4 * 262144 - 20, .rows = 16 }, // 1M tokens
+ };
+ 
+-fn bf16(x: f32) u16 {
++pub fn bf16(x: f32) u16 {
+     const b: u32 = @bitCast(x);
+     return @intCast((b + 0x7FFF + ((b >> 16) & 1)) >> 16);
+ }
+ 
+-const Bufs = std.ArrayList(cuda.DeviceBuffer);
++pub const Bufs = std.ArrayList(cuda.DeviceBuffer);
+ 
+ /// n zeroed device bytes, freed with the case.
+-fn zeros(gpu: check.Gpu, bufs: *Bufs, n: usize) !u64 {
++pub fn zeros(gpu: check.Gpu, bufs: *Bufs, n: usize) !u64 {
+     var b = try cuda.DeviceBuffer.alloc(gpu.d, n);
+     errdefer b.free();
+     try b.fill8(0, null);
+@@ -48,7 +48,7 @@ fn zeros(gpu: check.Gpu, bufs: *Bufs, n: usize) !u64 {
+     return b.ptr;
+ }
+ 
+-fn fromHost(gpu: check.Gpu, bufs: *Bufs, bytes: []const u8) !u64 {
++pub fn fromHost(gpu: check.Gpu, bufs: *Bufs, bytes: []const u8) !u64 {
+     var b = try cuda.DeviceBuffer.fromHost(gpu.d, bytes);
+     errdefer b.free();
+     try bufs.append(gpu.gpa, b);
+@@ -212,7 +212,7 @@ fn blocks(gpu: check.Gpu, bufs: *Bufs, set: glm.glue.Set, idx: *const glm.index.
+ }
+ 
+ /// Two device buffers of n bytes compared; 1 if any 4-byte word differs.
+-fn same(gpu: check.Gpu, what: []const u8, a: u64, b: u64, n: usize, np: usize, c: Case) !usize {
++pub fn same(gpu: check.Gpu, what: []const u8, a: u64, b: u64, n: usize, np: usize, c: Case) !usize {
+     const ha = try gpu.gpa.alloc(u8, n);
+     defer gpu.gpa.free(ha);
+     const hb = try gpu.gpa.alloc(u8, n);
+diff --git a/zig/tests/cuda/glm_index_ovn_check.zig b/zig/tests/cuda/glm_index_ovn_check.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b17d3e9b430177fb2ade70a4ae4bb40596f3d35
+--- /dev/null
++++ b/zig/tests/cuda/glm_index_ovn_check.zig
+@@ -0,0 +1,215 @@
++//! glm-index-ovn-check (GPU): TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte equal.
++const std = @import("std");
++const cuda = @import("cuda");
++const check = @import("check.zig");
++const glm = @import("glm_cuda");
++const base = @import("glm_index_check.zig");
++const sp = glm.sparse;
++
++const d = base.d;
++const Case = base.Case;
++const Bufs = base.Bufs;
++
++/// Decode windows the split takes: fewer than 8 rows over 8,192 pools or more.
++const decode = [_]Case{
++    .{ .cap = 8192, .pos = 4 * 8192 - 600, .rows = 5 },
++    .{ .cap = 16384, .pos = 4 * 16384 - 40, .rows = 1 },
++    .{ .cap = 65536, .pos = 4 * 65536 - 9, .rows = 3, .paged = true },
++    .{ .cap = 147456, .pos = 4 * 147456 - 9, .rows = 7, .bits = true }, // a cap off the power of two
++    .{ .cap = 262144, .pos = 4 * 149000, .rows = 4 }, // 596k tokens, the agents' depth
++    .{ .cap = 262144, .pos = 4 * 262144 - 20, .rows = 2, .paged = true }, // 1M tokens
++};
++/// Prompt blocks for the scheduled scorer: a tail block under 8 rows' multiple, pages, fewer heads.
++const prompt = [_]Case{
++    .{ .cap = 16384, .pos = 4 * 16384 - 1130, .rows = 1100 },
++    .{ .cap = 65536, .pos = 4 * 65536 - 520, .rows = 512, .paged = true },
++    .{ .cap = 147456, .pos = 4 * 147456 - 520, .rows = 512, .heads = 20 },
++};
++
++/// A case's device inputs: index queries, head weights, pooled keys (on shuffled pages if c.paged) and the position.
++const Inputs = struct { q: u64, w: u64, k: u64, t: glm.latent.Table, pos: u64 };
++
++fn inputs(gpu: check.Gpu, bufs: *Bufs, rand: std.Random, c: Case, np: usize) !Inputs {
++    const gpa = gpu.gpa;
++    const qi = try gpa.alloc(u16, c.rows * c.heads * d);
++    defer gpa.free(qi);
++    for (qi) |*x| x.* = base.bf16(rand.floatNorm(f32));
++    const wts = try gpa.alloc(u16, c.rows * c.heads);
++    defer gpa.free(wts);
++    for (wts) |*x| x.* = base.bf16(rand.floatNorm(f32));
++    const pk = try gpa.alloc(u16, c.cap * d);
++    defer gpa.free(pk);
++    for (pk) |*x| x.* = base.bf16(rand.floatNorm(f32) * 2);
++    var in: Inputs = .{ .q = try base.fromHost(gpu, bufs, std.mem.sliceAsBytes(qi)), .w = try base.fromHost(gpu, bufs, std.mem.sliceAsBytes(wts)), .k = 0, .t = .{}, .pos = 0 };
++    if (c.paged) { // as glm-index-check lays them out: the table long enough for the token lists' rows too
++        const page_rows = base.page_bytes / (512 * 2);
++        const entries = @max((c.cap + 127) / 128, (4 * np + page_rows - 1) / page_rows + 8);
++        const ids = try gpa.alloc(i32, entries);
++        defer gpa.free(ids);
++        for (ids, 0..) |*v, i| v.* = @intCast(i);
++        rand.shuffle(i32, ids);
++        const arena = try gpa.alloc(u8, entries * base.page_bytes);
++        defer gpa.free(arena);
++        @memset(arena, 0);
++        for (0..c.cap) |p| @memcpy(arena[@as(usize, @intCast(ids[p / 128])) * base.page_bytes + (p % 128) * d * 2 ..][0 .. d * 2], std.mem.sliceAsBytes(pk[p * d ..][0..d]));
++        in.k = try base.fromHost(gpu, bufs, arena);
++        in.t = .{ .pt = try base.fromHost(gpu, bufs, std.mem.sliceAsBytes(ids)), .ps = base.page_bytes, .page_rows = page_rows };
++    } else in.k = try base.fromHost(gpu, bufs, std.mem.sliceAsBytes(pk));
++    const p0: i32 = @intCast(c.pos);
++    in.pos = try base.fromHost(gpu, bufs, std.mem.asBytes(&p0));
++    return in;
++}
++
++fn scratch(gpu: check.Gpu, bufs: *Bufs, rows: usize, np: usize) !sp.Scratch {
++    const ls = @max(rows * sp.select_list * 4, glm.index.splitBytes(rows, np));
++    return .{ .scores = try base.zeros(gpu, bufs, @min(rows, sp.select_rows) * np * 4), .ls = try base.zeros(gpu, bufs, ls), .li = try base.zeros(gpu, bufs, 4), .pools = try base.zeros(gpu, bufs, rows * sp.topk_pools * 8), .at = try base.zeros(gpu, bufs, 4) };
++}
++
++pub fn run(gpu: check.Gpu) !void {
++    var s = try cuda.Stream.init(gpu.d, true);
++    defer s.deinit();
++    var glue_mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer glue_mod.unload();
++    var ops = try cuda.Module.load(gpu.d, cuda.kernels.glm_ops);
++    defer ops.unload();
++    const ks = try glm.glue.Kernels.load(glue_mod);
++    var idx = try glm.index.Kernels.load(gpu.d, cuda.kernels.glm_index, .all); // the knobs unset: today's kernels
++    defer idx.unload();
++    var on = idx; // the knobs' kernels, set as their loads set them
++    on.split_rows = glm.index.split_floor_rows;
++    on.split_fn = try idx.module.function("tf_glm_index_split");
++    on.sched_fn = try idx.module.function("tf_glm_index_scores_sched");
++    var rng = std.Random.DefaultPrng.init(0x0b5);
++    const rand = rng.random();
++    var fails: usize = 0;
++    for (decode) |c| fails += try decodeCase(gpu, s, rand, ops, &ks, &on, c);
++    for (prompt) |c| fails += try promptCase(gpu, s, rand, &idx, &on, c);
++    fails += try pools32(gpu, s, rand, ops, false);
++    fails += try pools32(gpu, s, rand, ops, true);
++    try check.expect(fails == 0, "glm-index-ovn-check: {d} buffers differ", .{fails});
++    check.pass("glm-index-ovn-check: split select, scheduled scores and int32 pools byte-equal at {d} cases", .{decode.len + prompt.len + 2});
++}
++
++/// selectTokens today against the split (tokens and counts), then tied and random scores through both selects.
++fn decodeCase(gpu: check.Gpu, s: cuda.Stream, rand: std.Random, ops: cuda.Module, ks: *const glm.glue.Kernels, on: *const glm.index.Kernels, c: Case) !usize {
++    var bufs: Bufs = .empty;
++    defer {
++        for (bufs.items) |*b| b.free();
++        bufs.deinit(gpu.gpa);
++    }
++    const np = sp.poolBucket(c.pos, c.rows, c.cap);
++    try check.expect(on.splits(c.rows, np), "glm-index-ovn-check: {d} rows over {d} pools must take the split", .{ c.rows, np });
++    const in = try inputs(gpu, &bufs, rand, c, np);
++    const sa = try scratch(gpu, &bufs, c.rows, np);
++    const sb = try scratch(gpu, &bufs, c.rows, np);
++    const tok = c.rows * sp.width * 4;
++    const ta = try base.zeros(gpu, &bufs, tok);
++    const tb = try base.zeros(gpu, &bufs, tok);
++    const ca = try base.zeros(gpu, &bufs, c.rows * 4);
++    const cb = try base.zeros(gpu, &bufs, c.rows * 4);
++    const old: glm.glue.Set = .{ .glue = ks };
++    const new: glm.glue.Set = .{ .glue = ks, .index = on };
++    try sp.selectTokens(old, ops, s, in.q, in.w, c.heads, in.k, in.t, in.pos, c.pos, c.rows, c.heads, d, c.cap, sa, ta, ca);
++    try sp.selectTokens(new, ops, s, in.q, in.w, c.heads, in.k, in.t, in.pos, c.pos, c.rows, c.heads, d, c.cap, sb, tb, cb);
++    try s.synchronize();
++    var fails = try base.same(gpu, "split tokens", ta, tb, tok, np, c);
++    fails += try base.same(gpu, "split counts", ca, cb, c.rows * 4, np, c);
++    const host = try gpu.gpa.alloc(f32, c.rows * np);
++    defer gpu.gpa.free(host);
++    const special = [_]f32{ std.math.nan(f32), -std.math.nan(f32), 0.0, -0.0, std.math.inf(f32), -std.math.inf(f32) };
++    const assemble = try ops.function("tf_glm_dsa_tokens");
++    for (0..2) |round| {
++        for (0..c.rows) |r| {
++            const vis = (c.pos + r + 1) / 4;
++            for (host[r * np ..][0..np], 0..) |*x, i| {
++                x.* = if (i >= vis) -std.math.inf(f32) else if (round == 0) @as(f32, @floatFromInt(rand.uintLessThan(u32, 16))) * 0.25 else rand.floatNorm(f32);
++                if (c.bits and i < vis and rand.uintLessThan(u32, 8) == 0) x.* = special[rand.uintLessThan(usize, special.len)];
++            }
++        }
++        try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = sa.scores, .len = c.rows * np * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(host));
++        var sel: cuda.Args = .{};
++        inline for (.{ sa.scores, sa.pools, @as(i64, @intCast(np)), in.pos, @as(c_int, sp.topk_pools) }) |v| sel.add(v);
++        try cuda.launch.launch(ks.select_rows, .{ .grid = .{ .x = @intCast(c.rows) }, .block = .{ .x = 128 } }, s, &sel);
++        var tk: cuda.Args = .{};
++        inline for (.{ sa.pools, in.pos, @as(c_int, sp.topk_pools), ta, ca, in.t.pt, @as(i64, @intCast(in.t.page_rows)) }) |v| tk.add(v);
++        try cuda.launch.launch(assemble, .{ .grid = .{ .x = @intCast(c.rows) }, .block = .{ .x = 256 } }, s, &tk);
++        try on.selectSplit(s, sa.scores, in.pos, c.rows, np, sb.ls, tb, cb, in.t.pt, in.t.page_rows);
++        try s.synchronize();
++        fails += try base.same(gpu, if (round == 0) "tied split tokens" else "random split tokens", ta, tb, tok, np, c);
++        fails += try base.same(gpu, "split counts", ca, cb, c.rows * 4, np, c);
++    }
++    return fails;
++}
++
++/// Every 512-row block's scores from tf_glm_index_scores and tf_glm_index_scores_sched.
++fn promptCase(gpu: check.Gpu, s: cuda.Stream, rand: std.Random, idx: *const glm.index.Kernels, on: *const glm.index.Kernels, c: Case) !usize {
++    var bufs: Bufs = .empty;
++    defer {
++        for (bufs.items) |*b| b.free();
++        bufs.deinit(gpu.gpa);
++    }
++    const np = sp.poolBucket(c.pos, c.rows, c.cap);
++    const in = try inputs(gpu, &bufs, rand, c, np);
++    const scale: f32 = @floatCast(std.math.pow(f64, d, -0.5));
++    const first: usize = @min(c.rows, sp.select_rows);
++    const out_a = try base.zeros(gpu, &bufs, first * np * 4);
++    const out_b = try base.zeros(gpu, &bufs, first * np * 4);
++    var fails: usize = 0;
++    var a: usize = 0;
++    while (a < c.rows) : (a += sp.select_rows) {
++        const n: usize = @min(sp.select_rows, c.rows - a);
++        if (n < glm.index.rows_from) continue; // the scheduled scorer takes prompt-sized launches only
++        const at_v: i32 = @intCast(c.pos + a);
++        const at = try base.fromHost(gpu, &bufs, std.mem.asBytes(&at_v));
++        const nb = (sp.scoreColumns(c.pos + a, n, np) + 63) / 64;
++        const q = in.q + a * c.heads * d * 2;
++        const w = in.w + a * c.heads * 2;
++        try idx.scores(s, q, w, c.heads, in.k, out_a, at, n, np, nb, scale, sp.headScale(c.heads), c.heads, in.t.pt, in.t.ps);
++        try on.scores(s, q, w, c.heads, in.k, out_b, at, n, np, nb, scale, sp.headScale(c.heads), c.heads, in.t.pt, in.t.ps);
++        try s.synchronize();
++        fails += try base.same(gpu, "scheduled scores", out_a, out_b, n * np * 4, np, c);
++    }
++    return fails;
++}
++
++/// tf_glm_dsa_tokens on int64 pools against tf_glm_pools_i32 then tf_glm_dsa_tokens_i32 (ids up to 1M tokens' pools).
++fn pools32(gpu: check.Gpu, s: cuda.Stream, rand: std.Random, ops: cuda.Module, paged: bool) !usize {
++    var bufs: Bufs = .empty;
++    defer {
++        for (bufs.items) |*b| b.free();
++        bufs.deinit(gpu.gpa);
++    }
++    const c: Case = .{ .cap = 262144, .pos = 4 * 262144 - 400, .rows = 300, .paged = paged };
++    const k = sp.topk_pools;
++    const ids = try gpu.gpa.alloc(i64, c.rows * k);
++    defer gpu.gpa.free(ids);
++    for (ids) |*v| v.* = rand.uintLessThan(u32, @intCast(c.cap));
++    const page_rows = base.page_bytes / (512 * 2);
++    var t: glm.latent.Table = .{};
++    if (paged) {
++        const table = try gpu.gpa.alloc(i32, (4 * c.cap + 511) / 512 + 8);
++        defer gpu.gpa.free(table);
++        for (table, 0..) |*v, i| v.* = @intCast(i);
++        rand.shuffle(i32, table);
++        t = .{ .pt = try base.fromHost(gpu, &bufs, std.mem.sliceAsBytes(table)), .ps = base.page_bytes, .page_rows = page_rows };
++    }
++    const p0: i32 = @intCast(c.pos);
++    const pos = try base.fromHost(gpu, &bufs, std.mem.asBytes(&p0));
++    const wide = try base.fromHost(gpu, &bufs, std.mem.sliceAsBytes(ids));
++    const narrow = try base.zeros(gpu, &bufs, c.rows * k * 4);
++    const tok = c.rows * sp.width * 4;
++    const ta = try base.zeros(gpu, &bufs, tok);
++    const tb = try base.zeros(gpu, &bufs, tok);
++    const ca = try base.zeros(gpu, &bufs, c.rows * 4);
++    const cb = try base.zeros(gpu, &bufs, c.rows * 4);
++    var pa: cuda.Args = .{};
++    inline for (.{ wide, narrow, @as(i64, @intCast(c.rows * k)) }) |v| pa.add(v);
++    try cuda.launch.launch(try ops.function("tf_glm_pools_i32"), .{ .grid = .{ .x = @intCast((c.rows * k + 255) / 256) }, .block = .{ .x = 256 } }, s, &pa);
++    inline for (.{ .{ "tf_glm_dsa_tokens", wide, ta, ca }, .{ "tf_glm_dsa_tokens_i32", narrow, tb, cb } }) |x| {
++        var args: cuda.Args = .{};
++        inline for (.{ x[1], pos, @as(c_int, k), x[2], x[3], t.pt, @as(i64, @intCast(t.page_rows)) }) |v| args.add(v);
++        try cuda.launch.launch(try ops.function(x[0]), .{ .grid = .{ .x = @intCast(c.rows) }, .block = .{ .x = 256 } }, s, &args);
++    }
++    try s.synchronize();
++    return try base.same(gpu, "int32 pools' tokens", ta, tb, tok, sp.width, c) + try base.same(gpu, "int32 pools' counts", ca, cb, c.rows * 4, 1, c);
++}
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+index a7053c8c822ec2aa6f0b7bc774bf2f7c7c704cdc..dd525e7df7b1a119ab42abe853c8aba12bf8baf2 100644
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -2,10 +2,12 @@
+ const std = @import("std");
+ const check = @import("check.zig");
+ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
++const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
+ 
+ /// The lines these commands add to `main.zig`'s usage, after its own.
+ pub const usage =
+     \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
++    \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\
+ ;
+ 
+@@ -14,6 +16,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+     _ = rest;
+     if (std.mem.eql(u8, cmd, "glm-draft-onepass")) {
+         try glm_draft_onepass.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-index-ovn-check")) {
++        try glm_index_ovn_check.run(gpu);
+     } else return false;
+     return true;
+ }

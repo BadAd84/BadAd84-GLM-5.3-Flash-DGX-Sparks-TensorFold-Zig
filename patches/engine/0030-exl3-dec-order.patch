@@ -1,0 +1,244 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] exl3: TF_EXL3_DEC_ORDER launches each k slice's blocks before the items
+
+Our fork `ai-engine`, ref `fork-ssh/ovn-up`, commit 46b46550f "exl3:
+TF_EXL3_DEC_ORDER launches each k slice's blocks before the items". Hand
+ported: the fork's two hunks do not apply, because the pin has moved
+GroupedArgs and grouped_body out of exl3_experts.cu into exl3_grouped.cuh and
+our entry points carry a fourth template argument.
+
+The grouped decode kernel's block order decides what the expert stream has in
+flight. With the items fastest, which is today, one item's 128-column blocks
+are spread across the round. With TF_EXL3_DEC_ORDER=1 each k slice's blocks are
+issued together, so consecutive blocks read trellis regions that were fetched
+together. The fork measured plus 1 to 3 per cent decode on the MiaAI recipe
+(its PR 95); nothing here measures it.
+
+Unset is byte-for-byte today's launch, by construction. ord defaults to 0 at
+every producer: decOrder returns 0 unless the variable is exactly "1", the
+entry points then take blockIdx.x as u and blockIdx.y as nblock exactly as
+before, and the grid keeps x = maxu, y = n / 128. With ord 1 the two axes swap
+in the same pair of places, so each block still gets the same (u, nblock) pair
+it would have got, only from a different blockIdx. The tiles, lanes and mma
+order inside grouped_body do not see ord at all.
+
+It completes 0019-kda-chunked, the patch that owns our exl3_experts.cu and
+exl3_grouped.cuh lines.
+
+Differences from the fork's lines, all forced by our file shapes:
+
+- GroupedArgs lives in zig/kernels/cuda/exl3_grouped.cuh here, so `ord` is
+  appended to the int list there, not in exl3_experts.cu. The struct's size
+  does not change: ten pointers and eleven ints pad to 128 bytes already, and
+  twelve ints is still 128.
+- our three entry points pass GROUPED_LOAD as a fourth template argument (the
+  sm_120 load-ahead, patch 0019), which the fork's lines do not have.
+- the fork also edits tf_exl3_grouped_p0, p1 and p2, the TF_EXL3_PIPE walkers.
+  This tree has no such kernels and no pipe() on the host, so those three lines
+  are left out. That is why our launch call keeps `e.grouped[...]` where the
+  fork's reads `if (pipe()) e.grouped_pipe[...] else e.grouped[...]`.
+- decOrder() caches its read in a file-scope optional instead of calling
+  getenv every time. The fork's code calls decOrder() twice a launch and the
+  two grouped launches run once a layer a step, so on a 92-layer TP=3 decode
+  round that is several hundred environment scans a step on the default path,
+  which would show up in the very A/B the knob exists for. The cached value is
+  the same value; the fork uses the same idiom for TF_EXL3_SPLITK.
+  Its doc comment is one line, which this repo's lean gate requires.
+- zig/tests/cuda/contract_exl3_grouped.zig builds a GroupedArgs by hand for the
+  contract's control kernels (contract_controls.cu's five tf_ctl_exl3_grouped_*
+  entries take the same struct). Its comment says it is in launch.zig add
+  order, so it gains the ord argument, 0, which is what those kernels want:
+  they pass blockIdx.x and y straight through and the harness builds its own
+  grid. The fork left its copy of this file one field short.
+
+Not compiled locally: zig/kernels/cuda/exl3_grouped.cuh and
+zig/kernels/cuda/exl3_experts.cu are CUDA, and zig/tests/cuda/
+contract_exl3_grouped.zig belongs to the GPU test binary. The host gates build
+none of the three. zig/src/cuda/exl3_experts.zig is host code and is built.
+
+Where this meets the pending item-plan patch (work/p41/0042-exl3-decode-items.
+patch), measured rather than guessed. `git apply --check` of that patch takes
+the stack without this lane cleanly, and on top of this lane it reports:
+
+  zig/src/cuda/exl3_experts.zig      hunks 3 to 7 at offset 11 (decOrder), then
+                                     "patch failed at 204", the gate and up
+                                     launch; the down launch behind it is never
+                                     reached
+  zig/src/families/glm/cuda_exl3.zig "patch failed at 204": its last hunk
+                                     appends the items test after the file's
+                                     last test, and patch 02 of this lane added
+                                     a test there
+  zig/tests/cuda/main.zig            hunks at offset 1 and 2, no conflict
+  zig/tests/cuda/glm_exl3_items_tests.zig  new file, no conflict
+
+So two hunks, both mechanical. The launch pair needs one grid expression a
+launch that takes the item plan's nx or this patch's swap, something like
+`if (ord == 1) w / 128 else nx`, with the ord add after skip_a; the test is a
+plain append past both. Nothing else of the two overlaps: the item plan's other
+hunks are in scratch sizing and the epilogue, this one is in the entry points,
+the struct and decOrder.
+
+Compiled here: exl3_experts and contract_controls build clean on nvcc 13.3 at
+sm_121 both before and after this patch, with the build's own flags, and
+zig build compile-cuda-tests (rc=0) covers the contract harness change.
+
+What a GPU run has to show. First that unset changes nothing: a reply digest
+equal to the build before this patch. The construction argument above predicts
+it (exl3_grouped.cuh reads no blockIdx or gridDim of its own, so the swap is a
+relabelling) and the compile says only that it builds, not what it computes.
+Then the knob itself, TF_EXL3_DEC_ORDER=1: the same reply digest again (the
+values cannot change, only the block order), and the routed stage's time
+against its baseline. The fork gates it against 13.94 ms for that stage. Both
+grouped launches take the knob, so a run that only measures the gate and up
+projection misses half of it.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- lean_check.py's DIRECT_GETENV: decOrder() read std.c.getenv("TF_EXL3_DEC_ORDER"); it is now a .cuda flag row read once through environment.value (space-trimmed 0 or 1, refused text read as off, as before any text but 1 was).
+- exl3_grouped.cuh and exl3_experts.cu: edc16dfe9 added one line beside the entry points; the ord argument applies as the fold has it.
+- platform/environment_test.zig's `valid` table gains TF_EXL3_DEC_ORDER's two forms: its coverage test requires every row outside .glm and .dsv41 there (the first gate run of the full series failed that test without them).
+- source: work/fold/0033-exl3-dec-order.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index f95a03189a116c31800ba7dd4886d86144f9efd5..b21a273b78acfba062eee6b3ab0ecc2b9957119e 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -28,6 +28,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
+ | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
+ | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
++| `TF_EXL3_DEC_ORDER` | Exactly `0` or `1`; 1 launches the EXL3 grouped decode's blocks k slice by k slice (the same values, a different order); default off |
+ | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
+ | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
+ | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
+diff --git a/zig/kernels/cuda/exl3_experts.cu b/zig/kernels/cuda/exl3_experts.cu
+index 3dce3afde3c2dab5afffe962e807aa28a5135167..fe4d14b918783afbf00f2172ef92bceb72f04eaa 100644
+--- a/zig/kernels/cuda/exl3_experts.cu
++++ b/zig/kernels/cuda/exl3_experts.cu
+@@ -17,16 +17,17 @@ constexpr int GROUPED_LOAD = tf_exl3::AHEAD;
+ constexpr int GROUPED_LOAD = tf_exl3::PLAIN;
+ #endif
+ 
++// TF_EXL3_DEC_ORDER: ord 1 swaps the item and column axes, so each k slice's blocks are issued before the items.
+ extern "C" __global__ void tf_exl3_grouped_0(tf_exl3::GroupedArgs a) {  // 3inst, any width
+-    tf_exl3::grouped_body<0, 8, 4, GROUPED_LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);
++    tf_exl3::grouped_body<0, 8, 4, GROUPED_LOAD>(a, a.ord ? blockIdx.y : blockIdx.x, a.ord ? blockIdx.x : blockIdx.y, blockIdx.z);
+ }
+ 
+ extern "C" __global__ void tf_exl3_grouped_1(tf_exl3::GroupedArgs a) {  // mcg, any width
+-    tf_exl3::grouped_body<1, 8, 4, GROUPED_LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);
++    tf_exl3::grouped_body<1, 8, 4, GROUPED_LOAD>(a, a.ord ? blockIdx.y : blockIdx.x, a.ord ? blockIdx.x : blockIdx.y, blockIdx.z);
+ }
+ 
+ extern "C" __global__ void tf_exl3_grouped_2(tf_exl3::GroupedArgs a) {  // mul1, any width (RED-SNOW's experts)
+-    tf_exl3::grouped_body<2, 8, 4, GROUPED_LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);
++    tf_exl3::grouped_body<2, 8, 4, GROUPED_LOAD>(a, a.ord ? blockIdx.y : blockIdx.x, a.ord ? blockIdx.x : blockIdx.y, blockIdx.z);
+ }
+ 
+ namespace tf_exl3 {
+diff --git a/zig/kernels/cuda/exl3_grouped.cuh b/zig/kernels/cuda/exl3_grouped.cuh
+index 930700d964cf526217803619983a7a86136550ed..a4059131e1226b7775c104e909df912f954ad364 100644
+--- a/zig/kernels/cuda/exl3_grouped.cuh
++++ b/zig/kernels/cuda/exl3_grouped.cuh
+@@ -20,7 +20,7 @@ struct GroupedArgs {
+     const int* ucount; // int32 [1]
+     const int* members; // int32 [nexp_max, maxm], row * 32 + slot, -1 after the last member
+     float* z; // fp32 partials, [(mat * sk + split) * P + p] * N + col
+-    int k, n, p, sk, maxm, slots, nexp_max, mats, ns, standard, skip;
++    int k, n, p, sk, maxm, slots, nexp_max, mats, ns, standard, skip, ord;
+ };
+ 
+ // How a warp reads its k tiles: main's loop, or a tile ahead (sm_120 up); SKIP and STALE are the contract's faults.
+diff --git a/zig/src/cuda/exl3_experts.zig b/zig/src/cuda/exl3_experts.zig
+index b907b3a3044a400ff9447895e0dc5efb796bcff3..95bb251bb5ab9a8b4056c619ac7aeffe93ef351a 100644
+--- a/zig/src/cuda/exl3_experts.zig
++++ b/zig/src/cuda/exl3_experts.zig
+@@ -57,6 +57,17 @@ pub fn plan(k: usize, n: usize, gateup: bool) !u32 {
+     return error.TileNotBuilt;
+ }
+ 
++/// TF_EXL3_DEC_ORDER: 1 issues each k slice's blocks before the items; the same values, a different order. Read once.
++var dec_order_env: ?u32 = null;
++fn decOrder() u32 {
++    if (dec_order_env == null) {
++        const raw = @import("profile").lookup("TF_EXL3_DEC_ORDER");
++        const on = @import("sys").environment.value(bool, "TF_EXL3_DEC_ORDER", raw, false) catch false;
++        dec_order_env = @intFromBool(on);
++    }
++    return dec_order_env.?;
++}
++
+ /// One call's buffers (exl3/experts.py Scratch), laid out in scratch()'s order, each 256-byte aligned.
+ pub const Scratch = struct {
+     xg: u64, // fp16 [P, D], the rotated gate inputs
+@@ -268,7 +279,11 @@ pub const Experts = struct {
+         g.add(i32d(l.gu_stride));
+         g.add(std_a);
+         g.add(skip_a);
+-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(nx), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
++        const ord_g: u32 = decOrder();
++        g.add(i32d(ord_g));
++        const gx: u32 = @intCast(if (ord_g == 1) w / 128 else nx);
++        const gy: u32 = @intCast(if (ord_g == 1) nx else w / 128);
++        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = gx, .y = gy, .z = @intCast(2 * g_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
+ 
+         var ep: launch_.Args = .{};
+         ep.add(sc.z);
+@@ -307,7 +322,11 @@ pub const Experts = struct {
+         dn.add(@as(i32, 0));
+         dn.add(std_a);
+         dn.add(skip_a);
+-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(nx), .y = @intCast(d / 128), .z = @intCast(d_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
++        const ord_d: u32 = decOrder();
++        dn.add(i32d(ord_d));
++        const dx: u32 = @intCast(if (ord_d == 1) d / 128 else nx);
++        const dy: u32 = @intCast(if (ord_d == 1) nx else d / 128);
++        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = dx, .y = dy, .z = @intCast(d_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
+ 
+         var cb: launch_.Args = .{};
+         cb.add(sc.z);
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 5bb0f54c5a7abb858620c3dac5d3fcd8a272b778..7d7121dd9256bc084f7a8424b27818724cf3a7f8 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -48,6 +48,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
+     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
++    .{ .name = "TF_EXL3_DEC_ORDER", .scope = .cuda, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
+     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
+     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
+diff --git a/zig/src/platform/environment_test.zig b/zig/src/platform/environment_test.zig
+index 7263482148137260e97e27ec5d85e79d4586936e..c079c0dcbef7d7d83bad5a5070f7bfae92a6be94 100644
+--- a/zig/src/platform/environment_test.zig
++++ b/zig/src/platform/environment_test.zig
+@@ -64,6 +64,8 @@ const valid = [_]Case{
+     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
+     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
+     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
++    .{ .name = "TF_EXL3_DEC_ORDER", .raw = "0", .n = 0 },
++    .{ .name = "TF_EXL3_DEC_ORDER", .raw = " 1", .n = 1 },
+     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
+     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
+     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
+diff --git a/zig/tests/cuda/contract_exl3_grouped.zig b/zig/tests/cuda/contract_exl3_grouped.zig
+index d1dd8a49fcd842f6867c04c6d0cb17943cc376f7..0f250e2ebfb2cddb4f2295ac867eefaa5dffeb2e 100644
+--- a/zig/tests/cuda/contract_exl3_grouped.zig
++++ b/zig/tests/cuda/contract_exl3_grouped.zig
+@@ -75,7 +75,7 @@ pub const Grouped = struct {
+         return true;
+     }
+ 
+-    /// GroupedArgs in launch.zig add order: one matrix (x0 = x1), standard 0, no skip.
++    /// GroupedArgs in launch.zig add order: one matrix (x0 = x1), standard 0, no skip, ord 0 (the control grid).
+     fn launch(self: *Grouped, f: cuda.Function, z: u64) !void {
+         const sh = self.fix.?.shape;
+         const sk = self.fix.?.sk;
+@@ -83,6 +83,7 @@ pub const Grouped = struct {
+         for ([_]u64{ self.in[0], self.in[0], self.in[1], self.in[1], self.in[2], self.in[2], self.in[3], self.in[4], self.in[5], z }) |p| a.add(p);
+         for ([_]usize{ sh.k, sh.n, sh.rows * ref.slots, sk, sh.rows, ref.slots, ref.experts, 1, 0, 0 }) |v| a.add(@as(i32, @intCast(v)));
+         a.add(@as(i32, -1));
++        a.add(@as(i32, 0)); // ord: the control kernels read blockIdx.x and y as they are, so this grid is theirs
+         const mt = (sh.rows + 15) / 16;
+         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(self.used), .y = @intCast(sh.n / 128), .z = @intCast(sk * mt) }, .block = .{ .x = 128 } }, self.rig.s, &a);
+     }

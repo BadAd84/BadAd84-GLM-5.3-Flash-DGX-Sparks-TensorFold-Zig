@@ -1,0 +1,166 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm forward: the prompt pieces' ranges and events beside the pieced exchanges
+
+zig/src/families/glm/cuda_forward.zig is 600 lines at v1.2.7, the lean rule's limit, and the index, one-pass,
+chunked-KDA and MLA levers later in this series add lines to it. row_step, max_pieces, ranges() and the Pieces
+struct move, unchanged, to cuda_forward_pieces.zig, which already holds the pieced exchanges that use them;
+cuda_forward.zig re-exports max_pieces, ranges and Pieces, so every caller (cuda_engine, cuda_prompt_pair,
+cuda_forward_pair) reads them as before. No behaviour changes.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat:
+- cuda_forward.zig 600 -> 542 lines; the fold's sparse-onepass moved ranges() alone into cuda_forward_pair.zig for the same rule, which this move replaces.
+
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index ded6ee05c0afa94a5a72ec2479b794bd30c4713a..0f68d55c36b80b49ae6dc9cbf528c60704a3d2dc 100644
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -110,66 +110,10 @@ pub const Modules = struct {
+     }
+ };
+ 
+-/// overlap.ROW_STEP and PIECES_MAX: piece boundaries on the BF16 prompt matmul's 128-row blocks, at most 16 pieces.
+-pub const row_step = 128;
+-pub const max_pieces = 16;
+-
+-/// overlap.ranges: [lo, hi) row pieces of a chunk of `rows`, about equal on row_step boundaries (fewer when short).
+-pub fn ranges(rows: usize, pieces: usize, out: *[max_pieces][2]usize) usize {
+-    const per = (rows + pieces - 1) / pieces;
+-    const size = (per + row_step - 1) / row_step * row_step;
+-    var n: usize = 0;
+-    var lo: usize = 0;
+-    while (lo < rows) : (lo += size) {
+-        out[n] = .{ lo, @min(rows, lo + size) };
+-        n += 1;
+-    }
+-    return n;
+-}
+-
+-/// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
+-pub const Pieces = struct {
+-    count: usize = 4,
+-    side: cuda.Stream,
+-    filled: [max_pieces]cuda.Event,
+-    gathered: [max_pieces]cuda.Event,
+-    glues: [max_pieces]cuda.Event, // split: a piece's own rows glued
+-    shared: [max_pieces]cuda.Event, // split: every rank's glued rows of a piece in
+-    owns_side: bool = true, // a paired step's second chunk (initTwin) runs on the first's side stream
+-
+-    /// With `pair` (TF_GLM_PROMPT_PAIR) the side stream runs at the highest priority, ahead of the main stream's grids.
+-    pub fn init(d: *const cuda.Driver, count: usize, pair: bool) !Pieces {
+-        if (count == 0 or count > max_pieces) return error.BadPieces;
+-        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
+-    }
+-
+-    /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
+-    pub fn initTwin(d: *const cuda.Driver, of: *const Pieces) !Pieces {
+-        return make(d, of.count, of.side, false);
+-    }
+-
+-    fn make(d: *const cuda.Driver, count: usize, side: cuda.Stream, owns_side: bool) !Pieces {
+-        var p: Pieces = .{ .count = count, .side = side, .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined, .owns_side = owns_side };
+-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
+-            a.* = try cuda.Event.init(d, false);
+-            b.* = try cuda.Event.init(d, false);
+-            g.* = try cuda.Event.init(d, false);
+-            s.* = try cuda.Event.init(d, false);
+-        }
+-        return p;
+-    }
+-
+-    pub fn deinit(p: *Pieces) void {
+-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
+-            a.deinit();
+-            b.deinit();
+-            g.deinit();
+-            s.deinit();
+-        }
+-        if (p.owns_side) p.side.deinit();
+-        p.* = undefined;
+-    }
+-};
++const pieces_mod = @import("cuda_forward_pieces.zig");
++pub const max_pieces = pieces_mod.max_pieces;
++pub const ranges = pieces_mod.ranges;
++pub const Pieces = pieces_mod.Pieces;
+ 
+ /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
+ pub const Exchange = union(enum) {
+diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm/cuda_forward_pieces.zig
+index ba803b1afbdf60876c28a9efef92237e945b7eca..10a81e9621f6bd8be8cd1579dc6c4d17ab4a4d93 100644
+--- a/zig/src/families/glm/cuda_forward_pieces.zig
++++ b/zig/src/families/glm/cuda_forward_pieces.zig
+@@ -3,12 +3,73 @@ const relay = @import("cuda_relay.zig");
+ const taps = @import("cuda_taps.zig");
+ const fw = @import("cuda_forward.zig");
+ const prof = @import("cuda_prof.zig");
++const cuda = @import("cuda");
+ const Forward = fw.Forward;
+-const Pieces = fw.Pieces;
+ const Site = fw.Forward.Site;
+ const room = fw.Forward.room;
+ const share = fw.Forward.share;
+ 
++/// overlap.ROW_STEP and PIECES_MAX: piece boundaries on the BF16 prompt matmul's 128-row blocks, at most 16 pieces.
++pub const row_step = 128;
++pub const max_pieces = 16;
++
++/// overlap.ranges: [lo, hi) row pieces of a chunk of `rows`, about equal on row_step boundaries (fewer when short).
++pub fn ranges(rows: usize, pieces: usize, out: *[max_pieces][2]usize) usize {
++    const per = (rows + pieces - 1) / pieces;
++    const size = (per + row_step - 1) / row_step * row_step;
++    var n: usize = 0;
++    var lo: usize = 0;
++    while (lo < rows) : (lo += size) {
++        out[n] = .{ lo, @min(rows, lo + size) };
++        n += 1;
++    }
++    return n;
++}
++
++/// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
++pub const Pieces = struct {
++    count: usize = 4,
++    side: cuda.Stream,
++    filled: [max_pieces]cuda.Event,
++    gathered: [max_pieces]cuda.Event,
++    glues: [max_pieces]cuda.Event, // split: a piece's own rows glued
++    shared: [max_pieces]cuda.Event, // split: every rank's glued rows of a piece in
++    owns_side: bool = true, // a paired step's second chunk (initTwin) runs on the first's side stream
++
++    /// With `pair` (TF_GLM_PROMPT_PAIR) the side stream runs at the highest priority, ahead of the main stream's grids.
++    pub fn init(d: *const cuda.Driver, count: usize, pair: bool) !Pieces {
++        if (count == 0 or count > max_pieces) return error.BadPieces;
++        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
++    }
++
++    /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
++    pub fn initTwin(d: *const cuda.Driver, of: *const Pieces) !Pieces {
++        return make(d, of.count, of.side, false);
++    }
++
++    fn make(d: *const cuda.Driver, count: usize, side: cuda.Stream, owns_side: bool) !Pieces {
++        var p: Pieces = .{ .count = count, .side = side, .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined, .owns_side = owns_side };
++        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
++            a.* = try cuda.Event.init(d, false);
++            b.* = try cuda.Event.init(d, false);
++            g.* = try cuda.Event.init(d, false);
++            s.* = try cuda.Event.init(d, false);
++        }
++        return p;
++    }
++
++    pub fn deinit(p: *Pieces) void {
++        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
++            a.deinit();
++            b.deinit();
++            g.deinit();
++            s.deinit();
++        }
++        if (p.owns_side) p.side.deinit();
++        p.* = undefined;
++    }
++};
++
+ /// overlap.Overlap.partials: each piece filled on the main stream, exchanged on the second (gathered or split).
+ pub fn exchangePieces(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: []const [2]usize) !void {
+     defer prof.context(f.prof, j, null, if (site == .mixer) .mixer else .ffn);

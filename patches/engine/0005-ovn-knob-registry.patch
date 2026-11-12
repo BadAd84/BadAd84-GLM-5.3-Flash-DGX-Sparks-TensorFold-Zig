@@ -1,0 +1,142 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] core: the TF_GLM_OVN knob registry
+
+ai-engine c60ce5fd1. One registry for the speed-hunt knobs: each is read from the environment
+once per process, cached in its own type so every knob has its own statics, and defaults off.
+Nothing else reads a knob directly, so a patch that adds a knob adds one entry here.
+
+Gate: applies on the pin; check-native-cuda-host green; whole-tree fmt green; lean
+base-vs-head 0 new. This patch is infrastructure and has no speed claim of its own.
+
+Folded in by the 2026-11-12 fold (work/fold/MAP.tsv), each hunk where it belongs:
+- 0002: the registry's cache key, so each knob gets its own statics
+- 0024: `ovn.fake`, the test-only override every knob test drives
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- lean_check.py's DIRECT_GETENV/HIDDEN_GETENV (a0ffd7ef7 era) make the pin-era getenv(S.key) a new finding: ovn.zig now reads each knob through its .glm row of platform/environment.zig (raw text by profile.lookup, parsed by environment.parse), and a knob with no row is a compile error (environment.registered).
+- on() keeps its bool (0 or 1 by the row; GLM's open refuses other text before any read), int() and the new real() and text() return error.BadOvnKnob for text the row refuses; fake() keeps the test-only override.
+- cuda_env_test.zig counts GLM's own readers without the TF_GLM_OVN_ rows and checks every knob row instead.
+- Cache(key) names its key (`const name = key`) and set() takes `raw`: the first compile (scripts/gates.sh, 2026-11-12) refused an unused parameter and a parameter shadowing ovn.text().
+- source: work/fold/0005-ovn-knob-registry.patch
+
+diff --git a/zig/src/cuda/ovn.zig b/zig/src/cuda/ovn.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..562d69f3a75e858fb0e973ab556658d95b2cc25e
+--- /dev/null
++++ b/zig/src/cuda/ovn.zig
+@@ -0,0 +1,77 @@
++//! Speed-hunt knobs (`TF_GLM_OVN_<NAME>`): each a `.glm` row of platform/environment.zig, read once a process.
++const std = @import("std");
++const environment = @import("sys").environment;
++
++/// One setting's cache: `key` names it, giving every knob its own type and statics.
++fn Cache(comptime key: [:0]const u8) type {
++    return struct {
++        const name = key; // the knob this cache holds; a distinct key is a distinct type
++        var read = false;
++        var text: ?[]const u8 = null; // the environment's text, null when unset
++        var value: environment.Error!?u64 = null; // `text` as its row parses it: null when unset or blank
++    };
++}
++
++/// `key`'s value as its row parses it, read once; a name without a row does not compile.
++fn get(comptime key: [:0]const u8) environment.Error!?u64 {
++    comptime environment.registered(key);
++    if (!Cache(key).read) set(key, @import("profile").lookup(key));
++    return Cache(key).value;
++}
++
++/// `key` holds `raw` from now on; text its row refuses is logged by name and kept as the error.
++fn set(comptime key: [:0]const u8, raw: ?[]const u8) void {
++    const S = Cache(key);
++    S.text = raw;
++    S.value = if (environment.check(key, raw)) |_| environment.parse(key, raw) else |err| err;
++    S.read = true;
++}
++
++/// `TF_GLM_OVN_<name>` as a switch: its row takes 0 or 1, unset or blank is off; GLM's open refuses other text.
++pub fn on(comptime name: []const u8) bool {
++    return ((get("TF_GLM_OVN_" ++ name) catch null) orelse 0) != 0;
++}
++
++/// `TF_GLM_OVN_<name>` as its row's whole number; unset or blank is `default`, text the row refuses an error.
++pub fn int(comptime name: []const u8, default: u64) error{BadOvnKnob}!u64 {
++    return (get("TF_GLM_OVN_" ++ name) catch return error.BadOvnKnob) orelse default;
++}
++
++/// `TF_GLM_OVN_<name>` as its row's finite real (unset or blank: null); text the row refuses is an error.
++pub fn real(comptime name: []const u8) error{BadOvnKnob}!?f64 {
++    const n = (get("TF_GLM_OVN_" ++ name) catch return error.BadOvnKnob) orelse return null;
++    return @bitCast(n);
++}
++
++/// `TF_GLM_OVN_<name>`'s text as its `.path` row keeps it (no control characters; unset or blank: null).
++pub fn text(comptime name: []const u8) error{BadOvnKnob}!?[]const u8 {
++    const key = "TF_GLM_OVN_" ++ name;
++    _ = get(key) catch return error.BadOvnKnob;
++    return environment.path(key, Cache(key).text) catch error.BadOvnKnob;
++}
++
++/// Test-only override: a knob holds `value` as if the environment did (an in-process read, checked by its row).
++pub fn fake(comptime name: []const u8, value: ?[]const u8) void {
++    if (!@import("builtin").is_test) @compileError("ovn.fake is for tests");
++    set("TF_GLM_OVN_" ++ name, value);
++}
++
++test "ovn: a setting reads as its row parses it, and every name keeps its own value" {
++    set("TF_GLM_PROF", "1");
++    set("TF_GLM_DFLASH2_LOG", null);
++    try std.testing.expectEqual(@as(?u64, 1), try get("TF_GLM_PROF"));
++    try std.testing.expectEqual(@as(?u64, null), try get("TF_GLM_DFLASH2_LOG"));
++    set("TF_GLM_DFLASH2_LOG", "8");
++    try std.testing.expectEqual(@as(?u64, 8), try get("TF_GLM_DFLASH2_LOG"));
++    try std.testing.expectEqual(@as(?u64, 1), try get("TF_GLM_PROF"));
++}
++
++test "ovn: blank text is unset and text the row refuses is an error" {
++    set("TF_GLM_PROF", " \t");
++    try std.testing.expectEqual(@as(?u64, null), try get("TF_GLM_PROF"));
++    for ([_][]const u8{ "yes", "2", "01" }) |bad| {
++        set("TF_GLM_PROF", bad);
++        try std.testing.expectError(error.InvalidEnvironment, get("TF_GLM_PROF"));
++    }
++    set("TF_GLM_PROF", null);
++}
+diff --git a/zig/src/cuda/root.zig b/zig/src/cuda/root.zig
+index b6476817f2b73ad60dd0a6c9e1b5f986c248dff7..10f4bd933970ab26f0f1e070b2d70afc83eadb29 100644
+--- a/zig/src/cuda/root.zig
++++ b/zig/src/cuda/root.zig
+@@ -44,6 +44,7 @@ pub const nvfp4 = @import("nvfp4.zig");
+ pub const segments = @import("segments.zig");
+ pub const grouped = @import("grouped.zig");
+ pub const qlinear = @import("qlinear.zig");
++pub const ovn = @import("ovn.zig");
+ pub const w4a8 = @import("w4a8.zig");
+ pub const norms = @import("norms.zig");
+ pub const embed_rows = @import("embed_rows.zig");
+diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
+index f7a6e7de348ecc4c4dc996883d5b98ebcd357520..d5ed85f8a58ff1ffd58e91bae9cae53687b90810 100644
+--- a/zig/src/families/glm/cuda_env_test.zig
++++ b/zig/src/families/glm/cuda_env_test.zig
+@@ -57,11 +57,20 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
+     var n: usize = 0;
+     for (e.rules) |r| if (r.scope == .glm) {
+         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
+-        n += 1;
++        if (!std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) n += 1; // the speed-hunt knobs: the next test
+     };
+     try t.expectEqual(switches.len + counts.len + reals.len, n);
+ }
+ 
++test "GLM strict env: every speed-hunt knob (cuda/ovn.zig) is a glm switch, count, real or text row" {
++    for (e.rules) |r| if (std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) {
++        try t.expectEqual(e.Scope.glm, r.scope);
++        try t.expect(r.kind == .flag or r.kind == .u64 or e.isReal(r.kind) or r.kind == .path);
++        for ([_][]const u8{ "", " ", "\t" }) |blank| try check(r.name, blank, true);
++        try check(r.name, if (r.kind == .path) "a\nb" else "typo", false);
++    };
++}
++
+ test "GLM strict env: switches keep unset, blank, 0 and 1, and refuse words and padded digits by name" {
+     for (switches) |s| {
+         _ = try row(s.name);

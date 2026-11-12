@@ -1,0 +1,550 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm exl3: decode windows on the 16-pair item plan
+
+The two commits of ashhart/TensorFold PR #2044 (cbbac0273 the item plan,
+610ce288b its GPU check at served size), taken from the PR branch as rebased
+on upstream main 673a34b3b. The engine files apply to this stack unchanged;
+only the three-line registration in zig/tests/cuda/main.zig is placed by hand,
+because the neighbouring lines differ here.
+
+A decode window's routed picks are grouped by the Router into items of up to
+16 pairs, the grouped kernels run in their standard mode on that plan, and the
+down epilogue writes the routed slot rows in place (no copy back). The bits
+are the plain decode's: glm-exl3-items compares the two byte for byte.
+
+Receipt on upstream main (docs/PR2044-AB.md, spark1-3, TP=3, drafts on):
+decode +1.2 / +0.2 / +0.1 / +0.7 / +2.1% at 1 / 2 / 4 / 6 / 8 streams, every
+reply digest equal to main's.
+
+Receipt on this stack (spark1-3, TP=3, drafts on, knobs off; image
+ai-engine:fix6 = the stack through 0042, ai-engine:fix7 = the same plus this
+patch), tok/s at 1 / 2 / 4 / 6 / 8 streams, every reply digest equal:
+  51.51 / 59.56 / 80.99 / 110.01 / 134.09 without
+  52.02 / 60.26 / 82.67 / 113.29 / 137.01 with (+1.0 / +1.2 / +2.1 / +3.0 / +2.2%)
+With TF_GLM_KDA_PAD=1 (the without row is the stack through 0041, which runs
+the same code on these short prompts):
+  63.94 / 74.66 / 93.28 / 124.59 / 150.80 without
+  64.81 / 74.23 / 94.45 / 126.65 / 154.07 with (+1.4 / -0.6 / +1.3 / +1.7 / +2.2%)
+The two-stream pad cell rerun in the order A B B A on fix6 and fix7 (means of
+three rounds): 74.16, 75.02, 75.61, 74.37, so +1.4% with the patch and the
+-0.6% cell was drift between boots.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- zig/tests/cuda/main.zig: the dispatch line sat above fold 0010's glm-resume-check, which this re-seat retires; it is placed below glm-exl3 alone. The engine files and the check apply unchanged: exl3_experts.zig only gained Layer.after (edc16dfe9) and cuda_exl3.zig has no commit in range.
+- PR #2044 is not in v1.2.7 (v127-drift.md Q5).
+- source: work/fold/0011-exl3-decode-items.patch
+
+diff --git a/zig/src/cuda/exl3_experts.zig b/zig/src/cuda/exl3_experts.zig
+index 005e007fd2d93852cbb63a354a34f20632bd553a..b907b3a3044a400ff9447895e0dc5efb796bcff3 100644
+--- a/zig/src/cuda/exl3_experts.zig
++++ b/zig/src/cuda/exl3_experts.zig
+@@ -5,6 +5,7 @@ const module = @import("module.zig");
+ const launch_ = @import("launch.zig");
+ const stream_ = @import("stream.zig");
+ const kernels = @import("kernels.zig");
++const grouped = @import("grouped.zig");
+ const exl3 = @import("exl3.zig");
+ const Driver = driver.Driver;
+ const Module = module.Module;
+@@ -41,6 +42,12 @@ pub const Layer = struct {
+     alpha: f32 = 0, // SwiGLU-OAI's sigmoid scale (act_mode 2)
+ };
+ 
++/// The item plan a decode window takes: the family's Router and the plan buffer the caller holds.
++pub const Items = struct {
++    router: *const grouped.Router,
++    plan: grouped.Plan,
++};
++
+ /// What one projection launches (experts.py default_config): the 8-tile 4-warp K splits, shape-fixed; n % 128 required.
+ pub fn plan(k: usize, n: usize, gateup: bool) !u32 {
+     const cands = [_]usize{ if (gateup) 4 else 1, 2, 1 };
+@@ -66,12 +73,21 @@ pub const Scratch = struct {
+ 
+ /// The byte size of the scratch buffers for a layer and row capacity, or error.TileNotBuilt when plan() fails.
+ pub fn scratchBytes(l: Layer, rows: usize, slots: usize) !usize {
++    return layoutBytes(l, rows, slots, l.dims * 4);
++}
++
++/// The decode item plan's scratch: scratchBytes() without y, which the down epilogue writes into `ey` instead.
++pub fn fusedBytes(l: Layer, rows: usize, slots: usize) !usize {
++    return layoutBytes(l, rows, slots, 0);
++}
++
++fn layoutBytes(l: Layer, rows: usize, slots: usize, y_pair: usize) !usize {
+     const g_sk = try plan(l.dims, l.width, true);
+     const d_sk = try plan(l.width, l.dims, false);
+     const p = rows * slots;
+     const maxu = @min(p, l.experts);
+     return align256(p * l.dims * 2) + align256(p * l.dims * 2) + align256(p * l.width * 2) +
+-        align256(@max(2 * g_sk * l.width, d_sk * l.dims) * p * 4) + align256(p * l.dims * 4) +
++        align256(@max(2 * g_sk * l.width, d_sk * l.dims) * p * 4) + align256(p * y_pair) +
+         align256(maxu * 4) + 256 + align256(maxu * rows * 4);
+ }
+ 
+@@ -81,6 +97,17 @@ fn align256(n: usize) usize {
+ 
+ /// The pointers into one allocation of scratchBytes(), or error.TileNotBuilt when plan() fails.
+ pub fn scratch(base: u64, l: Layer, rows: usize, slots: usize) !Scratch {
++    return carve(base, l, rows, slots, l.dims * 4);
++}
++
++/// The pointers into one allocation of fusedBytes(); y is 0 (the down epilogue writes the caller's `ey` rows).
++pub fn fusedScratch(base: u64, l: Layer, rows: usize, slots: usize) !Scratch {
++    var sc = try carve(base, l, rows, slots, 0);
++    sc.y = 0;
++    return sc;
++}
++
++fn carve(base: u64, l: Layer, rows: usize, slots: usize, y_pair: usize) !Scratch {
+     const p = rows * slots;
+     const g_sk = try plan(l.dims, l.width, true);
+     const d_sk = try plan(l.width, l.dims, false);
+@@ -97,7 +124,7 @@ pub fn scratch(base: u64, l: Layer, rows: usize, slots: usize) !Scratch {
+     const xu = take(&at, p * l.dims * 2);
+     const xd = take(&at, p * l.width * 2);
+     const z = take(&at, @max(2 * g_sk * l.width, d_sk * l.dims) * p * 4);
+-    const y = take(&at, p * l.dims * 4);
++    const y = take(&at, p * y_pair);
+     const ids = take(&at, maxu * 4);
+     const count = take(&at, 4);
+     const members = take(&at, maxu * rows * 4);
+@@ -156,6 +183,11 @@ pub const Experts = struct {
+ 
+     /// The routed experts of `rows` rows: group, rotate in, grouped gate/up, SwiGLU, grouped down, wts-weighted sum.
+     pub fn run(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch) !void {
++        try e.runWith(s, l, x, x_stride, x_dtype, pick, wts, rows, out, sc, 0, null);
++    }
++
++    /// run() on a decode window's item plan (`it`): the grouped kernels in standard mode, the slot rows in `ey`.
++    pub fn runWith(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch, ey: u64, it: ?Items) !void {
+         const d = l.dims;
+         const w = l.width;
+         const slots = sc.slots;
+@@ -173,17 +205,32 @@ pub const Experts = struct {
+                 return @intCast(v);
+             }
+         }.f;
++        // A decode window's item plan: the picks grouped into 16-pair items, the grouped kernels in standard mode.
++        const items = it != null; // one codebook a launch, a plan, and ey to write the slot rows into: nothing else
++        if (items and (l.codebook != .mcg or wts != 0 or out != 0 or ey == 0 or it.?.plan.members == 0 or it.?.plan.items == 0 or it.?.plan.counts == 0)) return error.TileNotBuilt;
++        const nx: usize = if (items) grouped.maxItems(p, l.experts + 1, 16) else maxu; // grid x and nexp_max
++        const mtu: usize = if (items) 1 else mt; // member tiles a program (a 16-pair item, or ceil(rows/16))
++        const uids = if (items) it.?.plan.items else sc.ids;
++        const ucount = if (items) it.?.plan.counts else sc.count;
++        const members = if (items) it.?.plan.members else sc.members;
++        const maxm_a: i32 = if (items) 16 else i32d(rows);
++        const std_a: i32 = if (items) 1 else 0;
++        const skip_a: i32 = if (items) i32d(l.experts) else -1;
+ 
+-        var a: launch_.Args = .{};
+-        a.add(pick);
+-        a.add(sc.ids);
+-        a.add(sc.count);
+-        a.add(sc.members);
+-        a.add(i32d(rows));
+-        a.add(i32d(slots));
+-        a.add(i32d(l.experts));
+-        a.add(i32d(rows));
+-        try launch_.launch(e.group, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = @intCast(rows * slots * 4) }, s, &a);
++        if (items) {
++            try it.?.router.route(s, pick, p, l.experts + 1, 16, it.?.plan);
++        } else {
++            var a: launch_.Args = .{};
++            a.add(pick);
++            a.add(sc.ids);
++            a.add(sc.count);
++            a.add(sc.members);
++            a.add(i32d(rows));
++            a.add(i32d(slots));
++            a.add(i32d(l.experts));
++            a.add(i32d(rows));
++            try launch_.launch(e.group, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = @intCast(rows * slots * 4) }, s, &a);
++        }
+ 
+         var r: launch_.Args = .{};
+         r.add(x);
+@@ -206,22 +253,22 @@ pub const Experts = struct {
+         g.add(l.up);
+         g.add(l.gate_k2);
+         g.add(l.up_k2);
+-        g.add(sc.ids);
+-        g.add(sc.count);
+-        g.add(sc.members);
++        g.add(uids);
++        g.add(ucount);
++        g.add(members);
+         g.add(sc.z);
+         g.add(i32d(d));
+         g.add(i32d(w));
+         g.add(i32d(p));
+         g.add(i32d(g_sk));
+-        g.add(i32d(rows));
++        g.add(maxm_a);
+         g.add(i32d(slots));
+-        g.add(i32d(maxu));
++        g.add(i32d(nx));
+         g.add(@as(i32, 2));
+         g.add(i32d(l.gu_stride));
+-        g.add(@as(i32, 0));
+-        g.add(@as(i32, -1));
+-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
++        g.add(std_a);
++        g.add(skip_a);
++        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(nx), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
+ 
+         var ep: launch_.Args = .{};
+         ep.add(sc.z);
+@@ -245,28 +292,28 @@ pub const Experts = struct {
+         dn.add(l.down);
+         dn.add(l.down_k2);
+         dn.add(l.down_k2);
+-        dn.add(sc.ids);
+-        dn.add(sc.count);
+-        dn.add(sc.members);
++        dn.add(uids);
++        dn.add(ucount);
++        dn.add(members);
+         dn.add(sc.z);
+         dn.add(i32d(w));
+         dn.add(i32d(d));
+         dn.add(i32d(p));
+         dn.add(i32d(d_sk));
+-        dn.add(i32d(rows));
++        dn.add(maxm_a);
+         dn.add(i32d(slots));
+-        dn.add(i32d(maxu));
++        dn.add(i32d(nx));
+         dn.add(@as(i32, 1));
+         dn.add(@as(i32, 0));
+-        dn.add(@as(i32, 0));
+-        dn.add(@as(i32, -1));
+-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
++        dn.add(std_a);
++        dn.add(skip_a);
++        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(nx), .y = @intCast(d / 128), .z = @intCast(d_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
+ 
+         var cb: launch_.Args = .{};
+         cb.add(sc.z);
+         cb.add(pick);
+         cb.add(l.svh_d);
+-        cb.add(sc.y);
++        cb.add(if (items) ey else sc.y); // items: write ey's routed slot rows in place (no copy back)
+         cb.add(wts);
+         cb.add(out);
+         cb.add(i32d(p));
+diff --git a/zig/src/families/glm/cuda_exl3.zig b/zig/src/families/glm/cuda_exl3.zig
+index f70c0f334349779c9b8a27aa71cee8afc0c53763..61b5ebdbe5dc1770fc3b5352faa70648539394e4 100644
+--- a/zig/src/families/glm/cuda_exl3.zig
++++ b/zig/src/families/glm/cuda_exl3.zig
+@@ -140,12 +140,16 @@ fn picksBytes(rows: usize) usize {
+     const cap: usize = @min(rows, chunk_rows);
+     return std.mem.alignForward(usize, cap * top_k * 4, 256);
+ }
++/// A decode chunk's arena: the plain 8-slot layout or the decode item plan's 9-slot one without y, the larger.
++fn decodeBytes(l: common.Layer, n: usize) !usize {
++    return @max(try common.scratchBytes(l, n, top_k), try common.fusedBytes(l, n, top_k + 1));
++}
+ pub fn scratchBytes(rows: usize, dims: usize, width: usize, prefill: bool, shx: bool) [4]usize {
+     const n: usize = @min(rows, chunk_rows);
+     var l = shape(dims, width);
+     l.shared_input = shx;
+     if (prefill and common.prompt.eligible(l)) return .{ picksBytes(rows) + (common.prompt.bytes(l, n, top_k) catch unreachable), 4, 4, 4 };
+-    return .{ picksBytes(rows) + (common.scratchBytes(shape(dims, width), n, top_k) catch unreachable), 4, 4, 4 };
++    return .{ picksBytes(rows) + (decodeBytes(shape(dims, width), n) catch unreachable), 4, 4, 4 };
+ }
+ /// `height` rows of `width` bytes, `spitch` apart at `src`, to `dpitch` apart at `dst`, in one call.
+ fn copyRows(stream: cuda.Stream, dst: u64, dpitch: usize, src: u64, spitch: usize, width: usize, height: usize, what: []const u8) !void {
+@@ -163,6 +167,10 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
+     var at: usize = 0;
+     while (at < rows) : (at += chunk_rows) {
+         const n: usize = @min(chunk_rows, rows - at);
++        if (!prompt) { // a decode window runs on the item plan, which writes the slot rows into ey
++            try decodeItems(k, stream, l, arena, cap, x + at * x_stride * 2, x_stride, picks + at * slots * 4, n, ey + at * slots * dims * 4, &ek.router, plan_buf);
++            continue;
++        }
+         try copyRows(stream, sc.picks, top_k * 4, picks + at * slots * 4, slots * 4, top_k * 4, n, "EXL3 compact route rows");
+         const output = if (fused) blk: {
+             const scratch = try common.prompt.scratch(arena, l, cap, top_k);
+@@ -177,6 +185,13 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
+     }
+ }
+ 
++/// A decode window's routed experts on the item plan: the down epilogue writes ey's routed slot rows in place.
++fn decodeItems(k: *const Kernels, stream: cuda.Stream, l: common.Layer, arena: u64, cap: usize, x: u64, x_stride: usize, picks: u64, n: usize, ey: u64, router: *const cuda.grouped.Router, plan: cuda.grouped.Plan) !void {
++    // the 9-slot layout without y (decodeBytes sizes the arena for it); no copy back from y, so none is freed here.
++    const scratch = try common.fusedScratch(arena, l, cap, top_k + 1);
++    return k.runWith(stream, l, x, x_stride, .bf16, picks, 0, n, 0, scratch, ey, .{ .router = router, .plan = plan });
++}
++
+ test "EXL3 admission: Mia-AiLab's block passes; other widths and codebooks are refused by name" {
+     const gpa = std.testing.allocator;
+     const mia =
+@@ -204,3 +219,12 @@ test "a chunk's compacted picks end before the common scratch at every row count
+ test "GLM's routed experts run on the common EXL3 module's kernels" {
+     try std.testing.expect(Kernels == cuda.exl3_experts.Experts);
+ }
++
++test "a decode window's item plan is at GLM's shapes the plain layout's bytes, so no pool changes" {
++    for ([_]usize{ 640, 768, 1024, 2048 }) |width| for (1..65) |rows| { // TP=3 narrow and wide shares, TP=2, TP=1
++        const l = shape(4096, width);
++        const plain = try common.scratchBytes(l, rows, top_k);
++        try std.testing.expect(try common.fusedBytes(l, rows, top_k + 1) <= plain);
++        try std.testing.expectEqual(picksBytes(rows) + plain, scratchBytes(rows, 4096, width, false, false)[0]);
++    };
++}
+diff --git a/zig/tests/cuda/glm_exl3_items_tests.zig b/zig/tests/cuda/glm_exl3_items_tests.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d4cb9a36566475ec406ba77c02c0b36c7560b5f
+--- /dev/null
++++ b/zig/tests/cuda/glm_exl3_items_tests.zig
+@@ -0,0 +1,221 @@
++//! GLM's EXL3 decode on the 16-pair item plan gives the plain decode's slot-row bytes, case by case.
++const std = @import("std");
++const cuda = @import("cuda");
++const glm = @import("glm_cuda");
++const check = @import("check.zig");
++const qr = @import("quant_ref_tests.zig");
++const Gpu = check.Gpu;
++const Rig = qr.RigT;
++const ex = cuda.exl3_experts;
++
++const E = 12; // routed experts (the shared one is id E, skipped)
++const D = 512; // dims
++const top = glm.exl3.top_k;
++const slots = top + 1;
++const limit: f32 = 7.0;
++
++fn signs(r: *Rig, n: usize, scale: f16) ![]f16 {
++    const out = try r.a.alloc(f16, n);
++    for (out) |*v| v.* = if (r.rng.boolean()) scale else -scale;
++    return out;
++}
++
++/// `E` K x N trellises back to back as the loader lays them out: the pointer table, with suh and svh.
++fn matrix(r: *Rig, k: usize, n: usize, shared_suh: ?[]const f16, suh: *u64, svh: *u64) !u64 {
++    const words = k / 16 * (n / 16) * 64; // i16 an expert
++    const tr = try r.a.alloc(i16, E * words);
++    for (tr) |*v| v.* = r.rng.int(i16);
++    const su = try r.a.alloc(f16, E * k);
++    for (0..E) |e| @memcpy(su[e * k ..][0..k], if (shared_suh) |s| s else try signs(r, k, 1.0));
++    suh.* = try r.dev(std.mem.sliceAsBytes(su));
++    svh.* = try r.dev(std.mem.sliceAsBytes(try signs(r, E * n, 0.02)));
++    const base = try r.dev(std.mem.sliceAsBytes(tr));
++    const ptrs = try r.a.alloc(u64, E);
++    for (ptrs, 0..) |*ptr, e| ptr.* = base + e * words * 2;
++    return r.dev(std.mem.sliceAsBytes(ptrs));
++}
++
++/// A layer of width `n`; `one`: every gate and up input shares one rotation (the loader's shx).
++fn weights(r: *Rig, dims: usize, n: usize, one: bool) !glm.exl3.Experts {
++    var w: glm.exl3.Experts = .{ .gt = 0, .ut = 0, .dt = 0, .k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .shx = one };
++    const k2: [E]i32 = @splat(8);
++    w.k2 = try r.dev(std.mem.sliceAsBytes(&k2));
++    const rot = if (one) try signs(r, dims, 1.0) else null;
++    w.gt = try matrix(r, dims, n, rot, &w.suh_g, &w.svh_g);
++    w.ut = try matrix(r, dims, n, rot, &w.suh_u, &w.svh_u);
++    w.dt = try matrix(r, n, dims, null, &w.suh_d, &w.svh_d);
++    return w;
++}
++
++/// The common module's layer GLM's cuda_exl3.layer builds from `w` (the stage checks call the module directly).
++fn commonLayer(w: glm.exl3.Experts, dims: usize, n: usize) ex.Layer {
++    return .{ .gate = w.gt, .up = w.ut, .down = w.dt, .gate_k2 = w.k2, .up_k2 = w.k2, .down_k2 = w.k2, .suh_g = w.suh_g, .suh_u = w.suh_u, .svh_g = w.svh_g, .svh_u = w.svh_u, .suh_d = w.suh_d, .svh_d = w.svh_d, .experts = E, .dims = dims, .width = n, .codebook = .mcg, .limit = limit, .act_mode = 0, .uniform_k2 = 8, .shared_input = w.shx };
++}
++
++/// Each row's 8 distinct routed picks (lockstep: every row the same picks), then the shared expert's id.
++fn picks(r: *Rig, rows: usize, lockstep: bool) ![]i32 {
++    const out = try r.a.alloc(i32, rows * slots);
++    var first: [top]i32 = undefined; // row 0's routed picks, reused every row under lockstep
++    for (0..rows) |row| {
++        if (row == 0 or !lockstep) {
++            var seen: [E]bool = @splat(false);
++            for (0..top) |j| {
++                var e = r.rng.uintLessThan(usize, E);
++                while (seen[e]) e = r.rng.uintLessThan(usize, E);
++                seen[e] = true;
++                first[j] = @intCast(e);
++            }
++        }
++        for (0..top) |j| out[row * slots + j] = first[j];
++        out[row * slots + slots - 1] = E;
++    }
++    return out;
++}
++
++/// The routed slot rows of `ey` [rows][slots][D] packed as [rows][top][D] (the plain path's y layout).
++fn packSlots(r: *Rig, ey: u64, rows: usize, dims: usize) ![]u8 {
++    const raw = try r.back(ey, rows * slots * dims * 4);
++    const out = try r.a.alloc(u8, rows * top * dims * 4);
++    for (0..rows) |row| @memcpy(out[row * top * dims * 4 ..][0 .. top * dims * 4], raw[row * slots * dims * 4 ..][0 .. top * dims * 4]);
++    return out;
++}
++
++/// The plain decode, as the old launch shape: the 8 compacted picks through the common module's runSlots.
++fn plain(r: *Rig, k: *const glm.exl3.Kernels, l: ex.Layer, x: []const u16, pk: []const i32, rows: usize, dims: usize) ![]u8 {
++    const p8 = try r.a.alloc(i32, rows * top);
++    for (0..rows) |row| @memcpy(p8[row * top ..][0..top], pk[row * slots ..][0..top]);
++    const sc = try ex.scratch(try r.zeros(try ex.scratchBytes(l, rows, top)), l, rows, top);
++    try k.runSlots(r.s, l, try r.dev(std.mem.sliceAsBytes(x)), dims, .bf16, try r.dev(std.mem.sliceAsBytes(p8)), rows, sc);
++    try r.s.synchronize();
++    return r.back(sc.y, rows * top * dims * 4);
++}
++
++/// The family's decode dispatch, whose decode windows run on the item plan: ey [rows][slots][D] fp32 bytes.
++fn items(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, w: glm.exl3.Experts, n: usize, x: []const u16, pk: []const i32, rows: usize, dims: usize) ![]u8 {
++    const P = rows * slots; // the item plan groups all 9 slots
++    const plan: cuda.grouped.Plan = .{
++        .members = try r.zeros(P * 4),
++        .items = try r.zeros(cuda.grouped.maxItems(P, E + 1, glm.experts.tile) * 12),
++        .counts = try r.zeros(8),
++        .rank = try r.zeros(P * 4),
++        .hist = try r.zeros(4),
++    };
++    const sz = glm.exl3.scratchBytes(rows, dims, n, false, w.shx);
++    const sc: glm.exl3.Scratch = .{ .picks = try r.zeros(sz[0]), .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]) };
++    const ey = try r.zeros(rows * slots * dims * 4);
++    const xd = try r.zeros(P * n * 2);
++    try glm.exl3.run(k, ek, r.s, w, sc, plan, try r.dev(std.mem.sliceAsBytes(x)), dims, try r.dev(std.mem.sliceAsBytes(pk)), slots, rows, E, dims, n, limit, false, ey, xd);
++    return packSlots(r, ey, rows, dims);
++}
++
++const Tally = struct { cases: usize = 0, failed: usize = 0 };
++
++const Case = struct { rows: usize, lock: bool };
++
++/// 17 rows is the only distinct window that spans two 16-pair items, so it stays distinct.
++const base_cases = [_]Case{
++    .{ .rows = 1, .lock = false }, .{ .rows = 2, .lock = false },  .{ .rows = 3, .lock = false },
++    .{ .rows = 8, .lock = false }, .{ .rows = 17, .lock = false }, .{ .rows = 16, .lock = true },
++    .{ .rows = 32, .lock = true }, .{ .rows = 48, .lock = true },  .{ .rows = 64, .lock = true },
++};
++
++const served_cases = [_]Case{ .{ .rows = 8, .lock = false }, .{ .rows = 64, .lock = true } };
++
++fn value(b: []const u8) f64 {
++    if (b.len == 4) return @as(f32, @bitCast(std.mem.readInt(u32, b[0..4], .little)));
++    return @as(f16, @bitCast(std.mem.readInt(u16, b[0..2], .little)));
++}
++
++fn bitsOf(b: []const u8) u32 {
++    return if (b.len == 4) std.mem.readInt(u32, b[0..4], .little) else std.mem.readInt(u16, b[0..2], .little);
++}
++
++/// Byte-equal, else one FAIL line: the count, the first (row of `per_row`, column), got/want, canaries, NaNs, most.
++fn same(t: *Tally, name: []const u8, got: []const u8, want: []const u8, elem: usize, per_row: usize) void {
++    t.cases += 1;
++    if (got.len == want.len and std.mem.eql(u8, got, want)) return;
++    t.failed += 1;
++    if (got.len != want.len) {
++        std.debug.print("FAIL {s}: {d} bytes, expected {d}\n", .{ name, got.len, want.len });
++        return;
++    }
++    var first: usize = 0;
++    var differ: usize = 0;
++    var canary: usize = 0;
++    var nan: usize = 0;
++    var most: f64 = 0;
++    var scale: f64 = 0;
++    for (0..got.len / elem) |i| {
++        const g = got[i * elem ..][0..elem];
++        const w = want[i * elem ..][0..elem];
++        if (std.mem.allEqual(u8, g, 0xff)) canary += 1;
++        const gv = value(g);
++        const wv = value(w);
++        if (std.math.isNan(gv)) nan += 1;
++        if (std.math.isFinite(wv)) scale = @max(scale, @abs(wv));
++        if (std.mem.eql(u8, g, w)) continue;
++        if (differ == 0) first = i;
++        differ += 1;
++        if (std.math.isFinite(gv) and std.math.isFinite(wv)) most = @max(most, @abs(gv - wv));
++    }
++    const g = got[first * elem ..][0..elem];
++    const w = want[first * elem ..][0..elem];
++    std.debug.print("FAIL {s}: {d} of {d} values differ, first at row {d} column {d}: got {e} (0x{x}), want {e} (0x{x}); {d} canary, {d} NaN; largest finite difference {e} of largest |want| {e}\n", .{ name, differ, got.len / elem, first / per_row, first % per_row, value(g), bitsOf(g), value(w), bitsOf(w), canary, nan, most, scale });
++}
++
++pub fn run_(gpu: Gpu) !void {
++    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
++    defer arena.deinit();
++    var stream = try cuda.Stream.init(gpu.d, false);
++    defer stream.deinit();
++    var prng = std.Random.DefaultPrng.init(29);
++    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = stream, .rng = prng.random() };
++    defer {
++        for (r.bufs.items) |*b| b.free();
++        r.bufs.deinit(gpu.gpa);
++    }
++
++    var pm = try cuda.Module.load(gpu.d, cuda.kernels.experts);
++    defer pm.unload();
++    var k = try glm.exl3.Kernels.load(gpu.d);
++    defer k.unload();
++    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), false);
++    defer ek.unload();
++    var t: Tally = .{};
++    // dims 4096 is GLM-5.3-Flash's served size, at the 768/1024 widths a rank meets
++    for ([_]struct { dims: usize, widths: []const usize, cases: []const Case }{
++        .{ .dims = D, .widths = &.{ 256, 640 }, .cases = &base_cases },
++        .{ .dims = 4096, .widths = &.{ 768, 1024 }, .cases = &served_cases },
++    }) |shape| {
++        for (shape.widths) |n| { // 640: a TP=3 rank's 5 blocks, 10 down steps
++            for (shape.cases) |cs| { // distinct and lockstep decode windows, each listed rather than derived
++                const dims = shape.dims;
++                const rows = cs.rows;
++                const x = try r.bfs(rows * dims, 1.0);
++                const pk = try picks(&r, rows, cs.lock);
++                const case = try std.fmt.allocPrint(r.a, "dims {d}, width {d}, {d} rows {s}", .{ dims, n, rows, if (cs.lock) "lockstep" else "distinct" });
++                const w = try weights(&r, dims, n, false);
++                const l = commonLayer(w, dims, n);
++                const want = try plain(&r, &k, l, x, pk, rows, dims);
++                same(&t, try std.fmt.allocPrint(r.a, "glm-exl3-items {s}: plain twice (control)", .{case}), try plain(&r, &k, l, x, pk, rows, dims), want, 4, dims);
++                var nan: usize = 0;
++                for (0..rows) |row| for (0..top) |j| for (0..dims) |c| {
++                    nan += @intFromBool(std.math.isNan(value(want[((row * top + j) * dims + c) * 4 ..][0..4])));
++                };
++                t.cases += 1;
++                if (nan != 0) {
++                    t.failed += 1;
++                    std.debug.print("FAIL glm-exl3-items {s}: the plain decode left {d} routed values NaN\n", .{ case, nan });
++                }
++                // A wrong plan (a members offset, a bad first/count, the shared item unskipped) misroutes a slot.
++                same(&t, try std.fmt.allocPrint(r.a, "glm-exl3-items {s}, items: ey", .{case}), try items(&r, &k, &ek, w, n, x, pk, rows, dims), want, 4, dims);
++            }
++        }
++    }
++    std.debug.print("RESULT glm-exl3-items: {d} of {d} comparisons differ\n", .{ t.failed, t.cases });
++    if (t.failed != 0) {
++        std.debug.print("FAIL glm-exl3-items: {d} of {d} comparisons differ\n", .{ t.failed, t.cases });
++        return error.TestFailed;
++    }
++    check.pass("glm-exl3-items: {d} comparisons equal the plain decode byte for byte", .{t.cases});
++}
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+index 71f2cac45cdfe320d2abca644c45940abb50c6b3..90ee4084ce7d10cf336e9ea00f35a2e678d01e53 100644
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -33,6 +33,7 @@ const native_fp_tests = @import("native_fp_tests.zig");
+ const affine4_decode_tests = @import("affine4_decode_tests.zig");
+ const w4a8_tests = @import("w4a8_tests.zig");
+ const glm_exl3_tests = @import("glm_exl3_tests.zig");
++const glm_exl3_items_tests = @import("glm_exl3_items_tests.zig");
+ const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
+ const glm_vision_tests = @import("glm_vision_tests.zig");
+ const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
+@@ -272,6 +273,7 @@ const usage =
+     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
+     \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
+     \\  glm-exl3                  GLM's EXL3 routed experts, decode and prompt, against float64 (synthetic)
++    \\  glm-exl3-items            the decode item plan against the plain decode, byte for byte (synthetic)
+     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
+     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
+     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
+@@ -440,6 +442,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
+     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
++    if (std.mem.eql(u8, cmd, "glm-exl3-items")) return glm_exl3_items_tests.run_(gpu);
+     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
+     if (try glm_ovn_checks.run(gpu, cmd, rest)) return; // the GLM OVN checks: true when it ran one of them

@@ -1,0 +1,75 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: a pass the rebased index ring cannot hold is refused, not written past it
+
+What fold patch 0010 (resume-any-row) still carries on v1.2.7: old 0042's State.ready / readyMtp guard
+and old 0060's unit test. After a rebase, ready() and readyMtp() only assumed the pass fits the ring; a pass
+of more rows than the rebased ring holds wrote past it into the neighbouring ring with no error. Now it is
+error.PastRing. No reachable default-path step changes: a v1.2.7 chunk from a request start is at most
+prefill_rows rows and a solo step starts on the grid, so both still fit; the guard is for any caller that does not.
+
+Receipts (fold 0010): 0042's spark1-3 digest receipt was taken with the old any-row resume; this guard alone
+has the host test below (glm_ring_host.zig) and no GPU receipt of its own.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- Fold 0010's resume at any row is RETIRED: v1.2.7's prompt cuts (9347a8a7d, f3988faa7, c5d45eee8, 3464a7d44) keep and resume at the request's message starts behind TF_GLM_REQUEST_STARTS, with Kept.below holding resumed == fresh; feeding the cache's own marks into the cut list would make each kept state's digest depend on its pass's resume point, so later turns are refused as SnapshotOutOfStep (DECISIONS.md, fold 0010).
+- Retired with it: the adapters' snap_min_rows (old 0024, 0028), prefillChunk's rows argument (0034), the chunk step's start/len (0036, upstream's own), chunkEnd's grid end (0045), canBatch's mark walk (0048), ringsAgree's pool rule (0042, 0043: upstream refuses pairing with cuts), the any-row snapshot tests (0063) and glm-resume-check.
+- Deferred: pairing beside a drafter (drafterIdle, old 0007/0041), a default-on change with no receipt of its own.
+- source: work/fold/0010-resume-any-row.patch
+
+diff --git a/zig/glm_ring_host.zig b/zig/glm_ring_host.zig
+index 5cd8da62b5693707f8de9ea3d9af7f0d4d2b050e..a4083573fe06ee5579859f469a8910f6d0ce9160 100644
+--- a/zig/glm_ring_host.zig
++++ b/zig/glm_ring_host.zig
+@@ -86,3 +86,33 @@ test "glm ring: rejected MTP proposals retain their rollback pool at every ring
+ test "glm ring: restored bases retain the same rollback pool" {
+     for ([_]usize{ 4096, 8192, 12288 }) |boundary| for ([_]usize{ 2, 7 }) |rewind| try check(boundary, true, rewind);
+ }
++
++test "glm ring: a pass the rebased ring cannot hold is refused, not written past the ring" {
++    var d: cuda.Driver = undefined;
++    d.api.cuMemcpyDtoDAsync_v2 = copy;
++    d.api.cuMemsetD32Async = set;
++    const stream: cuda.Stream = .{ .d = &d, .handle = null };
++    var keys: [64]u8 = @splat(0);
++    var gates: [64]u8 = @splat(0);
++    var rings = [_]u64{ @intFromPtr(&keys), @intFromPtr(&gates) };
++    var pos: u32 = 0;
++    var mtp: u32 = 0;
++    var st: State = undefined;
++    st.arena = .{ .buf = .{ .d = &d, .ptr = 0, .len = 0 } };
++    st.capacity = 1024;
++    st.ring_rows = keys.len;
++    st.ring_row = 1;
++    st.rings = &rings;
++    st.caches = &.{};
++    st.cur = &.{};
++    st.pos_dev = @intFromPtr(&pos);
++    st.mtp_pos_dev = @intFromPtr(&mtp);
++    st.mtp_caches = .{ .lc = 0, .ik = rings[0], .ig = rings[1], .pk = 0, .pk_rows = 0 };
++    try st.restoreHost(stream, 65, 0, &.{}, .{ 0, 0 }); // a row into the pool at 64: a rebase keeps that row
++    try t.expectError(error.PastRing, st.ready(stream, keys.len)); // 65 + 64 rows past a ring based at 64
++    try t.expectEqual(@as(usize, 64), st.base);
++    try st.ready(stream, keys.len - 1);
++    try st.setMtpLen(stream, 64);
++    try t.expectError(error.PastRing, st.readyMtp(stream, keys.len)); // MTP keeps a verify window before its cursor
++    try st.readyMtp(stream, keys.len - glm.forward.window_rows);
++}
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index 11bf6d59c3d38c3862cfb6a6251a406dc4bcf256..1c818278edfd4a2e7f78c4f4050d762208dace07 100644
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -484,12 +484,14 @@ pub const State = struct {
+     pub fn ready(st: *State, stream: cuda.Stream, rows: usize) !void {
+         if (st.pos + rows > st.capacity) return error.PastCapacity;
+         if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
++        if (st.pos + rows > st.base + st.ring_rows) return error.PastRing; // rows past the ring overwrite its neighbour
+     }
+ 
+     /// Before the MTP head's pass of `n` rows at mtp_len, likewise for its caches.
+     pub fn readyMtp(st: *State, stream: cuda.Stream, n: usize) !void {
+         if (st.mtp_len + n > st.capacity) return error.PastCapacity;
+         if (st.mtp_len + n > st.mtp_base + st.ring_rows) try st.rebase(stream, true);
++        if (st.mtp_len + n > st.mtp_base + st.ring_rows) return error.PastRing;
+     }
+ 
+     /// Rebase at the earliest pool a rollback may revisit; MTP retains a whole verify window before its cursor.

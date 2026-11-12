@@ -1,0 +1,72 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm tests: the shared-window check sizes its rows from the engine, not a literal 4
+
+zig/tests/cuda/glm_lanes_tests.zig's sharedCheck allocates its comparison buffers as
+`4 * V` and declares its per-stream id, output and twin arrays as `[S][4]u32`. The 4 is
+the largest number of rows the test itself asks a stream for; the engine's own ceiling is
+forward.window_rows, which is 8 in our tree. The literal is therefore a trap: the day a
+stream brings five rows into a shared verify, the check writes past these arrays rather
+than reporting a difference.
+
+The fork's substitution, from `ai-engine` at fork-ssh/ovn-up: `const W =
+glm.forward.window_rows;` with the two allocations and the three arrays sized by W.
+
+Left out deliberately, because each needs a feature our stack has not ported:
+
+  - S = 8 streams and the `sampled` index, the `wide` rounds of 33 to 64 rows, and every
+    read of `e.settings.shared_rows`. Those belong to TF_GLM_OVN_SHARED_ROWS; our
+    shared window is a fixed 32 rows (dflash.STEP_ROWS), so a 40-row forward would not
+    fit and the test would fail on hardware rather than find anything.
+  - the `x.prefill(ids, null, null)` arity, which comes from fork commit 1b4bd2975.
+  - the check.pass wording, which only describes the rounds left out above.
+
+So this does not add coverage of 5 to 8 rows a stream: the per-stream count stays
+`1 + (round + i) % 4`. It removes the overflow that would follow if anything did raise
+it, and it is the whole of the gap that can be closed before SHARED_ROWS is ported. The
+honest statement of the remaining gap is in the report, not in the code.
+
+Gates: the host gates do not compile zig/tests/cuda at all, so this was compiled with
+`zig build compile-cuda-tests`, which builds the tf-cuda-test runner and every file it
+imports without a GPU.
+
+What a GPU run must show: glm-shared-check passing unchanged on three ranks. It compares
+the same rows as before, so a difference would mean the substitution itself is wrong.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- 6d4191a95 raised window_rows from 8 to 32 (cuda_state.zig:21); the test still sizes its arrays by a literal 4, so the substitution now guards 32 rows; applies as is.
+- source: work/fold/0002-shared-window-width.patch
+
+diff --git a/zig/tests/cuda/glm_lanes_tests.zig b/zig/tests/cuda/glm_lanes_tests.zig
+index d2e5f44f8dbd2cb355b6d34e38ad5b47da19877e..6a7ace8e6bf73185bbd96cb85883a108d1852e26 100644
+--- a/zig/tests/cuda/glm_lanes_tests.zig
++++ b/zig/tests/cuda/glm_lanes_tests.zig
+@@ -242,6 +242,7 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank:
+     const x: glm.follow.Leader = .{ .e = e, .link = &link };
+     defer x.end() catch {};
+     const S = 5; // streams: every prompt, the first twice, the last sampled
++    const W = glm.forward.window_rows; // a stream's rows a round at most
+     const V = e.share.vocab.len();
+     var failed = false;
+     var first: [S]u32 = undefined;
+@@ -261,16 +262,16 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank:
+         var held: [glm.engine.max_drafts]u32 = undefined;
+         try x.draft(true, &.{t}, 1, &held, null);
+     }
+-    const lone = try a.alloc(u16, 4 * V);
+-    const mine = try a.alloc(u16, 4 * V);
++    const lone = try a.alloc(u16, W * V);
++    const mine = try a.alloc(u16, W * V);
+     var compared: usize = 0;
+     var round: usize = 0;
+     while (round < 12) : (round += 1) {
+         const n = 2 + round % (S - 1); // streams this round: 2 to S
+         var parts: [S]glm.engine.Part = undefined;
+-        var ids: [S][4]u32 = undefined;
+-        var outs: [S][4]u32 = undefined;
+-        var twin: [S][4]u32 = undefined;
++        var ids: [S][W]u32 = undefined;
++        var outs: [S][W]u32 = undefined;
++        var twin: [S][W]u32 = undefined;
+         for (0..n) |i| {
+             const rows = 1 + (round + i) % 4;
+             for (0..rows) |r| ids[i][r] = @intCast(100 + (round * 31 + i * 7 + r * 13) % 5000);

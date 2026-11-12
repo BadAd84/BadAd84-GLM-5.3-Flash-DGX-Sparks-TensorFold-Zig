@@ -1,0 +1,273 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: FP8 latent keys fetched a tile ahead, in 8-byte loads
+
+Our fork `ai-engine`, ref `fork-ssh/ovn-up`, commit 450b9519c "glm cuda: FP8
+latent keys fetched a tile ahead, in 8-byte loads", taken for the slab-only
+half of chunks_wide.
+
+The pin's FP8 arm of glm_attn::chunks_wide converts a 32-key tile right after
+the tile before was computed, with eight single-byte global loads a slot. A
+block of these kernels holds about 100 KB of shared memory, so it is alone on
+its SM and every gather's latency is exposed, while the BF16 arm hides its
+loads behind cp.async. This splits the FP8 work in two: fetch(tile) reads each
+of a thread's slots as one 8-byte uint2 plus its row scale into registers, and
+store(tile) converts from those registers and writes 16 bytes at a time into
+the tile's shared buffer. The entry does fetch(0), store(0), fetch(1); the tile
+loop, just after its barrier, stores tile + 1 into the buffer the barrier freed
+and fetches tile + 2. The BF16 arm keeps its cp.async pair, so load_kv is now
+BF16 only and its commit at the loop tail is guarded by !FP8.
+
+This completes 0021-mla-knobs. That patch brought zig/kernels/cuda/
+glm_glue_attn_ovn.cuh from the fork, and that file's chunks<HB, FP8, FUSED>
+already carries this exact fetch/store pair (its lines 45 to 85 and 111 to 136),
+so until now the skip and fused variants fetched a tile ahead while the default
+tf_glm_chunks_16_fp8 and tf_glm_chunks_32_fp8 did not. The pin owns chunks_wide
+itself, which is why no earlier patch in the stack touches these lines.
+
+The bits are unchanged, expression by expression:
+
+- byte extraction. The pin builds `bits` for even j as codes[j] | codes[j+1]<<8
+  over the slot's eight bytes. The uint2 load reads the same eight bytes, x the
+  first four and y the last four, little-endian on every CUDA device, so the
+  four code pairs are x & 0xffff, x >> 16, y & 0xffff, y >> 16 in that order,
+  which is the pin's j = 0, 2, 4, 6. The load is 8-byte aligned: codes is the
+  cache base plus src * LW with LW 512, and u * 8 is a multiple of 8.
+- the dead-key case. The pin takes bits 0 and row_scale 1.0 when !ok; the fetch
+  takes pre_c zero and pre_s 1.0, so every pair converts from 0 as before and
+  the slot is still written.
+- conversion and rounding. __nv_cvt_fp8x2_to_halfraw2, __half2, __half22float2
+  and __fmul_rn are the pin's calls with the pin's operands.
+  __floats2bfloat162_rn(a, b) is __float2bfloat16_rn of each half packed as one
+  word, the same round to nearest even the pin's two scalar conversions use.
+- placement. wide(key, u) is a multiple of 8 elements and the shared base is
+  16-byte aligned, so one uint4 covers exactly the pin's dst[wide(key,u)+0..7],
+  in the same element order: out[j] holds pair j as (low half, high half).
+- coverage. The pin's strided loop runs idx = t, t + blockDim.x, ... below
+  KT * (LW / 8) = 2048. All four wrappers are __launch_bounds__(256) and the
+  host launches 256 threads, so PER is 8 and idx = t + p * 256 is the same set.
+- ordering. A tile's buffer is (tile & 1); store(tile + 1) writes the other
+  buffer, whose last reader was tile - 1, and two __syncthreads() separate them.
+
+Those were swept rather than argued, in two passes, because most of this can be
+settled without a device:
+
+- the plumbing, with the conversion stood in for by a marker that keeps the
+  input and the half it came from, over every value of every code pair at four
+  slot positions in the row: 1,048,576 cases, 0 differ.
+- the whole conversion, host side with the real intrinsics
+  (__nv_cvt_fp8x2_to_halfraw2, __half2, __half22float2, __float2bfloat16_rn and
+  __floats2bfloat162_rn, built by nvcc 13.3 with the build's own defines), both
+  forms written out as the two files write them, over every value of every code
+  pair at nine row scales including 0, 1, a subnormal-making 3.05e-05 and
+  65504: 2,359,296 cases, 0 differ. This is the pass that settles the fourth
+  point, that one __floats2bfloat162_rn equals the pin's two scalar
+  __float2bfloat16_rn conversions, which was prose before.
+
+Neither sweep is vacuous: a mutant that swaps a pair's two halves is caught by
+both. What they cannot speak to is the device's own rounding of the multiply
+(the host path uses the same operation on both sides, so the comparison holds
+but __fmul_rn's SASS is not exercised) and the scheduling, which is the fifth
+and sixth points above and needs a GPU.
+
+Left out of the fork's hunks: the pt and pstep page addressing. The fork's
+fetch resolves a part page and reads the scales from past the page's codes when
+pt is set. FP8 on pages is an unported feature here, refused by cuda_start.zig
+and cuda_latent.zig, so chunks_wide keeps its slab-only addressing and the one
+comment line about it says so. Our line keeps `scales[src]` where the fork
+hoists `const float* row_scales = scales + src` to carry the page case, the
+same value. The fork's two-line comment above PER is one line here, with the
+256-thread half moved onto PER's own line, because this repo's lean gate takes
+a comment on one line. Nothing else in the commit's five hunks is dropped.
+
+Compiled here, before and after, with the build's own flags: nvcc 13.3 (the
+Windows toolkit on this workstation), torch_flags plus -O3 and the Windows
+preprocessor pair cuda_fatbin.zig passes, -I zig/kernels/cuda, one -gencode a
+recorded SM. Both sides build glm_glue clean at sm_80, 86, 89, 120 and 121.
+That is a compile, not a numerical check: the bytes still need a device.
+
+What ptxas reports, registers a thread, in the record's SM order
+(80, 86, 89, 120, 121):
+
+  tf_glm_chunks_16_fp8   64, 64, 64, 64, 64      ->  148, 148, 150, 128, 128
+  tf_glm_chunks_32_fp8   128, 128, 127, 130, 130 ->  194, 194, 213, 163, 163
+  tf_glm_chunks_16       64, 64, 64, 123, 123    ->  unchanged
+  tf_glm_chunks_32       150, 150, 150, 128, 128 ->  unchanged
+
+Neither changed kernel spills a byte on any of the five, before or after. The
+two kernels that do spill in this image, tf_glm_chunks_16_fp8_skip at 24 bytes
+and tf_glm_select_rows_wide at 8, spill the same before and after, so neither
+is this patch. The BF16 rows confirm the fork's claim that its arm is untouched.
+
+The before column reproduces what measurements/pending_133.zig already records
+for both kernels, exactly, which is what makes the after column substitutable:
+the instrument agrees with the receipt it is replacing. So this patch updates
+that file, the nvcc 13.3 receipts, with the measured numbers.
+
+It does not touch glm_kv_pending.zig. That file says nvcc 13.0, and 13.0 does
+not build this tree on this workstation: CUDA 13.0 and 13.1 predate glibc
+2.43's C23 rsqrt, so their crt/math_functions.h collides with the system
+mathcalls.h before any of our code is reached. Five ways round it were tried
+and none works: plain, -Xcompiler -fpermissive, neutering __THROW, and two
+diag_suppress forms (the tag is rejected and the front end emits no error
+number for this one, because an exception-specification mismatch is
+ill-formed rather than a suppressible diagnostic). Writing the 13.3
+measurement into a file labelled 13.0 would be a false provenance, so its two
+rows are stale after this patch and the build machine has to retake them.
+
+Which releases that actually affects, read out of registry.usageFor rather than
+assumed. newer(x, y) is strictly x after y, so the later_pending line keeps a
+record's usage while the release is below 13.2 and zeroes it from 13.2 on.
+Neither kernel is in measurements/main_130.zig, which usageFor consults first at
+exactly 13.0. So for these two: 13.0 and 13.1 read glm_kv_pending's numbers,
+which are the stale ones; 13.2 falls through pending_132.lookup and finds
+nothing, so none; 13.3 takes measurements/pending_133.zig, the file this patch
+updates; 13.4 and later find nothing either and are none. The stale pair is read
+on exactly the two compilers this box cannot run, and not on any later one, so
+the hole is narrow but it is not where an earlier draft of this header put it.
+The fork leaves both files untouched in this commit and still reads 64 and
+128/127/130 at ovn-up.
+
+What a GPU run has to show. Byte equality: tf_glm_chunks_16_fp8 and
+tf_glm_chunks_32_fp8 against the same kernels before this patch, dense and
+sparse, at counts that straddle the tile and chunk edges, including a count of
+zero and counts that leave a tile partly dead. Then the time: the fork claims
+this stage is about 220 ms of a 2,048-row prompt chunk, so the prompt side is
+where the win should appear, with decode's chunks_16_fp8 a smaller share. One
+thing to watch beside the clock: 128 registers a thread at 256 threads is two
+blocks an SM worth of registers, but these kernels already take one block an SM
+on shared memory, so the register rise should not move occupancy. Confirm that
+rather than assume it.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- 42735f94f moved glm_attn::chunks_wide from glm_glue_attn.cuh into zig/kernels/cuda/common/mla.cuh (shared with the tf_mla_* entries) and gave it RW and SPLIT template parameters. The fold's FP8 fetch/store split is merged into that function (git merge-file of the function's three texts): load_kv keeps v1.2.7's KW-wide BF16 copy, fetch and store are the fold's (LW wide; static_assert(!(FP8 && RW != 0)) makes KW == LW on the FP8 arm).
+- measurements/pending_133.zig carries the fold's after-registers for tf_glm_chunks_16_fp8 and _32_fp8, now re-measured on this body: nvcc 13.3 ptxas (the build's flags, work/reseat/nvcc_check.py) reports 148, 148, 150, 128, 128 and 194, 194, 213, 163, 163 at sm_80/86/89/120/121, the file's numbers exactly, against v1.2.7's 64 x5 and 128, 128, 127, 130, 130. Neither kernel spills on any of the five (spill_check.py).
+- source: work/fold/0031-fp8-tile-ahead.patch
+
+diff --git a/zig/kernels/cuda/common/mla.cuh b/zig/kernels/cuda/common/mla.cuh
+index 7828842021654a26f2ab1869850e528ac55041d9..d2ce1dd223e06a12686f55191c6a96c1a337e27d 100644
+--- a/zig/kernels/cuda/common/mla.cuh
++++ b/zig/kernels/cuda/common/mla.cuh
+@@ -67,7 +67,7 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
+   // a dense chunk's 512 keys are one page, its rows from that page's; a sparse key's row comes as the token list has it
+   const __nv_bfloat16* paged = !FP8 && pt && !sparse && live ? lc + ((int64_t)pt[c] * (pstep / 2) - start * KW) : lc;
+   const __nv_bfloat16* keys_at = SPLIT ? lc + (c * CH - start) * KW : paged;
+-  auto load_kv = [&](int tile) {
++  auto load_kv = [&](int tile) {  // BF16: the tile's rows by cp.async into its buffer
+     __nv_bfloat16* dst = kvs + (tile & 1) * KT * KW;
+     const int64_t first = start + tile * KT;
+     for (int idx = t; idx < KT * (KW / 8); idx += blockDim.x) {
+@@ -75,20 +75,41 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
+       const int64_t ki = first + key;
+       const bool ok = sparse ? ki < n : ki <= limit;
+       const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
+-      if constexpr (FP8) {
+-        const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc);
+-        const float row_scale = ok ? scales[src] : 1.0f;
++      cp16(dst + wide<KW>(key, u), keys_at + src * KW + u * 8, ok);
++    }
++  };
++  // FP8: a tile's codes and scales are fetched into registers a tile ahead, then converted while the one before runs.
++  constexpr int PER = FP8 ? KT * (LW / 8) / 256 : 1;  // slots a thread, at the 256 threads all four wrappers launch
++  uint2 pre_c[PER];
++  float pre_s[PER];
++  auto fetch = [&](int tile) {
++    const int64_t first = start + tile * KT;
+ #pragma unroll
+-        for (int j = 0; j < 8; j += 2) {
+-          const uint16_t bits = ok ? (uint16_t)codes[src * LW + u * 8 + j] |
+-                                        ((uint16_t)codes[src * LW + u * 8 + j + 1] << 8) : 0;
+-          const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
+-          dst[wide(key, u) + j] = __float2bfloat16_rn(__fmul_rn(v.x, row_scale));
+-          dst[wide(key, u) + j + 1] = __float2bfloat16_rn(__fmul_rn(v.y, row_scale));
+-        }
+-      } else {
+-        cp16(dst + wide<KW>(key, u), keys_at + src * KW + u * 8, ok);
++    for (int p = 0; p < PER; ++p) {
++      const int idx = t + p * 256, key = idx / (LW / 8), u = idx % (LW / 8);
++      const int64_t ki = first + key;
++      const bool ok = sparse ? ki < n : ki <= limit;
++      const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
++      // a slab row's codes at src and its scale at scales[src]; this tree refuses an FP8 cache on pages
++      const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc) + src * LW;
++      pre_c[p] = ok ? *reinterpret_cast<const uint2*>(codes + u * 8) : make_uint2(0u, 0u);
++      pre_s[p] = ok ? scales[src] : 1.0f;
++    }
++  };
++  auto store = [&](int tile) {
++    __nv_bfloat16* dst = kvs + (tile & 1) * KT * LW;
++#pragma unroll
++    for (int p = 0; p < PER; ++p) {
++      const int idx = t + p * 256, key = idx / (LW / 8), u = idx % (LW / 8);
++      uint32_t out[4];
++#pragma unroll
++      for (int j = 0; j < 4; ++j) {  // code pairs (2j, 2j + 1), little-endian in the slot's eight bytes
++        const uint16_t bits = (uint16_t)(((j < 2 ? pre_c[p].x : pre_c[p].y) >> (16 * (j & 1))) & 0xffffu);
++        const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
++        const __nv_bfloat162 b = __floats2bfloat162_rn(__fmul_rn(v.x, pre_s[p]), __fmul_rn(v.y, pre_s[p]));
++        out[j] = *reinterpret_cast<const uint32_t*>(&b);
+       }
++      *reinterpret_cast<uint4*>(dst + wide(key, u)) = make_uint4(out[0], out[1], out[2], out[3]);
+     }
+   };
+   float m[MT][2], l[MT][2], o[MT][8][4];
+@@ -104,10 +125,17 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
+       const bool ok = h0 + hd < heads;
+       cp16(qs + wide<KW>(hd, u), qa + (r * heads + (ok ? h0 + hd : 0)) * KW + u * 8, ok);
+     }
+-    load_kv(0);
+-    commit();
+-    load_kv(1);
+-    commit();
++    if constexpr (FP8) {
++      fetch(0);
++      store(0);
++      fetch(1);
++      commit();  // the query's copies
++    } else {
++      load_kv(0);
++      commit();
++      load_kv(1);
++      commit();
++    }
+   }
+   for (int tile = 0; live && tile < tiles; ++tile) {
+     if constexpr (FP8) {
+@@ -119,6 +147,10 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
+         wait<0>();
+     }
+     __syncthreads();
++    if constexpr (FP8) {  // the next tile into its buffer, free since the barrier before; the one after into registers
++      if (tile + 1 < tiles) store(tile + 1);
++      if (tile + 2 < tiles) fetch(tile + 2);
++    }
+     const __nv_bfloat16* kv = kvs + (tile & 1) * KT * KW;
+     const int64_t first = start + tile * KT;
+     float sc[4];
+@@ -200,8 +232,10 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
+     __syncthreads();
+     for (int i = 0; i < MT; ++i)
+       for (int hf = 0; hf < 2; ++hf) l[i][hf] = __fmaf_rn(l[i][hf], alpha[i][hf], stat[HB + i * 16 + hf * 8 + g]);
+-    if (tile + 2 < tiles) load_kv(tile + 2);
+-    commit();
++    if constexpr (!FP8) {
++      if (tile + 2 < tiles) load_kv(tile + 2);
++      commit();
++    }
+   }
+   for (int i = 0; i < MT; ++i)
+     for (int e = 0; e < 4; ++e) {
+diff --git a/zig/src/core/contract/measurements/pending_133.zig b/zig/src/core/contract/measurements/pending_133.zig
+index c89f898270c05e1e47c14ea8ea39a4b2baf51988..cb5676fdbef3fdb4fce01314e75004c871da0a16 100644
+--- a/zig/src/core/contract/measurements/pending_133.zig
++++ b/zig/src/core/contract/measurements/pending_133.zig
+@@ -34,8 +34,8 @@ pub const records = [_]Override{
+     .{ .name = "gdn_prep tf_gdn_prep_256, 16 rows or fewer", .usage = .{ .{ .regs = 146, .static = 0, .bound = 128 }, .{ .regs = 146, .static = 0, .bound = 128 }, .{ .regs = 146, .static = 0, .bound = 128 }, .{ .regs = 145, .static = 0, .bound = 128 }, .{ .regs = 145, .static = 0, .bound = 128 } } },
+     .{ .name = "gdn_prep tf_gdn_prep_64", .usage = .{ .{ .regs = 44, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 46, .static = 0, .bound = 128 }, .{ .regs = 46, .static = 0, .bound = 128 } } },
+     .{ .name = "gdn_prep tf_gdn_prep_64, 16 rows or fewer", .usage = .{ .{ .regs = 44, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 46, .static = 0, .bound = 128 }, .{ .regs = 46, .static = 0, .bound = 128 } } },
+-    .{ .name = "glm_glue tf_glm_chunks_16_fp8", .usage = .{ .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 } } },
+-    .{ .name = "glm_glue tf_glm_chunks_32_fp8", .usage = .{ .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 127, .static = 0, .bound = 256 }, .{ .regs = 130, .static = 0, .bound = 256 }, .{ .regs = 130, .static = 0, .bound = 256 } } },
++    .{ .name = "glm_glue tf_glm_chunks_16_fp8", .usage = .{ .{ .regs = 148, .static = 0, .bound = 256 }, .{ .regs = 148, .static = 0, .bound = 256 }, .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 } } },
++    .{ .name = "glm_glue tf_glm_chunks_32_fp8", .usage = .{ .{ .regs = 194, .static = 0, .bound = 256 }, .{ .regs = 194, .static = 0, .bound = 256 }, .{ .regs = 213, .static = 0, .bound = 256 }, .{ .regs = 163, .static = 0, .bound = 256 }, .{ .regs = 163, .static = 0, .bound = 256 } } },
+     .{ .name = "glm_glue tf_glm_lat_write_fp8", .usage = .{ .{ .regs = 26, .static = 64, .bound = 512 }, .{ .regs = 28, .static = 64, .bound = 512 }, .{ .regs = 28, .static = 64, .bound = 512 }, .{ .regs = 25, .static = 64, .bound = 512 }, .{ .regs = 25, .static = 64, .bound = 512 } } },
+     .{ .name = "norms tf_l2_rows", .usage = .{ .{ .regs = 48, .static = 32, .bound = 256 }, .{ .regs = 48, .static = 32, .bound = 256 }, .{ .regs = 48, .static = 32, .bound = 256 }, .{ .regs = 64, .static = 32, .bound = 256 }, .{ .regs = 64, .static = 32, .bound = 256 } } },
+     .{ .name = "norms tf_slerp_rows", .usage = .{ .{ .regs = 113, .static = 32, .bound = 256 }, .{ .regs = 113, .static = 32, .bound = 256 }, .{ .regs = 113, .static = 32, .bound = 256 }, .{ .regs = 113, .static = 32, .bound = 256 }, .{ .regs = 113, .static = 32, .bound = 256 } } },

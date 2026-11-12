@@ -1,0 +1,261 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: a logit gather broadcasts one block a rank, not one a row
+
+Our fork `ai-engine` at 0a77dcd7d, "glm cuda: a logit gather broadcasts one block a
+rank, so TP=3 prompt_logprobs past ~100 tokens no longer hangs" (its own "Fixes #1559").
+The fork diff applies to our tree unchanged for the three source files, so these are its
+lines.
+
+Sampler.gather copied this rank's columns into `full` row by row and then queued one
+ncclBroadcast per row per rank inside one NCCL group. At TP=3 a 128-row prompt-logprob
+pass posts 381 broadcasts in one group and never leaves ncclGroupEnd, so the pass hangs.
+Each rank's columns are already one packed [rows][span] block, so the fork broadcasts
+that block once a rank into a new `stage` buffer and places each block into its columns
+of `full` with one cuMemcpy2DAsync. The bytes in `full` are the same; the number of
+broadcasts a gather is now the world, whatever the rows.
+
+Three call sites take the new `stage` argument: Sampler.draw, prompt_logprobs.run (where
+the pass's own 128-row Buffers gain a `stage` of the same size as `full`) and
+structured.drawWhole.
+
+This completes no patch of ours. The pin has the identical row-by-row Spread.post
+(work/pin/tree/zig/src/families/glm/cuda_sampler.zig), and all three source files here
+are byte-identical to the pin before this patch, so it is a fork fix we had never taken,
+not a port regression.
+
+Left out of the fork's commit: nothing from the three source files. Added beyond it, in
+zig/glm_prompt_logprobs_host.zig (patch 0024 owns that file here):
+
+  - the `copy2d` no-op and `d.api.cuMemcpy2DAsync_v2 = copy2d` in Heads.score. Heads
+    builds its driver from `undefined` and sets only the entry points the code under
+    test calls, so without the stub the two tests that reach `score` call a garbage
+    function pointer. The fork added the same stub in its later 03138041e; the comment
+    here states what the code does rather than naming that commit.
+  - `e.smp.stage`, beside the `e.smp.full` the test already sets. The fork leaves the
+    new field undefined in its host test; our `run` reads it on the window path that
+    these tests take, so we give it an address.
+
+One place this patch goes beyond the fork's own edit: `Sampler.copy`, the 1D
+device-to-device helper, is removed. `gather` was its only caller in either tree and it is
+private, so after this change nothing can reach it; the fork leaves it in place and a dead
+private helper is not worth carrying.
+
+Gates: zig build test-glm-logprobs-host passes (7/7) with this patch, and patch 08 of this
+lane makes that step part of test-cuda-host, which it was not before.
+
+What a GPU run must show: a TP=3 serve answering a prompt_logprobs request over 128
+tokens at all (the hang this fixes), and the same logprob words as TP=1 for the same
+prompt. The bf16 bytes `full` holds should be identical to the old path, so a digest of
+a structured or sampled decode on three ranks is the cheap check that `place` and the
+broadcast layout agree.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- v1.2.7 has the same row-by-row Spread.post (cuda_sampler.zig unchanged in 9c9bf542..v1.2.7); applies as is.
+- source: work/fold/0001-logit-gather-blocks.patch
+
+diff --git a/zig/glm_prompt_logprobs_host.zig b/zig/glm_prompt_logprobs_host.zig
+index b023683624acaed01ea8fca375296417eef13986..50d9a131793ad22b8df3a93dc03ed014d0b3835e 100644
+--- a/zig/glm_prompt_logprobs_host.zig
++++ b/zig/glm_prompt_logprobs_host.zig
+@@ -101,6 +101,9 @@ const Heads = struct {
+     fn copy(_: u64, _: u64, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+         return 0;
+     }
++    fn copy2d(_: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
++        return 0;
++    }
+     fn group() callconv(.c) cuda.nccl.Result {
+         return 0;
+     }
+@@ -111,6 +114,7 @@ const Heads = struct {
+     fn score(d: *cuda.Driver, output: Output, rank_: usize) !void {
+         d.api.cuLaunchKernel = launch;
+         d.api.cuMemcpyDtoDAsync_v2 = copy;
++        d.api.cuMemcpy2DAsync_v2 = copy2d; // the sampler places each rank's columns with one strided copy
+         var lib: cuda.nccl.Library = undefined;
+         lib.api.ncclGroupStart = group;
+         lib.api.ncclGroupEnd = group;
+@@ -146,6 +150,7 @@ const Heads = struct {
+         e.smp.d = d;
+         e.smp.vocab = 16;
+         e.smp.full = .{ .d = d, .ptr = 0x50000, .len = 1024 };
++        e.smp.stage = .{ .d = d, .ptr = 0x60000, .len = 1024 };
+         try glm.prompt_logprobs.run(&e, .{}, &.{7});
+     }
+ };
+diff --git a/zig/src/families/glm/cuda_prompt_logprobs.zig b/zig/src/families/glm/cuda_prompt_logprobs.zig
+index 3694a1435834c5244ded6c9e86cf244ec64d2b2b..219851c073ed469b5440affe5fce55a1f9b717d6 100644
+--- a/zig/src/families/glm/cuda_prompt_logprobs.zig
++++ b/zig/src/families/glm/cuda_prompt_logprobs.zig
+@@ -28,14 +28,18 @@ pub const Reader = struct { ctx: *anyopaque, call: *const fn (ctx: *anyopaque, w
+ pub const Buffers = struct {
+     columns: cuda.DeviceBuffer,
+     full: cuda.DeviceBuffer,
++    stage: cuda.DeviceBuffer, // the gather's blocks (Sampler.gather), batch_rows * vocab bf16
+ 
+     fn make(e: *const Engine) !Buffers {
+         var columns = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.share.vocab.len() * 2);
+         errdefer columns.free();
+-        return .{ .columns = columns, .full = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2) };
++        var full = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2);
++        errdefer full.free();
++        return .{ .columns = columns, .full = full, .stage = try cuda.DeviceBuffer.alloc(e.d, batch_rows * e.c.vocab * 2) };
+     }
+ 
+     pub fn free(b: *Buffers) void {
++        b.stage.free();
+         b.full.free();
+         b.columns.free();
+     }
+@@ -69,6 +73,7 @@ pub fn run(e: *Engine, want: Want, next: []const u32) !void {
+     const rows: usize = if (own != null) batch_rows else fw.window_rows;
+     const columns = if (own) |b| b.columns.ptr else e.bd.logits;
+     const full = if (own) |b| b.full.ptr else e.smp.full.ptr;
++    const stage = if (own) |b| b.stage.ptr else e.smp.stage.ptr;
+     const D: usize = e.c.hidden;
+     const words = e.prompt_out.slice(u32);
+     const picks = words[batch_rows * row_words ..][0..batch_rows];
+@@ -78,7 +83,7 @@ pub fn run(e: *Engine, want: Want, next: []const u32) !void {
+         const n = @min(rows, next.len - r);
+         // as the head's last-row pass (Forward.finish); its column count takes no K slices (the test below)
+         try projection.matmul(projectionSet(e), e.stream, e.w.head, e.bp.fnormed + r * D * 2, D, columns, e.bp.kda.mm_part, n, e.share.vocab.len(), D, false);
+-        try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = columns }}, n, full);
++        try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = columns }}, n, stage, full);
+         const reader = want.reader orelse continue;
+         @memcpy(picks[0..n], next[r..][0..n]);
+         try e.smp.logprobRows(e.stream, full, n, out + batch_rows * row_words * 4, want.k, out);
+diff --git a/zig/src/families/glm/cuda_sampler.zig b/zig/src/families/glm/cuda_sampler.zig
+index c8f1e33bd7ac7960739b657007a2c8e091dcaa5e..6a5e48cc75d0b42b81f5d8db9e466a7f8495ac96 100644
+--- a/zig/src/families/glm/cuda_sampler.zig
++++ b/zig/src/families/glm/cuda_sampler.zig
+@@ -34,6 +34,7 @@ pub const Sampler = struct {
+     vocab: usize,
+     rows: usize,
+     full: cuda.DeviceBuffer, // bf16 [rows][vocab]: every rank's columns in place
++    stage: cuda.DeviceBuffer, // bf16, rows * vocab: every rank's columns as one block a rank (gather)
+     rule: cuda.DeviceBuffer,
+     meta: cuda.DeviceBuffer,
+     tok: cuda.DeviceBuffer,
+@@ -47,6 +48,8 @@ pub const Sampler = struct {
+         const gm = try m.function("tf_grammar_mask");
+         var full = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
+         errdefer full.free();
++        var stage = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
++        errdefer stage.free();
+         var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
+         errdefer r.free();
+         var meta = try cuda.DeviceBuffer.alloc(d, 16);
+@@ -54,7 +57,7 @@ pub const Sampler = struct {
+         var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
+         errdefer tok.free();
+         const prob = try cuda.DeviceBuffer.alloc(d, rows * 4);
+-        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
++        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .stage = stage, .rule = r, .meta = meta, .tok = tok, .prob = prob };
+     }
+ 
+     pub fn deinit(s: *Sampler) void {
+@@ -62,13 +65,14 @@ pub const Sampler = struct {
+         s.tok.free();
+         s.meta.free();
+         s.rule.free();
++        s.stage.free();
+         s.full.free();
+         s.module.unload();
+     }
+ 
+     /// `rows` rows of `mine` -> `out`, tokens at positions first, first + 1, ...; `spans`: every rank's, rank order.
+     pub fn draw(s: *Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, first: u64, r: Rule, out: []u32) !void {
+-        try s.gather(stream, exchange, spans, mine, rows, s.full.ptr);
++        try s.gather(stream, exchange, spans, mine, rows, s.stage.ptr, s.full.ptr);
+         try s.drawFull(stream, rows, first, r, out);
+     }
+ 
+@@ -92,19 +96,23 @@ pub const Sampler = struct {
+         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
+     }
+ 
+-    /// `rows` rows of `mine` made whole in `full` (bf16 [rows][vocab]) on every rank, each column from its rank.
+-    pub fn gather(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, full: u64) !void {
+-        const V = s.vocab;
+-        for (mine) |l| {
+-            const span = spans[l.rank];
+-            for (0..rows) |row| try s.copy(stream, full + (row * V + span.lo) * 2, l.logits + row * span.len() * 2, span.len() * 2);
+-        }
++    /// `full` (bf16 [rows][vocab]) whole on every rank: one broadcast a rank into `stage`, one strided copy a rank.
++    pub fn gather(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, stage: u64, full: u64) !void {
+         switch (exchange) {
+-            .local => {},
+-            .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = full, .vocab = V, .spans = spans, .rows = rows }, Spread.post),
++            .local => for (mine) |l| try s.place(stream, full, l.logits, spans[l.rank], rows),
++            .nccl => |x| {
++                try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .stage = stage, .spans = spans, .mine = mine, .rows = rows }, Spread.post);
++                for (spans) |span| try s.place(stream, full, stage + rows * span.lo * 2, span, rows);
++            },
+         }
+     }
+ 
++    /// One rank's columns (bf16 [rows][span], packed) into their columns of `full`.
++    fn place(s: *const Sampler, stream: cuda.Stream, full: u64, src: u64, span: Span, rows: usize) !void {
++        const p: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = span.len() * 2, .dst = full + span.lo * 2, .dst_pitch = s.vocab * 2, .width = span.len() * 2, .height = rows };
++        try s.d.check(s.d.api.cuMemcpy2DAsync_v2(&p, stream.handle), "cuMemcpy2DAsync");
++    }
++
+     /// Structured output: each of `rows` whole rows in `full` keeps its allowed tokens (`words` u32 a row at `bits`).
+     pub fn mask(s: *const Sampler, stream: cuda.Stream, rows: usize, bits: u64, words: usize) !void {
+         var args: cuda.Args = .{};
+@@ -131,10 +139,6 @@ pub const Sampler = struct {
+     pub fn rowsRead(s: *const Sampler, rows: usize, host: []u16) !void {
+         try s.full.download(0, std.mem.sliceAsBytes(host[0 .. rows * s.vocab]));
+     }
+-
+-    fn copy(s: *const Sampler, stream: cuda.Stream, dst: u64, src: u64, bytes: usize) !void {
+-        try s.d.check(s.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, stream.handle), "cuMemcpyDtoDAsync");
+-    }
+ };
+ 
+ test "rules as nemotron/cuda_sampler fills them; temperature 0 is greedy" {
+@@ -147,20 +151,24 @@ test "rules as nemotron/cuda_sampler fills them; temperature 0 is greedy" {
+     try std.testing.expectEqual(@as(?Sampling, null), check(.{ .seed = 0, .temperature = 0 }));
+ }
+ 
+-/// Each rank's columns of each row from that rank (spans may differ in width: TP=3), in one group.
++/// Each rank's columns as one block from that rank (spans may differ in width: TP=3), in one group: world broadcasts.
+ const Spread = struct {
+     lib: *const cuda.nccl.Library,
+     comm: cuda.nccl.Comm,
+     stream: cuda.Stream,
+-    full: u64,
+-    vocab: usize,
++    stage: u64,
+     spans: []const Span,
++    mine: []const Local,
+     rows: usize,
+ 
+     fn post(t: Spread) anyerror!void {
+-        for (0..t.rows) |row| for (t.spans, 0..) |span, q| {
+-            const at = t.full + (row * t.vocab + span.lo) * 2;
+-            try t.lib.check(t.lib.api.ncclBroadcast(at, at, span.len(), .bf16, @intCast(q), t.comm, t.stream.handle), "ncclBroadcast");
+-        };
++        for (t.spans, 0..) |span, q| {
++            const at = t.stage + t.rows * span.lo * 2;
++            var send = at;
++            for (t.mine) |l| if (l.rank == q) {
++                send = l.logits;
++            };
++            try t.lib.check(t.lib.api.ncclBroadcast(send, at, t.rows * span.len(), .bf16, @intCast(q), t.comm, t.stream.handle), "ncclBroadcast");
++        }
+     }
+ };
+diff --git a/zig/src/families/glm/cuda_structured.zig b/zig/src/families/glm/cuda_structured.zig
+index 38cebeaeee7c2097408c0aa75d95fce1f8a36387..217cca19bd10fa62552efa6a9f2c167b6607e7d8 100644
+--- a/zig/src/families/glm/cuda_structured.zig
++++ b/zig/src/families/glm/cuda_structured.zig
+@@ -8,7 +8,7 @@ const Engine = @import("cuda_engine.zig").Engine;
+ 
+ /// Structured output's draw: the rows whole on every rank (Sampler.gather); rank 0 masks them by `bits` and draws.
+ pub fn drawWhole(e: anytype, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
+-    try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, e.smp.full.ptr);
++    try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, e.smp.stage.ptr, e.smp.full.ptr);
+     if (e.share.rank != 0) {
+         try e.stream.synchronize();
+         return e.checkGathers();

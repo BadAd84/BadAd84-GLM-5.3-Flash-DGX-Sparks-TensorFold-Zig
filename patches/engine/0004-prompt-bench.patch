@@ -1,0 +1,367 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] host: the prompt-bench step, so request preparation can be timed on this tree
+
+Fork ai-engine, ref fork-ssh/ovn-up, commit ef81b4a49 "server: render and
+tokenize a request once; TF_GLM_OVN_HOST_ONCE": the instrument the commit was
+measured with. The measured work itself is patch 03, so this lands first and
+gives the before number on our own tree.
+
+What it is: `zig build prompt-bench` installs `zig-out/bin/prompt_bench`, run
+as `prompt_bench MODEL PROMPTS [rounds]`. MODEL is a checkpoint directory with
+tokenizer.json and a chat template; PROMPTS is a directory of the parity
+probe's own texts (c0.txt, reply.txt, tool_plain.txt, tool_masked.txt, c32.txt,
+fix40.txt). It builds four requests, two of them the probe's r2 and its masked
+twin and two synthetic agent turns of about 200k and 650k tokens that end on a
+tool result, and prints the median and minimum milliseconds a round for each
+site of request preparation. No GPU, no network, no engine: the engine behind
+the server is a script that accepts every submit and never replies.
+
+It also checks itself each round: the prompt ids from chat.prepare, the ids
+from prompt.prepare and the ids from a plain renderIds must be the same slice
+of numbers, and the three marks (history_len, rewind_len, user_end) must agree
+with the ones the request carries, or it stops with IdsDiffer or MarksDiffer.
+
+No patch in this stack touches these files, so this completes nothing earlier.
+
+What is not the fork's own lines, and why:
+- zig/build/server.zig: the fork's promptBench builds the lanes, engine_api,
+  tokenizer and template modules itself. Our tree has `plain`, which builds the
+  same set plus `core` and runs addTo and testImports, and which every other
+  CPU-only server artefact here is built with; our server root needs the core
+  import, so promptBench calls `plain` and takes engine_api back out of its
+  import table. The step name, its description and the executable are the
+  fork's.
+- zig/tests/server/prompt_bench.zig is the fork's file with the eight rows that
+  time the new path removed: they call Rendered.keep and Rendered.pieces and
+  messages.toolArgumentsWith, none of which exist before patch 03. What is left
+  is the whole old path, which is the before number. Patch 03 puts the fork's
+  eighteen rows back. The helper `render`, the local `problem` and the local
+  `user_at` went with those rows for the same reason.
+- two site labels lose a line number: the fork writes "systemPrefixLen (chat
+  154)" and "replySpans (chat 177)" for lines in its own chat.zig, which are
+  163 and 186 here and would drift again; they read "(chat.zig)" instead.
+- zig/src/server/root.zig gains the fork's four exports. Three are what the
+  bench imports; `messages` is used by the rows patch 03 restores.
+
+What a GPU run has to say: nothing. prompt-bench is a host tool and is not part
+of any default build step, the serve image or the host gates; it is only built
+when asked for by name.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- build.zig grew a step line (cache_index_timing) under the hunk and root.zig's export block moved: the same added lines, seated by a 3-way merge; chat.prepare and plain() keep their signatures at v1.2.7.
+- zig fmt: prompt_bench.zig's sites table is aligned for the rows it has here (the fold kept 0035's wider columns, which `zig fmt --check` refuses at this patch).
+- source: work/fold/0004-prompt-bench.patch
+
+diff --git a/build.zig b/build.zig
+index fe8202515fdd7d372e489dde55f6a76e8913593a..c676132b952c6f4770521a6591c0b9ad8023b7af 100644
+--- a/build.zig
++++ b/build.zig
+@@ -248,6 +248,7 @@ pub fn build(b: *std.Build) void {
+     @import("zig/build/startup_states_timing.zig").step(b);
+     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
+     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
++    @import("zig/build/server.zig").promptBench(b);
+     @import("zig/build/mcdma_pair.zig").add(b, target);
+     @import("zig/build/cache_index_timing.zig").step(b);
+     sys_build.wire(b);
+diff --git a/zig/build/server.zig b/zig/build/server.zig
+index 3af132fafa26db74c2a23d5a1594adb7c250ef7b..cddd09a0e0af1a065d8137a10d384f763d990102 100644
+--- a/zig/build/server.zig
++++ b/zig/build/server.zig
+@@ -185,3 +185,19 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
+     step.dependOn(&server_install.step);
+     step.dependOn(&cli_install.step);
+ }
++
++/// ``zig build prompt-bench``, then ``zig-out/bin/prompt_bench MODEL PROMPTS [rounds]``: request preparation per site.
++pub fn promptBench(b: *std.Build) void {
++    const host = b.graph.host;
++    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .ReleaseFast, .link_libc = true });
++    const server_mod = plain(b, "zig/src/server/root.zig", host, .ReleaseFast, lanes);
++    const api = server_mod.import_table.get("engine_api").?;
++    const exe = b.addExecutable(.{ .name = "prompt_bench", .root_module = b.createModule(.{
++        .root_source_file = b.path("zig/tests/server/prompt_bench.zig"),
++        .target = host,
++        .optimize = .ReleaseFast,
++        .link_libc = true,
++        .imports = &.{ .{ .name = "server", .module = server_mod }, .{ .name = "engine_api", .module = api } },
++    }) });
++    b.step("prompt-bench", "The server's request preparation on the parity probe's r2, ms per site (no GPU)").dependOn(&b.addInstallArtifact(exe, .{}).step);
++}
+diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 93e1d91daff90bdfb17ded16ebcd1a6ba2a0e41c..80864cca099914886b3dfad6dc42385ffb565a74 100644
+--- a/zig/src/server/root.zig
++++ b/zig/src/server/root.zig
+@@ -15,6 +15,10 @@ pub const hub = @import("hub.zig");
+ pub const tool_specs = @import("tool_specs.zig");
+ pub const Server = server.Server;
+ pub const Config = server.Config;
++pub const prompt = @import("prompt.zig");
++pub const chat = @import("chat.zig");
++pub const messages = @import("messages.zig");
++pub const openai = @import("openai.zig");
+ 
+ test {
+     _ = @import("startup_receipt.zig");
+diff --git a/zig/tests/server/prompt_bench.zig b/zig/tests/server/prompt_bench.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..26db37dc96062a5040ca384a7a6c354f11bdaf24
+--- /dev/null
++++ b/zig/tests/server/prompt_bench.zig
+@@ -0,0 +1,256 @@
++//! ``prompt_bench MODEL PROMPTS [rounds]``: the server's request preparation on the parity probe's r2, ms per site.
++const std = @import("std");
++const server = @import("server");
++const api = @import("engine_api");
++const json = server.json;
++const Value = json.Value;
++const prompt = server.prompt;
++const chat = server.chat;
++const Allocator = std.mem.Allocator;
++
++const Script = struct {
++    fn engine(s: *@This()) api.Engine {
++        return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
++    }
++    fn info(_: *anyopaque) api.Info {
++        return .{ .context_window = 1 << 21, .prompt_cache = true };
++    }
++    fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {}
++    fn cancel(_: *anyopaque, _: api.Id) void {}
++    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
++        out.* = .{};
++    }
++    fn memory(_: *anyopaque, _: bool) ?api.Memory {
++        return null;
++    }
++};
++
++const Gone = struct {
++    pub fn check(_: Gone) bool {
++        return false;
++    }
++};
++
++fn object(a: Allocator, pairs: []const struct { []const u8, Value }) !Value {
++    const o = try json.newObject(a);
++    for (pairs) |p| try o.put(a, p[0], p[1]);
++    return .{ .object = o };
++}
++
++fn message(a: Allocator, role: []const u8, content: []const u8) !Value {
++    return object(a, &.{ .{ "role", .{ .string = role } }, .{ "content", .{ .string = content } } });
++}
++
++fn read(io: std.Io, a: Allocator, dir: []const u8, name: []const u8) ![]const u8 {
++    return std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, name }), a, .limited(16 << 20));
++}
++
++/// A chat body as a client sends it: the messages, optional tools, thinking off through chat_template_kwargs.
++fn body(a: Allocator, messages: []const Value, tools: ?Value) ![]const u8 {
++    const kwargs = try object(a, &.{.{ "enable_thinking", .{ .bool = false } }});
++    const b = try object(a, &.{ .{ "model", .{ .string = "m" } }, .{ "messages", .{ .array = try a.dupe(Value, messages) } }, .{ "chat_template_kwargs", kwargs }, .{ "max_tokens", .{ .int = "64" } }, .{ "stream", .{ .bool = true } } });
++    if (tools) |t| try b.object.put(a, "tools", t);
++    return json.stringify(a, b, .{ .ascii = false });
++}
++
++/// An agent's conversation over `corpus`: one read_file call and its result per 4 KiB, ending on a tool result.
++fn agent(a: Allocator, corpus: []const u8, bytes: usize) !struct { prior: []const u8, now: []const u8 } {
++    const spec = try object(a, &.{ .{ "type", .{ .string = "function" } }, .{ "function", try object(a, &.{ .{ "name", .{ .string = "read_file" } }, .{ "description", .{ .string = "Read part of a file." } }, .{ "parameters", (try json.parse(a, "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"path\"]}")).ok } }) } });
++    const tools: Value = .{ .array = try a.dupe(Value, &.{spec}) };
++    var list: std.ArrayList(Value) = .empty;
++    try list.append(a, try message(a, "system", "You are a careful assistant. Answer briefly."));
++    try list.append(a, try message(a, "user", "Read the files and report the three slowest batches."));
++    var at: usize = 0;
++    var n: usize = 0;
++    var prior_len: usize = 0;
++    while (at < bytes) : (n += 1) {
++        const chunk = corpus[at % corpus.len ..][0..@min(4096, corpus.len - at % corpus.len)];
++        at += chunk.len;
++        const id = try std.fmt.allocPrint(a, "call_{d}", .{n});
++        const args = try std.fmt.allocPrint(a, "{{\"path\": \"src/part_{d}.txt\", \"offset\": {d}}}", .{ n, at });
++        const call = try object(a, &.{ .{ "id", .{ .string = id } }, .{ "type", .{ .string = "function" } }, .{ "function", try object(a, &.{ .{ "name", .{ .string = "read_file" } }, .{ "arguments", .{ .string = args } } }) } });
++        const turn = try object(a, &.{ .{ "role", .{ .string = "assistant" } }, .{ "content", .{ .string = try std.fmt.allocPrint(a, "Reading part {d}.", .{n}) } }, .{ "tool_calls", .{ .array = try a.dupe(Value, &.{call}) } } });
++        prior_len = list.items.len;
++        try list.append(a, turn);
++        try list.append(a, try object(a, &.{ .{ "role", .{ .string = "tool" } }, .{ "tool_call_id", .{ .string = id } }, .{ "content", .{ .string = try std.mem.concat(a, u8, &.{ try std.fmt.allocPrint(a, "[part {d}]\n", .{n}), chunk }) } } }));
++    }
++    return .{ .prior = try body(a, list.items[0..prior_len], tools), .now = try body(a, list.items, tools) };
++}
++
++const sites = [_][]const u8{
++    "parse body",                     "plan (openai.chatInput)",      "chat.prepare",          "  prompt.prepare",
++    "  systemPrefixLen (chat.zig)",   "  replySpans (chat.zig)",      "old: renderIds prompt", "old: renderIds history",
++    "old: renderIds continued probe", "old: rewindLen (full encode)",
++};
++
++/// A list with message `at` given the probe text, or a probe message of `role` appended when `at` is the end.
++fn probeList(a: Allocator, messages: []const Value, at: usize, role: []const u8) ![]Value {
++    const list = try a.alloc(Value, @max(messages.len, at + 1));
++    @memcpy(list[0..messages.len], messages);
++    const m = if (at < messages.len) try json.copyObject(a, messages[at].object) else try json.newObject(a);
++    if (at == messages.len) try m.put(a, "role", .{ .string = role });
++    try m.put(a, "content", .{ .string = "\u{2063}probe" });
++    list[at] = .{ .object = m };
++    return list;
++}
++
++fn now(io: std.Io) i96 {
++    return std.Io.Clock.awake.now(io).toNanoseconds();
++}
++
++fn ms(ns: i96) f64 {
++    return @as(f64, @floatFromInt(ns)) / 1e6;
++}
++
++const Out = struct { ids: usize, digest: u64, history: u32, rewind: u32, user_end: u32 };
++
++fn load(gpa: Allocator, io: std.Io, dir: []const u8, script: *Script) !struct { hf: *server.hf_text.HfText, srv: *server.Server } {
++    var problem: []const u8 = "";
++    const hf = server.hf_text.HfText.load(gpa, io, dir, null, gpa, &problem) catch |e| {
++        std.debug.print("load: {s}\n", .{problem});
++        return e;
++    };
++    const srv = try server.Server.init(gpa, io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
++    return .{ .hf = hf, .srv = srv };
++}
++
++/// One request from its body bytes to a prepared request, as the chat route runs it.
++fn prepareBody(srv: *server.Server, cx: *server.errors.Cx, bytes: []const u8) !chat.Prepared {
++    const raw = (try json.parse(cx.a, bytes)).ok;
++    const input = try server.openai.chatInput(srv, cx, raw);
++    return chat.prepare(srv, cx, input, Gone{});
++}
++
++fn bench(gpa: Allocator, io: std.Io, dir: []const u8, name: []const u8, prior: []const u8, bytes: []const u8, rounds: usize) !void {
++    var script: Script = .{};
++    var cold_ns: i96 = 0;
++    {
++        // a fresh boot: nothing in the tokenizer's memo
++        const x = try load(gpa, io, dir, &script);
++        defer x.hf.deinit();
++        defer x.srv.deinit();
++        var arena = std.heap.ArenaAllocator.init(gpa);
++        defer arena.deinit();
++        var cx: server.errors.Cx = .{ .a = arena.allocator() };
++        const t = now(io);
++        const p = try prepareBody(x.srv, &cx, bytes);
++        cold_ns = now(io) - t;
++        x.srv.release(p.preparing, p.request);
++    }
++    const x = try load(gpa, io, dir, &script);
++    defer x.hf.deinit();
++    defer x.srv.deinit();
++    const srv = x.srv;
++    {
++        // the previous turn, as the client sent it before this one
++        var arena = std.heap.ArenaAllocator.init(gpa);
++        defer arena.deinit();
++        var cx: server.errors.Cx = .{ .a = arena.allocator() };
++        const p = try prepareBody(srv, &cx, prior);
++        srv.release(p.preparing, p.request);
++    }
++    const times = try gpa.alloc(i96, sites.len * rounds);
++    defer gpa.free(times);
++    var out: Out = undefined;
++    for (0..rounds) |r| {
++        var arena = std.heap.ArenaAllocator.init(gpa);
++        defer arena.deinit();
++        var cx: server.errors.Cx = .{ .a = arena.allocator() };
++        const a = cx.a;
++        var at = now(io);
++        const lap = struct {
++            fn lap(i: std.Io, from: *i96) i96 {
++                const t = now(i);
++                defer from.* = t;
++                return t - from.*;
++            }
++        }.lap;
++        const row = times[r * sites.len ..][0..sites.len];
++        @memset(row, 0);
++        const raw = (try json.parse(a, bytes)).ok;
++        row[0] = lap(io, &at);
++        const input = try server.openai.chatInput(srv, &cx, raw);
++        row[1] = lap(io, &at);
++        const p = try chat.prepare(srv, &cx, input, Gone{});
++        row[2] = lap(io, &at);
++        srv.release(p.preparing, p.request);
++        const effort = srv.effortFor(null);
++        const prepared = try prompt.prepare(srv, &cx, input, false, effort);
++        row[3] = lap(io, &at);
++        _ = prompt.systemPrefixLen(srv, &cx, input.messages, input.tools, prepared.ids, false, effort);
++        row[4] = lap(io, &at);
++        _ = try prompt.replySpans(srv, &cx, prepared.ids);
++        row[5] = lap(io, &at);
++        const msgs = input.messages.array;
++        const last_tool = std.mem.eql(u8, msgs[msgs.len - 1].strField("role").?, "tool");
++        // the old path, every probe encoded whole: the reference the request must equal
++        const ids = try prompt.renderIds(srv, &cx, input.messages, input.tools, false, effort, true);
++        row[6] = lap(io, &at);
++        const history = try prompt.renderIds(srv, &cx, input.messages, input.tools, false, effort, false);
++        row[7] = lap(io, &at);
++        var history_len: usize = 0;
++        if (history.len > 0 and history.len < ids.len and std.mem.eql(u32, ids[0..history.len], history)) history_len = history.len;
++        if (history_len == 0 and ids.len > 1 and std.mem.eql(u32, history, ids)) history_len = ids.len - 1;
++        if (history_len > 0 and last_tool) {
++            var scratch: server.errors.Cx = .{ .a = a };
++            if (prompt.renderIds(srv, &scratch, .{ .array = try probeList(a, msgs, msgs.len, "assistant") }, input.tools, false, effort, false)) |probe| {
++                if (std.mem.indexOfDiff(u32, history, probe)) |i| history_len = if (i > 0 and i < history_len) i else history_len;
++            } else |_| {}
++        }
++        row[8] = lap(io, &at);
++        const rewind = prompt.rewindLen(srv, &cx, input.messages, msgs.len, input.tools, ids, false, effort);
++        row[9] = lap(io, &at);
++        const user_end = if (std.mem.eql(u8, msgs[msgs.len - 1].strField("role").?, "user")) history_len else 0;
++        if (!std.mem.eql(u32, ids, p.request.prompt) or !std.mem.eql(u32, ids, prepared.ids)) return error.IdsDiffer;
++        if (history_len != p.request.history_len or rewind != p.request.rewind_len or user_end != p.request.user_end) {
++            std.debug.print("reference history {d} rewind {d} user_end {d}\n", .{ history_len, rewind, user_end });
++            return error.MarksDiffer;
++        }
++        out = .{ .ids = ids.len, .digest = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(ids)), .history = p.request.history_len, .rewind = p.request.rewind_len, .user_end = p.request.user_end };
++    }
++    std.debug.print("\n{s}: {d} prompt ids, digest {x:0>16}, history {d}, rewind {d}, user_end {d}\n", .{ name, out.ids, out.digest, out.history, out.rewind, out.user_end });
++    std.debug.print("{s:<34} {d:>9.2}\n{s:<34} {d:>9.2}\n", .{ "cold boot: body to chat.prepare", ms(cold_ns), "first warm turn: chat.prepare", ms(times[2]) });
++    std.debug.print("{s:<34} {s:>9} {s:>9} ({d} rounds)\n", .{ "site", "median", "min", rounds });
++    const column = try gpa.alloc(i96, rounds);
++    defer gpa.free(column);
++    for (sites, 0..) |site, i| {
++        for (column, 0..) |*c, r| c.* = times[r * sites.len + i];
++        std.mem.sort(i96, column, {}, std.sort.asc(i96));
++        std.debug.print("{s:<34} {d:>9.2} {d:>9.2}\n", .{ site, ms(column[rounds / 2]), ms(column[0]) });
++    }
++}
++
++pub fn main(init: std.process.Init) !u8 {
++    const gpa = init.gpa;
++    const io = init.io;
++    const a = init.arena.allocator();
++    const argv = try init.minimal.args.toSlice(a);
++    if (argv.len < 3) {
++        std.debug.print("usage: prompt_bench MODEL PROMPTS [rounds]\n", .{});
++        return 2;
++    }
++    const rounds: usize = if (argv.len > 3) try std.fmt.parseInt(usize, argv[3], 10) else 7;
++    server.log.init(io, false);
++    const c0 = try read(io, a, argv[2], "c0.txt");
++    const reply = try read(io, a, argv[2], "reply.txt");
++    const tool = try read(io, a, argv[2], "tool_plain.txt");
++    // the probe's r0 and r2, byte for byte (scripts/parity/perpatch_measure_ai.py R0, R2)
++    const r0 = [_]Value{ try message(a, "system", "You are a careful assistant. Answer briefly."), try message(a, "user", try std.mem.concat(a, u8, &.{ c0, "\n\nRead the code above." })) };
++    const r2 = r0 ++ [_]Value{ try message(a, "assistant", try std.mem.concat(a, u8, &.{ "Reply. ", reply })), try message(a, "user", try std.mem.concat(a, u8, &.{ tool, "\nTurn: name the three slowest batches." })) };
++    try bench(gpa, io, argv[1], "r2", try body(a, &r0, null), try body(a, &r2, null), rounds);
++    // r2m: the template's own tokens quoted in the turn (the masked route)
++    const quoted = try read(io, a, argv[2], "tool_masked.txt");
++    const r2m = r0 ++ [_]Value{ try message(a, "assistant", try std.mem.concat(a, u8, &.{ "Reply m. ", reply })), try message(a, "user", try std.mem.concat(a, u8, &.{ quoted, "\nTurn: name the three slowest batches." })) };
++    try bench(gpa, io, argv[1], "r2m (masked)", try body(a, &r0, null), try body(a, &r2m, null), rounds);
++    const corpus = try std.mem.concat(a, u8, &.{ c0, try read(io, a, argv[2], "c32.txt"), try read(io, a, argv[2], "fix40.txt") });
++    const small = try agent(a, corpus, c0.len);
++    try bench(gpa, io, argv[1], "agent ~200k, ends on a tool result", small.prior, small.now, rounds);
++    var big_corpus: std.ArrayList(u8) = .empty;
++    for (0..3) |k| for (0..corpus.len / 4096 + 1) |i| {
++        try big_corpus.print(a, "<{d}.{d}>", .{ k, i });
++        try big_corpus.appendSlice(a, corpus[i * 4096 .. @min(corpus.len, (i + 1) * 4096)]);
++    };
++    const big = try agent(a, big_corpus.items, big_corpus.items.len * 5 / 6);
++    try bench(gpa, io, argv[1], "agent ~650k, ends on a tool result", big.prior, big.now, rounds);
++    return 0;
++}

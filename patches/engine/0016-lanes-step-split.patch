@@ -1,0 +1,157 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm lanes: the stepped prompt pass in its own file beside cuda_lanes.zig
+
+zig/src/families/glm/cuda_lanes.zig is 600 lines at v1.2.7, the lean rule's limit, and the knobs later in this
+series add lines to Lanes.facts(). Lanes.prefillStep and its vtable entry move, unchanged, to
+cuda_lanes_step.zig (the fold did the same move inside its reply-prefill patch, which this re-seat defers);
+Lanes keeps the name as an alias, and the helpers the step calls (of, take, cancelled, opening, images, marksOf,
+Sink) are made pub. No behaviour changes: the same body, called from the same vtable slot.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat:
+- cuda_lanes.zig 600 -> 570 lines; zig/prefill_widths_glm_host.zig still calls glm.lanes.Lanes.prefillStep.
+
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index d1ba0e967bcd27b0502f88f66efb9187d25a5d0c..9fc547247a4c8f1263b867434e9090f5f5cefc31 100644
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -86,7 +86,7 @@ pub const Lanes = struct {
+     };
+     const steps_vt: be.Backend.VTable = vt: {
+         var v = whole_vt;
+-        v.prefill_step = prefillStepFn;
++        v.prefill_step = @import("cuda_lanes_step.zig").prefillStepFn;
+         v.cancel_prefill = cancelPrefillFn;
+         v.prefill_many = null;
+         v.many_rows = 0;
+@@ -129,11 +129,11 @@ pub const Lanes = struct {
+         return copy_policy.apply(self.facts(), enabled, self.x.e.drafter == null and self.costs != null);
+     }
+ 
+-    fn of(ptr: *anyopaque) *Lanes {
++    pub fn of(ptr: *anyopaque) *Lanes {
+         return @ptrCast(@alignCast(ptr));
+     }
+ 
+-    fn take(self: *Lanes, token: u32) u64 {
++    pub fn take(self: *Lanes, token: u32) u64 {
+         const h = self.next;
+         self.drawn[h % ring] = token;
+         self.next += 1;
+@@ -180,7 +180,7 @@ pub const Lanes = struct {
+         return l;
+     }
+ 
+-    fn cancelled(ptr: ?*anyopaque) bool {
++    pub fn cancelled(ptr: ?*anyopaque) bool {
+         return @as(*lanes.Stream, @ptrCast(@alignCast(ptr.?))).isCancelled();
+     }
+ 
+@@ -230,37 +230,7 @@ pub const Lanes = struct {
+         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
+     }
+ 
+-    /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
+-    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
+-        return prefillStep(of(ptr), s);
+-    }
+-    pub fn prefillStep(self: anytype, s: *lanes.Stream) !bool {
+-        const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
+-        const from = if (going == null) try self.opening(s) else null;
+-        if (going == null) try self.images(s, from);
+-        const l = self.lanes.getPtr(s).?;
+-        if (going != null) try self.x.bind(l.slot);
+-        const at = going orelse if (from) |r| r.at else 0;
+-        errdefer l.fill = null;
+-        var sink: Sink = .{ .gpa = self.x.e.gpa, .s = s };
+-        try sink.prepare();
+-        self.x.e.prompt_logprobs = sink.want();
+-        defer self.x.e.prompt_logprobs = null;
+-        var keeps: share_mod.Keeps = undefined;
+-        const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
+-        if (step.first) |first| {
+-            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
+-            l.first = self.take(first);
+-            l.fill = null;
+-            return true;
+-        }
+-        l.fill = at + step.rows; // a cold pass's cut (cuda_prompt_cuts), so uncapped; the share still works by time
+-        if (s.settle_step) { // its tail would land in the next decode round's time
+-            try self.x.e.stream.synchronize();
+-            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
+-        }
+-        return false;
+-    }
++    pub const prefillStep = @import("cuda_lanes_step.zig").prefillStep;
+ 
+     fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {
+         const self = of(ptr);
+@@ -281,7 +251,7 @@ pub const Lanes = struct {
+     }
+ 
+     /// A prompt pass begins: the stream's slot bound and its sequence fresh; where the pass resumes (a kept state).
+-    fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
++    pub fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
+         const ids = s.prompt();
+         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
+         const gpa = self.x.e.gpa;
+@@ -357,15 +327,15 @@ pub const Lanes = struct {
+     }
+ 
+     /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
+-    fn images(self: *Lanes, s: *lanes.Stream, from: ?engine.Resume) !void {
++    pub fn images(self: *Lanes, s: *lanes.Stream, from: ?engine.Resume) !void {
+         if (s.images.len == 0) return;
+         const v = self.x.e.images orelse return error.NoVision;
+         try v.begin(self.x.e.slot, s.images, if (from) |r| r.at else 0); // a refusal here leaves every rank as it was
+         try self.x.images(v);
+     }
+-    const Sink = @import("cuda_prompt_sink.zig").Sink;
++    pub const Sink = @import("cuda_prompt_sink.zig").Sink;
+ 
+-    fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *share_mod.Keeps) ?engine.Marks {
++    pub fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *share_mod.Keeps) ?engine.Marks {
+         if (self.cached(s)) {
+             const l = self.lanes.getPtr(s) orelse return null;
+             return share_mod.marks(self.x.e, l.slot, s, l.marks, keeps);
+diff --git a/zig/src/families/glm/cuda_lanes_step.zig b/zig/src/families/glm/cuda_lanes_step.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..6754a8f3facc0f81993e485ace6838cf1a841df7
+--- /dev/null
++++ b/zig/src/families/glm/cuda_lanes_step.zig
+@@ -0,0 +1,36 @@
++//! One chunk of a stream's prompt pass (Lanes.prefillStep), beside cuda_lanes.zig's other vtable entries.
++const lanes = @import("lanes");
++const share_mod = @import("cuda_share.zig");
++const L = @import("cuda_lanes.zig").Lanes;
++
++/// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
++pub fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
++    return prefillStep(L.of(ptr), s);
++}
++pub fn prefillStep(self: anytype, s: *lanes.Stream) !bool {
++    const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
++    const from = if (going == null) try self.opening(s) else null;
++    if (going == null) try self.images(s, from);
++    const l = self.lanes.getPtr(s).?;
++    if (going != null) try self.x.bind(l.slot);
++    const at = going orelse if (from) |r| r.at else 0;
++    errdefer l.fill = null;
++    var sink: L.Sink = .{ .gpa = self.x.e.gpa, .s = s };
++    try sink.prepare();
++    self.x.e.prompt_logprobs = sink.want();
++    defer self.x.e.prompt_logprobs = null;
++    var keeps: share_mod.Keeps = undefined;
++    const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = L.cancelled }, self.marksOf(s, &keeps));
++    if (step.first) |first| {
++        lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
++        l.first = self.take(first);
++        l.fill = null;
++        return true;
++    }
++    l.fill = at + step.rows; // a cold pass's cut (cuda_prompt_cuts), so uncapped; the share still works by time
++    if (s.settle_step) { // its tail would land in the next decode round's time
++        try self.x.e.stream.synchronize();
++        lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
++    }
++    return false;
++}

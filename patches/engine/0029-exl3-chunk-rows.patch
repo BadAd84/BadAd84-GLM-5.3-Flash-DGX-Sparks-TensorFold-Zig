@@ -1,0 +1,117 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: the EXL3 prompt experts take a whole 2,048-row chunk in one call
+
+Our fork `ai-engine`, ref `fork-ssh/ovn-up`, commit 0aec07b2f "glm cuda: the
+EXL3 prompt experts take a whole 2,048-row chunk in one call". The fork's hunk
+applies to this tree unchanged; only its doc comment is reflowed, because the
+fork writes two lines and this repo's lean gate takes a comment on one. The
+figures the fork's second line carries, 57 rows an expert against 28, are in
+the paragraph below instead.
+
+cuda_exl3.chunk_rows was 1,024 while a prompt chunk is prefill_rows = 2,048, so
+run()'s loop called the routed experts twice a chunk. Each call reads every
+expert's trellis in 64-row tiles, so with 288 experts and top-8 routing a call
+of 1,024 rows gives an expert about 28 rows, its tile 44 per cent full, and
+every expert is read twice a chunk. One call of 2,048 rows gives about 57 rows,
+89 per cent, and reads each expert once.
+
+It completes none of our patches: zig/src/families/glm/cuda_exl3.zig is a pin
+file that no patch 0001 to 0042 touches, and the pin has the same 1,024.
+
+Every use of chunk_rows, and what it costs:
+
+- run() at the loop: `while (at < rows) : (at += chunk_rows)`, one pass a chunk
+  instead of two, with `n = @min(chunk_rows, rows - at)` now the chunk's rows.
+- picksBytes(rows) and scratchBytes(rows, ...) and run()'s `cap`, all through
+  `@min(rows, chunk_rows)`: the arena the engine allocates for a prompt buffer
+  set grows from a 1,024-row call's to a 2,048-row call's.
+- the existing test "a chunk's compacted picks end before the common scratch at
+  every row count" walks 1 .. 3 * chunk_rows, so it now walks twice as far; it
+  still passes, it is just a longer loop.
+
+The extra bytes a rank, from exl3_prompt.sizes and picksBytes at dims 4096 and
+a 2,048-row prompt buffer (GLM's prompt path is the fused one: prompt.eligible
+holds at mcg, uniform_k2 8, gu_stride 0, dims % 256 and width % 128):
+
+  rank share    gate and up share a rotation    they do not
+  640 wide      +153,124,864 B (146.0 MiB)      +278,953,984 B (266.0 MiB)
+  768 wide      +155,222,016 B (148.0 MiB)      +281,051,136 B (268.0 MiB)
+
+640 and 768 are TP=3's narrow and wide expert shares of 2,048. 32,768 B of each
+figure is the compacted picks; the rest is the rotated inputs, the act and y at
+2,048 rows. weights.exl3_shx defaults true and cuda_weights.zig clears it only
+when a layer's experts do not share one input rotation, so the left column is
+the one to expect on our checkpoint; the fork's own "~270 MiB a rank" is the
+right column. A twin prompt buffer set adds nothing: Buffers.make zeroes every
+size a twin does not hold, and the four EXL3 sizes are not in twin_at. A decode
+window is unaffected, its rows are far below chunk_rows either way.
+
+The bits do not change, and that is checkable here rather than taken from the
+commit message: the prompt kernels tf_exl3_prompt_gu and tf_exl3_prompt_down
+take K whole, with no split-k argument and no k axis in their grids (the grid
+is width or dims over 128 or 256, by item), so one pair accumulates over the
+same K in the same order whatever else is in the call. Grouping only decides
+which 64-pair item a pair lands in, and a pair's arithmetic does not depend on
+its neighbours.
+
+Added here, not in the fork's commit: a test that the arena the engine asks for
+holds a whole chunk, over TP=3's two shares, TP=2 and TP=1 and both rotation
+layouts, and then pins the four byte totals above exactly. It is the invariant
+the change exists for, and it fails on the pin's 1,024 because scratchBytes
+then sizes the arena for half a chunk. The exact totals are there so the cost a
+rank is a number the gate holds rather than one in a report. It reads
+prefill_rows from cuda_state.zig, the same import the fork's own later form of
+this constant uses.
+
+One note for whoever integrates the pending item-plan patch (work/p41/
+0042-exl3-decode-items.patch): measured with `git apply --check`, that patch
+takes the stack without this lane cleanly, and on top of it its last
+cuda_exl3.zig hunk is refused, because that hunk appends its items test after
+the file's last test and this patch added a test there. It is an append past
+an append, nothing more.
+
+What a GPU run has to show: that a prompt reply digest is unchanged, and that
+the pool still fits. The second is the real risk, not the first: this takes
+about 150 MiB a rank of headroom on a TP=3 Spark, so a prompt whose buffers
+only just fitted before may now fail to allocate. Worth a boot at the served
+context before the digest run.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- cuda_exl3.zig has no commit in 9c9bf542..v1.2.7 (206 lines both); applies as is, test included.
+- source: work/fold/0032-exl3-chunk-rows.patch
+
+diff --git a/zig/src/families/glm/cuda_exl3.zig b/zig/src/families/glm/cuda_exl3.zig
+index 61b5ebdbe5dc1770fc3b5352faa70648539394e4..3dd0ab083490ff5ed029c820246b6b0bd1379e52 100644
+--- a/zig/src/families/glm/cuda_exl3.zig
++++ b/zig/src/families/glm/cuda_exl3.zig
+@@ -126,8 +126,8 @@ pub const Kernels = cuda.exl3_experts.Experts;
+ const common = cuda.exl3_experts;
+ pub const Scratch = struct { picks: u64, xg: u64, xu: u64, z: u64 };
+ pub const top_k = 8;
+-/// Rows a call to the common experts takes: each call reads every expert's weights, so a prompt pass needs few calls.
+-pub const chunk_rows = 1024;
++/// Rows a call to the common experts takes: each call reads every expert's weights, so a prompt chunk is one call.
++pub const chunk_rows = 2048;
+ fn layer(w: Experts, count: usize, dims: usize, width: usize, limit: f32) common.Layer {
+     return .{ .gate = w.gt, .up = w.ut, .down = w.dt, .gate_k2 = w.k2, .up_k2 = w.k2, .down_k2 = w.k2, .suh_g = w.suh_g, .suh_u = w.suh_u, .svh_g = w.svh_g, .svh_u = w.svh_u, .suh_d = w.suh_d, .svh_d = w.svh_d, .experts = count, .dims = dims, .width = width, .codebook = .mcg, .limit = limit, .act_mode = 0, .uniform_k2 = 8, .shared_input = w.shx };
+ }
+@@ -228,3 +228,19 @@ test "a decode window's item plan is at GLM's shapes the plain layout's bytes, s
+         try std.testing.expectEqual(picksBytes(rows) + plain, scratchBytes(rows, 4096, width, false, false)[0]);
+     };
+ }
++
++test "a prompt chunk's routed experts are one call: its arena holds a whole chunk, not half of one" {
++    const prefill_rows = @import("cuda_state.zig").prefill_rows;
++    try std.testing.expect(chunk_rows >= prefill_rows); // run()'s loop takes a whole chunk in one pass
++    for ([_]usize{ 640, 768, 1024, 2048 }) |width| for ([_]bool{ false, true }) |shx| { // TP=3's two shares, TP=2, TP=1
++        var l = shape(4096, width);
++        l.shared_input = shx;
++        const whole = try common.prompt.bytes(l, prefill_rows, top_k);
++        try std.testing.expectEqual(picksBytes(prefill_rows) + whole, scratchBytes(prefill_rows, 4096, width, true, shx)[0]);
++    };
++    // the arena at TP=3's two shares, so what this costs a rank is a number the gate holds, not one in a report
++    try std.testing.expectEqual(@as(usize, 306_249_728), scratchBytes(prefill_rows, 4096, 640, true, true)[0]);
++    try std.testing.expectEqual(@as(usize, 310_444_032), scratchBytes(prefill_rows, 4096, 768, true, true)[0]);
++    try std.testing.expectEqual(@as(usize, 557_907_968), scratchBytes(prefill_rows, 4096, 640, true, false)[0]);
++    try std.testing.expectEqual(@as(usize, 562_102_272), scratchBytes(prefill_rows, 4096, 768, true, false)[0]);
++}

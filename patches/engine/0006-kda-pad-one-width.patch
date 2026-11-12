@@ -1,0 +1,153 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: TF_GLM_KDA_PAD pads the KDA input stack at one width
+
+ai-engine 917575463..e796315f3, squashed. TP=3 splits KDA heads 22/21/21, so the fused input
+row width is 8,726 / 8,341: not a multiple of 8, which makes glm_mm skip the stack and cost about
+9 ms a call. With the knob on, the stack is copied to its own eight-aligned buffer (true rows,
+then zeros) so it packs; the pad columns come from zero weights and are ignored, and the field
+offsets inside a row do not move. `tileLinears` calls it at load, so the pad applies to a stack
+only when the knob is set.
+
+Receipt (ai-engine, measured on the dev triangle): padded at 4 dense bits, decode aggregate
+tok/s 46.12/46.14 to 58.88/58.29 at one stream, 63.01/62.85 to 72.80/72.66 at two, 70.73/69.77
+to 79.24/79.11 at four, 79.07/79.62 to 84.92/85.55 at six, 85.97 to 89.75/89.72 at eight: no
+regression at any level. Numerics: the pad columns are exactly zero (0 of 68 dumped), but at
+DENSE_BITS=4 the stack is quantized where it was not before, so replies differ; the accuracy
+gate that cleared it is the retrieval fixture, not bit-identity. Default off.
+
+Gate: applies on the pin; check-native-cuda-host green; whole-tree fmt green; lean base-vs-head
+0 new; the pad's own check rides in the patch.
+
+Folded in by the 2026-11-12 fold (work/fold/MAP.tsv), each hunk where it belongs:
+- 0024: tileLinears calls padKdaInputs again, the KDA_DUMP hook moves into it, the staged download is back
+- 0040: cuda_state rows take rowWidth's one common padded width, and padKdaInputs is called once
+- 0041: tileLinears synchronizes before the read-back; its restore of prompt_pair.wanted's TF_GLM_CHUNK_SOLO argument cancels the port's own change, so cuda_engine.zig is untouched here
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- TF_GLM_KDA_PAD, its padWidth and the one common rowWidth are the pin's own and v1.2.7's (cuda_ranks.zig:65, cuda_kda_block.zig:37-60): what this lever still adds is the TF_GLM_KDA_DUMP hook.
+- lean_check.py's DIRECT_GETENV: TF_GLM_KDA_DUMP is a .glm .path row read by environment.path through profile.lookup, not std.c.getenv; cuda_env_test.zig lists it among GLM's own readers.
+- Dropped, each an old-0003 port artifact a later old patch undid: body()'s 13-argument bodyProfile call (bodyProfile still takes 14 at v1.2.7) and the o_site fork moved above project (old 0041 put it back).
+- Dropped: the docstring swap on padKdaInputs (the fold's text describes linears()), the trailing comment on the staged download and the check's reworded doc line; none changes behaviour.
+- 5b80e93ac moved the KDA chain to zig/src/cuda/kda.zig (cuda_kda_block.zig now `const kda = cuda.kda`); the hook sits in project(), which that commit left in place.
+- source: work/fold/0006-kda-pad-one-width.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index 38b5cbc4729ed8efeed123ed897b9b2777a340df..dc30a9e0cee268fbc0c98c1623646c9175bb4d21 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -40,6 +40,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
+ | `TF_GLM_DFLASH2_LOG` | Whole unsigned 64-bit count of DFlash2 rounds whose drafts are logged; default 0 |
+ | `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 |
++| `TF_GLM_KDA_DUMP` | A file path without control characters; the first KDA input projection after load writes its `rows` x width bf16 stack there once, for the pad's own float64 check. Unset or blank writes none |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
+index d5ed85f8a58ff1ffd58e91bae9cae53687b90810..b30626db907702bb4710478c1d1524e5ae83a16a 100644
+--- a/zig/src/families/glm/cuda_env_test.zig
++++ b/zig/src/families/glm/cuda_env_test.zig
+@@ -18,6 +18,10 @@ const switches = [_]Name{
+ };
+ const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
+ const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
++/// The other GLM settings the speed-hunt levers read, each with its row's kind.
++const levers = [_]struct { name: [:0]const u8, kind: e.Kind }{
++    .{ .name = "TF_GLM_KDA_DUMP", .kind = .path },
++};
+ 
+ /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
+ fn row(name: []const u8) !e.Rule {
+@@ -54,12 +58,22 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
+     for (switches) |s| try t.expectEqual(e.Kind.flag, (try row(s.name)).kind);
+     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
+     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
++    for (levers) |l| try t.expectEqual(l.kind, (try row(l.name)).kind);
+     var n: usize = 0;
+     for (e.rules) |r| if (r.scope == .glm) {
+         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
+-        if (!std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) n += 1; // the speed-hunt knobs: the next test
++        if (!std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) n += 1; // the speed-hunt knobs have their own test below
+     };
+-    try t.expectEqual(switches.len + counts.len + reals.len, n);
++    try t.expectEqual(switches.len + counts.len + reals.len + levers.len, n);
++}
++
++test "GLM strict env: the levers' own rows take blank as unset, and a path row refuses control characters by name" {
++    for (levers) |l| {
++        for ([_][]const u8{ "", " ", "\t" }) |blank| try check(l.name, blank, true);
++        if (l.kind != .path) continue;
++        try check(l.name, "/tmp/kda dump.bin", true);
++        try check(l.name, "/tmp/kda\ndump.bin", false);
++    }
+ }
+ 
+ test "GLM strict env: every speed-hunt knob (cuda/ovn.zig) is a glm switch, count, real or text row" {
+diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
+index 92e3bcdd8af08c5efa29573071cfec2961adbf6c..e06004f7092d64d2bc22141221abbf53acd7bd61 100644
+--- a/zig/src/families/glm/cuda_kda_block.zig
++++ b/zig/src/families/glm/cuda_kda_block.zig
+@@ -48,6 +48,10 @@ pub const Layer = struct {
+ /// TF_GLM_KDA_PAD's one eight-aligned row width for every rank, set once at load (Engine.open); 0: no pad.
+ pub var pad_to: usize = 0;
+ 
++/// TF_GLM_KDA_DUMP: driver and path for one dump of a projection's output, set at load, spent on first use.
++pub var dump_driver: ?*const cuda.Driver = null;
++pub var dump_path: ?[*:0]const u8 = null;
++
+ /// The pad width for `kda_heads` split over `world` ranks: the widest rank's row, rounded up to eight columns.
+ pub fn padWidth(kda_heads: usize, world: usize) usize {
+     const heads = (kda_heads + world - 1) / world;
+@@ -112,6 +116,23 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
+     }
+     try b16.matmul(selected, stream, s.p + fa * 2, w, l.fb, s.ka, s.mm_part, rows, n, kda.dk, false);
+     try b16.matmul(selected, stream, s.p + (fa + kda.dk) * 2, w, l.gb, s.kg, s.mm_part, rows, n, kda.dk, false);
++    try dumpOnce(stream, s.p, w, rows);
++}
++
++/// The float64 gate's input: the projected fused stack (`rows` x `w` bf16, row stride `w`), written once.
++fn dumpOnce(stream: cuda.Stream, src: u64, w: usize, rows: usize) !void {
++    const path = dump_path orelse return;
++    const d = dump_driver orelse return;
++    dump_path = null; // one dump a process: the gate compares a single round
++    const bytes = rows * w * 2;
++    const host = try std.heap.page_allocator.alloc(u8, bytes);
++    defer std.heap.page_allocator.free(host);
++    try stream.synchronize();
++    try d.check(d.api.cuMemcpyDtoH_v2(@ptrCast(host.ptr), src, bytes), "cuMemcpyDtoH");
++    const f = std.c.fopen(path, "wb") orelse return error.DumpOpen;
++    defer _ = std.c.fclose(f);
++    _ = std.c.fwrite(host.ptr, 1, host.len, f);
++    std.log.info("glm: kda dump {d} rows x {d} cols", .{ rows, w });
+ }
+ 
+ /// `rows` rows of `cols` bf16 packed at `src` into `dst`, rows `stride` apart (tf_glm_copy_rows).
+diff --git a/zig/src/families/glm/cuda_tile.zig b/zig/src/families/glm/cuda_tile.zig
+index 592a24dd2cbc57c1a4a3239137386a0dd335205a..5b25327969b82d29bf9e3a7b78ec67d37a73dad0 100644
+--- a/zig/src/families/glm/cuda_tile.zig
++++ b/zig/src/families/glm/cuda_tile.zig
+@@ -63,6 +63,12 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
+ 
+ /// Move an uneven fused KDA stack into an eight-aligned buffer so tiledInput() passes; pad columns are ignored.
+ pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
++    const dump = @import("profile").lookup("TF_GLM_KDA_DUMP");
++    if (try @import("sys").environment.path("TF_GLM_KDA_DUMP", dump)) |_| { // one projected stack, for the pad's checks
++        const kb = @import("cuda_kda_block.zig");
++        kb.dump_driver = d;
++        kb.dump_path = dump.?.ptr;
++    }
+     for (w.layers) |*l| switch (l.mixer) {
+         .kda => |*x| try padOneKdaInput(w, d, s, x),
+         else => {},
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 47384419e44a7a4cb78bca787d2c3d57b130163b..c18c3475dff905e522e684cd5dfd5d45ce9bf0d7 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -74,6 +74,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_DFLASH2_LOG", .scope = .glm, .kind = .u64, .forms = "a whole unsigned 64-bit round count (0 logs no drafts)" },
+     .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7)" },
++    .{ .name = "TF_GLM_KDA_DUMP", .scope = .glm, .kind = .path, .forms = "a file path without control characters, where one projected KDA input stack is written" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },

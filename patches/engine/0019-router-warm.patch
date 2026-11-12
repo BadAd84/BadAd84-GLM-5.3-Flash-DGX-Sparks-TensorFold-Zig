@@ -1,0 +1,256 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: TF_GLM_OVN_ROUTER_WARM warms the router kernels at boot
+
+ai-engine e3492ca82 grafted onto the pin stack. A new module (cuda_router_warm.zig,
+156 lines) warms the router kernels at boot (at level 2 the prompt-path mixer too),
+taking the first layer of each kind as production's warm_routers does, and the engine
+calls it after the weights load and before the server accepts requests. Knob off: warm
+returns 0, no launches.
+
+Pin adaptations (the source assumed the later era): moe.route does not exist at the pin,
+so the warm's routed-expert call goes through moe.body (the router, top-k pick, plan
+and experts, no fill); Forward.post's pin signature takes (rank, rows), so the warm's
+call drops the two later args; the Forward literal drops split_min, which the pin lacks;
+moeKernels and post are made pub for the warm module.
+
+Gates on pin+0001..0014: check-native-cuda-host green, test-lane-api-host green,
+whole-tree fmt green, lean base-vs-head 0 new.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- lean_check.py's DIRECT_GETENV/HIDDEN_GETENV: every TF_* setting this patch reads is a row of platform/environment.zig with a line in docs/environment.md, read through cuda.ovn or environment, never getenv. Row: TF_GLM_OVN_ROUTER_WARM (u64, the level).
+- cuda.zig's module list moved (7 commits in range): the same added line, seated by a 3-way merge.
+- source: work/fold/0018-router-warm.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index b32507d2a31c72cd261729245d2d3bd957585ee0..c281dbe7c4367dfc4f5aa50f95ee604f4d56cf90 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -58,6 +58,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
+ | `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
+ | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
++| `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index c401cca9fb21ba186e46ca10cb4ca4bfc1f9a446..7f005f9d210a798a2cb58c53f0ff31be032c04ca 100644
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -60,6 +60,7 @@ test {
+     _ = @import("cuda_env.zig");
+     _ = @import("cuda_taps_tp_test.zig");
+     _ = @import("cuda_roce_multi.zig");
++    _ = @import("cuda_router_warm.zig");
+     _ = @import("cuda_lanes_test.zig");
+     _ = @import("cuda_prompt_cuts.zig");
+     _ = @import("cuda_request_starts_test.zig");
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+index 0a97f358a7b4a02c5cba0639661937456a1a2938..4e4846a98d9b60b7d831d5781902a4963b6b49d9 100644
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -219,6 +219,8 @@ pub const Engine = struct {
+         errdefer e.shared_buf.free();
+         errdefer @import("cuda_load_owner.zig").drain(stream, d);
+         try e.stream.synchronize();
++        // TF_GLM_OVN_ROUTER_WARM: load the router (and, at 2, the prompt-path mixer) kernel variants on scratch now
++        _ = try @import("cuda_router_warm.zig").warm(e);
+         return e;
+     }
+ 
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index dc72cbb6218ff9afe11cebf9aac3cf1b79f64acc..c4f2d61775317914c1bfc3bb6926e0ffa4e3717f 100644
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -199,7 +199,7 @@ pub const Forward = struct {
+         try glue.hcPre(f.set(), f.stream, b.x, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc);
+     }
+ 
+-    fn post(f: *const Forward, r: Rank, rows: usize) !void {
++    pub fn post(f: *const Forward, r: Rank, rows: usize) !void {
+         const stamp = prof_mod.span(f.prof, f.stream, .glue);
+         defer stamp.end();
+         const c = &r.w.config;
+@@ -267,7 +267,7 @@ pub const Forward = struct {
+         return .{ .set = f.set(), .linear = .{ .lane = &f.m.lane, .nvfp4_prompt = &f.m.prompt }, .copy_rows = f.m.copy_rows };
+     }
+ 
+-    fn moeKernels(f: *const Forward) moe.Kernels {
++    pub fn moeKernels(f: *const Forward) moe.Kernels {
+         return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof };
+     }
+ 
+diff --git a/zig/src/families/glm/cuda_router_warm.zig b/zig/src/families/glm/cuda_router_warm.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..c407544dab44546e6ca6be921238cd058900c6ec
+--- /dev/null
++++ b/zig/src/families/glm/cuda_router_warm.zig
+@@ -0,0 +1,156 @@
++//! TF_GLM_OVN_ROUTER_WARM: warm the router kernels (at 2, the prompt-path mixer too) at boot, off the first request.
++const std = @import("std");
++const cuda = @import("cuda");
++const fw = @import("cuda_forward.zig");
++const glue = @import("cuda_glue.zig");
++const moe = @import("cuda_moe.zig");
++const latent = @import("cuda_latent.zig");
++const weights = @import("cuda_weights.zig");
++const dsa_block = @import("cuda_dsa_block.zig");
++const Engine = @import("cuda_engine.zig").Engine;
++
++/// The throwaway state's tokens: enough for every row class's position-0 dense window (cuda_cost_time uses the same).
++const warm_capacity = 1024;
++
++/// P1ShortTTFT-1's router_warm_rows: {2} plus each router block's first row and the block itself (patch lines 24-28).
++pub const row_classes = [_]u32{ 1, 2, 16, 17, 32, 33, 64, 65, 128 };
++
++/// The prefix of row_classes that fits `rows` buffer rows (production breaks when R > b.normed.shape[0]).
++pub fn classes(rows: usize) []const u32 {
++    var n: usize = 0;
++    while (n < row_classes.len and row_classes[n] <= rows) n += 1;
++    return row_classes[0..n];
++}
++
++/// TF_GLM_OVN_ROUTER_WARM: 0 off (default), 1 the router warm, 2 the router warm plus the prompt-path mixer warm.
++pub const Level = enum(u8) { off = 0, router = 1, all = 2 };
++
++/// The knob's value; any other integer or non-integer is refused (as the engine refuses other OVN typos).
++pub fn level() error{BadOvnKnob}!Level {
++    return switch (try cuda.ovn.int("ROUTER_WARM", 0)) {
++        0 => .off,
++        1 => .router,
++        2 => .all,
++        else => error.BadOvnKnob,
++    };
++}
++
++/// The warm's layers, each the first of its kind (as production's warm_routers takes the first MoE and DSA layer).
++pub const Picked = struct {
++    moe: ?moe.Layer = null,
++    index: ?dsa_block.Index = null,
++    kda_layer: ?weights.Layer = null,
++    mla_layer: ?weights.Layer = null,
++};
++
++pub fn pickLayers(layers: []const weights.Layer) Picked {
++    var p: Picked = .{};
++    for (layers) |l| {
++        switch (l.ffn) {
++            .moe => |m| {
++                if (p.moe == null) p.moe = m;
++            },
++            .dense => {},
++        }
++        switch (l.mixer) {
++            .kda => {
++                if (p.kda_layer == null) p.kda_layer = l;
++            },
++            .mla => |a| {
++                if (p.mla_layer == null) {
++                    p.mla_layer = l;
++                    p.index = a.index;
++                }
++            },
++        }
++    }
++    return p;
++}
++
++/// The indexer gate as a router call (production's index_gate = glue.router(normed, ix.gate, igr)); ne is the d=128.
++pub const IndexGate = struct { gate: u64, igr: u64, router_part: u64, ne: usize };
++
++fn indexGate(index: ?dsa_block.Index, dsa: dsa_block.Scratch) ?IndexGate {
++    const ix = index orelse return null;
++    return .{ .gate = ix.gate, .igr = dsa.igr, .router_part = dsa.router_part, .ne = ix.d };
++}
++
++/// P1ShortTTFT-1: the MoE route and the indexer gate, once at each fitting row class, on the MoE and DSA scratch.
++pub fn routerWarm(mk: moe.Kernels, set: glue.Set, stream: cuda.Stream, moe_layer: ?moe.Layer, moe_scratch: moe.Scratch, gate: ?IndexGate, normed: u64, hidden: usize, rows: usize) !usize {
++    var n: usize = 0;
++    for (classes(rows)) |r| {
++        const R: usize = r;
++        if (moe_layer) |l| {
++            try moe.body(mk, stream, l, moe_scratch, normed, hidden, R, false); // the router and its pick, no fill
++            n += 1;
++        }
++        if (gate) |g| {
++            try glue.router(set, stream, normed, hidden, g.gate, g.igr, g.router_part, R, hidden, g.ne);
++            n += 1;
++        }
++    }
++    return n;
++}
++
++/// WarmAll-1: the hyper-connection glue and the first KDA and DSA mixer blocks, at each row class, on a fresh state.
++fn mixerWarm(e: *Engine, f: *fw.Forward, tst: *fw.State, p: Picked, hidden: usize) !usize {
++    const r = f.ranks[0];
++    const rank = e.w.share.rank;
++    var n: usize = 0;
++    for (classes(e.bp.rows)) |row| {
++        const R: usize = row;
++        try tst.reset(e.stream); // a fresh sequence at position 0
++        try tst.ready(e.stream, R);
++        const nch = @min(latent.chunksFor(R), e.bp.nch);
++        const out = e.bp.gathered + rank * R * hidden * 4;
++        if (p.kda_layer) |l| {
++            try f.pre(r, l.attn_hc, l.in_norm, R);
++            try f.mixer(r, l, 0, 0, R, nch, out);
++            n += 2;
++        }
++        if (p.mla_layer) |l| {
++            try f.pre(r, l.attn_hc, l.in_norm, R);
++            try f.mixer(r, l, 0, 0, R, nch, out);
++            n += 2;
++        }
++        try f.post(r, R);
++        n += 1;
++    }
++    return n;
++}
++
++/// The warm's single-rank in-process Forward on the prompt buffers: no collective, taps, prefetch, prof or pairing.
++fn promptForward(e: *Engine, one: *[1]fw.Rank) fw.Forward {
++    one.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = &e.bp }};
++    return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = one, .exchange = .local, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide };
++}
++
++/// The boot entry (every rank, after the weights load, before the server accepts requests). Returns the launches.
++pub fn warm(e: *Engine) !usize {
++    const lvl = try level();
++    if (lvl == .off) return 0;
++    const t0 = std.Io.Clock.awake.now(e.io).toNanoseconds();
++    const hidden = e.c.hidden;
++    const cap = e.bp.rows;
++    const picked = pickLayers(e.w.layers);
++    var one: [1]fw.Rank = undefined;
++    var f = promptForward(e, &one);
++    var n = try routerWarm(f.moeKernels(), f.set(), e.stream, picked.moe, e.bp.moe, indexGate(picked.index, e.bp.dsa), e.bp.normed, hidden, cap);
++    switch (lvl) {
++        .off => unreachable,
++        .router => try e.stream.synchronize(),
++        .all => {
++            var tst = try fw.State.initFormat(e.gpa, e.d, &e.w, warm_capacity, e.settings.kv8);
++            defer tst.deinit();
++            errdefer e.stream.synchronize() catch {}; // drain before the throwaway state's buffer is freed
++            one[0] = .{ .w = &e.w, .st = &tst, .b = &e.bp };
++            n += try mixerWarm(e, &f, &tst, picked, hidden);
++            try e.stream.synchronize();
++        },
++    }
++    if (e.share.rank == 0) {
++        const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(e.io).toNanoseconds() - t0)) / 1e6;
++        std.log.info("glm: TF_GLM_OVN_ROUTER_WARM={d}: {d} warm launches, {d:.1} ms (first-use loads off the first request)", .{ @backingInt(lvl), n, ms });
++    }
++    return n;
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index db1324b83fe31474eb496b1f278e3fbb7711de5b..f9a0be937c78218ca31fe79b7ca5c4e3b9aa212b 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -92,6 +92,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },
+     .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
++    .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },

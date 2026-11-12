@@ -1,0 +1,261 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: the index kernels take decode windows (TF_GLM_INDEX_CUDA)
+
+ai-engine ab3009315 + 868689925 (grafted; comment lines single-lined for the lean rule).
+
+A decode window re-reads every pooled key a row in tf_glm_scores (one row a block):
+at 596k tokens that is about 38 MB a row a DSA layer. TF_GLM_INDEX_CUDA=all routes
+windows of any row count through glm_index_scores (rows share each staged 64-pool
+tile) and glm_index_pools (the floor select); 1 keeps its prompt-chunk-only meaning.
+TF_GLM_INDEX_DECODE_FROM gates a window by depth, read once at load; 0 keeps every
+depth. Measurement (ai-engine docs/SPEEDUPS.md): INDEX_CUDA=1 cold 267k -2.2 pct,
+133k -1.1 pct, byte-equal gate; the =all extension rides the same kernels. Default off.
+
+Gates on pin+0001..0005: check-native-cuda-host green, whole-tree fmt green, lean
+base-vs-head 0 new. No .cu change: the kernels are upstream pin code; this patch
+only routes windows to them.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- cuda_index.zig is the pin's at v1.2.7 (131 lines, no commit in range): the routing applies as is.
+- lean_check.py's DIRECT_GETENV: TF_GLM_INDEX_DECODE_FROM is a .glm .size row; decodeFrom() reads it through environment.read (same forms: blank or 0 any depth, a typo refused) and its test reads the row.
+- source: work/fold/0008-index-decode-windows.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index 3dc17fda4b5d0b31619188b6385e91c2e6131a08..61851cf30a499c9b15e71bf82d19920b78e1c785 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -50,6 +50,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_DRAFT_NOISE` | Finite number of at least 0, the keyed Gumbel draw's weight in a sampled stream's pick; default 0 (off) |
+ | `TF_GLM_OVN_DRAFT_CUTS` | Comma-separated `streams:cut` pairs (`1:0.3,4:0.7`): a pass of N streams takes the cut of the largest key at most N, else `TF_GLM_DRAFT_CONFIDENCE`; checked as text at startup and as pairs when the drafter loads; default unset |
+ | `TF_GLM_DFLASH2_WIN` | Whole count from 0 through 2048 of the context positions a DFlash2 draft attends to; drafts only, never replies; default 2048 |
++| `TF_GLM_INDEX_DECODE_FROM` | Whole native-size context position; with `TF_GLM_INDEX_CUDA=all`, a decode window takes the index kernels only once its pools reach this position; default 0 (any depth) |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
+index 36c50ad22d3eb301be9032b734ca006084cd825d..34308070ac71dbda95ae1f25c5415e0402b19ad3 100644
+--- a/zig/src/families/glm/cuda_env_test.zig
++++ b/zig/src/families/glm/cuda_env_test.zig
+@@ -22,6 +22,7 @@ const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
+ const levers = [_]struct { name: [:0]const u8, kind: e.Kind }{
+     .{ .name = "TF_GLM_KDA_DUMP", .kind = .path },
+     .{ .name = "TF_GLM_DFLASH2_WIN", .kind = .u64 },
++    .{ .name = "TF_GLM_INDEX_DECODE_FROM", .kind = .size },
+ };
+ 
+ /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
+diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_index.zig
+index 5c4ad55bb2abcb1dcaa5a4e1404dfc76b48c3cb7..cb2288c0355be28b0205f371e85f01c8b9fc8f71 100644
+--- a/zig/src/families/glm/cuda_index.zig
++++ b/zig/src/families/glm/cuda_index.zig
+@@ -1,4 +1,4 @@
+-//! A prompt chunk's DSA indexer in CUDA (glm_index.cu): the bytes of tf_glm_scores and tf_glm_select_rows.
++//! A DSA indexer's scores and pools in CUDA (glm_index.cu): the bytes of tf_glm_scores and tf_glm_select_rows.
+ 
+ const std = @import("std");
+ const cuda = @import("cuda");
+@@ -12,21 +12,23 @@ pub const score_tiles = 16;
+ pub const threads = score_rows * 32;
+ /// glm_index_pools' block: glm_index::T.
+ pub const pool_threads = 256;
+-/// The rows a launch must have to take it: where tf_glm_scores' `loop` tiling starts.
++/// The rows a launch must have to take it outside Mode.all: where tf_glm_scores' `loop` tiling starts.
+ pub const rows_from = sparse.score_loop_from;
+ pub const cap_max = 4096;
+ 
+-/// TF_GLM_INDEX_CUDA: unset or 0 (today's launches), 1 (both kernels), scores (only the scores, to bisect).
++/// TF_GLM_INDEX_CUDA: 0 or unset (today's launches), 1 (both kernels, prompt chunks), scores, all.
+ pub const Mode = enum {
+     off,
+     both,
+     scores,
++    all,
+ 
+     pub fn parse(text: ?[]const u8) !Mode {
+         const t = text orelse return .off;
+         if (t.len == 0 or std.mem.eql(u8, t, "0")) return .off;
+         if (std.mem.eql(u8, t, "1")) return .both;
+         if (std.mem.eql(u8, t, "scores")) return .scores;
++        if (std.mem.eql(u8, t, "all")) return .all;
+         return error.BadIndexMode;
+     }
+ 
+@@ -36,9 +38,14 @@ pub const Mode = enum {
+     }
+ };
+ 
+-/// glm_index_scores' grid: rows in CTAs of 8, the `nb` pool blocks in runs of score_tiles.
++/// The 64-pool tiles a CTA scores: score_tiles runs for prompt chunks, one tile a CTA for a decode window.
++pub fn tileLoop(rows: usize) usize {
++    return if (rows >= rows_from) score_tiles else 1;
++}
++
++/// glm_index_scores' grid: rows in CTAs of 8, the `nb` pool blocks in runs of tileLoop(rows).
+ pub fn scoresGrid(rows: usize, nb: usize) [2]u32 {
+-    return .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, score_tiles))) };
++    return .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, tileLoop(rows)))) };
+ }
+ 
+ /// The candidates a row of the pools kernel keeps and the floor's target (speed only; the pools are the same).
+@@ -54,15 +61,26 @@ pub const Kernels = struct {
+     module: cuda.Module,
+     scores_fn: cuda.Function,
+     pools_fn: cuda.Function,
+-    /// Whether the pools kernel replaces tf_glm_select_rows (Mode.both).
++    /// Whether the pools kernel replaces tf_glm_select_rows (Mode.both, Mode.all).
+     select: bool,
++    /// Whether decode windows (fewer than rows_from rows) take the kernels too (Mode.all).
++    decode: bool,
++    /// The pools a decode window needs before it takes them (TF_GLM_INDEX_DECODE_FROM, read at load; 0: any depth).
++    decode_from: usize = 0,
+ 
+     /// `image`: cuda.kernels.glm_index.
+     pub fn load(d: *const cuda.Driver, image: []const u8, mode: Mode) !Kernels {
+         if (image.len == 0) return error.NoIndexKernels;
+         var m = try cuda.Module.load(d, image);
+         errdefer m.unload();
+-        return .{ .module = m, .scores_fn = try m.function("tf_glm_index_scores"), .pools_fn = try m.function("tf_glm_index_pools"), .select = mode == .both };
++        return .{
++            .module = m,
++            .scores_fn = try m.function("tf_glm_index_scores"),
++            .pools_fn = try m.function("tf_glm_index_pools"),
++            .select = mode == .both or mode == .all,
++            .decode = mode == .all,
++            .decode_from = try decodeFrom(@import("profile").lookup("TF_GLM_INDEX_DECODE_FROM")),
++        };
+     }
+ 
+     pub fn unload(k: *Kernels) void {
+@@ -71,15 +89,14 @@ pub const Kernels = struct {
+ 
+     /// Whether `rows` rows over `np` pools with this key cache layout go through the kernels.
+     pub fn takes(k: *const Kernels, rows: usize, np: usize, pk: u64, ps: u64) bool {
+-        _ = k;
+-        return rows >= rows_from and np >= topk and pk % 16 == 0 and ps % 16 == 0;
++        return (rows >= rows_from or (k.decode and np >= k.decode_from)) and np >= topk and pk % 16 == 0 and ps % 16 == 0;
+     }
+ 
+     /// tf_glm_scores' launch for `rows` rows at `at` into out [rows][np]; the first `nb` 64-pool blocks are written.
+     pub fn scores(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64) !void {
+         const g = scoresGrid(rows, nb);
+         var a: cuda.Args = .{};
+-        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, score_tiles), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
++        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(tileLoop(rows))), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
+         try cuda.launch.launch(k.scores_fn, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
+     }
+ 
+@@ -92,24 +109,49 @@ pub const Kernels = struct {
+     }
+ };
+ 
++/// TF_GLM_INDEX_DECODE_FROM's text by its row, a context position, as the pools a decode window must reach (0: any).
++pub fn decodeFrom(raw: ?[]const u8) !usize {
++    return try @import("sys").environment.value(usize, "TF_GLM_INDEX_DECODE_FROM", raw, 0) / sparse.pool;
++}
++
++test "GLM index: TF_GLM_INDEX_DECODE_FROM is a position, counted in pools; a typo is refused" {
++    try std.testing.expectEqual(@as(usize, 0), try decodeFrom(null));
++    try std.testing.expectEqual(@as(usize, 0), try decodeFrom(" "));
++    try std.testing.expectEqual(@as(usize, 16384), try decodeFrom("65536"));
++    try std.testing.expectError(error.InvalidEnvironment, decodeFrom("64k"));
++}
++
++test "GLM index: with a decode depth gate, shallow decode windows keep today's path and deep ones take the kernels" {
++    var k: Kernels = undefined;
++    k.decode = true;
++    k.decode_from = 16384; // 65,536 positions
++    try std.testing.expect(!k.takes(4, 16383, 0x1000, 32768));
++    try std.testing.expect(k.takes(4, 16384, 0x1000, 32768));
++    try std.testing.expect(k.takes(rows_from, 1024, 0x1000, 32768)); // prompt chunks are not gated
++}
++
+ fn cdiv(a: usize, b: usize) usize {
+     return (a + b - 1) / b;
+ }
+ 
+-test "GLM index: TF_GLM_INDEX_CUDA is off unless 1 or scores, and a typo is refused" {
++test "GLM index: TF_GLM_INDEX_CUDA is off unless 1, scores or all, and a typo is refused" {
+     try std.testing.expectEqual(Mode.off, try Mode.parse(null));
+     try std.testing.expectEqual(Mode.off, try Mode.parse(""));
+     try std.testing.expectEqual(Mode.off, try Mode.parse("0"));
+     try std.testing.expectEqual(Mode.both, try Mode.parse("1"));
+     try std.testing.expectEqual(Mode.scores, try Mode.parse("scores"));
++    try std.testing.expectEqual(Mode.all, try Mode.parse("all"));
+     try std.testing.expectError(error.BadIndexMode, Mode.parse("on"));
+ }
+ 
+-test "GLM index: the scores grid covers 8 rows a CTA and 16 pool blocks a CTA" {
++test "GLM index: the scores grid covers 8 rows a CTA, 16 pool blocks a prompt CTA and one a decode CTA" {
+     // a 512-row chunk over 147,456 pools: 2,304 blocks
+     try std.testing.expectEqual([2]u32{ 64, 144 }, scoresGrid(512, 2304));
+     try std.testing.expectEqual([2]u32{ 9, 1 }, scoresGrid(65, 16));
+     try std.testing.expectEqual([2]u32{ 8, 2 }, scoresGrid(64, 17));
++    // a 4-row decode window over 596k tokens' 149,000 pools: one CTA a 64-pool block
++    try std.testing.expectEqual([2]u32{ 1, 2329 }, scoresGrid(4, 2329));
++    try std.testing.expectEqual([2]u32{ 2, 32 }, scoresGrid(9, 32));
+     try std.testing.expectEqual([2]u32{ 1, 1 }, scoresGrid(1, 0));
+ }
+ 
+@@ -121,11 +163,19 @@ test "GLM index: the candidate cap follows the pool count and stays in shared me
+     try std.testing.expect(tile(1 << 30).cap <= cap_max);
+ }
+ 
+-test "GLM index: only prompt-sized launches on aligned key caches take the kernels" {
+-    const k: Kernels = undefined;
++test "GLM index: prompt-sized launches on aligned key caches take the kernels, decode windows only with Mode.all" {
++    var k: Kernels = undefined;
++    k.decode = false;
++    k.decode_from = 0;
+     try std.testing.expect(k.takes(rows_from, 1024, 0x1000, 32768));
+     try std.testing.expect(!k.takes(rows_from - 1, 1024, 0x1000, 32768));
++    try std.testing.expect(!k.takes(4, 1 << 18, 0x1000, 32768));
+     try std.testing.expect(!k.takes(512, 1024, 0x1008, 32768));
+     try std.testing.expect(!k.takes(512, 1024, 0x1000, 32760));
+     try std.testing.expect(!k.takes(512, topk - 1, 0x1000, 32768));
++    k.decode = true;
++    try std.testing.expect(k.takes(1, 1024, 0x1000, 32768));
++    try std.testing.expect(k.takes(rows_from - 1, 1 << 18, 0x1000, 32768));
++    try std.testing.expect(!k.takes(4, topk - 1, 0x1000, 32768));
++    try std.testing.expect(!k.takes(4, 1024, 0x1008, 32768));
+ }
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 560905fc1a3d0e51480a9bc4d9c5f6d352b4bd00..43560b63f3b73c0bf11fb6225f63d5870ef092a7 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -84,6 +84,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_DRAFT_NOISE", .scope = .glm, .kind = .real, .trim = " ", .forms = "a finite weight of at least 0 (default 0, off)" },
+     .{ .name = "TF_GLM_OVN_DRAFT_CUTS", .scope = .glm, .kind = .path, .forms = "comma-separated streams:cut pairs such as 1:0.3,4:0.7, without control characters" },
+     .{ .name = "TF_GLM_DFLASH2_WIN", .scope = .glm, .kind = .u64, .trim = " ", .max = 2048, .forms = "a whole count of context positions from 0 to 2048 (default 2048)" },
++    .{ .name = "TF_GLM_INDEX_DECODE_FROM", .scope = .glm, .kind = .size, .forms = "a whole context position from which decode windows take the index kernels (0: any depth)" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
+diff --git a/zig/tests/cuda/glm_index_check.zig b/zig/tests/cuda/glm_index_check.zig
+index 48dd2d0ad25b88b0642bedfb2d8c007af12b03cd..9d24f3869948122360ffa03204e3b4305dd4b3d8 100644
+--- a/zig/tests/cuda/glm_index_check.zig
++++ b/zig/tests/cuda/glm_index_check.zig
+@@ -20,6 +20,15 @@ const cases = [_]Case{
+     .{ .cap = 65536, .pos = 4 * 65536 - 520, .rows = 512 },
+     .{ .cap = 147456, .pos = 4 * 147456 - 520, .rows = 512 }, // a cap off the power of two
+     .{ .cap = 262144, .pos = 4 * 262144 - 520, .rows = 512 },
++    // decode windows (TF_GLM_INDEX_CUDA=all): one 64-pool tile a CTA, the window's rows sharing it
++    .{ .cap = 4096, .pos = 300, .rows = 3 }, // fewer than 512 visible pools: each row takes all it sees
++    .{ .cap = 1024, .pos = 4 * 1024 - 10, .rows = 2 },
++    .{ .cap = 4096, .pos = 4 * 4096 - 20, .rows = 8, .heads = 20 },
++    .{ .cap = 16384, .pos = 4 * 16384 - 40, .rows = 9, .paged = true },
++    .{ .cap = 65536, .pos = 4 * 65536 - 40, .rows = 33, .bits = true },
++    .{ .cap = 147456, .pos = 4 * 147456 - 9, .rows = 1 },
++    .{ .cap = 262144, .pos = 4 * 149000, .rows = 4 }, // 596k tokens, the agents' depth
++    .{ .cap = 262144, .pos = 4 * 262144 - 20, .rows = 16 }, // 1M tokens
+ };
+ 
+ fn bf16(x: f32) u16 {
+@@ -72,7 +81,7 @@ pub fn run(gpu: check.Gpu) !void {
+     var ops = try cuda.Module.load(gpu.d, cuda.kernels.glm_ops);
+     defer ops.unload();
+     const ks = try glm.glue.Kernels.load(glue_mod);
+-    var idx = try glm.index.Kernels.load(gpu.d, cuda.kernels.glm_index, .both);
++    var idx = try glm.index.Kernels.load(gpu.d, cuda.kernels.glm_index, .all);
+     defer idx.unload();
+     var idx_scores = idx; // TF_GLM_INDEX_CUDA=scores: the kernels' scores, tf_glm_select_rows' pools
+     idx_scores.select = false;

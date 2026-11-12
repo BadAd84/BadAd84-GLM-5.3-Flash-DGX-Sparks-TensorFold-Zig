@@ -61,16 +61,17 @@ ENV+=(-e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_MIN_NCHANNELS=4 -e NCC
 # does not already name it, so an A/B arm can turn any of them off without editing this file.
 # The pin's own knobs (L2PF, PREFILL_ROWS, FILL_ROWS) are NOT in this set: setting them explicitly
 # killed the boot (container created, then gone within 60s, twice) and L2PF already reports its own
-# sizing at boot, so each needs its own A/B before it can join. See PORT-LEDGER.
-DEFS="TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_ONE_CHUNK=1 TF_GLM_OVN_KEPT_WALK=1
+# sizing at boot, so each needs its own A/B before it can join. Every name below is a row of the .glm scope of
+# zig/src/platform/environment.zig on the re-seated tree (one-chunk and reply-prefill are not carried, see
+# docs/audit-2026-11-12/reseat-v127.md).
+DEFS="TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_KEPT_WALK=1
  TF_GLM_OVN_DRAFT_ONEPASS=1 TF_GLM_OVN_DRAFT_DOWN4=1 TF_GLM_OVN_DRAFT_MLPSPLIT=4
- TF_GLM_OVN_REPLY_PREFILL=1 TF_GLM_OVN_MLA_FUSEMERGE=1 TF_GLM_OVN_GLUE_FUSE=1
+ TF_GLM_OVN_MLA_FUSEMERGE=1 TF_GLM_OVN_GLUE_FUSE=1
  TF_GLM_OVN_INDEX_SCHED=1 TF_GLM_OVN_POOLS32=1 TF_GLM_OVN_INDEX_REGROUP=1
  TF_GLM_OVN_MM_WIDE=1 TF_GLM_OVN_SPARSE_ONEPASS=1 TF_GLM_OVN_ROUTER_WARM=1"
-# Off by default: this recipe's own stack has not been A/B'd at 1/2/4/6/8 streams yet, and the
-# rule here is that a knob is default-off until it is. KNOBS=measured opts into the set the
-# source stack measured (ai-engine serve4.sh def17, production's probe, ABBA, every digest
-# equal); KNOBS=all is the same list for an arm that means to test them all.
+# Off by default: a knob is default-off until it has been A/B'd at 1/2/4/6/8 streams on this series (the arms are
+# running; docs/OVERNIGHT-2026-11-12.md has the cells). KNOBS=measured opts into the set below; KNOBS=all is the same
+# list for an arm that means to test them all.
 case "${KNOBS:-off}" in
   measured|all)
     for kv in $DEFS; do

@@ -1,0 +1,183 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: the MTP head's own passes run only without a DFlash2 drafter
+
+Fork `a8ccc5c81` "glm cuda: the MTP head's own passes run only without a DFlash2 drafter",
+with the two further head sites the fork's tip carries in cuda_prompt_pieces.run and
+cuda_snapshots.planBytes.
+
+With DFlash2 loaded the head never drafts, yet every prompt row was still absorbed into its
+caches. The fork measured 61 to 86 ms of each 1.5 to 1.8 second 2,048-row chunk, 4.0 to 4.7
+per cent of a cold prefill, plus the head's rows in every kept state. The drafter reads only
+the head's .draft weights, so the weights stay loaded and nothing else moves. A new
+Engine.head flag (drafting and no drafter) gates the absorb sites; e.mtp keeps its meaning,
+which is that drafting is on and the head is loaded.
+
+Our serve runs --drafts with --drafter, so e.mtp is true and e.head is false on it: this is
+the arm where the saving lands.
+
+The five absorb sites, all gated together so no two paths can disagree about mtp_len:
+cuda_engine.prefillChunk (prompt_solo.mtpRows), cuda_prompts.pass (the batched pass),
+cuda_prompt_pair.mtpRows (a paired step's two chunks), cuda_prompt_pieces.run (MULTI_FILL's
+pieces) and cuda_snapshots.planBytes, which plans the head's rows for a kept state and now
+plans none when the head absorbs none. keepAs and seal already take the state's own mtp_len,
+which stays 0, so they need no edit.
+
+Every other reading of e.mtp was checked and stays e.mtp, because each one asks whether the
+head is loaded rather than whether it absorbs: the rank fingerprint and its drafter term,
+weights.load, the shared verify buffers, Engine.draft's NoDraftHead, Lanes.facts and its
+copy-confidence and NoDraftHead, cuda_snapshots.seal and keepAs, and cuda_disk_ranks.shape.
+The fork's shape line is `e.mtp and !drop_mtp`, whose second term is the unported DROP_MTP
+knob, so ours stays `e.mtp`.
+
+Changed from the fork's lines: cuda_prompt_pieces.run drops the port-time comment "the pin
+signals the head pass by its MTP head, not an e.head flag", which this patch makes false.
+Three test engines are given the flag, because they are `undefined` apart from the fields
+they set and the code now reads head: glm_snap_fixture sets `f.e.head = mtp` as the fork
+does, glm_prompt_host's stand-in engine renames its `mtp` field to `head` as the fork does,
+and glm_snapshot_host sets both fields at each of its two bare engines. The fork writes that
+as a second statement and sets it at only one of the two, leaving its other test to read an
+undefined bool; here both are set, and each is written as one destructuring assignment
+because glm_snapshot_host already sits at the lean gate's 600-line limit and a second
+statement would push it over. The numbers those tests assert do not move, because head true
+is what they measured before.
+
+Left out of a8ccc5c81: its cuda_prof.zig change, which adds mla_chunks and mla_merge
+sections. Those belong to the latent-attention profile split that this stack has not ported,
+so here they would be two enum members no code marks.
+
+What a GPU run has to show: with --drafter loaded, the mtp profile section of a prompt chunk
+goes to zero and a cold prefill loses its 4 per cent, the reply digest for a fixed prompt is
+unchanged, and a turn resumed from a state kept under the new plan restores without
+error.SnapshotSize. Without a drafter nothing should change at all.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- The head absorb site in cuda_prompt_pieces.run (MULTI_FILL's pieces) is not carried here: that file belongs to the shared-round era, whose MULTI_FILL path this re-seat does not carry (DECISIONS.md, fold 0027). The four other absorb sites and planBytes are gated as in the fold.
+- v1.2.7's paired step refuses a drafter (cuda_prompt_pair.pairedAt: `e.drafter != null`), so the mtpRows gate of a paired step is reached only without a drafter, where e.head equals e.mtp.
+- source: work/fold/0030-head-flag.patch
+
+diff --git a/zig/glm_prompt_host.zig b/zig/glm_prompt_host.zig
+index bb44e927d66394780176aec59e500b8bc23ee0b3..a48cbd02c5ea20bf9e34c2db755e9830030654d5 100644
+--- a/zig/glm_prompt_host.zig
++++ b/zig/glm_prompt_host.zig
+@@ -64,7 +64,7 @@ const engine = struct {
+         capacity: usize = 4096,
+         c: struct { hidden: usize = 1 } = .{},
+         hold: struct { ptr: u64 },
+-        mtp: bool = true,
++        head: bool = true,
+         cur: *Seq = undefined,
+         seqs: [32]Seq = @splat(.{}),
+         bp: fw.Buffers,
+@@ -277,7 +277,7 @@ test "GLM prompt workflow: both ranks share exact packets and reject malformed b
+ test "GLM structured: prompt rows survive without an MTP head" {
+     var b: Box = .{};
+     var e = b.make();
+-    e.mtp = false;
++    e.head = false;
+     try pass(&e, &.{ .{ .slot = 4, .ids = &.{ 31, 32 } }, .{ .slot = 9, .ids = &.{ 61, 62, 63 } } });
+     try t.expectEqual(@as(u16, 32), held(&e, 4));
+     try t.expectEqual(@as(u16, 63), held(&e, 9));
+diff --git a/zig/glm_snapshot_host.zig b/zig/glm_snapshot_host.zig
+index d042bdf4566818922ae861ca61acdf40a11887ee..6bd9b067d485c13878a578a4f43f964137b7ec7c 100644
+--- a/zig/glm_snapshot_host.zig
++++ b/zig/glm_snapshot_host.zig
+@@ -42,7 +42,7 @@ test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configur
+     defer seq.st.deinit();
+     e.cur = &seq;
+     e.c = w.config;
+-    e.mtp = true;
++    e.mtp, e.head = .{ true, true }; // as Engine.init without a drafter: the head's rows are part of a kept state
+     e.capacity = seq.st.capacity;
+     for ([_]u32{ 2048, 34816, 266240 }) |at| {
+         std.debug.print("GLM snapshot sizing rank=0 world=2 at={d} bytes={d} arena={d}\n", .{ at, glm.native.snap_bytes(&e, at), seq.st.arena.buf.len });
+@@ -427,7 +427,7 @@ test "GLM snapshots: 0.3 GiB fits the first default TP2 prefix at 256K but not a
+     defer seq.st.deinit();
+     e.cur = &seq;
+     e.c = w.config;
+-    e.mtp = true;
++    e.mtp, e.head = .{ true, true }; // as Engine.init without a drafter: the head's rows are part of a kept state
+     e.capacity = seq.st.capacity;
+     const minimum = glm.native.snap_min_bytes(&e);
+     const budget: u64 = 322122547;
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+index 4e4846a98d9b60b7d831d5781902a4963b6b49d9..628d56edb1cf8d13a54bd25fce1bc3afd7b0be4e 100644
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -84,6 +84,7 @@ pub const Engine = struct {
+     slot: u32 = 0,
+     capacity: usize,
+     mtp: bool,
++    head: bool, // the MTP head's own passes run: drafting without DFlash2, which reads only the head's .draft weights
+     heat_gate: heat.Gate, // upstream's bands (off unless set), read before each prompt chunk on the gathered maximum
+     shared_buf: cuda.DeviceBuffer, // one f64 every rank all-reduces to its maximum
+     snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
+@@ -154,7 +155,7 @@ pub const Engine = struct {
+         if (o.settings.layers > c.layers) return error.BadLayers;
+         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
+         for (layers, 0..) |*l, i| l.* = @intCast(i);
+-        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
++        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp, .head = o.mtp and !o.drafter };
+         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
+         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
+         const Tile = struct {
+@@ -410,7 +411,7 @@ pub const Engine = struct {
+         if (f.prof) |p| p.mark(e.stream, .draw);
+         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
+         stamp = prof_mod.span(f.prof, e.stream, .mtp);
+-        if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);
++        if (e.head) try prompt_solo.mtpRows(e, &f, as_i32);
+         stamp.end();
+         if (f.prof) |p| p.mark(e.stream, .mtp);
+         stamp = prof_mod.span(f.prof, e.stream, .commit);
+diff --git a/zig/src/families/glm/cuda_prompt_pair.zig b/zig/src/families/glm/cuda_prompt_pair.zig
+index bf895cd2891b5507751624c5a5eeceaa6e025530..a037fe038ac1406548b3e55cf4ccb08d0fc174dd 100644
+--- a/zig/src/families/glm/cuda_prompt_pair.zig
++++ b/zig/src/families/glm/cuda_prompt_pair.zig
+@@ -122,7 +122,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel:
+ 
+ /// decode._absorb_rows of a chunk: the MTP head over its next ids `nxt` on its final-norm rows `hidden`.
+ fn mtpRows(e: *Engine, f: *fw.Forward, nxt: []const i32, hidden: u64) !void {
+-    if (!e.mtp or nxt.len == 0) return;
++    if (!e.head or nxt.len == 0) return;
+     try f.mtp(nxt, &.{hidden});
+     try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
+ }
+diff --git a/zig/src/families/glm/cuda_prompts.zig b/zig/src/families/glm/cuda_prompts.zig
+index b66392f44caf1781252de78253e4625246e0feab..54798fbc432cc4a94bec6b3ff354c34f9fb59b45 100644
+--- a/zig/src/families/glm/cuda_prompts.zig
++++ b/zig/src/families/glm/cuda_prompts.zig
+@@ -53,7 +53,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
+     for (parts, segs[0..parts.len]) |p, g| {
+         one[0] = .{ .w = &e.w, .st = g.st, .b = &e.bp };
+         // decode._absorb_rows; the head's pass writes final-norm row 0, which the hold rows above already copied
+-        if (e.mtp and g.rows > 1) {
++        if (e.head and g.rows > 1) {
+             try f.mtp(@ptrCast(p.ids[1..]), &.{e.bp.fnormed + g.row0 * D * 2});
+             try g.st.setMtpLen(e.stream, g.st.mtp_len + g.rows - 1);
+         }
+diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
+index 878dee4b7e98a47234063ec6fa0af399077bc4a4..51e146ea86238ff6ded340bb1d468f345e1ea93c 100644
+--- a/zig/src/families/glm/cuda_snapshots.zig
++++ b/zig/src/families/glm/cuda_snapshots.zig
+@@ -31,7 +31,8 @@ pub fn bytes(e: anytype, at: usize) u64 {
+ }
+ 
+ fn planBytes(e: anytype, at: usize) u64 {
+-    const head: ?usize = if (e.mtp) @min(e.capacity, std.math.add(usize, at, @import("cuda_state.zig").window_rows) catch return std.math.maxInt(u64)) else null;
++    // the head's rows as keepAs plans them: none while it absorbs nothing (DFlash2 drafting), so mtp_len stays 0
++    const head: ?usize = if (!e.mtp) null else if (!e.head) 0 else @min(e.capacity, std.math.add(usize, at, @import("cuda_state.zig").window_rows) catch return std.math.maxInt(u64));
+     // a paged sequence holds its request's rows: its prefix is counted to the capacity, in a window's bytes
+     const n = layout.Plan.size(&e.cur.st, &e.c, e.capacity, at, head, heldPages(e, at)) catch return std.math.maxInt(u64);
+     return pages.rounded(n) catch std.math.maxInt(u64);
+diff --git a/zig/test_support/glm_snap_fixture.zig b/zig/test_support/glm_snap_fixture.zig
+index 0a09c3a4b33e0986d73716e22ff8c7ab6510d916..b371f194fda5685089f171d7fcc5d6d29b6a6aa9 100644
+--- a/zig/test_support/glm_snap_fixture.zig
++++ b/zig/test_support/glm_snap_fixture.zig
+@@ -31,6 +31,7 @@ pub const Fixture = struct {
+         f.e.share = w.share;
+         f.e.capacity = f.seq.st.capacity;
+         f.e.mtp = mtp;
++        f.e.head = mtp; // as Engine.init: the MTP head absorbs prompt rows unless a drafter drafts
+         f.e.snaps = .empty;
+         f.e.snap_pages = null;
+         f.e.snap_setup = null;

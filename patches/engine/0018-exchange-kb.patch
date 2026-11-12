@@ -1,0 +1,154 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm relay: TF_GLM_OVN_EXCHANGE_KB, a direct exchange posted in pieces
+
+ai-engine 35b9011e0 applied clean onto the pin stack (one file, cuda_relay.zig). A
+direct exchange's send and receive go in pieces of at most EXCHANGE_KB KiB; the
+pieces land where the whole would, byte for byte, and NCCL pairs the postings per
+peer and kind in order, so each whole send's pieces start where it starts with the
+same count. Knob unset (0) posts the whole buffer exactly as before.
+
+The source note: a 4,096-row chunk's 11 MB share gathers at a seventh of the rate a
+4 MB one does, which is what the knob addresses. Comment lines single-lined to meet
+the lean rule.
+
+Gates on pin+0001..0013: check-native-cuda-host green, test-lane-api-host green,
+whole-tree fmt green, lean base-vs-head 0 new.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- lean_check.py's DIRECT_GETENV/HIDDEN_GETENV: every TF_* setting this patch reads is a row of platform/environment.zig with a line in docs/environment.md, read through cuda.ovn or environment, never getenv. Row: TF_GLM_OVN_EXCHANGE_KB (u64, KiB).
+- cuda_relay.zig has no commit in 9c9bf542..v1.2.7; applies as is.
+- source: work/fold/0017-exchange-kb.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index d0eb6c4e9f122618201abfbf44cf8177c1814acd..b32507d2a31c72cd261729245d2d3bd957585ee0 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -57,6 +57,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
+ | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
+ | `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
++| `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/src/families/glm/cuda_relay.zig b/zig/src/families/glm/cuda_relay.zig
+index 34e681b08e6e5adbe09f9e6237c473faa3b06311..4082b1b91e4654363e364acac30bcf55112497d6 100644
+--- a/zig/src/families/glm/cuda_relay.zig
++++ b/zig/src/families/glm/cuda_relay.zig
+@@ -80,9 +80,32 @@ const Direct = struct {
+     lo: usize,
+     dims: usize,
+ 
++    /// TF_GLM_OVN_EXCHANGE_KB: a direct exchange in pieces of at most this many KiB (0: whole); same bytes either way.
++    fn pieceBytes() usize {
++        return @as(usize, @intCast(cuda.ovn.int("EXCHANGE_KB", 0) catch 0)) << 10; // ovn caches the read itself
++    }
+     fn post(t: Direct, peer: usize, src: u64, out: usize, dst: u64, in: usize, ty: cuda.nccl.DataType) !void {
+-        try t.lib.check(t.lib.api.ncclSend(src, out, ty, @intCast(peer), t.comm, t.side.handle), "ncclSend");
+-        try t.lib.check(t.lib.api.ncclRecv(dst, in, ty, @intCast(peer), t.comm, t.side.handle), "ncclRecv");
++        const width: usize = if (ty == .f32) 4 else 2;
++        const piece = pieceBytes() / width; // elements a piece
++        if (piece == 0 or (out <= piece and in <= piece)) {
++            try t.lib.check(t.lib.api.ncclSend(src, out, ty, @intCast(peer), t.comm, t.side.handle), "ncclSend");
++            try t.lib.check(t.lib.api.ncclRecv(dst, in, ty, @intCast(peer), t.comm, t.side.handle), "ncclRecv");
++            return;
++        }
++        var so: usize = 0;
++        var ro: usize = 0;
++        while (so < out or ro < in) {
++            if (so < out) {
++                const n = @min(piece, out - so);
++                try t.lib.check(t.lib.api.ncclSend(src + so * width, n, ty, @intCast(peer), t.comm, t.side.handle), "ncclSend");
++                so += n;
++            }
++            if (ro < in) {
++                const n = @min(piece, in - ro);
++                try t.lib.check(t.lib.api.ncclRecv(dst + ro * width, n, ty, @intCast(peer), t.comm, t.side.handle), "ncclRecv");
++                ro += n;
++            }
++        }
+     }
+     fn partials(t: Direct) anyerror!void {
+         const x = t.x;
+@@ -106,8 +129,8 @@ const Direct = struct {
+ /// NCCL for the relay's postings: each call in order, and the call numbered `fail` returns an error.
+ const Fake = struct {
+     const Kind = enum { start, end, send, recv };
+-    const Call = struct { kind: Kind, peer: c_int = -1 };
+-    var calls: [64]Call = undefined;
++    const Call = struct { kind: Kind, peer: c_int = -1, ptr: u64 = 0, count: usize = 0 };
++    var calls: [256]Call = undefined;
+     var n: usize = 0;
+     var fail: ?usize = null;
+ 
+@@ -122,11 +145,11 @@ const Fake = struct {
+     fn end() callconv(.c) cuda.nccl.Result {
+         return note(.{ .kind = .end });
+     }
+-    fn send(_: cuda.abi.DevicePtr, _: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+-        return note(.{ .kind = .send, .peer = peer });
++    fn send(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
++        return note(.{ .kind = .send, .peer = peer, .ptr = ptr, .count = count });
+     }
+-    fn recv(_: cuda.abi.DevicePtr, _: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+-        return note(.{ .kind = .recv, .peer = peer });
++    fn recv(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
++        return note(.{ .kind = .recv, .peer = peer, .ptr = ptr, .count = count });
+     }
+     fn library() cuda.nccl.Library {
+         var api: cuda.nccl.Api = undefined;
+@@ -186,3 +209,42 @@ test "a posting that fails, at each posting in turn, ends its group and posts no
+         }
+     };
+ }
++
++test "TF_GLM_OVN_EXCHANGE_KB: a direct exchange in pieces covers each whole posting's bytes, per peer and kind, in order" {
++    const lib = Fake.library();
++    const x: Relay = .{ .world = 3, .rank = 1, .n = 4096 };
++    cuda.ovn.fake("EXCHANGE_KB", null);
++    Fake.n = 0;
++    Fake.fail = null;
++    try Fake.run(&lib, x, .split_partials);
++    const whole_n = Fake.n;
++    var whole: [256]Fake.Call = undefined;
++    @memcpy(whole[0..whole_n], Fake.calls[0..whole_n]);
++    cuda.ovn.fake("EXCHANGE_KB", "16"); // 16 KiB: a 1,366-row share of 8 dims at 4 bytes is 43 KiB, so three pieces
++    defer cuda.ovn.fake("EXCHANGE_KB", null);
++    Fake.n = 0;
++    try Fake.run(&lib, x, .split_partials);
++    try std.testing.expect(Fake.n > whole_n);
++    try std.testing.expectEqual(Fake.Kind.start, Fake.calls[0].kind);
++    try std.testing.expectEqual(Fake.Kind.end, Fake.calls[Fake.n - 1].kind);
++    // NCCL pairs postings per peer and kind in order: each whole send's pieces start where it starts, same count.
++    for (whole[0..whole_n]) |w| {
++        if (w.kind != .send and w.kind != .recv) continue;
++        var covered: usize = 0;
++        var at: u64 = w.ptr;
++        var seen_first = false;
++        for (Fake.calls[0..Fake.n]) |c| {
++            if (c.kind != w.kind or c.peer != w.peer) continue;
++            if (!seen_first) {
++                if (c.ptr != w.ptr) continue; // pieces of an earlier whole posting to the same peer
++                seen_first = true;
++            }
++            if (covered >= w.count) break;
++            try std.testing.expectEqual(at, c.ptr);
++            try std.testing.expect(c.count <= (16 << 10) / 4);
++            covered += c.count;
++            at += c.count * 4;
++        }
++        try std.testing.expectEqual(w.count, covered);
++    }
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 2de3e7e484e60eb5493212c406a00c4a8d638dc9..db1324b83fe31474eb496b1f278e3fbb7711de5b 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -91,6 +91,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },
++    .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },

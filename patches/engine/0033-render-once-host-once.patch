@@ -1,0 +1,2055 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE
+
+Fork ai-engine, ref fork-ssh/ovn-up, commit ef81b4a49 "server: render and
+tokenize a request once; TF_GLM_OVN_HOST_ONCE", the rest of it. Patch 01 took
+its two standalone optimisations and patch 02 its bench.
+
+What it was. prompt.prepare rendered and tokenized the whole conversation up
+to four times for one request: the prompt, the history, the continued-turn
+probe and the rewind probe, each a full template render and a full masked
+encode, and each render parsed every tool call again. On a long agent turn
+that is the engine thread's single largest piece of per-request host work.
+
+What it is now. The prompt is rendered once and its ids are kept with the
+added-token segments they came from (core/tokenizer/kept.zig). Each probe
+renders its own text, but encodes only the segments that differ from the
+prompt's: the leading and trailing runs are the prompt's own ids, taken by
+pointer. The history probe usually needs no render at all, because the
+template says where its own text ends: a final `{% if add_generation_prompt %}`
+block that nothing else reads is found at compile time
+(core/template/generation.zig) and the generation-on render records the length
+before it, so the history is that prefix of the prompt's text. Tool-call
+arguments are parsed once a request and reused by every later render of the
+same message (messages.Args).
+
+TF_GLM_OVN_HOST_ONCE=1, default off, adds one more step: the rewind probe's
+render is watched against the prompt's text (core/template/watch.zig) and
+stops a few KiB past the first byte where they differ, because by then the
+answer to "where do the two id streams part" is already fixed. The knob is
+read once at start-up (server.host_once).
+
+The ids must not move, and that is what the tests check. kept_test runs
+random masked texts and random edits of them against a fresh encodeMasked,
+3,000 rounds each, and asserts the reuse actually happens; generation_test
+runs 200 random chats through the GLM-shaped template and asserts the
+flag-off render is the flag-on render up to the mark, spans included, plus
+400 watched renders that are prefixes of the full one; prompt_once_test
+drives the real prepare over random conversations against a reference that
+is the old four-render path, comparing ids, history_len, rewind_len and
+user_end, with the knob off and on. All of them run under test-cuda-host, and
+the fork's own `test-prompt-once-host` step runs the three sets alone.
+
+No patch in this stack touches these files, so this completes nothing earlier;
+it completes patches 01 and 02 of this lane.
+
+What is not the fork's own lines, and why. The fork wrote this against a base
+140 upstream commits older than our pin, and prompt.zig is where that shows:
+
+- the pin's renderIds is a thin call to renderRequest, which carries a Kimi
+  bypass, a native-DeepSeek bypass, tool_choice, response_format and images
+  render options, MiniMax-M3's own closing token, the templateClosed test and
+  the explicit-thinking-off refusal. None of that exists in the fork's base.
+  The fork's shape is ported onto it: renderText returns the model_text
+  render (the pin's private render and RenderedIds go, since both the old path
+  and Once want the Rendered itself), closer returns the one id a thinking-off
+  generation prompt ends with and carries both of the pin's cases in the pin's
+  order, and offRefusal is the pin's refusal lifted out so the prompt render
+  inside Once runs it too. Once.prompt therefore takes a require_off argument
+  the fork's version has no notion of.
+- renderText is the fork's `rendered`, renamed: the pin's templateClosed takes
+  a parameter called `rendered` and Zig refuses the shadow. Nothing else about
+  it changed except the pin's own options and the pin's video marker
+  replacement, which it keeps.
+- every scratch Cx a probe runs under keeps carrying cx.template_fields, which
+  the pin added and the fork's base has no field for.
+- model_text.Rendered.keep also falls back to a whole encode when the render
+  carries Kimi release segments. Our Rendered has a `segments` field the fork's
+  has not, and with segments present `encode` is a sequence of per-segment
+  encodes, not encodeMasked(text, spans), so a kept state over it would be
+  wrong. The fallback leaves `state` null, which is what makes pieces and
+  prefixPieces take their own null-state paths; they need no segment test of
+  their own.
+- the fork registers `test-prompt-once-host` in zig/build/cuda.zig. Here the
+  server host steps live in zig/build/cuda_server_host.zig, where server_tests,
+  mods.tokenizer and the template module are all in scope, so the step is
+  registered there, unchanged otherwise.
+- the fork's keep, pieces, prefix and masked hooks sit inside hf_text.zig,
+  which is 600 lines here and would be 626 with them: over the lean rule's
+  limit. They are in zig/src/server/hf_text_kept.zig instead, the same bodies
+  with the tokenizer reached through one helper, and hf_text.zig's vtable
+  points straight at them (597 lines).
+- zig/tests/server/prompt_bench.zig gets the eight rows patch 02 removed back,
+  the fork's; its render helper passes our srv.media() where the fork writes
+  .of(srv.info.vision).
+
+Nothing of the commit is left out.
+
+Measured here, no GPU: prompt_bench, five rounds, ReleaseFast, x86_64 laptop,
+the two trees run back to back on an otherwise idle machine. The model is
+GLM-4.6's tokenizer with the GLM-5.3 chat template, whose every word is one of
+that tokenizer's added tokens; the corpus is this tree's own zig sources.
+Median chat.prepare, before then after:
+
+  the parity probe's r2, 223,956 ids          3.54 -> 1.31 ms
+  the same with template words quoted         4.03 -> 1.33 ms
+  an agent turn of 215,115 ids on a tool      20.72 -> 11.57 ms
+  an agent turn of 636,930 ids on a tool      63.35 -> 35.89 ms
+
+Against a tokenizer whose added tokens the template does not write (DeepSeek
+V3.2's pair, where every render is one long segment and only the history mark
+and the memo help) the same r2 shape reads 387.33 -> 144.74 ms.
+
+The prompt digest and all three marks are identical before and after in every
+case, which prompt_bench itself asserts each round (IdsDiffer, MarksDiffer).
+
+What a GPU run has to say. The host saving is measured above and needs no
+GPU. What a serve has to show is that nothing moved underneath it: the same
+reply digests as the stack through 0042 at 1, 2, 4, 6 and 8 streams with every
+knob off, the same with TF_GLM_OVN_HOST_ONCE=1, and a long agent turn (the
+650k shape) returning the pin's digest with the knob both ways. The marks the
+engine receives decide prompt-cache reuse, so a run should also confirm that
+history_len, rewind_len and user_end on a resumed conversation are what they
+were, by the restore the serve reports rather than by the numbers alone.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
+- lean_check.py's DIRECT_GETENV: server.zig read std.c.getenv("TF_GLM_OVN_HOST_ONCE") (any text but 1 off); it is now a .glm flag row read once by environment.value, so text other than 0 or 1 refuses the start.
+- tokenizer.zig is 595 lines at v1.2.7 and the fold's hunks made it 615: Tokenizer.encodeSegments, the body the fold split out of encodeMaskedCounted, lives in kept.zig as encodeSegments(t, ...) beside its three callers, and the three Tokenizer helpers it calls (refuseAdded, encodeSegment, encodeTextMasked) are pub.
+- zig/tests/server/prompt_bench.zig: the sites table comes back whole, as zig fmt aligns it (prompt-bench's own alignment differs since that patch's table is narrower).
+- source: work/fold/0035-render-once-host-once.patch
+
+diff --git a/docs/environment.md b/docs/environment.md
+index b21a273b78acfba062eee6b3ab0ecc2b9957119e..23d30a9cf512b047059d6f6ae88641146a4885e6 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -76,6 +76,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_GLUE_FUSE` | Whole row count; a decode window of at most this many rows runs each hc_post with the next site's hc_pre in one kernel; default 0 (off) |
+ | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
+ | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
++| `TF_GLM_OVN_HOST_ONCE` | Exactly `0` or `1`; default off (the rewind probe's render stops a few KiB past where it leaves the prompt) |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/build/cuda_server_host.zig b/zig/build/cuda_server_host.zig
+index a5e4aa3d3df61b8b60e5e675fab833bb72411088..98a54761b459a6995fee87bbdd45a52285b1a915 100644
+--- a/zig/build/cuda_server_host.zig
++++ b/zig/build/cuda_server_host.zig
+@@ -63,6 +63,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
+     b.step("test-http-limits-host", "Total HTTP read deadlines and connection admission without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"HTTP limits:"} })).step);
+     b.step("test-server-recovery-host", "Incomplete replies, token allocation and bounded SSE storage without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Server recovery:"} })).step);
+     b.step("test-prompt-interior-host", "Last-user metadata excludes later messages without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"interior prompt:"} })).step);
++    const once = b.step("test-prompt-once-host", "A request rendered once: kept ids, the generation split and every probe against full renders");
++    for ([_]struct { *std.Build.Module, []const u8 }{ .{ server_tests, "prompt once:" }, .{ mods.tokenizer, "kept pieces:" }, .{ template, "generation split:" } }) |t|
++        once.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = t[0], .filters = &.{t[1]} })).step);
+     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
+     @import("request_starts_host.zig").steps(b, native_modules.engines, server_tests);
+     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
+diff --git a/zig/src/core/template/eval.zig b/zig/src/core/template/eval.zig
+index 1286e19e22ef6a8fbcd948fcd35b0e818d868922..e966f6dbc8d36ea9dd891300e3ea93380c7be5e9 100644
+--- a/zig/src/core/template/eval.zig
++++ b/zig/src/core/template/eval.zig
+@@ -24,6 +24,14 @@ pub const Ctx = struct {
+     vars: *const v.Map,
+     out: *v.Buffer,
+     depth: usize = 0,
++    /// Stops the render a set distance past where its root output leaves a reference text (watch.zig).
++    watch: ?*@import("watch.zig").Watch = null,
++
++    /// After a write to `c.out` that began at `from` bytes: the watch's check, on the root output only.
++    fn wrote(c: *Ctx, from: usize) Error!void {
++        const w = c.watch orelse return;
++        if (w.out != null and w.out.? == c.out) try w.grew(&c.rt, c.out, from);
++    }
+ 
+     fn resolve(c: *Ctx, name: []const u8) Error!Value {
+         if (c.vars.get(name)) |x| return x;
+@@ -114,9 +122,13 @@ fn assignByName(c: *Ctx, act: *Activation, t: ast.Target, x: Value) Error!void {
+ 
+ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
+     for (body) |st| switch (st) {
+-        .output => |pieces| for (pieces) |pc| switch (pc) {
+-            .text => |t| try c.out.literal(c.rt.a, t),
+-            .expr => |e| try c.out.append(c.rt.a, try v.asStr(&c.rt, try eval(c, act, e))),
++        .output => |pieces| for (pieces) |pc| {
++            const from = c.out.text.items.len;
++            switch (pc) {
++                .text => |t| try c.out.literal(c.rt.a, t),
++                .expr => |e| try c.out.append(c.rt.a, try v.asStr(&c.rt, try eval(c, act, e))),
++            }
++            try c.wrote(from);
+         },
+         .for_ => |f| try execFor(c, act, f),
+         .if_ => |n| {
+@@ -135,7 +147,12 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
+             mv.* = .{ .node = m, .closure = act, .name = m.name.id };
+             (try slotOf(c, act, m.name.frame, m.name.slot)).* = .{ .macro = mv };
+         },
+-        .scoped => |sc| try c.out.append(c.rt.a, try capture(c, try enter(c, act, sc.frame), sc.body)),
++        .scoped => |sc| {
++            const text = try capture(c, try enter(c, act, sc.frame), sc.body);
++            const from = c.out.text.items.len;
++            try c.out.append(c.rt.a, text);
++            try c.wrote(from);
++        },
+         .break_ => return .brk,
+         .continue_ => return .cont,
+     };
+@@ -518,3 +535,11 @@ pub fn eval(c: *Ctx, act: *Activation, e: *const ast.Expr) Error!Value {
+ pub fn root(c: *Ctx, t: ast.Template) Error!void {
+     _ = try exec(c, try enter(c, null, t.frame), t.body);
+ }
++
++/// `root`, `mark` set to the output's length when statement `split` starts (if it starts).
++pub fn rootMarked(c: *Ctx, t: ast.Template, split: usize, mark: *?usize) Error!void {
++    const act = try enter(c, null, t.frame);
++    if (try exec(c, act, t.body[0..split]) != .normal) return;
++    mark.* = c.out.text.items.len;
++    _ = try exec(c, act, t.body[split..]);
++}
+diff --git a/zig/src/core/template/generation.zig b/zig/src/core/template/generation.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..d374941731a583d9ec8d8439010b1919739b45d7
+--- /dev/null
++++ b/zig/src/core/template/generation.zig
+@@ -0,0 +1,87 @@
++//! Where a template's history ends: a final `{% if add_generation_prompt %}` block that nothing else reads.
++const std = @import("std");
++const ast = @import("ast.zig");
++
++const flag = "add_generation_prompt";
++
++/// The index in `body` of a final generation block, when rendering with the flag off stops right before it.
++pub fn split(body: []const ast.Stmt) ?usize {
++    var last = body.len;
++    while (last > 0 and emptyOutput(body[last - 1])) last -= 1;
++    if (last == 0) return null;
++    const n = switch (body[last - 1]) {
++        .if_ => |n| n,
++        else => return null,
++    };
++    if (n.elifs.len > 0 or n.else_body.len > 0) return null;
++    if (n.test_expr.* != .name or !std.mem.eql(u8, n.test_expr.name.id, flag)) return null;
++    // the test is the flag's only mention: everything before it renders alike with the flag on or off
++    var seen: usize = 0;
++    stmts(body, &seen);
++    return if (seen == 1) last - 1 else null;
++}
++
++fn emptyOutput(st: ast.Stmt) bool {
++    if (st != .output) return false;
++    for (st.output) |pc| if (pc != .text or pc.text.len > 0) return false;
++    return true;
++}
++
++fn name(n: *const ast.Name, seen: *usize) void {
++    if (std.mem.eql(u8, n.id, flag)) seen.* += 1;
++}
++
++fn target(t: ast.Target, seen: *usize) void {
++    switch (t) {
++        .name => |n| name(n, seen),
++        .tuple => |items| for (items) |x| target(x, seen),
++        .ns => |ns| name(ns.name, seen),
++    }
++}
++
++fn expr(e: *const ast.Expr, seen: *usize) void {
++    if (e.* == .name) name(e.name, seen);
++    ast.eachChild(error{}, e, seen, child) catch |err| switch (err) {};
++}
++
++fn child(seen: *usize, e: *ast.Expr) error{}!void {
++    expr(e, seen);
++}
++
++fn stmts(body: []const ast.Stmt, seen: *usize) void {
++    for (body) |st| switch (st) {
++        .output => |pieces| for (pieces) |pc| if (pc == .expr) expr(pc.expr, seen),
++        .for_ => |f| {
++            target(f.target, seen);
++            expr(f.iter, seen);
++            if (f.filter) |x| expr(x, seen);
++            stmts(f.body, seen);
++            stmts(f.else_body, seen);
++        },
++        .if_ => |n| ifs(n, seen),
++        .assign => |a| {
++            target(a.target, seen);
++            expr(a.value, seen);
++        },
++        .block_set => |b| {
++            target(b.target, seen);
++            if (b.filter) |x| expr(x, seen);
++            stmts(b.body, seen);
++        },
++        .macro => |m| {
++            name(m.name, seen);
++            for (m.params) |p| name(p, seen);
++            for (m.defaults) |d| expr(d, seen);
++            stmts(m.body, seen);
++        },
++        .scoped => |s| stmts(s.body, seen),
++        .break_, .continue_ => {},
++    };
++}
++
++fn ifs(n: *const ast.If, seen: *usize) void {
++    expr(n.test_expr, seen);
++    stmts(n.body, seen);
++    for (n.elifs) |e| ifs(e, seen);
++    stmts(n.else_body, seen);
++}
+diff --git a/zig/src/core/template/generation_test.zig b/zig/src/core/template/generation_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..32c21124b3168a58983579f4e3704b1fd34ca29b
+--- /dev/null
++++ b/zig/src/core/template/generation_test.zig
+@@ -0,0 +1,120 @@
++//! A final generation block's mark: the flag-off render is the flag-on text up to it, provenance included.
++const std = @import("std");
++const template = @import("template.zig");
++const t = std.testing;
++
++const glm_like =
++    \\[gMASK]<sop>{%- for m in messages -%}{%- if m.role == 'user' -%}<|user|>{{ m.content }}
++    \\{%- elif m.role == 'assistant' -%}<|assistant|>{{ m.content }}{% if loop.last %}<|end|>{% endif %}
++    \\{%- else -%}<|{{ m.role }}|>{{ m.content }}{%- endif -%}{%- endfor -%}
++    \\{%- if add_generation_prompt -%}<|assistant|><think>{%- endif -%}
++    \\
++;
++
++fn render(a: std.mem.Allocator, compiled: *const template.Compiled, messages: std.json.Value, generation: bool, history: *?usize) !template.Str {
++    var more: template.More = .{};
++    defer history.* = more.history;
++    return template.renderMore(a, compiled, messages, .null, .null, .null, generation, null, &more);
++}
++
++fn chat(a: std.mem.Allocator, r: std.Random) !std.json.Value {
++    const roles = [_][]const u8{ "user", "assistant", "tool", "system" };
++    const texts = [_][]const u8{ "", "x", "<|user|>", "a\nb", " ", "<think>" };
++    var list = std.json.Array.init(a);
++    for (0..r.uintLessThan(usize, 6)) |_| {
++        var m: std.json.ObjectMap = .empty;
++        try m.put(a, "role", .{ .string = roles[r.uintLessThan(usize, roles.len)] });
++        try m.put(a, "content", .{ .string = texts[r.uintLessThan(usize, texts.len)] });
++        try list.append(.{ .object = m });
++    }
++    return .{ .array = list };
++}
++
++test "generation split: the flag-off text and spans are the flag-on render's up to the mark" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var compiled = try template.compile(a, glm_like, null);
++    defer compiled.deinit();
++    try t.expect(compiled.split != null);
++    var prng = std.Random.DefaultPrng.init(0x67656e);
++    const r = prng.random();
++    for (0..200) |_| {
++        const messages = try chat(a, r);
++        var mark: ?usize = null;
++        const on = try render(a, &compiled, messages, true, &mark);
++        var none: ?usize = null;
++        const off = try render(a, &compiled, messages, false, &none);
++        try t.expectEqual(@as(?usize, null), none);
++        const h = mark.?;
++        try t.expectEqualStrings(off.s, on.s[0..h]);
++        var kept: usize = 0;
++        while (kept < on.spans.len and on.spans[kept][0] < h) kept += 1;
++        try t.expectEqualSlices(template.Span, off.spans, on.spans[0..kept]);
++        for (on.spans[0..kept]) |p| try t.expect(p[1] <= h);
++    }
++}
++
++test "generation split: any other read of the flag, an else, or output after the block keeps every render" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    for ([_][]const u8{
++        "{% if add_generation_prompt %}x{% endif %}{{ messages|length }}",
++        "{{ add_generation_prompt }}{% if add_generation_prompt %}x{% endif %}",
++        "{% if add_generation_prompt %}x{% else %}y{% endif %}",
++        "{% if add_generation_prompt %}x{% elif true %}y{% endif %}",
++        "{% set g = add_generation_prompt %}{% if g %}x{% endif %}",
++        "{% if add_generation_prompt and true %}x{% endif %}",
++        "{% macro f(add_generation_prompt) %}{% endmacro %}{% if add_generation_prompt %}x{% endif %}",
++        "{% for add_generation_prompt in [1] %}{% endfor %}{% if add_generation_prompt %}x{% endif %}",
++        "{% if add_generation_prompt %}x{% endif %} ",
++        "{% if add_generation_prompt %}{% if add_generation_prompt %}x{% endif %}{% endif %}",
++    }) |source| {
++        var compiled = try template.compile(a, source, null);
++        defer compiled.deinit();
++        try t.expectEqual(@as(?usize, null), compiled.split);
++        var mark: ?usize = 7;
++        _ = try render(a, &compiled, .{ .array = std.json.Array.init(a) }, true, &mark);
++        try t.expectEqual(@as(?usize, null), mark);
++    }
++    var trailing = try template.compile(a, "a{% if add_generation_prompt %}x{% endif %}\n", null);
++    defer trailing.deinit();
++    try t.expectEqual(@as(?usize, 1), trailing.split);
++}
++
++test "render watch: a render stopped past its difference is a prefix of the full one, text and spans" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var compiled = try template.compile(a, glm_like, null);
++    defer compiled.deinit();
++    var prng = std.Random.DefaultPrng.init(0x7761);
++    const r = prng.random();
++    var stopped: usize = 0;
++    for (0..400) |_| {
++        var ref_more: template.More = .{};
++        const reference = try template.renderMore(a, &compiled, try chat(a, r), .null, .null, .null, true, null, &ref_more);
++        const messages = try chat(a, r);
++        var full_more: template.More = .{};
++        const full = try template.renderMore(a, &compiled, messages, .null, .null, .null, true, null, &full_more);
++        var watch: template.Watch = .{ .against = reference.s, .slack = r.uintLessThan(usize, 12) };
++        var more: template.More = .{ .watch = &watch };
++        const cut = try template.renderMore(a, &compiled, messages, .null, .null, .null, true, null, &more);
++        try t.expectEqual(more.cut, watch.stopped);
++        try t.expect(std.mem.startsWith(u8, full.s, cut.s));
++        try t.expectEqualSlices(template.Span, full.spans[0..cut.spans.len], cut.spans);
++        if (!more.cut) {
++            try t.expectEqualStrings(full.s, cut.s);
++            try t.expectEqual(full_more.history, more.history);
++            continue;
++        }
++        stopped += 1;
++        try t.expectEqual(@as(?usize, null), more.history);
++        // stopped only once `slack` bytes past where it left the reference
++        const d = watch.diverged.?;
++        try t.expect(cut.s.len >= d + watch.slack);
++        try t.expectEqual(d, std.mem.indexOfDiff(u8, reference.s, cut.s).?);
++    }
++    try t.expect(stopped > 100);
++}
+diff --git a/zig/src/core/template/template.zig b/zig/src/core/template/template.zig
+index 5c4e62addc13792333b02f72cd2371534474ee9b..e1296710f77b9ff6cf7e48d3baa29f074841f6cd 100644
+--- a/zig/src/core/template/template.zig
++++ b/zig/src/core/template/template.zig
+@@ -24,6 +24,8 @@ pub const Compiled = struct {
+     /// Its child allocator also backs each render's scratch, so concurrent renders need it thread-safe.
+     arena: std.heap.ArenaAllocator,
+     tree: ast.Template,
++    /// The final generation block's index in the body, when one ends the template (generation.zig).
++    split: ?usize = null,
+ 
+     pub fn deinit(t: *Compiled) void {
+         t.arena.deinit();
+@@ -99,7 +101,7 @@ pub fn compile(gpa: Allocator, source: []const u8, diag: ?*Diag) Error!Compiled
+     var bad: ?[]const u8 = null;
+     checkNames(body, &bad);
+     if (bad) |name| return report(gpa, diag, "template uses unsupported filter or test '{s}'", .{name});
+-    return .{ .arena = arena, .tree = .{ .body = body, .frame = frame } };
++    return .{ .arena = arena, .tree = .{ .body = body, .frame = frame }, .split = @import("generation.zig").split(body) };
+ }
+ 
+ /// Renders with HF's variables: messages, tools (none when absent), documents, add_generation_prompt, then `context`.
+@@ -116,24 +118,48 @@ pub fn renderProvenance(gpa: Allocator, t: *const Compiled, messages: std.json.V
+ 
+ /// Checkpoint-owned globals are template data; request context overrides them and retains its provenance.
+ pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error!Str {
++    var more: More = .{};
++    return renderMore(gpa, t, messages, tools, context, template_globals, add_generation_prompt, diag, &more);
++}
++
++pub const Watch = @import("watch.zig").Watch;
++
++/// A render's extras: `watch` stops it early (then `cut`); with the generation prompt on, `history` is where it starts.
++pub const More = struct {
++    watch: ?*Watch = null,
++    /// The length of the text the flag off renders, when a final generation block shows it is a prefix.
++    history: ?usize = null,
++    /// The watch stopped the render: text and spans are a prefix of the full render's.
++    cut: bool = false,
++};
++
++/// `renderProvenanceGlobals` with `more`'s extras.
++pub fn renderMore(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag, more: *More) Error!Str {
+     // not on `gpa`: an arena there, such as a server request's, would keep the freed scratch until it is reset
+     var arena = std.heap.ArenaAllocator.init(t.arena.child_allocator);
+     defer arena.deinit();
+     const a = arena.allocator();
+     var out: v.Buffer = .{};
+     var vars: v.Map = .empty;
+-    var c = eval.Ctx{ .rt = .{ .a = a }, .vars = &vars, .out = &out };
+-    run(&c, &vars, t, messages, tools, context, template_globals, add_generation_prompt) catch |err| {
++    var c = eval.Ctx{ .rt = .{ .a = a }, .vars = &vars, .out = &out, .watch = more.watch };
++    if (more.watch) |w| w.out = &out;
++    var mark: ?usize = null;
++    more.cut = false;
++    run(&c, &vars, t, messages, tools, context, template_globals, add_generation_prompt, &mark) catch |err| {
+         if (err == error.OutOfMemory) return error.OutOfMemory;
+-        if (diag) |d| d.raised = c.rt.raised;
+-        return report(gpa, diag, "{s}", .{c.rt.msg});
++        more.cut = if (more.watch) |w| w.stopped else false;
++        if (!more.cut) {
++            if (diag) |d| d.raised = c.rt.raised;
++            return report(gpa, diag, "{s}", .{c.rt.msg});
++        }
+     };
++    more.history = if (add_generation_prompt and !more.cut) mark else null;
+     const text = try gpa.dupe(u8, out.text.items);
+     errdefer gpa.free(text);
+     return .{ .s = text, .spans = try gpa.dupe(Span, out.spans.items) };
+ }
+ 
+-fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool) v.Error!void {
++fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, mark: *?usize) v.Error!void {
+     const a = c.rt.a;
+     if (template_globals == .object) {
+         var it = template_globals.object.iterator();
+@@ -151,7 +177,7 @@ fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value,
+             try vars.put(a, key, try pyjson.fromJson(&c.rt, e.value_ptr.*));
+         }
+     }
+-    try eval.root(c, t.tree);
++    if (t.split) |s| try eval.rootMarked(c, t.tree, s, mark) else try eval.root(c, t.tree);
+ }
+ 
+ /// One-shot compile and render, the call the engine's chat prompts make.
+@@ -166,5 +192,6 @@ test {
+     _ = @import("unicode.zig");
+     _ = @import("value.zig");
+     _ = @import("provenance_test.zig");
++    _ = @import("generation_test.zig");
+     _ = @import("access.zig");
+ }
+diff --git a/zig/src/core/template/watch.zig b/zig/src/core/template/watch.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6c9084f6c5851dda3147e11b05550b8c8b8bbdd
+--- /dev/null
++++ b/zig/src/core/template/watch.zig
+@@ -0,0 +1,29 @@
++//! A render that stops once its output has run `slack` bytes past where it first differs from a reference text.
++const std = @import("std");
++const v = @import("value.zig");
++
++/// Output is append-only, so a stopped render's text and spans are a prefix of the full render's.
++pub const Watch = struct {
++    against: []const u8,
++    slack: usize,
++    out: ?*const v.Buffer = null,
++    diverged: ?usize = null,
++    stopped: bool = false,
++
++    /// The root output grew from `from` bytes: fails the render, stopped, once it is `slack` past the difference.
++    pub fn grew(w: *Watch, rt: *v.Rt, out: *const v.Buffer, from: usize) v.Error!void {
++        const text = out.text.items;
++        if (w.diverged == null) {
++            const ref = w.against[@min(from, w.against.len)..];
++            const new = text[from..];
++            const n = @min(new.len, ref.len);
++            if (std.mem.indexOfDiff(u8, new[0..n], ref[0..n])) |i| {
++                w.diverged = from + i;
++            } else if (new.len > ref.len) w.diverged = from + ref.len;
++        }
++        const d = w.diverged orelse return;
++        if (text.len < d + w.slack) return;
++        w.stopped = true;
++        return rt.fail("render stopped {d} bytes past its first difference", .{w.slack});
++    }
++};
+diff --git a/zig/src/core/tokenizer/kept.zig b/zig/src/core/tokenizer/kept.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ecac15be9e77639381add3ba2078da93c7ae1a0
+--- /dev/null
++++ b/zig/src/core/tokenizer/kept.zig
+@@ -0,0 +1,160 @@
++//! Ids kept with their added-token segments: a later text reuses the ids of the segments it repeats, unencoded.
++const std = @import("std");
++const tok = @import("tokenizer.zig");
++const steps = @import("steps.zig");
++const memo = @import("memo.zig");
++const Allocator = std.mem.Allocator;
++const Span = tok.Span;
++const Segment = tok.Segment;
++
++/// `ids` equal encodeMasked(text, spans); no segments when nothing can be reused (no spans, or lossy UTF-8).
++pub const Kept = struct {
++    text: []const u8,
++    spans: []const Span,
++    segs: []const Segment = &.{},
++    starts: []const usize = &.{},
++    ids: []const u32,
++};
++
++/// Ids whose concatenation `head ++ mid ++ tail` is encodeMasked(text, spans): kept, encoded, kept.
++pub const Pieces = struct {
++    head: []const u32 = &.{},
++    mid: []const u32 = &.{},
++    tail: []const u32 = &.{},
++};
++
++/// Only valid UTF-8 with request spans splits as encodeMasked does without a lossy copy.
++fn reusable(text: []const u8, spans: []const Span) bool {
++    return spans.len > 0 and std.unicode.utf8ValidateSlice(text);
++}
++
++/// Each segment's ids in order, its first id's index in `starts` when given; a segment's ids depend on it alone.
++pub fn encodeSegments(t: *const tok.Tokenizer, ctx: *steps.Context, text: []const u8, spans: []const Span, segs: []const Segment, ids: *std.ArrayList(u32), starts: ?[]usize, work: ?*tok.MaskWork) tok.Error!void {
++    var cursor: usize = 0;
++    for (segs, 0..) |seg, n| {
++        if (starts) |s| s[n] = ids.items.len;
++        if (seg.id) |id| {
++            try ids.append(ctx.a, id);
++            continue;
++        }
++        if (seg.start == seg.end) continue;
++        while (cursor < spans.len and spans[cursor][1] <= seg.start) {
++            cursor += 1;
++            if (work) |w| w.spans += 1;
++        }
++        const request = cursor < spans.len and spans[cursor][0] < seg.end;
++        const gap = text[seg.start..seg.end];
++        if (!request or t.normalized.ends.items.len == 0) {
++            const from = ids.items.len;
++            try t.encodeSegment(ctx, gap, seg.start == 0, ids);
++            if (request) try t.refuseAdded(ids.items[from..]);
++        } else {
++            // A cached gap with this text may have been encoded using a different mask.
++            var clipped: std.ArrayList(Span) = .empty;
++            var j = cursor;
++            while (j < spans.len and spans[j][0] < seg.end) : (j += 1) {
++                const p = spans[j];
++                try clipped.append(ctx.a, .{ @max(seg.start, p[0]) - seg.start, @min(seg.end, p[1]) - seg.start });
++                if (work) |w| w.spans += 1;
++            }
++            try t.encodeTextMasked(ctx, gap, seg.start == 0, ids, true, clipped.items);
++        }
++    }
++    if (starts) |s| s[segs.len] = ids.items.len;
++}
++
++/// encodeMasked(text, spans) with the segments and each segment's first id index; slices of `text` and `spans` kept.
++pub fn keep(t: *const tok.Tokenizer, a: Allocator, text: []const u8, spans: []const Span) tok.Error!Kept {
++    if (!reusable(text, spans)) return .{ .text = text, .spans = spans, .ids = try t.encodeMasked(a, text, spans) };
++    try tok.checkSpans(text, spans, null);
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
++    const segs = try a.dupe(Segment, try t.segments(&ctx, text, spans));
++    const starts = try a.alloc(usize, segs.len + 1);
++    var ids: std.ArrayList(u32) = .empty;
++    try encodeSegments(t, &ctx, text, spans, segs, &ids, starts, null);
++    return .{ .text = text, .spans = spans, .segs = segs, .starts = starts, .ids = try a.dupe(u32, ids.items) };
++}
++
++/// encodeMasked(text, spans) as pieces: the leading and trailing segments `kept` repeats are its ids, not re-encoded.
++pub fn pieces(t: *const tok.Tokenizer, a: Allocator, kept: *const Kept, text: []const u8, spans: []const Span) tok.Error!Pieces {
++    if (kept.segs.len == 0 or !reusable(text, spans)) return .{ .mid = try t.encodeMasked(a, text, spans) };
++    try tok.checkSpans(text, spans, null);
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
++    const segs = try t.segments(&ctx, text, spans);
++    const both = @min(kept.segs.len, segs.len);
++    var head: usize = 0;
++    while (head < both and same(kept, kept.segs[head], text, spans, segs[head])) head += 1;
++    var tail: usize = 0;
++    while (tail < both - head and same(kept, kept.segs[kept.segs.len - 1 - tail], text, spans, segs[segs.len - 1 - tail])) tail += 1;
++    var ids: std.ArrayList(u32) = .empty;
++    try encodeSegments(t, &ctx, text, spans, segs[head .. segs.len - tail], &ids, null, null);
++    return .{ .head = kept.ids[0..kept.starts[head]], .mid = try a.dupe(u32, ids.items), .tail = kept.ids[kept.starts[kept.segs.len - tail]..] };
++}
++
++/// A cut text's leading segment ids, as every longer text with its bytes and clipped spans encodes them, or null.
++pub fn prefix(t: *const tok.Tokenizer, a: Allocator, kept: *const Kept, text: []const u8, spans: []const Span) tok.Error!?Pieces {
++    if (kept.segs.len == 0 or !reusable(text, spans)) return null;
++    try tok.checkSpans(text, spans, null);
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
++    const segs = try t.segments(&ctx, text, spans);
++    // an added token no later byte can lengthen (its trie walk ends inside the text) fixes every segment up to it
++    var reach: usize = 0;
++    for (t.added) |x| reach = @max(reach, x.content.len);
++    var fixed = segs.len;
++    while (fixed > 0 and !(segs[fixed - 1].id != null and segs[fixed - 1].start + reach < text.len)) fixed -= 1;
++    if (fixed == 0) return null;
++    for (segs[0 .. fixed - 1], segs[1..fixed]) |x, y| if (x.end > y.start) return null;
++    var head: usize = 0;
++    const both = @min(kept.segs.len, fixed);
++    while (head < both and same(kept, kept.segs[head], text, spans, segs[head])) head += 1;
++    var ids: std.ArrayList(u32) = .empty;
++    try encodeSegments(t, &ctx, text, spans, segs[head..fixed], &ids, null, null);
++    return .{ .head = kept.ids[0..kept.starts[head]], .mid = try a.dupe(u32, ids.items) };
++}
++
++/// Whether two segments encode alike: the same id, or the same bytes, start-of-text flag and clipped request spans.
++fn same(kept: *const Kept, k: Segment, text: []const u8, spans: []const Span, p: Segment) bool {
++    if (k.id != null or p.id != null) return k.id != null and p.id != null and k.id.? == p.id.?;
++    if (k.end - k.start != p.end - p.start or (k.start == 0) != (p.start == 0)) return false;
++    if (!memo.equal(kept.text[k.start..k.end], text[p.start..p.end])) return false;
++    var i = firstAfter(kept.spans, k.start);
++    var j = firstAfter(spans, p.start);
++    while (true) : ({
++        i += 1;
++        j += 1;
++    }) {
++        const in_k = i < kept.spans.len and kept.spans[i][0] < k.end;
++        const in_p = j < spans.len and spans[j][0] < p.end;
++        if (in_k != in_p) return false;
++        if (!in_k) return true;
++        const a = clip(kept.spans[i], k);
++        const b = clip(spans[j], p);
++        if (a[0] != b[0] or a[1] != b[1]) return false;
++    }
++}
++
++/// The first span ending after `at` (spans are ordered and disjoint).
++fn firstAfter(spans: []const Span, at: usize) usize {
++    var lo: usize = 0;
++    var hi = spans.len;
++    while (lo < hi) {
++        const mid = lo + (hi - lo) / 2;
++        if (spans[mid][1] <= at) lo = mid + 1 else hi = mid;
++    }
++    return lo;
++}
++
++/// A span clipped to a segment, relative to its start.
++fn clip(p: Span, s: Segment) Span {
++    return .{ @max(s.start, p[0]) - s.start, @min(s.end, p[1]) - s.start };
++}
++
++test {
++    _ = @import("kept_test.zig");
++}
+diff --git a/zig/src/core/tokenizer/kept_test.zig b/zig/src/core/tokenizer/kept_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f05525c0851e379070bf9540b049948251d65d2
+--- /dev/null
++++ b/zig/src/core/tokenizer/kept_test.zig
+@@ -0,0 +1,169 @@
++//! Kept pieces against a fresh encodeMasked on random texts: masked added spellings, strips, merges, refusals.
++const std = @import("std");
++const tok = @import("tokenizer.zig");
++const kept = @import("kept.zig");
++const t = std.testing;
++
++// Merges span a whole gap; "<V>" is vocabulary (a request spelling it is refused); "<S>>" lengthens "<S>".
++const source =
++    \\{"added_tokens":[{"content":"<S>","special":true,"normalized":false},
++    \\{"content":"<S>>","special":true,"normalized":false},
++    \\{"content":"<L>","special":true,"normalized":false,"lstrip":true},
++    \\{"content":"<R>","special":true,"normalized":false,"rstrip":true},
++    \\{"content":"<N>","special":true,"normalized":true},
++    \\{"content":"<V>","special":true,"normalized":false}],
++    \\"model":{"type":"BPE","unk_token":"?","vocab":{"a":0,"b":1,"c":2," ":3,"<":4,">":5,"S":6,"L":7,"R":8,"N":9,
++    \\"V":10,"\n":11,"ab":12,"abc":13,"?":14,"<V":15,"<V>":16,"bc":17},"merges":["a b","ab c","b c","< V","<V >"]}}
++;
++
++const words = [_][]const u8{ "<S>", "<L>", "<R>", "<N>", "<V>", " ", "  ", "a", "b", "c", "ab", "bc", "\n", "<", "S>", ">", "\u{e9}", "\xff" };
++
++const Part = struct { word: u8, request: bool };
++
++fn text(a: std.mem.Allocator, parts: []const Part) !struct { text: []u8, spans: []tok.Span } {
++    var out: std.ArrayList(u8) = .empty;
++    var spans: std.ArrayList(tok.Span) = .empty;
++    for (parts) |p| {
++        const at = out.items.len;
++        try out.appendSlice(a, words[p.word]);
++        if (!p.request) continue;
++        // adjacent request parts are one span, as a template writes one string
++        if (spans.items.len > 0 and spans.items[spans.items.len - 1][1] == at) spans.items[spans.items.len - 1][1] = out.items.len else try spans.append(a, .{ at, out.items.len });
++    }
++    return .{ .text = out.items, .spans = spans.items };
++}
++
++fn part(r: std.Random, invalid: bool) Part {
++    const n: u8 = if (invalid) words.len else words.len - 1;
++    return .{ .word = r.uintLessThan(u8, n), .request = r.boolean() };
++}
++
++fn same(a: std.mem.Allocator, tokenizer: *const tok.Tokenizer, k: *const kept.Kept, probe: []const u8, spans: []const tok.Span) !void {
++    const want = tokenizer.encodeMasked(a, probe, spans);
++    const got = kept.pieces(tokenizer, a, k, probe, spans);
++    if (want) |ids| {
++        const p = try got;
++        try t.expectEqualSlices(u32, ids, try std.mem.concat(a, u32, &.{ p.head, p.mid, p.tail }));
++    } else |err| try t.expectError(err, got);
++}
++
++test "kept pieces: a segment starting the text encodes apart from the same bytes later in it" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var tokenizer = try tok.parse(a,
++        \\{"added_tokens":[{"content":"<S>","special":true,"normalized":false}],
++        \\"pre_tokenizer":{"type":"Metaspace","replacement":"\u2581","prepend_scheme":"first","split":false},
++        \\"model":{"type":"WordLevel","unk_token":"?","vocab":{"?":0,"ab":1,"\u2581ab":2}}}
++    );
++    defer tokenizer.deinit();
++    const held = try kept.keep(&tokenizer, a, "<S>ab", &.{.{ 3, 5 }});
++    const want = try tokenizer.encodeMasked(a, "ab", &.{.{ 0, 2 }});
++    // the same two bytes, but first in the text: Metaspace prepends to them only there
++    try t.expect(!std.mem.eql(u32, want, held.ids[1..]));
++    const got = try kept.pieces(&tokenizer, a, &held, "ab", &.{.{ 0, 2 }});
++    try t.expectEqualSlices(u32, want, try std.mem.concat(a, u32, &.{ got.head, got.mid, got.tail }));
++}
++
++test "kept pieces: random edits of a masked text give encodeMasked's ids or its error" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var tokenizer = try tok.parse(a, source);
++    defer tokenizer.deinit();
++    tokenizer.memo = try tok.Memo.create(a, 1 << 20);
++    var prng = std.Random.DefaultPrng.init(0x6b657074);
++    const r = prng.random();
++    var reused: usize = 0;
++    for (0..3000) |round| {
++        const invalid = round % 10 == 0;
++        var base: std.ArrayList(Part) = .empty;
++        for (0..r.uintLessThan(usize, 40)) |_| try base.append(a, part(r, invalid));
++        const b = try text(a, base.items);
++        const want = tokenizer.encodeMasked(a, b.text, b.spans);
++        const k = kept.keep(&tokenizer, a, b.text, b.spans);
++        if (want) |ids| try t.expectEqualSlices(u32, ids, (try k).ids) else |err| {
++            try t.expectError(err, k);
++            continue;
++        }
++        const held = try k;
++        var probe = try base.clone(a);
++        for (0..1 + r.uintLessThan(usize, 3)) |_| {
++            const at = if (probe.items.len == 0) 0 else r.uintLessThan(usize, probe.items.len + 1);
++            switch (r.uintLessThan(u8, 6)) {
++                0 => try probe.insert(a, at, part(r, invalid)),
++                1 => if (at < probe.items.len) {
++                    _ = probe.orderedRemove(at);
++                },
++                2 => if (at < probe.items.len) {
++                    probe.items[at] = part(r, invalid);
++                },
++                3 => if (at < probe.items.len) {
++                    probe.items[at].request = !probe.items[at].request;
++                },
++                4 => try probe.append(a, part(r, invalid)),
++                else => probe.shrinkRetainingCapacity(at),
++            }
++        }
++        const p = try text(a, probe.items);
++        try same(a, &tokenizer, &held, p.text, p.spans);
++        const got = kept.pieces(&tokenizer, a, &held, p.text, p.spans) catch continue;
++        if (got.head.len + got.tail.len > 0) reused += 1;
++    }
++    // the reuse itself must be exercised, or the comparison above proves nothing about it
++    try t.expect(reused > 500);
++}
++
++test "kept pieces: a cut text's fixed ids lead every longer text's encoding, errors included" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var tokenizer = try tok.parse(a, source);
++    defer tokenizer.deinit();
++    var prng = std.Random.DefaultPrng.init(0x637574);
++    const r = prng.random();
++    var fixed: usize = 0;
++    for (0..3000) |round| {
++        const invalid = round % 10 == 0;
++        var base: std.ArrayList(Part) = .empty;
++        for (0..r.uintLessThan(usize, 30)) |_| try base.append(a, part(r, false));
++        const b = try text(a, base.items);
++        const held = kept.keep(&tokenizer, a, b.text, b.spans) catch continue;
++        // a longer text sharing a random lead with the kept one, cut anywhere between its parts
++        var full = try a.dupe(Part, base.items[0..r.uintLessThan(usize, base.items.len + 1)]);
++        for (0..r.uintLessThan(usize, 30)) |_| full = try std.mem.concat(a, Part, &.{ full, &.{part(r, invalid)} });
++        const f = try text(a, full);
++        const p = try text(a, full[0..r.uintLessThan(usize, full.len + 1)]);
++        const got = kept.prefix(&tokenizer, a, &held, p.text, p.spans);
++        const want = tokenizer.encodeMasked(a, f.text, f.spans);
++        const lead = got catch |err| {
++            try t.expectError(err, want);
++            continue;
++        } orelse continue;
++        const ids = want catch continue; // a later segment the cut text does not reach may refuse
++        try t.expect(std.mem.startsWith(u32, ids, try std.mem.concat(a, u32, &.{ lead.head, lead.mid })));
++        fixed += 1;
++    }
++    try t.expect(fixed > 500);
++}
++
++test "kept pieces: a long kept prefix and suffix around one changed request, and a refused one" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var tokenizer = try tok.parse(a, source);
++    defer tokenizer.deinit();
++    const head = "<S>abc abc<L>  ab<R>  ab<S>";
++    const tail = "<S>abc<N>tail";
++    const base = head ++ "request one" ++ tail;
++    const held = try kept.keep(&tokenizer, a, base, &.{.{ head.len, head.len + 11 }});
++    const changed = head ++ "changed text" ++ tail;
++    const spans = [_]tok.Span{.{ head.len, head.len + 12 }};
++    const got = try kept.pieces(&tokenizer, a, &held, changed, &spans);
++    try t.expect(got.head.len > 0 and got.tail.len > 0);
++    try t.expectEqualSlices(u32, try tokenizer.encodeMasked(a, changed, &spans), try std.mem.concat(a, u32, &.{ got.head, got.mid, got.tail }));
++    const refused = head ++ "changed <V> text" ++ tail;
++    const quoted = [_]tok.Span{.{ head.len, head.len + 16 }};
++    try t.expectError(error.UnsafeAddedTokenMask, tokenizer.encodeMasked(a, refused, &quoted));
++    try t.expectError(error.UnsafeAddedTokenMask, kept.pieces(&tokenizer, a, &held, refused, &quoted));
++}
+diff --git a/zig/src/core/tokenizer/tokenizer.zig b/zig/src/core/tokenizer/tokenizer.zig
+index 45e0dcded9f0c59df209f699f8895e1ba5286d61..58d7db0b3ba8fe8e6919501a384fbeb3a8f6ab24 100644
+--- a/zig/src/core/tokenizer/tokenizer.zig
++++ b/zig/src/core/tokenizer/tokenizer.zig
+@@ -9,6 +9,7 @@ const qwen2_slow = @import("qwen2_slow.zig");
+ const Allocator = std.mem.Allocator;
+ pub const Memo = @import("memo.zig").Memo;
+ pub const eos = @import("eos.zig");
++pub const kept = @import("kept.zig");
+ /// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
+ pub const identity = @import("identity.zig").identity;
+ 
+@@ -96,7 +97,7 @@ const Trie = struct {
+ };
+ 
+ /// Lossy UTF-8 replacement keeps unchanged byte offsets and marks replacements that consume request bytes.
+-fn validMasked(a: Allocator, text: []const u8, spans: []const Span) Allocator.Error!struct { text: []const u8, spans: []const Span } {
++pub fn validMasked(a: Allocator, text: []const u8, spans: []const Span) Allocator.Error!struct { text: []const u8, spans: []const Span } {
+     if (std.unicode.utf8ValidateSlice(text)) return .{ .text = text, .spans = spans };
+     var out: std.ArrayList(u8) = .empty;
+     var mapped: std.ArrayList(Span) = .empty;
+@@ -121,7 +122,18 @@ fn validMasked(a: Allocator, text: []const u8, spans: []const Span) Allocator.Er
+     return .{ .text = out.items, .spans = mapped.items };
+ }
+ 
+-const Segment = struct { start: usize, end: usize, id: ?u32 };
++/// Request spans in order, non-empty and inside the text, as encodeMasked requires them.
++pub fn checkSpans(text: []const u8, spans: []const Span, work: ?*MaskWork) error{BadRequestSpans}!void {
++    var previous: usize = 0;
++    for (spans) |p| {
++        if (work) |w| w.spans += 1;
++        if (p[0] < previous or p[0] >= p[1] or p[1] > text.len) return error.BadRequestSpans;
++        previous = p[1];
++    }
++}
++
++/// A run of text between added tokens (id null), or one added token; offsets into the encoded text.
++pub const Segment = struct { start: usize, end: usize, id: ?u32 };
+ 
+ pub const Tokenizer = struct {
+     /// Owns the loaded tables and backs each call's scratch, so concurrent calls need it thread-safe.
+@@ -206,12 +218,7 @@ pub const Tokenizer = struct {
+     /// The optional work receipt counts span visits and trie transitions, independent of timing.
+     pub fn encodeMaskedCounted(t: *const Tokenizer, a: Allocator, text: []const u8, spans: []const Span, work: ?*MaskWork) Error![]u32 {
+         if (spans.len == 0) return t.encode(a, text);
+-        var previous: usize = 0;
+-        for (spans) |p| {
+-            if (work) |w| w.spans += 1;
+-            if (p[0] < previous or p[0] >= p[1] or p[1] > text.len) return error.BadRequestSpans;
+-            previous = p[1];
+-        }
++        try checkSpans(text, spans, work);
+         var stack: [scratch_stack_bytes]u8 = undefined;
+         var fallback = std.heap.BufferFirstAllocator.init(&stack, t.allocator);
+         var arena = std.heap.ArenaAllocator.init(fallback.allocator());
+@@ -219,39 +226,16 @@ pub const Tokenizer = struct {
+         var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
+         const valid = try validMasked(ctx.a, text, spans);
+         var ids: std.ArrayList(u32) = .empty;
+-        var cursor: usize = 0;
+-        for (try t.splitAddedMasked(&ctx, &t.raw, valid.text, valid.spans, work)) |seg| {
+-            if (seg.id) |id| {
+-                try ids.append(ctx.a, id);
+-                continue;
+-            }
+-            if (seg.start == seg.end) continue;
+-            while (cursor < valid.spans.len and valid.spans[cursor][1] <= seg.start) {
+-                cursor += 1;
+-                if (work) |w| w.spans += 1;
+-            }
+-            const request = cursor < valid.spans.len and valid.spans[cursor][0] < seg.end;
+-            const gap = valid.text[seg.start..seg.end];
+-            if (!request or t.normalized.ends.items.len == 0) {
+-                const from = ids.items.len;
+-                try t.encodeSegment(&ctx, gap, seg.start == 0, &ids);
+-                if (request) try t.refuseAdded(ids.items[from..]);
+-            } else {
+-                // A cached gap with this text may have been encoded using a different mask.
+-                var clipped: std.ArrayList(Span) = .empty;
+-                var j = cursor;
+-                while (j < valid.spans.len and valid.spans[j][0] < seg.end) : (j += 1) {
+-                    const p = valid.spans[j];
+-                    try clipped.append(ctx.a, .{ @max(seg.start, p[0]) - seg.start, @min(seg.end, p[1]) - seg.start });
+-                    if (work) |w| w.spans += 1;
+-                }
+-                try t.encodeTextMasked(&ctx, gap, seg.start == 0, &ids, true, clipped.items);
+-            }
+-        }
++        try kept.encodeSegments(t, &ctx, valid.text, valid.spans, try t.splitAddedMasked(&ctx, &t.raw, valid.text, valid.spans, work), &ids, null, work);
+         return a.dupe(u32, ids.items);
+     }
+ 
+-    fn refuseAdded(t: *const Tokenizer, ids: []const u32) error{UnsafeAddedTokenMask}!void {
++    /// encodeMasked's split of a valid text at its template-written added tokens, the request spans masked.
++    pub fn segments(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, spans: []const Span) Error![]const Segment {
++        return t.splitAddedMasked(ctx, &t.raw, text, spans, null);
++    }
++
++    pub fn refuseAdded(t: *const Tokenizer, ids: []const u32) error{UnsafeAddedTokenMask}!void {
+         for (ids) |id| {
+             const word = id / 64;
+             if (word < t.added_ids.len and t.added_ids[word] & (@as(u64, 1) << @as(u6, @intCast(id % 64))) != 0)
+@@ -260,7 +244,7 @@ pub const Tokenizer = struct {
+     }
+ 
+     /// encodeText through the memo for a segment of `min_bytes` or more: its kept ids, else encoded and kept.
+-    fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
++    pub fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
+         const m = t.memo orelse return t.encodeText(ctx, text, first, ids);
+         if (text.len < @import("memo.zig").min_bytes) return t.encodeText(ctx, text, first, ids);
+         if (try m.append(text, first, ctx.a, ids)) return;
+@@ -295,7 +279,7 @@ pub const Tokenizer = struct {
+         return t.encodeTextMasked(ctx, text, first, ids, added, &.{});
+     }
+ 
+-    fn encodeTextMasked(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool, spans: []const Span) Error!void {
++    pub fn encodeTextMasked(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool, spans: []const Span) Error!void {
+         var zero: usize = if (first) unicode.decodeAt(text, 0).len else 0;
+         const normalized = if (t.normalizer) |*n| try n.apply(ctx, text, &zero) else text;
+         const whole = [_]Segment{.{ .start = 0, .end = normalized.len, .id = null }};
+@@ -581,6 +565,7 @@ test "an added token whose new id would be 2^32 - 1 or more is refused, not wrap
+ test {
+     _ = @import("tokenizer_test.zig");
+     _ = @import("masked_test.zig");
++    _ = @import("kept.zig");
+     _ = @import("unicode_nfkc_test.zig");
+ }
+ 
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 7d7121dd9256bc084f7a8424b27818724cf3a7f8..b70396004300b31645c9e37655b56efedb3b08fd 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -110,6 +110,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_GLUE_FUSE", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the most rows a decode window glues in one fused kernel" },
+     .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
+     .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
++    .{ .name = "TF_GLM_OVN_HOST_ONCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
+diff --git a/zig/src/server/fixtures/glm53/chat_template.jinja b/zig/src/server/fixtures/glm53/chat_template.jinja
+new file mode 100644
+index 0000000000000000000000000000000000000000..15bf200ee8fb7ca3c5bdd362429aa801f4f033f6
+--- /dev/null
++++ b/zig/src/server/fixtures/glm53/chat_template.jinja
+@@ -0,0 +1,210 @@
++[gMASK]<sop>
++{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else 'max' -%}
++{%- if effective_reasoning_effort is not none -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
++{%- if tools -%}
++{%- macro tool_to_json(tool) -%}
++    {%- set ns_tool = namespace(first=true) -%}
++    {{ '{' -}}
++    {%- for k, v in tool.items() -%}
++        {%- if k != 'defer_loading' and k != 'strict' -%}
++            {%- if not ns_tool.first -%}{{- ', ' -}}{%- endif -%}
++            {%- set ns_tool.first = false -%}
++            "{{ k }}": {{ v | tojson(ensure_ascii=False) }}
++        {%- endif -%}
++    {%- endfor -%}
++    {{- '}' -}}
++{%- endmacro -%}
++{%- macro tool_references_to_response(refs) -%}
++    {{- '<tool_response><tools>\n' -}}
++    {%- for tr in refs -%}
++        {%- for tool in tools -%}
++            {%- if 'function' in tool -%}
++                {%- set tool = tool['function'] -%}
++            {%- endif -%}
++            {%- if tool.name == tr.name -%}
++                {{- tool_to_json(tool) + '\n' -}}
++            {%- endif -%}
++        {%- endfor -%}
++    {%- endfor -%}
++    {{- '</tools></tool_response>' -}}
++{%- endmacro -%}
++<|system|>
++# Tools
++
++You may call one or more functions to assist with the user query.
++
++You are provided with function signatures within <tools></tools> XML tags:
++<tools>
++{% for tool in tools %}
++{%- if 'function' in tool -%}
++    {%- set tool = tool['function'] -%}
++{%- endif -%}
++{% if tool.defer_loading is not defined or not tool.defer_loading %}
++{{ tool_to_json(tool) }}
++{% endif %}
++{% endfor %}
++</tools>
++
++For each function call, output the function name and arguments within the following XML format:
++<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call>{%- endif -%}
++{%- macro visible_text(content) -%}
++    {%- if content is string -%}
++        {{- content }}
++    {%- elif content is iterable and content is not mapping -%}
++        {%- for item in content -%}
++            {%- if item is mapping and item.type == 'text' -%}
++                {{- item.text }}
++            {%- elif item is string -%}
++                {{- item }}
++            {%- elif item is mapping and item.type in ['image', 'image_url', 'video', 'video_url', 'audio', 'audio_url', 'input_audio'] -%}
++                {%- set media_type = item.type | replace('_url', '') | replace('input_', '') -%}
++                {{- "<reminder>You are unable to process this " ~ media_type ~ " because you don't have multi-modal input ability. Try different methods.</reminder>" }}
++            {%- endif -%}
++        {%- endfor -%}
++    {%- else -%}
++        {{- content }}
++    {%- endif -%}
++{%- endmacro -%}
++{%- macro tool_response(text) -%}
++{{- '<tool_response>' + text + '</tool_response>' -}}
++{%- endmacro -%}
++{%- macro render_tool_response(m) -%}
++{%- if m.content is string -%}
++    {{- tool_response(m.content) -}}
++{%- elif m.content and m.content is not mapping and m.content.0.type == "tool_reference" -%}
++    {{- tool_references_to_response(m.content) -}}
++{%- elif is_list_of_outputs(m) -%}
++    {%- for tr in m.content -%}
++        {%- if tr.output is iterable and tr.output is not string and tr.output is not mapping and tr.output and tr.output.0.type == "tool_reference" -%}
++            {{- tool_references_to_response(tr.output) -}}
++        {%- else -%}
++            {{- tool_response(visible_text(tr.output)) -}}
++        {%- endif -%}
++    {%- endfor -%}
++{%- else -%}
++    {{- tool_response(visible_text(m.content)) -}}
++{%- endif -%}
++{%- endmacro -%}
++{%- macro id_of(obj) -%}
++    {%- if obj.tool_call_id -%}
++        {{- obj.tool_call_id -}}
++    {%- elif obj.id -%}
++        {{- obj.id -}}
++    {%- endif -%}
++{%- endmacro -%}
++{%- macro is_list_of_outputs(m) -%}
++    {%- if m.content and m.content.0.output is defined -%}1{%- endif -%}
++{%- endmacro -%}
++{%- set ns = namespace(last_user_index=-1) -%}
++{%- for m in messages %}
++    {%- if m.role == 'user' %}
++        {%- set ns.last_user_index = loop.index0 -%}
++    {%- endif %}
++{%- endfor %}
++{%- for m in messages -%}
++{%- if m.role == 'user' -%}<|user|>{{ visible_text(m.content) }}
++{%- elif m.role == 'assistant' -%}
++<|assistant|>
++{%- set content = visible_text(m.content) %}
++{%- if m.reasoning_content is string %}
++    {%- set reasoning_content = m.reasoning_content %}
++{%- elif '</think>' in content %}
++    {%- set reasoning_content = content.split('</think>')[0].split('<think>')[-1] %}
++    {%- set content = content.split('</think>')[-1] %}
++{%- endif %}
++{%- if ((clear_thinking is defined and not clear_thinking) or loop.index0 > ns.last_user_index) and reasoning_content is defined -%}
++{{ '<think>' + reasoning_content +  '</think>'}}
++{%- else -%}
++{{ '<think></think>' }}
++{%- endif -%}
++{%- if content.strip() -%}
++{{ content.strip() }}
++{%- endif -%}
++{% if m.tool_calls %}
++{% for tc in m.tool_calls %}
++{%- if tc.function %}
++    {%- set tc = tc.function %}
++{%- endif %}
++{{- '<tool_call>' + tc.name -}}
++{% set _args = tc.arguments %}{% for k, v in _args.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>{% endfor %}</tool_call>{% endfor %}
++{% endif %}
++{%- elif m.role == 'tool' -%}
++{%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
++    {{- '<|observation|>' -}}
++    {%- set block_start = loop.index0 -%}
++    {%- set ns_blk = namespace(end=block_start) -%}
++    {%- for j in range(block_start, messages|length) -%}
++        {%- if messages[j].role == 'tool' -%}
++            {%- set ns_blk.end = j -%}
++        {%- else -%}
++            {%- break -%}
++        {%- endif -%}
++    {%- endfor -%}
++    {%- set ns_a = namespace(tool_calls=none) -%}
++    {%- if block_start > 0 and messages[block_start - 1].role == 'assistant' and messages[block_start - 1].tool_calls -%}
++        {%- set ns_a.tool_calls = messages[block_start - 1].tool_calls -%}
++    {%- endif -%}
++    {%- set ns_chk = namespace(can_sort=true) -%}
++    {%- if not ns_a.tool_calls -%}
++        {%- set ns_chk.can_sort = false -%}
++    {%- else -%}
++        {%- for k in range(block_start, ns_blk.end + 1) -%}
++            {%- set m = messages[k] -%}
++            {%- if is_list_of_outputs(m) -%}
++                {%- for entry in m.content -%}
++                    {%- set eid = id_of(entry) -%}
++                    {%- if not eid -%}
++                        {%- set ns_chk.can_sort = false -%}
++                    {%- endif -%}
++                {%- endfor -%}
++            {%- else -%}
++                {%- set tk_id = id_of(m) -%}
++                {%- if not tk_id -%}
++                    {%- set ns_chk.can_sort = false -%}
++                {%- endif -%}
++            {%- endif -%}
++        {%- endfor -%}
++        {%- for tc in ns_a.tool_calls -%}
++            {%- set tc_id = id_of(tc) -%}
++            {%- if not tc_id -%}
++                {%- set ns_chk.can_sort = false -%}
++            {%- endif -%}
++        {%- endfor -%}
++    {%- endif -%}
++    {%- if ns_chk.can_sort -%}
++        {%- for tc in ns_a.tool_calls -%}
++            {%- set tc_id = id_of(tc) -%}
++            {%- for k in range(block_start, ns_blk.end + 1) -%}
++                {%- set m = messages[k] -%}
++                {%- if is_list_of_outputs(m) -%}
++                    {%- for entry in m.content -%}
++                        {%- set eid = id_of(entry) -%}
++                        {%- if eid == tc_id -%}
++                            {%- if entry.output is iterable and entry.output is not string and entry.output is not mapping and entry.output and entry.output.0.type == "tool_reference" -%}
++                                {{- tool_references_to_response(entry.output) -}}
++                            {%- else -%}
++                                {{- tool_response(visible_text(entry.output)) -}}
++                            {%- endif -%}
++                        {%- endif -%}
++                    {%- endfor -%}
++                {%- else -%}
++                    {%- set tk_id = id_of(m) -%}
++                    {%- if tk_id == tc_id -%}
++                        {{- render_tool_response(m) -}}
++                    {%- endif -%}
++                {%- endif -%}
++            {%- endfor -%}
++        {%- endfor -%}
++    {%- else -%}
++        {%- for k in range(block_start, ns_blk.end + 1) -%}
++            {{- render_tool_response(messages[k]) -}}
++        {%- endfor -%}
++    {%- endif -%}
++{% endif -%}
++{%- elif m.role == 'system' -%}
++<|system|>{{ visible_text(m.content) }}
++{%- endif -%}
++{%- endfor -%}
++{%- if add_generation_prompt -%}
++    <|assistant|>{{- '<think>' -}}
++{%- endif -%}
+diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
+index 5187ab9223a92ebd3da4c9c6e27364ceb552a3bd..3087b8c4e8d3af4ec5073aa038db1342fe9dfec3 100644
+--- a/zig/src/server/hf_text.zig
++++ b/zig/src/server/hf_text.zig
+@@ -4,6 +4,7 @@ const tokenizer = @import("tokenizer");
+ const template = @import("template");
+ const json = @import("json");
+ const model_text = @import("model_text.zig");
++const kept_hooks = @import("hf_text_kept.zig");
+ const KimiText = @import("kimi_text.zig").KimiText;
+ const dsv41_chat = @import("dsv41_chat");
+ const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
+@@ -301,6 +302,9 @@ pub const HfText = struct {
+             .token_bytes = tokenBytesFn,
+             .encode_plain = encodePlainFn,
+             .encode_masked = encodeMaskedFn,
++            .keep = kept_hooks.keepFn,
++            .pieces = kept_hooks.piecesFn,
++            .prefix_pieces = kept_hooks.prefixFn,
+         } };
+     }
+ 
+@@ -334,16 +338,7 @@ pub const HfText = struct {
+     }
+ 
+     fn encodeMaskedFn(ctx: *anyopaque, a: Allocator, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error![]u32 {
+-        return self(ctx).tok.encodeMasked(a, s, spans) catch |err| {
+-            if (err == error.OutOfMemory) return error.OutOfMemory;
+-            problem.* = if (err == error.UnsafeNormalizedAddedTokenMask)
+-                "normalized added tokens cannot be matched safely through this normalizer with request text"
+-            else if (err == error.UnsafeAddedTokenMask)
+-                "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely"
+-            else
+-                "the tokenizer cannot encode this prompt with request byte provenance";
+-            return error.Template;
+-        };
++        return self(ctx).tok.encodeMasked(a, s, spans) catch |err| return kept_hooks.masked(err, problem);
+     }
+ 
+     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
+@@ -437,12 +432,14 @@ pub const HfText = struct {
+         if (t.clear_thinking) |clear| try context.put(a, "clear_thinking", .{ .bool = options.clear_thinking orelse clear });
+         var diag: template.Diag = .{};
+         const tools: std.json.Value = if (options.tools) |tl| try toStd(a, tl) else .null;
+-        const out = template.renderProvenanceGlobals(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag) catch |e| {
++        var watch: template.Watch = .{ .against = if (options.stop) |s| s.against else "", .slack = if (options.stop) |s| s.slack else 0 };
++        var more: template.More = .{ .watch = if (options.stop != null) &watch else null };
++        const out = template.renderMore(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag, &more) catch |e| {
+             if (e == error.OutOfMemory) return error.OutOfMemory;
+             problem.* = diag.msg;
+             return error.Template;
+         };
+-        return .{ .text = out.s, .spans = out.spans };
++        return .{ .text = out.s, .spans = out.spans, .history = more.history, .cut = more.cut };
+     }
+ };
+ 
+diff --git a/zig/src/server/hf_text_kept.zig b/zig/src/server/hf_text_kept.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..bdc129a759c92140b9c18ecf4dcf788f630dacc6
+--- /dev/null
++++ b/zig/src/server/hf_text_kept.zig
+@@ -0,0 +1,41 @@
++//! An HfText's kept-ids hooks behind model_text.Text, and the words a masked encoding's failure reaches a request as.
++const std = @import("std");
++const tokenizer = @import("tokenizer");
++const model_text = @import("model_text.zig");
++const Allocator = std.mem.Allocator;
++
++/// The loaded tokenizer behind a `model_text.Text` whose context is an `HfText`.
++fn tok(ctx: *anyopaque) *const tokenizer.Tokenizer {
++    const t: *@import("hf_text.zig").HfText = @ptrCast(@alignCast(ctx));
++    return &t.tok;
++}
++
++pub fn keepFn(ctx: *anyopaque, a: Allocator, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error!model_text.Kept {
++    const k = try a.create(tokenizer.kept.Kept);
++    k.* = tokenizer.kept.keep(tok(ctx), a, s, spans) catch |err| return masked(err, problem);
++    return .{ .ids = k.ids, .state = k };
++}
++
++pub fn piecesFn(ctx: *anyopaque, a: Allocator, kept: model_text.Kept, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error!model_text.Pieces {
++    const k: *const tokenizer.kept.Kept = @ptrCast(@alignCast(kept.state.?));
++    const p = tokenizer.kept.pieces(tok(ctx), a, k, s, spans) catch |err| return masked(err, problem);
++    return .{ .head = p.head, .mid = p.mid, .tail = p.tail };
++}
++
++pub fn prefixFn(ctx: *anyopaque, a: Allocator, kept: model_text.Kept, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error!?model_text.Pieces {
++    const k: *const tokenizer.kept.Kept = @ptrCast(@alignCast(kept.state.?));
++    const p = (tokenizer.kept.prefix(tok(ctx), a, k, s, spans) catch |err| return masked(err, problem)) orelse return null;
++    return .{ .head = p.head, .mid = p.mid };
++}
++
++/// A masked encoding's failure as the request reads it.
++pub fn masked(err: tokenizer.Error, problem: *[]const u8) model_text.Error {
++    if (err == error.OutOfMemory) return error.OutOfMemory;
++    problem.* = if (err == error.UnsafeNormalizedAddedTokenMask)
++        "normalized added tokens cannot be matched safely through this normalizer with request text"
++    else if (err == error.UnsafeAddedTokenMask)
++        "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely"
++    else
++        "the tokenizer cannot encode this prompt with request byte provenance";
++    return error.Template;
++}
+diff --git a/zig/src/server/messages.zig b/zig/src/server/messages.zig
+index b6a2e868e7a7a2d420f050c53b035be781039a52..7bc983c8a610cd0dbd3835bc95f175e45f578f45 100644
+--- a/zig/src/server/messages.zig
++++ b/zig/src/server/messages.zig
+@@ -200,14 +200,26 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
+     return .{ .array = out.items };
+ }
+ 
++/// A message's call arguments as ``toolArguments`` made them, by the message object: one request parses each once.
++pub const Args = std.AutoHashMapUnmanaged(*const json.Object, Value);
++
+ /// ``_normalize_tool_call_arguments``: call arguments as objects for templates; bad ones under ``_invalid_arguments``.
+ pub fn toolArguments(cx: *Cx, messages: Value) errors.Refused!Value {
++    return toolArgumentsWith(cx, messages, null);
++}
++
++/// `toolArguments`, each message object's result kept in `memo` for the request's later renders of it.
++pub fn toolArgumentsWith(cx: *Cx, messages: Value, memo: ?*Args) errors.Refused!Value {
+     if (messages != .array) return messages;
+     const out = try cx.a.alloc(Value, messages.array.len);
+     for (messages.array, out) |message, *slot| {
+         slot.* = message;
+         const calls = message.get("tool_calls") orelse continue;
+         if (calls != .array or calls.array.len == 0) continue;
++        if (memo) |m| if (m.get(message.object)) |done| {
++            slot.* = done;
++            continue;
++        };
+         var touched = false;
+         const new_calls = try cx.a.alloc(Value, calls.array.len);
+         for (calls.array, new_calls) |call, *dst| {
+@@ -235,6 +247,7 @@ pub fn toolArguments(cx: *Cx, messages: Value) errors.Refused!Value {
+             touched = true;
+         }
+         if (touched) slot.* = .{ .object = try withField(cx, message.object, "tool_calls", .{ .array = new_calls }) };
++        if (memo) |m| try m.put(cx.a, message.object, slot.*);
+     }
+     return .{ .array = out };
+ }
+diff --git a/zig/src/server/model_text.zig b/zig/src/server/model_text.zig
+index 9f8bcfc2029bcbcba7a4c650dbaf1d5333d0c420..3f6dde84d5a82dbb4eab6ff99598a232f7ae6207 100644
+--- a/zig/src/server/model_text.zig
++++ b/zig/src/server/model_text.zig
+@@ -16,18 +16,30 @@ pub const RenderOptions = struct {
+     response_format: ?json.Value = null,
+     /// The server serves images: native image parts may render.
+     images: bool = false,
++    /// Stop rendering `slack` bytes past where the text first differs from `against`; the text is then cut.
++    stop: ?struct { against: []const u8, slack: usize } = null,
+ };
+ 
+ pub const Error = error{ Template, OutOfMemory };
+ pub const Span = [2]usize;
+ pub const Segment = struct { end: usize, allow_special: bool };
+ 
++/// A rendered prompt's ids with what `Text.pieces` reuses of them; null `state`: nothing to reuse.
++pub const Kept = struct { ids: []const u32, state: ?*const anyopaque = null };
++
++/// Ids whose concatenation `head ++ mid ++ tail` is a text's masked encoding.
++pub const Pieces = struct { head: []const u32 = &.{}, mid: []const u32 = &.{}, tail: []const u32 = &.{} };
++
+ /// The real rendered bytes and the half-open request ranges within them.
+ pub const Rendered = struct {
+     text: []const u8,
+     spans: []const Span = &.{},
+     /// Release encoders may reset BPE at each segment, including adjacent ordinary template fragments.
+     segments: []const Segment = &.{},
++    /// With the generation prompt on: the length of the text the template renders with it off, when that is a prefix.
++    history: ?usize = null,
++    /// The render stopped early (`RenderOptions.stop`): text and spans are a prefix of the full render's.
++    cut: bool = false,
+ 
+     pub fn isTemplate(r: Rendered, start: usize, end: usize) bool {
+         if (start == end) return true;
+@@ -95,6 +107,27 @@ pub const Rendered = struct {
+         return t.encodeMasked(a, r.text, r.spans, problem);
+     }
+ 
++    /// `encode`'s ids, kept so a later rendering of the same request reuses the segments it repeats.
++    pub fn keep(r: Rendered, t: Text, a: Allocator, problem: *[]const u8) Error!Kept {
++        if (r.spans.len == 0 or r.segments.len > 0) return .{ .ids = try r.encode(t, a, problem) };
++        const f = t.vtable.keep orelse return .{ .ids = try r.encode(t, a, problem) };
++        return f(t.ctx, a, r.text, r.spans, problem);
++    }
++
++    /// `encode`'s ids as pieces, reusing `kept`'s for the segments this rendering repeats.
++    pub fn pieces(r: Rendered, t: Text, a: Allocator, kept: Kept, problem: *[]const u8) Error!Pieces {
++        const f = t.vtable.pieces orelse return .{ .mid = try r.encode(t, a, problem) };
++        if (kept.state == null or r.spans.len == 0) return .{ .mid = try r.encode(t, a, problem) };
++        return f(t.ctx, a, kept, r.text, r.spans, problem);
++    }
++
++    /// For a cut render: the full render's leading ids its text already fixes, as pieces; null when unknown.
++    pub fn prefixPieces(r: Rendered, t: Text, a: Allocator, kept: Kept, problem: *[]const u8) Error!?Pieces {
++        const f = t.vtable.prefix_pieces orelse return null;
++        if (kept.state == null or r.spans.len == 0) return null;
++        return f(t.ctx, a, kept, r.text, r.spans, problem);
++    }
++
+     pub fn appendPlain(r: Rendered, a: Allocator, label: []const u8) Allocator.Error!Rendered {
+         if (label.len == 0) return r;
+         const spans = try a.alloc(Span, r.spans.len + 1);
+@@ -173,6 +206,12 @@ pub const Text = struct {
+         encode_masked: ?*const fn (ctx: *anyopaque, a: Allocator, text: []const u8, spans: []const Span, problem: *[]const u8) Error![]u32 = null,
+         /// A token's own bytes (a partial UTF-8 sequence kept whole) for logprob rows; null: the tokenizer can't say.
+         token_bytes: ?*const fn (ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 = null,
++        /// ``encode_masked`` with what ``pieces`` reuses; null: nothing is kept.
++        keep: ?*const fn (ctx: *anyopaque, a: Allocator, text: []const u8, spans: []const Span, problem: *[]const u8) Error!Kept = null,
++        /// ``encode_masked`` of `text` as pieces, a kept text's ids standing for the segments `text` repeats.
++        pieces: ?*const fn (ctx: *anyopaque, a: Allocator, kept: Kept, text: []const u8, spans: []const Span, problem: *[]const u8) Error!Pieces = null,
++        /// A cut text's fixed leading ids as pieces: those every text extending it encodes to; null: none known.
++        prefix_pieces: ?*const fn (ctx: *anyopaque, a: Allocator, kept: Kept, text: []const u8, spans: []const Span, problem: *[]const u8) Error!?Pieces = null,
+     };
+ 
+     pub fn encode(t: Text, a: Allocator, text: []const u8, add_special: bool) Error![]u32 {
+diff --git a/zig/src/server/prompt.zig b/zig/src/server/prompt.zig
+index 774d212cdfebc0ae7df252096da920743f4f726a..271b016d5e27e0b61b50e3ad7e514277df979dbf 100644
+--- a/zig/src/server/prompt.zig
++++ b/zig/src/server/prompt.zig
+@@ -10,6 +10,8 @@ const images = @import("images.zig");
+ const Server = @import("server.zig").Server;
+ const Value = json.Value;
+ const Cx = errors.Cx;
++/// How far a cut probe render runs past where it leaves the prompt: enough for the next template token to fix its ids.
++const stop_slack = 4096;
+ 
+ /// With image input, `ids` holds each image's tokens, `images` the images and `cache_key` the prompt the cache matches.
+ pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{} };
+@@ -34,8 +36,18 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
+ }
+ 
+ pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool) errors.Refused![]const u32 {
++    var problem: []const u8 = "";
++    const r = try renderText(srv, cx, messages, tools, thinking, effort, generation, null, null);
++    const ids = r.encode(srv.text, cx.a, &problem) catch |e| return failed(cx, e, problem);
++    const close = try closer(srv, cx, ids, thinking, generation);
++    try offRefusal(srv, cx, r, close, thinking, generation, require_off);
++    return if (close) |c| try std.mem.concat(cx.a, u32, &.{ ids, &.{c} }) else ids;
++}
++
++/// The template's text for `messages` (call arguments through `args`); with `against`, cut a little past leaving it.
++fn renderText(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, args: ?*messages_mod.Args, against: ?[]const u8) errors.Refused!model_text.Rendered {
+     const messages_in = if (srv.text.vtable.format == .kimi) messages else try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media());
+-    const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArguments(cx, messages_in);
++    const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArgumentsWith(cx, messages_in, args);
+     var problem: []const u8 = "";
+     const options: model_text.RenderOptions = .{
+         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
+@@ -46,33 +58,46 @@ pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Valu
+         .tool_choice = cx.template_fields.get("tool_choice"),
+         .response_format = cx.template_fields.get("response_format"),
+         .images = srv.info.vision != null,
++        .stop = if (against) |t| .{ .against = t, .slack = stop_slack } else null,
+     };
+-    const rendered = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
+-        error.OutOfMemory => return error.OutOfMemory,
+-        error.Template => return cx.fail(.request, "{s}", .{problem}),
++    var r = srv.text.render(cx.a, normalized, options, &problem) catch |e| return failed(cx, e, problem);
++    // with image input, a marker the text spells is ordinary text (images.zig)
++    if (srv.info.vision) |v| if (v.video) |o| if (o.video_text.len > 0) {
++        const word = try srv.text.tokenString(cx.a, o.video_token);
++        r = try r.replaceTemplate(cx.a, o.video_text, word);
+     };
+-    var ids = rendered.ids;
+-    var closed = rendered.closed;
++    return r;
++}
++
++fn failed(cx: *Cx, e: model_text.Error, problem: []const u8) errors.Refused {
++    return switch (e) {
++        error.OutOfMemory => error.OutOfMemory,
++        error.Template => cx.fail(.request, "{s}", .{problem}),
++    };
++}
++
++/// The id a thinking-off generation prompt ends with: MiniMax-M3's own close, else the `</think>` closing a thought.
++fn closer(srv: *Server, cx: *Cx, ids: []const u32, thinking: bool, generation: bool) errors.Refused!?u32 {
++    if (thinking or !generation) return null;
+     // MiniMax-M3 thinks adaptively: with thinking off, its reply begins after the `</mm:think>` the prompt ends with
+-    if (!thinking and generation and std.mem.eql(u8, srv.markers.close, @import("reply_text.zig").mm_markers.close)) {
+-        if (srv.text.tokenId(srv.markers.close)) |close| return try std.mem.concat(cx.a, u32, &.{ ids, &.{close} });
++    if (std.mem.eql(u8, srv.markers.close, @import("reply_text.zig").mm_markers.close)) {
++        if (srv.text.tokenId(srv.markers.close)) |close| return close;
+     }
+-    if (!thinking and generation and ids.len > 0) {
+-        const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
+-        if (std.mem.eql(u8, @import("reply_text.zig").pyStrip(last), "<think>")) {
+-            const close = srv.text.encode(cx.a, "</think>", false) catch |e| switch (e) {
+-                error.OutOfMemory => return error.OutOfMemory,
+-                error.Template => &[_]u32{},
+-            };
+-            if (close.len == 1) {
+-                ids = try std.mem.concat(cx.a, u32, &.{ ids, close });
+-                closed = true;
+-            }
+-        }
+-    }
+-    if (require_off and !thinking and generation and srv.info.capability(.thinking_applicable) and !srv.thinking_switch and !closed)
+-        return cx.refuse("thinking off is not supported by this chat template: it has no thinking switch or closable generation prefix");
+-    return ids;
++    if (ids.len == 0) return null;
++    const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
++    if (!std.mem.eql(u8, @import("reply_text.zig").pyStrip(last), "<think>")) return null;
++    const close = srv.text.encode(cx.a, "</think>", false) catch |e| switch (e) {
++        error.OutOfMemory => return error.OutOfMemory,
++        error.Template => &[_]u32{},
++    };
++    return if (close.len == 1) close[0] else null;
++}
++
++/// A request that asked for thinking off is refused by a template with neither a switch nor a closable prefix.
++fn offRefusal(srv: *Server, cx: *Cx, r: model_text.Rendered, close: ?u32, thinking: bool, generation: bool, require_off: bool) errors.Refused!void {
++    if (!require_off or thinking or !generation or close != null) return;
++    if (!srv.info.capability(.thinking_applicable) or srv.thinking_switch or templateClosed(r, srv.markers.close)) return;
++    return cx.refuse("thinking off is not supported by this chat template: it has no thinking switch or closable generation prefix");
+ }
+ 
+ /// Info.thinking_switch at start-up: a simple chat's explicit off passes the same render and refusal as a request.
+@@ -94,17 +119,91 @@ pub fn thinkingSwitch(srv: *Server) std.mem.Allocator.Error!bool {
+     return true;
+ }
+ 
+-const RenderedIds = struct { ids: []u32, closed: bool };
++/// A probe's ids, `renderIds`' for its messages: pieces whose kept parts are the prompt's own, and a closer.
++const Probe = struct {
++    pieces: model_text.Pieces,
++    close: ?u32,
+ 
+-/// The template's ids for `messages`; with image input, a marker the text spells is ordinary text (images.zig).
+-fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!RenderedIds {
+-    var rendered = try srv.text.render(a, messages, options, problem);
+-    if (srv.info.vision) |v| if (v.video) |o| if (o.video_text.len > 0) {
+-        const word = try srv.text.tokenString(a, o.video_token);
+-        rendered = try rendered.replaceTemplate(a, o.video_text, word);
+-    };
+-    return .{ .ids = try rendered.encode(srv.text, a, problem), .closed = templateClosed(rendered, srv.markers.close) };
+-}
++    fn parts(p: *const Probe) [4][]const u32 {
++        return .{ p.pieces.head, p.pieces.mid, p.pieces.tail, if (p.close) |*c| @as(*const [1]u32, c) else &.{} };
++    }
++
++    fn len(p: *const Probe) usize {
++        return p.pieces.head.len + p.pieces.mid.len + p.pieces.tail.len + @intFromBool(p.close != null);
++    }
++
++    /// ``std.mem.indexOfDiff(u32, base, ids)`` for this probe's ids, without joining them.
++    fn diff(p: *const Probe, base: []const u32) ?usize {
++        var at: usize = 0;
++        for (p.parts()) |part| {
++            const n = @min(part.len, base.len - at);
++            // a kept part is the prompt's own memory: equal wherever it sits at the same place
++            if (part.ptr != base.ptr + at) if (std.mem.indexOfDiff(u32, base[at..][0..n], part[0..n])) |i| return at + i;
++            if (n < part.len) return base.len;
++            at += n;
++        }
++        return if (at == base.len) null else at;
++    }
++};
++
++/// One request's conversation rendered once: the prompt's ids kept, so each probe encodes only what it changes.
++const Once = struct {
++    srv: *Server,
++    tools: []const Value,
++    thinking: bool,
++    effort: ?[]const u8,
++    args: messages_mod.Args = .empty,
++    kept: model_text.Kept = .{ .ids = &.{} },
++    /// The prompt's text up to its generation block: the history render's text, when the template shows it is.
++    history_text: ?model_text.Rendered = null,
++    /// The prompt's rendered text, which a cut probe render is watched against.
++    text: []const u8 = "",
++
++    /// The prompt's ids (generation prompt on), kept for the probes.
++    fn prompt(o: *Once, cx: *Cx, messages: Value, require_off: bool) errors.Refused![]const u32 {
++        var problem: []const u8 = "";
++        const r = try renderText(o.srv, cx, messages, o.tools, o.thinking, o.effort, true, &o.args, null);
++        o.kept = r.keep(o.srv.text, cx.a, &problem) catch |e| return failed(cx, e, problem);
++        o.text = r.text;
++        if (r.history) |h| o.history_text = try r.slice(cx.a, 0, h);
++        const close = try closer(o.srv, cx, o.kept.ids, o.thinking, true);
++        try offRefusal(o.srv, cx, r, close, o.thinking, true, require_off);
++        return if (close) |c| try std.mem.concat(cx.a, u32, &.{ o.kept.ids, &.{c} }) else o.kept.ids;
++    }
++
++    /// `renderIds`' ids for `messages`, with the segments the kept prompt repeats taken from it.
++    fn probe(o: *Once, cx: *Cx, messages: Value, generation: bool) errors.Refused!Probe {
++        return o.encoded(cx, try renderText(o.srv, cx, messages, o.tools, o.thinking, o.effort, generation, &o.args, null), generation);
++    }
++
++    /// `probe(messages, true).diff(ids)`; TF_GLM_OVN_HOST_ONCE: from a render cut once its first ids are decided.
++    fn diffGenerated(o: *Once, cx: *Cx, messages: Value, ids: []const u32) errors.Refused!?usize {
++        const early = o.srv.host_once and o.kept.state != null and o.srv.info.vision == null;
++        const r = try renderText(o.srv, cx, messages, o.tools, o.thinking, o.effort, true, &o.args, if (early) o.text else null);
++        if (!r.cut) return (try o.encoded(cx, r, true)).diff(ids);
++        var problem: []const u8 = "";
++        const fixed = r.prefixPieces(o.srv.text, cx.a, o.kept, &problem) catch |e| return failed(cx, e, problem);
++        if (fixed) |p| {
++            const lead: Probe = .{ .pieces = p, .close = null };
++            // decided: a mismatch inside the fixed ids, or the prompt ending before them
++            if (lead.diff(ids)) |i| if (i != lead.len()) return i;
++        }
++        return (try o.probe(cx, messages, true)).diff(ids);
++    }
++
++    /// The prompt's messages without the generation prompt: `probe(messages, false)`, cut from the prompt's text.
++    fn history(o: *Once, cx: *Cx, messages: Value) errors.Refused!Probe {
++        if (o.history_text) |h| return o.encoded(cx, h, false);
++        return o.probe(cx, messages, false);
++    }
++
++    fn encoded(o: *Once, cx: *Cx, r: model_text.Rendered, generation: bool) errors.Refused!Probe {
++        var problem: []const u8 = "";
++        const p = r.pieces(o.srv.text, cx.a, o.kept, &problem) catch |e| return failed(cx, e, problem);
++        const last = if (p.tail.len > 0) p.tail else if (p.mid.len > 0) p.mid else p.head;
++        return .{ .pieces = p, .close = try closer(o.srv, cx, last, o.thinking, generation) };
++    }
++};
+ 
+ /// The template's generation prompt (thinking on or off): what a probe conversation renders past its history.
+ fn generationPrompt(srv: *Server, cx: *Cx, thinking: bool) errors.Refused![]const u32 {
+@@ -151,21 +250,24 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
+         .ids => |ids| return .{ .ids = ids },
+     };
+     cx.template_fields = input.fields;
+-    const prompt = try renderRequest(srv, cx, input.messages, input.tools, thinking, effort, true, input.explicit_off);
+-    const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
++    var once: Once = .{ .srv = srv, .tools = input.tools, .thinking = thinking, .effort = effort };
++    const prompt = try once.prompt(cx, input.messages, input.explicit_off);
++    const history = try once.history(cx, input.messages);
++    const at = history.diff(prompt);
+     var history_len: usize = 0;
+-    if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
+-    if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
+-    if (history_len > 0) history_len = continuedLen(srv, cx, input.messages, input.tools, thinking, effort, history, history_len);
++    if (history.len() > 0 and at == history.len()) history_len = history.len(); // a strict prefix of the prompt
++    if (history_len == 0 and prompt.len > 1 and at == null) history_len = prompt.len - 1; // a template with no generation suffix
++    // either way the history's ids are the prompt's first `history.len()`
++    if (history_len > 0) history_len = continuedLen(&once, cx, input.messages, prompt[0..history.len()], history_len);
+     // --vision: placeholders expanded to image tokens before the window, chunks and cache see it; no rewind kept
+     if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
+     const count = if (input.messages == .array) input.messages.array.len else 0;
+-    const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
++    const rewind_len = if (srv.info.prompt_cache) rewindWith(&once, cx, input.messages, count, prompt) else 0; // one more render
+     return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len, .user_end = userEnd(input.messages, history_len) };
+ }
+ 
+ /// The history's prefix the next turn repeats (a template may close a tool reply's turn only when nothing follows).
+-fn continuedLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, history: []const u32, history_len: usize) usize {
++fn continuedLen(once: *Once, cx: *Cx, messages: Value, history: []const u32, history_len: usize) usize {
+     if (messages != .array or messages.array.len == 0) return history_len;
+     const role = messages.array[messages.array.len - 1].strField("role") orelse return history_len;
+     if (!std.mem.eql(u8, role, "tool")) return history_len;
+@@ -176,8 +278,8 @@ fn continuedLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, th
+     reply.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return history_len;
+     list[messages.array.len] = .{ .object = reply };
+     var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .template_fields = cx.template_fields };
+-    const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, false) catch return history_len;
+-    const i = std.mem.indexOfDiff(u32, history, probe) orelse return history_len;
++    const probe = once.probe(&scratch, .{ .array = list }, false) catch return history_len;
++    const i = probe.diff(history) orelse return history_len;
+     return if (i > 0 and i < history_len) i else history_len;
+ }
+ 
+@@ -203,6 +305,11 @@ test "interior prompt: user end excludes later tool and assistant text" {
+ 
+ /// Where the latest user message's text starts (of the first `real_count`): the prompt and a probe there agree to it.
+ pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tools: []const Value, prompt: []const u32, thinking: bool, effort: ?[]const u8) usize {
++    var once: Once = .{ .srv = srv, .tools = tools, .thinking = thinking, .effort = effort }; // nothing kept: the probe encodes whole
++    return rewindWith(&once, cx, messages, real_count, prompt);
++}
++
++fn rewindWith(once: *Once, cx: *Cx, messages: Value, real_count: usize, prompt: []const u32) usize {
+     if (messages != .array or real_count > messages.array.len) return 0;
+     const user_index = for (0..real_count) |n| {
+         const i = real_count - 1 - n;
+@@ -215,8 +322,7 @@ pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tool
+     user.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return 0;
+     list[user_index] = .{ .object = user };
+     var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .template_fields = cx.template_fields };
+-    const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, true) catch return 0;
+-    const i = std.mem.indexOfDiff(u32, prompt, probe) orelse return 0;
++    const i = (once.diffGenerated(&scratch, .{ .array = list }, prompt) catch return 0) orelse return 0;
+     return if (i < prompt.len) i else 0;
+ }
+ 
+diff --git a/zig/src/server/prompt_once_test.zig b/zig/src/server/prompt_once_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..eccc45aba0a9bcc290fd9b8da3a0d4ea324773b8
+--- /dev/null
++++ b/zig/src/server/prompt_once_test.zig
+@@ -0,0 +1,185 @@
++//! prepare renders once and reuses the prompt's ids in its probes; on random chats it must equal every full render.
++const std = @import("std");
++const api = @import("engine_api");
++const json = @import("json");
++const HfText = @import("hf_text.zig").HfText;
++const errors = @import("errors.zig");
++const prompt_mod = @import("prompt.zig");
++const Server = @import("server.zig").Server;
++const Value = json.Value;
++const Allocator = std.mem.Allocator;
++
++const Script = struct {
++    fn engine(s: *@This()) api.Engine {
++        return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
++    }
++    fn info(_: *anyopaque) api.Info {
++        return .{ .context_window = 1 << 20, .prompt_cache = true };
++    }
++    fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {}
++    fn cancel(_: *anyopaque, _: api.Id) void {}
++    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
++        out.* = .{};
++    }
++    fn memory(_: *anyopaque, _: bool) ?api.Memory {
++        return null;
++    }
++};
++
++// GLM-5.3's other template words as added tokens of the mini byte-level BPE, so each splits a segment as it does there
++const extra = [_][]const u8{ "<|observation|>", "<tool_response>", "</tool_response>", "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>", "<tools>", "</tools>" };
++
++fn tokenizer(a: Allocator) ![]const u8 {
++    var parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, @embedFile("fixtures/control_tokens/mini_tokenizer.json"), .{});
++    const list = &parsed.object.getPtr("added_tokens").?.array;
++    for (extra, 0..) |word, i| {
++        var o: std.json.ObjectMap = .empty;
++        try o.put(a, "id", .{ .integer = @intCast(1100 + i) });
++        try o.put(a, "content", .{ .string = word });
++        try o.put(a, "special", .{ .bool = true });
++        try o.put(a, "normalized", .{ .bool = false });
++        try list.append(.{ .object = o });
++    }
++    return std.json.Stringify.valueAlloc(a, parsed, .{});
++}
++
++// request texts, the masked route among them: the template's own words, the probe's mark, long memo-sized runs
++const texts = [_][]const u8{ "", "ok", "  ", "Read the code.", "<|user|>", "<|assistant|><think>", "</think>done", "<think>plan</think>answer", "<|observation|><tool_response>x</tool_response>", "\u{2063}probe", "caf\u{e9} \u{1f600}", "<arg_key>k</arg_key>" };
++
++fn content(a: Allocator, r: std.Random) ![]const u8 {
++    if (r.uintLessThan(u8, 6) > 0) return texts[r.uintLessThan(usize, texts.len)];
++    var long: std.ArrayList(u8) = .empty;
++    for (0..1100 + r.uintLessThan(usize, 600)) |i| try long.append(a, "abc <|user|> \n"[(i * 7 + r.uintLessThan(usize, 3)) % 14]);
++    return long.items;
++}
++
++fn message(a: Allocator, r: std.Random, role: []const u8, n: usize) !Value {
++    const o = try json.newObject(a);
++    try o.put(a, "role", .{ .string = role });
++    try o.put(a, "content", .{ .string = try content(a, r) });
++    if (std.mem.eql(u8, role, "assistant")) {
++        if (r.boolean()) try o.put(a, "reasoning_content", .{ .string = texts[r.uintLessThan(usize, texts.len)] });
++        if (r.boolean()) {
++            const args = [_][]const u8{ "{\"path\": \"a.txt\", \"n\": 3}", "", "{not json", "[1]" };
++            const f = try json.newObject(a);
++            try f.put(a, "name", .{ .string = "read_file" });
++            try f.put(a, "arguments", .{ .string = args[r.uintLessThan(usize, args.len)] });
++            const call = try json.newObject(a);
++            try call.put(a, "id", .{ .string = try std.fmt.allocPrint(a, "c{d}", .{n}) });
++            try call.put(a, "type", .{ .string = "function" });
++            try call.put(a, "function", .{ .object = f });
++            try o.put(a, "tool_calls", .{ .array = try a.dupe(Value, &.{.{ .object = call }}) });
++        }
++    }
++    if (std.mem.eql(u8, role, "tool")) try o.put(a, "tool_call_id", .{ .string = try std.fmt.allocPrint(a, "c{d}", .{n -| 1}) });
++    return .{ .object = o };
++}
++
++const Marks = struct { ids: []const u32, history_len: usize, rewind_len: usize, user_end: usize };
++
++/// prepare as it was before rendering once: every probe a full renderIds.
++fn reference(srv: *Server, cx: *errors.Cx, messages: []const Value, tools: []const Value, thinking: bool) errors.Refused!Marks {
++    const list: Value = .{ .array = @constCast(messages) };
++    const ids = try prompt_mod.renderIds(srv, cx, list, tools, thinking, null, true);
++    const history = try prompt_mod.renderIds(srv, cx, list, tools, thinking, null, false);
++    var history_len: usize = 0;
++    if (history.len > 0 and history.len < ids.len and std.mem.eql(u32, ids[0..history.len], history)) history_len = history.len;
++    if (history_len == 0 and ids.len > 1 and std.mem.eql(u32, history, ids)) history_len = ids.len - 1;
++    const last = messages[messages.len - 1].strField("role").?;
++    if (history_len > 0 and std.mem.eql(u8, last, "tool")) {
++        const probe = try cx.a.alloc(Value, messages.len + 1);
++        @memcpy(probe[0..messages.len], messages);
++        const reply = try json.newObject(cx.a);
++        try reply.put(cx.a, "role", .{ .string = "assistant" });
++        try reply.put(cx.a, "content", .{ .string = "\u{2063}probe" });
++        probe[messages.len] = .{ .object = reply };
++        var scratch: errors.Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking };
++        if (prompt_mod.renderIds(srv, &scratch, .{ .array = probe }, tools, thinking, null, false)) |p| {
++            if (std.mem.indexOfDiff(u32, history, p)) |i| if (i > 0 and i < history_len) {
++                history_len = i;
++            };
++        } else |_| {}
++    }
++    // the old rewindLen: the last user's text replaced by the probe mark, the whole render compared
++    var rewind: usize = 0;
++    const at = for (0..messages.len) |n| {
++        if (std.mem.eql(u8, messages[messages.len - 1 - n].strField("role").?, "user")) break messages.len - 1 - n;
++    } else null;
++    if (at) |u| {
++        const list2 = try cx.a.dupe(Value, messages);
++        const user = try json.copyObject(cx.a, messages[u].object);
++        try user.put(cx.a, "content", .{ .string = "\u{2063}probe" });
++        list2[u] = .{ .object = user };
++        var scratch: errors.Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking };
++        if (prompt_mod.renderIds(srv, &scratch, .{ .array = list2 }, tools, thinking, null, true)) |p| {
++            if (std.mem.indexOfDiff(u32, ids, p)) |i| rewind = if (i < ids.len) i else 0;
++        } else |_| {}
++    }
++    return .{ .ids = ids, .history_len = history_len, .rewind_len = rewind, .user_end = if (std.mem.eql(u8, last, "user")) history_len else 0 };
++}
++
++fn check(source: []const u8, split: bool, host_once: bool, rounds: usize, seed: u64) !usize {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var tmp = std.testing.tmpDir(.{});
++    defer tmp.cleanup();
++    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tokenizer.json", .data = try tokenizer(a) });
++    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "chat_template.jinja", .data = source });
++    var problem: []const u8 = "";
++    const hf = try HfText.load(a, std.testing.io, try tmp.dir.realPathFileAlloc(std.testing.io, ".", a), null, a, &problem);
++    defer hf.deinit();
++    try std.testing.expectEqual(split, hf.compiled.?.split != null);
++    var script: Script = .{};
++    const srv = try Server.init(a, std.testing.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
++    defer srv.deinit();
++    srv.host_once = host_once;
++    const spec = (try json.parse(a, "{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"parameters\":{\"type\":\"object\"}}}")).ok;
++    var prng = std.Random.DefaultPrng.init(seed);
++    const r = prng.random();
++    const roles = [_][]const u8{ "user", "assistant", "tool", "tool", "system" };
++    var compared: usize = 0;
++    for (0..rounds) |_| {
++        var list: std.ArrayList(Value) = .empty;
++        if (r.boolean()) try list.append(a, try message(a, r, "system", 0));
++        for (0..1 + r.uintLessThan(usize, 7)) |n| try list.append(a, try message(a, r, roles[r.uintLessThan(usize, roles.len)], n));
++        const tools: []const Value = if (r.boolean()) &.{spec} else &.{};
++        const thinking = r.boolean();
++        const clear: ?bool = switch (r.uintLessThan(u8, 3)) {
++            0 => null,
++            1 => true,
++            else => false,
++        };
++        var cx: errors.Cx = .{ .a = a, .clear_thinking = clear };
++        const want = reference(srv, &cx, list.items, tools, thinking);
++        var cx2: errors.Cx = .{ .a = a, .clear_thinking = clear };
++        const got = prompt_mod.prepare(srv, &cx2, .{ .messages = .{ .array = list.items }, .tools = tools, .fields = .null }, thinking, null);
++        if (want) |w| {
++            const g = try got;
++            try std.testing.expectEqualSlices(u32, w.ids, g.ids);
++            try std.testing.expectEqual(w.history_len, g.history_len);
++            try std.testing.expectEqual(w.rewind_len, g.rewind_len);
++            try std.testing.expectEqual(w.user_end, g.user_end);
++            compared += 1;
++        } else |err| {
++            try std.testing.expectError(err, got);
++            try std.testing.expectEqualStrings(cx.message, cx2.message);
++        }
++    }
++    return compared;
++}
++
++test "prompt once: GLM-5.3's template, the history cut from the prompt's render, equals every full render" {
++    const source = @embedFile("fixtures/glm53/chat_template.jinja");
++    try std.testing.expect(try check(source, true, false, 400, 0x676c6d) > 300);
++}
++
++test "prompt once: a template whose history must be rendered on its own equals every full render" {
++    // text after the generation block: no mark, so the history is a probe render with reused pieces
++    const source = @embedFile("fixtures/glm53/chat_template.jinja") ++ "{{ ' ' }}";
++    try std.testing.expect(try check(source, false, false, 200, 0x6e6f6d) > 150);
++}
++
++test "prompt once: TF_GLM_OVN_HOST_ONCE's rewind probe, cut past where it leaves the prompt, equals every full render" {
++    try std.testing.expect(try check(@embedFile("fixtures/glm53/chat_template.jinja"), true, true, 400, 0x637574) > 300);
++}
+diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 80864cca099914886b3dfad6dc42385ffb565a74..0e57049a68c5cf4827491503873a5c3e92fdb48f 100644
+--- a/zig/src/server/root.zig
++++ b/zig/src/server/root.zig
+@@ -276,6 +276,7 @@ test {
+     _ = @import("quoted_markers_test.zig");
+     _ = @import("request_cost_test.zig");
+     _ = @import("prompt_tool_turn_test.zig");
++    _ = @import("prompt_once_test.zig");
+ }
+ 
+ test {
+diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
+index 28656e6c3f745ee51062665c3c198e0b540c6f4f..39925cdf03f1207089e995c0047fb5c05cf40258 100644
+--- a/zig/src/server/server.zig
++++ b/zig/src/server/server.zig
+@@ -141,6 +141,8 @@ pub const Server = struct {
+     keys: ?*auth.Store,
+     late_system: []const u8 = "system",
+     needs_user_after_tool: bool = false,
++    /// TF_GLM_OVN_HOST_ONCE=1: the rewind probe's render stops a few KiB past where it leaves the prompt (prompt.zig).
++    host_once: bool = false,
+     markers: reply_text.Markers = reply_text.think_markers,
+     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
+     chunks: chunk_plan.Plan = .{},
+@@ -232,6 +234,7 @@ pub const Server = struct {
+             std.mem.indexOf(u8, source, "thinking_mode") != null;
+         srv.late_system = try lateSystem(a, text);
+         srv.needs_user_after_tool = needsUserAfterTool(source);
++        srv.host_once = try @import("sys").environment.value(bool, "TF_GLM_OVN_HOST_ONCE", @import("profile").lookup("TF_GLM_OVN_HOST_ONCE"), false);
+         if (srv.info.vision != null) {
+             const template_images = templateImages(srv);
+             if (!template_images) log.line("warning: --vision: the chat template writes no image placeholder for an image part, so image requests will fail; serve with --chat-template naming a template that has an image path", .{});
+diff --git a/zig/tests/server/prompt_bench.zig b/zig/tests/server/prompt_bench.zig
+index 26db37dc96062a5040ca384a7a6c354f11bdaf24..aa48df61280fa16012506ed4c30659bca08e858a 100644
+--- a/zig/tests/server/prompt_bench.zig
++++ b/zig/tests/server/prompt_bench.zig
+@@ -78,8 +78,10 @@ fn agent(a: Allocator, corpus: []const u8, bytes: usize) !struct { prior: []cons
+ }
+ 
+ const sites = [_][]const u8{
+-    "parse body",                     "plan (openai.chatInput)",      "chat.prepare",          "  prompt.prepare",
+-    "  systemPrefixLen (chat.zig)",   "  replySpans (chat.zig)",      "old: renderIds prompt", "old: renderIds history",
++    "parse body",                     "plan (openai.chatInput)",      "chat.prepare",             "  prompt.prepare",
++    "  systemPrefixLen (chat.zig)",   "  replySpans (chat.zig)",      "  render prompt",          "  keep prompt",
++    "  render history probe",         "  pieces history probe",       "  render continued probe", "  pieces continued probe",
++    "  render rewind probe",          "  pieces rewind probe",        "old: renderIds prompt",    "old: renderIds history",
+     "old: renderIds continued probe", "old: rewindLen (full encode)",
+ };
+ 
+@@ -94,6 +96,14 @@ fn probeList(a: Allocator, messages: []const Value, at: usize, role: []const u8)
+     return list;
+ }
+ 
++/// The template's text for `messages`, as prompt.zig renders it for this bench's requests (thinking off).
++fn render(srv: *server.Server, cx: *server.errors.Cx, tools: []const Value, messages: []const Value, generation: bool, args: *server.messages.Args) !server.model_text.Rendered {
++    var problem: []const u8 = "";
++    const normalized = try server.messages.toolArgumentsWith(cx, try server.messages.normalizeWith(cx, .{ .array = @constCast(messages) }, srv.late_system, srv.needs_user_after_tool, srv.media()), args);
++    const t: ?Value = if (tools.len > 0) Value{ .array = @constCast(tools) } else null;
++    return srv.text.render(cx.a, normalized, .{ .tools = t, .add_generation_prompt = generation }, &problem);
++}
++
+ fn now(io: std.Io) i96 {
+     return std.Io.Clock.awake.now(io).toNanoseconds();
+ }
+@@ -152,6 +162,7 @@ fn bench(gpa: Allocator, io: std.Io, dir: []const u8, name: []const u8, prior: [
+     const times = try gpa.alloc(i96, sites.len * rounds);
+     defer gpa.free(times);
+     var out: Out = undefined;
++    var problem: []const u8 = "";
+     for (0..rounds) |r| {
+         var arena = std.heap.ArenaAllocator.init(gpa);
+         defer arena.deinit();
+@@ -181,13 +192,36 @@ fn bench(gpa: Allocator, io: std.Io, dir: []const u8, name: []const u8, prior: [
+         row[4] = lap(io, &at);
+         _ = try prompt.replySpans(srv, &cx, prepared.ids);
+         row[5] = lap(io, &at);
++        // the new path's steps with the public pieces, as prompt.zig's Once takes them
+         const msgs = input.messages.array;
+         const last_tool = std.mem.eql(u8, msgs[msgs.len - 1].strField("role").?, "tool");
++        const user_at = for (0..msgs.len) |n| {
++            if (std.mem.eql(u8, msgs[msgs.len - 1 - n].strField("role").?, "user")) break msgs.len - 1 - n;
++        } else unreachable;
++        var args: server.messages.Args = .empty;
++        const pr = try render(srv, &cx, input.tools, msgs, true, &args);
++        row[6] = lap(io, &at);
++        const k = try pr.keep(srv.text, a, &problem);
++        row[7] = lap(io, &at);
++        const hr = try render(srv, &cx, input.tools, msgs, false, &args);
++        row[8] = lap(io, &at);
++        _ = try hr.pieces(srv.text, a, k, &problem);
++        row[9] = lap(io, &at);
++        if (last_tool) {
++            const cr = try render(srv, &cx, input.tools, try probeList(a, msgs, msgs.len, "assistant"), false, &args);
++            row[10] = lap(io, &at);
++            _ = try cr.pieces(srv.text, a, k, &problem);
++            row[11] = lap(io, &at);
++        }
++        const rr = try render(srv, &cx, input.tools, try probeList(a, msgs, user_at, "user"), true, &args);
++        row[12] = lap(io, &at);
++        _ = try rr.pieces(srv.text, a, k, &problem);
++        row[13] = lap(io, &at);
+         // the old path, every probe encoded whole: the reference the request must equal
+         const ids = try prompt.renderIds(srv, &cx, input.messages, input.tools, false, effort, true);
+-        row[6] = lap(io, &at);
++        row[14] = lap(io, &at);
+         const history = try prompt.renderIds(srv, &cx, input.messages, input.tools, false, effort, false);
+-        row[7] = lap(io, &at);
++        row[15] = lap(io, &at);
+         var history_len: usize = 0;
+         if (history.len > 0 and history.len < ids.len and std.mem.eql(u32, ids[0..history.len], history)) history_len = history.len;
+         if (history_len == 0 and ids.len > 1 and std.mem.eql(u32, history, ids)) history_len = ids.len - 1;
+@@ -197,9 +231,9 @@ fn bench(gpa: Allocator, io: std.Io, dir: []const u8, name: []const u8, prior: [
+                 if (std.mem.indexOfDiff(u32, history, probe)) |i| history_len = if (i > 0 and i < history_len) i else history_len;
+             } else |_| {}
+         }
+-        row[8] = lap(io, &at);
++        row[16] = lap(io, &at);
+         const rewind = prompt.rewindLen(srv, &cx, input.messages, msgs.len, input.tools, ids, false, effort);
+-        row[9] = lap(io, &at);
++        row[17] = lap(io, &at);
+         const user_end = if (std.mem.eql(u8, msgs[msgs.len - 1].strField("role").?, "user")) history_len else 0;
+         if (!std.mem.eql(u32, ids, p.request.prompt) or !std.mem.eql(u32, ids, prepared.ids)) return error.IdsDiffer;
+         if (history_len != p.request.history_len or rewind != p.request.rewind_len or user_end != p.request.user_end) {

@@ -1,0 +1,77 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm checks: the OVN check commands in their own table beside main.zig's
+
+zig/tests/cuda/main.zig is 595 lines at v1.2.7 and 598 after draft-knobs; the item-plan check and the
+index checks would take it past the lean rule's 600. The GLM OVN check commands move to
+zig/tests/cuda/glm_ovn_checks.zig (the fold's own file, from its reply-prefill patch, which this re-seat
+defers), and main.zig asks that table first: one import and one dispatch line, its usage string ends with the
+table's. glm-draft-onepass is the first command in it; the index and one-pass checks join it later.
+Same commands, same output, the check binary only.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat:
+- Moves draft-knobs' glm-draft-onepass registration out of main.zig (598 -> 597 lines), so the item-plan patch's three lines fit (600).
+
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7053c8c822ec2aa6f0b7bc774bf2f7c7c704cdc
+--- /dev/null
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -0,0 +1,19 @@
++//! The GLM OVN check commands, each a TF_GLM_OVN_* path against today's kernels, run from main.zig's table.
++const std = @import("std");
++const check = @import("check.zig");
++const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
++
++/// The lines these commands add to `main.zig`'s usage, after its own.
++pub const usage =
++    \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
++    \\
++;
++
++/// True when `cmd` is one of these commands, having run it; false when main.zig's own table should go on.
++pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
++    _ = rest;
++    if (std.mem.eql(u8, cmd, "glm-draft-onepass")) {
++        try glm_draft_onepass.run(gpu);
++    } else return false;
++    return true;
++}
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+index 0e62d894735ffa1c9f56119de40307397480d832..71f2cac45cdfe320d2abca644c45940abb50c6b3 100644
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -36,7 +36,7 @@ const glm_exl3_tests = @import("glm_exl3_tests.zig");
+ const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
+ const glm_vision_tests = @import("glm_vision_tests.zig");
+ const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
+-const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
++const glm_ovn_checks = @import("glm_ovn_checks.zig");
+ const glm_mm_bench = @import("glm_mm_bench.zig");
+ const glm_index_check = @import("glm_index_check.zig");
+ const carveout_tests = @import("carveout_tests.zig");
+@@ -275,7 +275,6 @@ const usage =
+     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
+     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
+     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
+-    \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
+     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
+     \\  glm-index-check           GLM's indexer with glm_index against tf_glm_scores and tf_glm_select_rows, byte for byte (one GPU)
+     \\  glm-kv-host-slots         TF_GLM_KV_HOST's gather past its slots is refused as error.GlmKvHostSlots, then one within (one GPU)
+@@ -311,7 +310,7 @@ const usage =
+     \\  glm-fp8g-shares          block-FP8 TP shares packed as GLM's loader packs them, on the lane, against FP64 of the cut
+     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
+     \\
+-;
++++ glm_ovn_checks.usage;
+ 
+ pub fn main(init: std.process.Init) !u8 {
+     const args = try init.minimal.args.toSlice(init.arena.allocator());
+@@ -443,7 +442,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
+     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
+-    if (std.mem.eql(u8, cmd, "glm-draft-onepass")) return glm_draft_onepass.run(gpu);
++    if (try glm_ovn_checks.run(gpu, cmd, rest)) return; // the GLM OVN checks: true when it ran one of them
+     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
