@@ -3,7 +3,8 @@
 # ahead on these GPUs), then for each TAG build ai-engine:TAG from ~/work/glm53-zig/TAG-src.tar, copy the image
 # to the two workers and bench it (bench-arm.sh: P=1,2,4,6,8, knobs off, drafts on). Strictly one after
 # another: a build beside a bench shares the box's memory bandwidth and would move the cells.
-# A tag whose build fails is logged and skipped. Log lines go to stdout; cells to ~/bench/TAG/.
+# A tag whose build fails is logged and skipped. Log lines go to stdout; cells to ~/bench/TAG/. With NOBENCH=1 the
+# images are built and distributed only (a stage queued behind this one runs its own cells on them).
 set -uo pipefail
 FILE=${1:?usage: series-chain.sh MARKER_FILE MARKER TAG...}; MARK=${2:?marker}; shift 2
 G="$HOME/work/glm53-zig"; cd "$G" || exit 1
@@ -21,6 +22,7 @@ for tag in "$@"; do
   done
   [ "$ok" = 1 ] || { fails=$((fails + 1)); echo "[series] $(date +%T) $tag DISTRIBUTE FAILED"; continue; }
   echo "[series] $(date +%T) $tag built and distributed"
+  [ "${NOBENCH:-0}" = 1 ] && continue
   XENV="" KNOBS=off DRAFTER=1 bash "$G/bench-arm.sh" "ai-engine:$tag" "$tag" > "$G/bench-$tag.out" 2>&1
   echo "[series] $(date +%T) $tag benched"
 done
