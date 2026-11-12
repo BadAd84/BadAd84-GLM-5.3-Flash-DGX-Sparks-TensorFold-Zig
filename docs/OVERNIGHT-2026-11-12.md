@@ -224,3 +224,22 @@ All three give the same reply for every turn (digests equal). Upstream's request
 within 20 to 60 ms of ours, so resuming at any row is not needed for that case, and it is why the re-seat retires it.
 What it still wins is an exact repeat of a whole prompt (62 to 66 ms against 102 to 252). With request starts on, the
 cold first token is 180 ms slower than with them off in this run (8,776 against 8,596), one cell and not repeated.
+
+## 13. The series re-seated on v1.2.7, every switch off (`glm53-zig:rs1`)
+
+The 33 patches of `docs/audit-2026-11-12/reseat-v127.md` applied to the v1.2.7 tag (tree `93a99447e703`), built into an
+image on spark1 (every `.cu` compiled) and benched like the base: one fresh boot a level, 400 tokens a stream, no
+switch set. Decode tok/s, against `glm53-zig:v127` with the same settings, replies byte-identical at every level:
+
+| | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| upstream v1.2.7 | 50.16 | 58.57 | 79.23 | 106.37 | 129.66 |
+| re-seated series, switches off | 51.55 | 60.88 | 83.11 | 111.63 | 137.43 |
+| change | +2.8% | +4.0% | +4.9% | +4.9% | +6.0% |
+
+Nothing regresses at any level. The 10,929-token prompt (`d0b0076e1126`, equal): first token of the cold pass 7,455 ms
+against 8,576 on v1.2.7, and a repeat of it 595 to 601 ms (v1.2.7: 620 to 640; the any-row resume is retired, request
+starts are the way to resume a chat, section 12). The 3.6k-token prompt: 2,517 ms cold against 2,964, repeat 1,177 to
+1,183 against 1,455.
+An earlier try of this bench failed at every boot because the image had not been copied to spark2 and spark3 (rank 0
+waited for ranks that could not start); `scripts/dist-image.sh TAG` copies an image to spark2 and spark3 and checks the ids agree; a bench needs it after every build.

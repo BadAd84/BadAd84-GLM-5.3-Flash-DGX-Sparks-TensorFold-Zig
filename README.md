@@ -20,6 +20,7 @@ still needs. Remove this paragraph with the file.
     bash scripts/apply.sh work/t                     # the pin plus every patch, in filename order
     tar -C work/t/tree --exclude .git -cf work/t/src.tar .
     bash scripts/build-image.sh <tag> work/t/src.tar # on spark1: image glm53-zig:<tag>, compiled for sm_121a
+    bash scripts/dist-image.sh <tag>                 # copy it to spark2 and spark3 (every rank needs it)
     bash scripts/zig-tp3.sh <streams> [ctx]          # TP=3 on spark1-3, waits for /v1/models
     python3 scripts/streams.py 8888 <streams> --kind prose
     bash scripts/zig-tp3-stop.sh
@@ -53,6 +54,7 @@ runs, and it changes numerics, so the last row is the like-for-like one against 
 | through 0044, `TF_GLM_KDA_PAD=1` | 64.81 | 74.23 | 94.45 | 126.65 | 154.07 |
 | upstream v1.2.7, no patches | 50.16 | 58.57 | 79.23 | 106.37 | 129.66 |
 | upstream v1.2.7, `TF_GLM_KDA_PAD=1` | 62.19 | 70.57 | 88.91 | 118.29 | 143.25 |
+| re-seated series on v1.2.7, switches off | 51.55 | 60.88 | 83.11 | 111.63 | 137.43 |
 
 So with production's own setting the Zig engine leads at 6 and 8 streams and trails at 1, 2 and 4. The gap at low
 stream counts is the time of one decode round; `docs/speed_target.md` has its breakdown. The series is being
