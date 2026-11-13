@@ -304,3 +304,27 @@ four streams):
 No level regresses, so the set is a win by the fleet rule and goes into the recipe's measured knob set (`scripts/serve.sh`).
 Against production (81.73 / 89.22 / 117.98 / 114.78 / 131.28) the best arm is now -14.6%, -12.4%, -16.2% at one, two and
 four streams and +16.6% and +22.1% at six and eight. The round is 38.8 ms against production's 35.6.
+
+## 17. The recipe's whole knob set, and every one-knob arm, on the corrected series (`rs2`)
+
+Image `rs2` is the series after the `TF_GLM_OVN_MLA_FUSEMERGE` boot fix (`docs/audit-2026-11-12/mla-boot-fix.md`: the
+bounded FP8 chunk kernels of 0025 took the fork's 16 parameters while the host passes 14) and with the dead
+`TF_GLM_OVN_ONEPASS_EXACT` switch retired. With the pad on every arm, one fresh boot a level, replies byte-identical to the
+pad-only arm, tok/s (change against the first pad-only cell; a second and a third pad-only cell, taken hours later, read
+-1.1/-2.5/-1.8/-2.0/-1.4% and +0.5/+0.1/-0.4/+0.2/-0.8%, so about 2% is run-to-run noise on this box):
+
+| arm | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| pad only | 64.57 | 73.71 | 93.66 | 126.18 | 153.75 |
+| `MLA_FUSEMERGE` alone | 65.46 (+1.4%) | 74.25 (+0.7%) | 94.66 (+1.1%) | 127.53 (+1.1%) | 155.17 (+0.9%) |
+| the recipe's measured set (`KNOBS=measured`) | 70.17 (+8.7%) | 78.71 (+6.8%) | 99.40 (+6.1%) | 134.31 (+6.4%) | 165.26 (+7.5%) |
+
+The measured set is `INDEX_CUDA`, `KEPT_WALK`, the three drafter knobs, `MLA_FUSEMERGE`, `GLUE_FUSE`, `INDEX_SCHED`, `POOLS32`,
+`INDEX_REGROUP`, `MM_WIDE`, `SPARSE_ONEPASS` and `ROUTER_WARM`, all of `scripts/serve.sh`'s `DEFS`. No level regresses. Against
+production (81.73 / 89.22 / 117.98 / 114.78 / 131.28) it is -14.1%, -11.8% and -15.8% at one, two and four streams and +17.0% and
++25.9% at six and eight; the round at one stream is 38.5 ms against production's 35.6.
+
+One-knob arms on `rs1` (each against the pad-only cells, replies equal): `INDEX_CUDA`, `INDEX_SCHED`, `POOLS32`, `INDEX_REGROUP`,
+`MM_WIDE` and `SPARSE_ONEPASS` are within +-1% at every level, that is noise; `KEPT_WALK`, `GLUE_FUSE` and `ROUTER_WARM` read -2% in
+their first cells and -0.6 to +1.4% when repeated, so they are neutral. With `DRAFT_KEEPWIN=1` added to the drafter set the cells
+read +8.6 / +6.5 / +5.9 / +6.5 / +6.0% against +8.1 / +6.1 / +5.5 / +6.0 / +4.2%, inside the noise, so it stays out of the set.
