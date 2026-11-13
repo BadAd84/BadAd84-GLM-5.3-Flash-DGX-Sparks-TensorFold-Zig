@@ -347,14 +347,33 @@ streams (change against `rs2-measured`, the first cell of section 17):
 | `mr1-7-roce` (+ `TF_ROCE=1`) | 68.56 | 76.81 | 96.97 | 131.05 | 160.67 | 39.5 | 0.651 |
 | `mr1-7-nosplit-roce` (`TF_ROCE=1`, no `MLPSPLIT`) | 68.23 | 76.22 | 96.97 | 135.05 | 167.07 | 39.7 | 0.651 |
 
-- **Main is slower than the v1.2.7 series.** With the same seven knobs the re-seated stack reads -3.4 / -3.1 / -2.4 / -2.4 / -3.0%
-  against `rs2-ctl`, a round of 39.5 ms against 38.2, with the same acceptance. The pin stays at v1.2.7; main is not adopted.
+- **Main is not shown to be faster or slower than the v1.2.7 series.** With the same seven knobs the re-seated stack reads
+  -3.4 / -3.1 / -2.4 / -2.4 / -3.0% against `rs2-ctl`, a round of 39.5 ms against 38.2, with the same acceptance; but the same `rs2`
+  arm run again later (`rs2-ctl-b`, section 19) reads as low as `mr1-7` (68.68 against 68.48 tok/s at one stream), so the box drifts
+  about 3% between identical runs and the difference is inside it. The pin stays at v1.2.7: nothing on main measured as a win for us.
 - **The RoCE gather never connected.** Every `TF_ROCE=1` boot printed `RoCE all-gather: PeerRefused (HCA 0: the queue pair toward rank 1
   refused RTR); NCCL carries every gather`. Upstream pairs HCA h with the peer's HCA h; the cabled triangle pairs differently (skill
   `fix-crossed-mesh-roce-rail-pairing`). So `TF_ROCE=1` here only turned on upstream's drafter MLP split on every pass, and the
   `mb-roce` gain over `mb-pad` (+3.4 / +2.5 / +3.5 / +4.3 / +5.4%) is that split, not RoCE. A RoCE gather on this cabling needs the
   GID-derived pairing patch first; its measured size on the fork was +1.4% at one stream and -1.3% at eight.
-- **The drafter split on every pass helps at six and eight streams.** `mr1-7-nosplit-roce` (upstream's split, every pass) against
-  `mr1-7-roce` (ours, only while at most four streams are in a pass): -0.5 / -0.8 / 0.0 / +3.1 / +4.0%. Our knob already takes a
-  stream count, so `TF_GLM_OVN_DRAFT_MLPSPLIT=8` on image `rs2` should give the same at six and eight without leaving v1.2.7; measured
-  in section 19.
+- **The drafter split on every pass, one pair of cells.** `mr1-7-nosplit-roce` (upstream's split, every pass) against `mr1-7-roce`
+  (ours, only while at most four streams are in a pass) reads -0.5 / -0.8 / 0.0 / +3.1 / +4.0%. Our knob takes a stream count, so
+  `TF_GLM_OVN_DRAFT_MLPSPLIT=8` on image `rs2` is the same split without leaving v1.2.7; section 19 repeats it.
+
+## 19. `MLPSPLIT=8` against `=4` on `rs2`, control between the two test cells
+
+Same image, same seven-knob arm except the stream count that gates the split (4 or 8); order `rs2-s8`, `rs2-ctl-b`, `rs2-s8-b`,
+the first control `rs2-ctl` having been taken at the start of the window; replies equal in every cell.
+
+| arm | 1 | 2 | 4 | 6 | 8 | ms/round |
+|---|---:|---:|---:|---:|---:|---:|
+| `rs2-ctl` (`=4`) | 70.86 | 79.53 | 100.01 | 134.52 | 165.26 | 38.2 |
+| `rs2-s8` (`=8`) | 70.41 | 77.81 | 97.14 | 131.95 | 161.99 | 38.4 |
+| `rs2-ctl-b` (`=4`) | 68.68 | 76.66 | 97.20 | 130.85 | 160.21 | 39.4 |
+| `rs2-s8-b` (`=8`) | 70.32 | 78.86 | 99.28 | 136.20 | 167.60 | 38.5 |
+| mean of the two `=8` cells against the two `=4` cells | +0.9% | +0.3% | -0.4% | +1.0% | +1.3% | |
+
+The two `=4` cells differ from each other by 3.1 / 3.6 / 2.8 / 2.7 / 3.1% and the two `=8` cells by 0.1 / 1.3 / 2.2 / 3.2 / 3.4%, so
+the split's stream count is neutral inside the run-to-run spread and `=4` stays. The section 18 figures of +3.1% and +4.0% at six
+and eight streams were one pair of cells inside that spread. On this box one identical arm repeated can read 3% low, so a single
+cell, and a gap under about 3%, decides nothing; a claim at that size needs the arm in both orders.
