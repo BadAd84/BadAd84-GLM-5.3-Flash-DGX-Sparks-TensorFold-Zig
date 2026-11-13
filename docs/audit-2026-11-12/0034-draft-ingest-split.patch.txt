@@ -1,0 +1,525 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: TF_GLM_OVN_DRAFT_INGEST_SPLIT, a decode ingest's fc and k, v as each rank's columns
+
+New here (lane DrafterLever, 2026-11-13), not from the fork or production; default off. Every rank runs DFlash2's
+whole context ingest each round: fc (4,096 x 20,480 at 4 bits, 47.2 MB) and the five layers' k, v projections
+(5 x 4.7 MB), the same 71 MB of weights read on all three ranks. With TF_GLM_OVN_DRAFT_INGEST_SPLIT=1, at two ranks
+or more, an ingest of a decode verify's tap rows (32 or fewer) runs fc and each layer's k, v as this rank's
+64-column share of their outputs (fc 1408/1344/1344 columns at TP=3, k and v 384/320/320 each), all-gathers the
+shares in the drafter's partial-sums buffer (one gather for fc, one for all five k, v) and places them with strided
+copies (cuMemcpy2DAsync); the hidden norm and the ring writes then run on the whole rows as before. The five k, v
+matmuls share one launch of group sums, which every one of them recomputed. Prompt ingests (more rows) keep the
+whole path.
+
+Bits: the drafts are those of the whole path, by construction. A share is the whole linear's rows (quantize4 per
+row, pack per 64-column tile), it starts on a 64-column tile, and it launches with the whole linear's K slices
+(cuda_q4.Q4.sk read by kSlices; fc's own shape would take 8 slices where the whole takes 4), so every output column
+is the same tile lane, the same K order and the same cluster sum as in the whole launch. Replies cannot move:
+verification keeps the target's own sample. Knob off: nothing loads, no launch changes; Q4.sk defaults to 0, which
+is splitK as before.
+
+Why this lever (the profile, work/drafter-lever/REPORT.md): on rank 0 of the pad stack at one stream
+(~/nsys/f5-pad-p1.sqlite, 152 decode rounds) the drafter step is 5.95 ms a round and its ingest 0.449 ms (fc
+0.233, each k, v group_kernel 0.035); the drafter knobs (DOWN4, ONEPASS, MLPSPLIT) leave the ingest untouched, and
+production's whole context update is 0.265 ms (its boot calibration). Expected: about 46 MB fewer weight bytes a
+round a rank, -0.1 to -0.25 ms a round at every stream count (0.3 to 0.6% at one stream, about 0.3% at four) after
+the two gathers and nine strided copies it adds, which needs the arm in both orders on this box.
+
+Receipts, CPU only (WSL, ~/gates/isplit2-*): on v1.2.7 + 0001..0033 + this patch, check-native-cuda-host rc 0,
+test-cuda-host rc 0 (383/383 steps, 6280 of 6310 tests, 30 skipped), compile-cuda-tests rc 0, the standalone
+test-glm-ring-host, test-glm-logprobs-host, test-glm-onepass-order-host and test-rows-host rc 0, zig fmt --check
+zig/ rc 0; gate-names against mlafix2: 0 failing names on either side; lean base against head 386 against 386
+problems (6254 and 6255 files), 0 new; git apply --check on the series rc 0, and series + patch equal to the lane
+tree. The new host step test-glm-ingest-split-host (13 of 13) fails on each of six faithful mutants: kSlices ignoring
+sk, keepSlices taking the share's own slices, the extra tiles on the last ranks, fc placed at the widest pitch, v
+placed over k, and a split at one rank. Not yet run on a GPU: the knob-on digests at 1/2/4/6/8 streams, the drafted
+tokens of TF_GLM_DFLASH2_LOG=300 equal between knob off and on, and TF_GLM_DFLASH2_PROF's ingest ms.
+
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -46,6 +46,7 @@
+ | `TF_GLM_OVN_DRAFT_DOWN4` | Exactly `0` or `1`; default off (the drafter MLP's down at 4 bits) |
+ | `TF_GLM_OVN_DRAFT_KEEPWIN` | Exactly `0` or `1`; default off (kept prompt states carry the drafter's window rows) |
+ | `TF_GLM_OVN_DRAFT_MLPSPLIT` | Whole stream count; at world 3 or more the drafter MLP is split over the ranks while at most this many streams are in a pass; default 0 (off) |
++| `TF_GLM_OVN_DRAFT_INGEST_SPLIT` | Exactly `0` or `1`; default off (at two ranks or more a decode ingest's fc and k, v projections run as each rank's 64-column share, all-gathered: the same drafts) |
+ | `TF_GLM_OVN_DRAFT_EDGE` | Finite number, the DFlash2 selector's edge weight in a pick; default 1 |
+ | `TF_GLM_OVN_DRAFT_BETA` | Finite number above 0; set, the drafts' chances are softmax((score + noise) / beta); default unset |
+ | `TF_GLM_OVN_DRAFT_NOISE` | Finite number of at least 0, the keyed Gumbel draw's weight in a sampled stream's pick; default 0 (off) |
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -94,6 +94,7 @@
+     const taps_tp = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prompt taps:"} }));
+     b.step("test-glm-prompt-taps-host", "DFlash2 prompt taps hold every row at TP>1 through recording copies and emulated NCCL").dependOn(&taps_tp.step);
+     step.dependOn(&taps_tp.step);
++    b.step("test-glm-ingest-split-host", "DFlash2's split ingest: column shares, K slices and placement on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM ingest split:"} })).step);
+     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
+     const prompt_host = b.createModule(.{ .root_source_file = b.path("zig/exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes } } });
+     const prompt_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_host, .filters = &.{"exl3 prompt:"} }));
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -80,6 +80,7 @@
+     .{ .name = "TF_GLM_OVN_DRAFT_DOWN4", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_DRAFT_KEEPWIN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_DRAFT_MLPSPLIT", .scope = .glm, .kind = .u64, .forms = "a whole stream count, 0 (off) or the most streams a pass splits the drafter MLP for" },
++    .{ .name = "TF_GLM_OVN_DRAFT_INGEST_SPLIT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_DRAFT_EDGE", .scope = .glm, .kind = .signed_real, .trim = " ", .forms = "a finite edge weight (default 1)" },
+     .{ .name = "TF_GLM_OVN_DRAFT_BETA", .scope = .glm, .kind = .positive_real, .trim = " ", .forms = "a finite temperature above 0 (unset: no noisy chances)" },
+     .{ .name = "TF_GLM_OVN_DRAFT_NOISE", .scope = .glm, .kind = .real, .trim = " ", .forms = "a finite weight of at least 0 (default 0, off)" },
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -110,6 +110,7 @@
+     _ = @import("cuda_tile.zig");
+     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them
+     _ = @import("dflash_ovn.zig");
++    _ = @import("dflash_ingest.zig");
+ }
+ 
+ pub const dflash = @import("dflash.zig");
+diff --git a/zig/src/families/glm/cuda_q4.zig b/zig/src/families/glm/cuda_q4.zig
+--- a/zig/src/families/glm/cuda_q4.zig
++++ b/zig/src/families/glm/cuda_q4.zig
+@@ -17,7 +17,7 @@
+ }
+ 
+ /// A tiled 4-bit matrix [n][k] (shared.Q4): packed words, (k / 64, npad) bf16 scales and biases, npad = n up to 128s.
+-pub const Q4 = struct { w: u64, s: u64, b: u64, n: usize, k: usize, npad: usize };
++pub const Q4 = struct { w: u64, s: u64, b: u64, n: usize, k: usize, npad: usize, sk: usize = 0 }; // sk: kSlices
+ 
+ pub const Kernels = struct {
+     group: cuda.Function,
+@@ -66,6 +66,11 @@
+     return sk;
+ }
+ 
++/// The K slices `q` launches with: its own shape's (sk 0), or those of the whole linear a column share was cut from.
++pub fn kSlices(q: Q4) usize {
++    return if (q.sk != 0) q.sk else splitK(q.n, q.k);
++}
++
+ /// shared.pack: MLX words i32 [n][k/8] and bf16 scales and biases [n][k/64] -> `q` (caller's buffers, `bytes` long).
+ pub fn pack(ks: *const Kernels, stream: cuda.Stream, words: u64, scales: u64, biases: u64, q: Q4) !void {
+     const kg = q.k / 64;
+@@ -89,7 +94,7 @@
+ /// qmm.matmul of a Q4 (tile 2, up to 16 rows): x bf16 (`ldx` apart), group sums xs fp32 [rows][k/64] -> out bf16.
+ pub fn matmul(ks: *const Kernels, stream: cuda.Stream, x: u64, ldx: usize, xs: u64, q: Q4, out: u64, rows: usize) !void {
+     if (rows == 0 or rows > 16) return error.WindowTooWide;
+-    const sk = splitK(q.n, q.k);
++    const sk = kSlices(q);
+     const tiles = (q.n + 63) / 64;
+     var parts: Parts = std.mem.zeroes(Parts);
+     parts.count = 1;
+@@ -116,6 +121,14 @@
+     try std.testing.expectEqual(@as(usize, 77440), npadOf(77440));
+     try std.testing.expectEqual(@as(usize, 51712), npadOf(51627));
+ }
++
++test "GLM ingest split: a column share launches with its whole linear's K slices, not its own shape's" {
++    const own: Q4 = .{ .w = 0, .s = 0, .b = 0, .n = 1408, .k = 5 * 4096, .npad = npadOf(1408) };
++    try std.testing.expectEqual(@as(usize, 8), kSlices(own));
++    var share = own;
++    share.sk = splitK(4096, 5 * 4096);
++    try std.testing.expectEqual(@as(usize, 4), kSlices(share));
++}
+ pub const many_rows: usize = 128;
+ 
+ /// matmul over up to many_rows rows in one launch: row tile t is matmul's launch for rows 16t.., the weights read once.
+@@ -131,7 +144,7 @@
+ }
+ 
+ fn group(ks: *const Kernels, f: cuda.Function, stream: cuda.Stream, x: u64, ldx: usize, xs: u64, q: Q4, out: u64, rows: usize) !void {
+-    const sk = splitK(q.n, q.k);
++    const sk = kSlices(q);
+     const tiles = (q.n + 63) / 64;
+     var parts: Parts = std.mem.zeroes(Parts);
+     parts.count = 1;
+diff --git a/zig/src/families/glm/dflash.zig b/zig/src/families/glm/dflash.zig
+--- a/zig/src/families/glm/dflash.zig
++++ b/zig/src/families/glm/dflash.zig
+@@ -131,6 +131,7 @@
+     knobs: @import("dflash_ovn.zig").Knobs = .{}, // TF_GLM_OVN_DRAFT_*: unset, the drafter as it runs without them
+     sff: usize = 0, // MLPSPLIT: the MLP width of this rank's slice (sgu, sdown); 0: no slices
+     wide4: ?cuda.Function = null, // DOWN4 on a split MLP: the fp32-out 4-bit tile for down's K slices
++    shares: ?@import("dflash_ingest.zig").Shares = null, // INGEST_SPLIT: this rank's fc and k, v columns (null: off)
+     scratch: cuda.DeviceBuffer = undefined,
+     slots: std.ArrayList(Slot) = .empty,
+     verifies: u64 = 0, // verifies so far: a slot's rows are still in taps_step while its v_step is the latest
+diff --git a/zig/src/families/glm/dflash_block.zig b/zig/src/families/glm/dflash_block.zig
+--- a/zig/src/families/glm/dflash_block.zig
++++ b/zig/src/families/glm/dflash_block.zig
+@@ -5,8 +5,10 @@
+ const mm = @import("cuda_mm.zig");
+ const q4 = @import("cuda_q4.zig");
+ const df = @import("dflash.zig");
++const isplit = @import("dflash_ingest.zig");
+ const Drafter = df.Drafter;
+ const D = df.D;
++const KVW = df.KVW;
+ const BLOCK = df.BLOCK;
+ 
+ fn go(f: cuda.Function, grid: cuda.Dim3, threads: u32, e: anytype, a: *cuda.Args) !void {
+@@ -23,23 +25,33 @@
+         .bf16 => |t| try mm.matmul(&e.m.mm, e.stream, x, t.k, t, out, dr.part, m, wide, false),
+         .q4 => |q| {
+             if (wide and dr.wide4 == null) return error.WideFromFourBits;
+-            var a: cuda.Args = .{};
+-            a.add(x);
+-            a.add(@as(i32, @intCast(q.k)));
+-            a.add(@as(i32, @intCast(q.k)));
+-            a.add(dr.gs);
+-            try go(dr.k.gsum, .{ .x = @intCast(m) }, 128, e, &a);
++            try gsum(dr, e, x, q.k, m);
+             if (wide) return many(e, dr.wide4, x, dr.gs, q, out, m);
+-            if (dr.knobs.onepass) return many(e, null, x, dr.gs, q, out, m);
+-            var r0: usize = 0;
+-            while (r0 < m) : (r0 += 16) {
+-                const rows = @min(16, m - r0);
+-                try q4.matmul(&e.m.q4, e.stream, x + r0 * q.k * 2, q.k, dr.gs + r0 * (q.k / 64) * 4, q, out + r0 * q.n * 2, rows);
+-            }
++            try mul4(dr, e, x, q, out, m);
+         },
+     }
+ }
+ 
++/// A 4-bit linear's input group sums: `m` rows of `k` into dr.gs (lin's first launch).
++fn gsum(dr: *const Drafter, e: anytype, x: u64, k: usize, m: usize) !void {
++    var a: cuda.Args = .{};
++    a.add(x);
++    a.add(@as(i32, @intCast(k)));
++    a.add(@as(i32, @intCast(k)));
++    a.add(dr.gs);
++    try go(dr.k.gsum, .{ .x = @intCast(m) }, 128, e, &a);
++}
++
++/// A 4-bit linear on `m` rows whose group sums are in dr.gs: ONEPASS's launches of q4.many_rows rows, else 16.
++fn mul4(dr: *const Drafter, e: anytype, x: u64, q: q4.Q4, out: u64, m: usize) !void {
++    if (dr.knobs.onepass) return many(e, null, x, dr.gs, q, out, m);
++    var r0: usize = 0;
++    while (r0 < m) : (r0 += 16) {
++        const rows = @min(16, m - r0);
++        try q4.matmul(&e.m.q4, e.stream, x + r0 * q.k * 2, q.k, dr.gs + r0 * (q.k / 64) * 4, q, out + r0 * q.n * 2, rows);
++    }
++}
++
+ /// TF_GLM_OVN_DRAFT_ONEPASS: q4.many_rows rows a launch, a 16-row tile lin's own launch for it (`wide4`: fp32 out).
+ fn many(e: anytype, wide4: ?cuda.Function, x: u64, xs: u64, q: q4.Q4, out: u64, m: usize) !void {
+     var r0: usize = 0;
+@@ -82,22 +94,50 @@
+ 
+ /// `N` context rows (cin, cpos, crings uploaded) through fc, the hidden norm and each layer's k, v into the rings.
+ pub fn ingestPass(dr: *Drafter, e: anytype, N: usize) !void {
++    if (dr.shares) |*s| if (isplit.splits(dr.world, N)) return ingestShared(dr, e, s, N);
+     try lin(dr, e, dr.cin, dr.fc, dr.c1, N, false);
+     try glue.rmsnorm(set(e), e.stream, dr.c1, D, dr.hnorm, dr.ctx, D, null, df.EPS, N, D);
+     for (dr.layers, 0..) |l, li| {
+         try lin(dr, e, dr.ctx, l.kv, dr.ckv, N, false);
+-        var a: cuda.Args = .{};
+-        a.add(dr.ckv);
+-        a.add(l.kn);
+-        a.add(dr.cpos);
+-        a.add(dr.crings);
+-        a.add(@as(i32, @intCast(li)));
+-        a.add(df.EPS);
+-        a.add(df.THETA);
+-        try go(dr.k.ctx_kv, .{ .x = @intCast(N), .y = 8 }, 64, e, &a);
++        try ctxKv(dr, e, dr.ckv, l.kn, li, N);
+     }
+ }
+ 
++/// Layer `li`'s k and v rows at `ckv` normed, rotated and written into each row's ring (df_ctx_kv).
++fn ctxKv(dr: *const Drafter, e: anytype, ckv: u64, kn: u64, li: usize, N: usize) !void {
++    var a: cuda.Args = .{};
++    a.add(ckv);
++    a.add(kn);
++    a.add(dr.cpos);
++    a.add(dr.crings);
++    a.add(@as(i32, @intCast(li)));
++    a.add(df.EPS);
++    a.add(df.THETA);
++    try go(dr.k.ctx_kv, .{ .x = @intCast(N), .y = 8 }, 64, e, &a);
++}
++
++/// TF_GLM_OVN_DRAFT_INGEST_SPLIT: fc, then every layer's k and v, as this rank's columns, gathered in dr.sums, placed.
++fn ingestShared(dr: *Drafter, e: anytype, s: *const isplit.Shares, N: usize) !void {
++    const fc = try isplit.slot(D, dr.world, N, 1);
++    try gsum(dr, e, dr.cin, s.fc.k, N);
++    try mul4(dr, e, dr.cin, s.fc, dr.sums + e.share.rank * fc, N);
++    try gather(e, dr.sums, fc);
++    for (0..dr.world) |r| try place(e, dr.sums, dr.c1, try isplit.placeFc(D, dr.world, r, N));
++    try glue.rmsnorm(set(e), e.stream, dr.c1, D, dr.hnorm, dr.ctx, D, null, df.EPS, N, D);
++    try gsum(dr, e, dr.ctx, D, N); // every layer's k and v read the same rows: their group sums once
++    const kv = try isplit.slot(KVW, dr.world, N, 2 * df.LAYERS);
++    for (s.kv, 0..) |q, li| try mul4(dr, e, dr.ctx, q, dr.sums + e.share.rank * kv + li * N * q.n * 2, N);
++    try gather(e, dr.sums, kv);
++    for (0..dr.world) |r| for (try isplit.placeKv(KVW, dr.world, r, N, df.LAYERS)) |p| try place(e, dr.sums, dr.ckv, p);
++    for (dr.layers, 0..) |l, li| try ctxKv(dr, e, dr.ckv + li * N * 2 * KVW * 2, l.kn, li, N);
++}
++
++/// One placed copy of a gathered slot (dflash_ingest.Place) from `src` into `dst`, on the stream.
++fn place(e: anytype, src: u64, dst: u64, p: isplit.Place) !void {
++    const c: cuda.abi.Memcpy2D = .{ .src = src + p.src, .src_pitch = p.src_pitch, .dst = dst + p.dst, .dst_pitch = p.dst_pitch, .width = p.width, .height = p.height };
++    try e.d.check(e.d.api.cuMemcpy2DAsync_v2(&c, e.stream.handle), "cuMemcpy2DAsync");
++}
++
+ fn conv(dr: *const Drafter, e: anytype, z: u64, which: i32, base: u64, out: u64, add: bool, M: usize) !void {
+     var a: cuda.Args = .{};
+     a.add(z);
+diff --git a/zig/src/families/glm/dflash_ingest.zig b/zig/src/families/glm/dflash_ingest.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/dflash_ingest.zig
+@@ -0,0 +1,168 @@
++//! TF_GLM_OVN_DRAFT_INGEST_SPLIT: a decode ingest's fc and k, v projections as each rank's columns, gathered, placed.
++const std = @import("std");
++const q4 = @import("cuda_q4.zig");
++const df = @import("dflash.zig");
++
++/// One rank's output columns of an `n`-column linear: whole 64-column tiles, the first `tiles % world` ranks one more.
++pub const Share = struct { col0: usize, n: usize };
++
++pub fn share(n: usize, world: usize, rank: usize) error{BadIngestShare}!Share {
++    if (world == 0 or rank >= world or n % 64 != 0 or n / 64 < world) return error.BadIngestShare;
++    const tiles = n / 64;
++    const base = tiles / world;
++    const extra = tiles % world;
++    return .{ .col0 = 64 * (rank * base + @min(rank, extra)), .n = 64 * (base + @intFromBool(rank < extra)) };
++}
++
++/// This rank's 4-bit shares: fc's columns, and each layer's k columns then v columns (the whole kv's stacking).
++pub const Shares = struct { fc: q4.Q4, kv: [df.LAYERS]q4.Q4 };
++
++/// `q` cut from a linear of `whole_n` columns keeps that linear's K slices, so each column sums its K as before.
++pub fn keepSlices(q: q4.Q4, whole_n: usize) q4.Q4 {
++    var s = q;
++    s.sk = q4.splitK(whole_n, q.k);
++    return s;
++}
++
++/// Whether an ingest of `rows` rows runs on the shares: two ranks or more, and a decode verify's tap rows at most.
++pub fn splits(world: usize, rows: usize) bool {
++    return world >= 2 and rows > 0 and rows <= df.STEP_ROWS;
++}
++
++/// One rank's bytes in a gather: `parts` x `rows` rows of the widest share of `n` (rank 0's), alike on every rank.
++pub fn slot(n: usize, world: usize, rows: usize, parts: usize) error{BadIngestShare}!usize {
++    return parts * rows * (try share(n, world, 0)).n * 2;
++}
++
++/// A strided copy of gathered bf16 rows into whole rows, in bytes: cuMemcpy2DAsync's offsets, pitches and extent.
++pub const Place = struct { src: usize, src_pitch: usize, dst: usize, dst_pitch: usize, width: usize, height: usize };
++
++/// fc: rank r's slot, `rows` rows of its columns, into rows `n` wide at its first column.
++pub fn placeFc(n: usize, world: usize, r: usize, rows: usize) error{BadIngestShare}!Place {
++    const s = try share(n, world, r);
++    return .{ .src = r * try slot(n, world, rows, 1), .src_pitch = s.n * 2, .dst = s.col0 * 2, .dst_pitch = n * 2, .width = s.n * 2, .height = rows };
++}
++
++/// kv: rank r's slot, `layers` x `rows` rows of [its k columns, its v columns], into rows [k (half), v (half)].
++pub fn placeKv(half: usize, world: usize, r: usize, rows: usize, layers: usize) error{BadIngestShare}![2]Place {
++    const s = try share(half, world, r);
++    const k: Place = .{ .src = r * try slot(half, world, rows, 2 * layers), .src_pitch = 2 * s.n * 2, .dst = s.col0 * 2, .dst_pitch = 2 * half * 2, .width = s.n * 2, .height = layers * rows };
++    var v = k;
++    v.src += s.n * 2;
++    v.dst += half * 2;
++    return .{ k, v };
++}
++
++const t = std.testing;
++
++test "GLM ingest split: whole 64-column tiles from column 0 on, the first ranks one tile more, every column once" {
++    try t.expectEqual(Share{ .col0 = 0, .n = 1408 }, try share(4096, 3, 0));
++    try t.expectEqual(Share{ .col0 = 1408, .n = 1344 }, try share(4096, 3, 1));
++    try t.expectEqual(Share{ .col0 = 2752, .n = 1344 }, try share(4096, 3, 2));
++    try t.expectEqual(Share{ .col0 = 384, .n = 320 }, try share(1024, 3, 1));
++    for ([_]usize{ 1024, 2048, 4096 }) |n| for (1..5) |world| {
++        var at: usize = 0;
++        for (0..world) |r| {
++            const s = try share(n, world, r);
++            try t.expectEqual(at, s.col0);
++            try t.expect(s.n > 0 and s.n % 64 == 0 and s.col0 % 64 == 0 and s.n <= (try share(n, world, 0)).n);
++            at += s.n;
++        }
++        try t.expectEqual(n, at);
++    };
++    try t.expectError(error.BadIngestShare, share(4096 - 32, 3, 0));
++    try t.expectError(error.BadIngestShare, share(4096, 0, 0));
++    try t.expectError(error.BadIngestShare, share(4096, 3, 3));
++    try t.expectError(error.BadIngestShare, share(128, 3, 0));
++}
++
++test "GLM ingest split: shares keep the whole linear's K slices; fc's share would slice K twice as finely alone" {
++    const fc: q4.Q4 = .{ .w = 0, .s = 0, .b = 0, .n = 1408, .k = 5 * df.D, .npad = q4.npadOf(1408) };
++    try t.expectEqual(@as(usize, 8), q4.kSlices(fc));
++    try t.expectEqual(q4.splitK(df.D, 5 * df.D), q4.kSlices(keepSlices(fc, df.D)));
++    try t.expectEqual(@as(usize, 4), q4.kSlices(keepSlices(fc, df.D)));
++    const kv: q4.Q4 = .{ .w = 0, .s = 0, .b = 0, .n = 2 * 384, .k = df.D, .npad = q4.npadOf(2 * 384) };
++    try t.expectEqual(q4.splitK(2 * df.KVW, df.D), q4.kSlices(keepSlices(kv, 2 * df.KVW)));
++}
++
++test "GLM ingest split: from two ranks on, at a decode verify's tap rows or fewer" {
++    try t.expect(splits(3, 1) and splits(2, df.STEP_ROWS) and splits(4, 7));
++    try t.expect(!splits(1, 3) and !splits(3, 0) and !splits(3, df.STEP_ROWS + 1) and !splits(3, df.MAX_CTX));
++}
++
++/// Host stand-in for cuMemcpy2DAsync on bf16 words (offsets and pitches in bytes, as Place holds them).
++fn copy2D(src: []const u16, dst: []u16, p: Place) void {
++    for (0..p.height) |row| {
++        const s = (p.src + row * p.src_pitch) / 2;
++        const d = (p.dst + row * p.dst_pitch) / 2;
++        @memcpy(dst[d..][0 .. p.width / 2], src[s..][0 .. p.width / 2]);
++    }
++}
++
++/// A bf16 word for (layer, row, column), mixed so that a word read from the wrong place matches by chance at most.
++fn word(layer: usize, row: usize, col: usize) u16 {
++    var x: u32 = @intCast(layer << 17 | row << 12 | col);
++    x ^= x >> 16;
++    x *%= 0x7feb352d;
++    x ^= x >> 15;
++    x *%= 0x846ca68b;
++    x ^= x >> 16;
++    return @truncate(x);
++}
++
++test "GLM ingest split: each rank's fc columns land at their place in every row, one to four ranks, 1 to 32 rows" {
++    const a = t.allocator;
++    const n = df.D;
++    for (1..5) |world| for ([_]usize{ 1, 3, df.STEP_ROWS }) |rows| {
++        const sl = try slot(n, world, rows, 1);
++        const gathered = try a.alloc(u16, world * sl / 2);
++        defer a.free(gathered);
++        @memset(gathered, 0);
++        for (0..world) |r| { // rank r's matmul output: rows x its share, row stride its share
++            const s = try share(n, world, r);
++            for (0..rows) |i| for (0..s.n) |j| {
++                gathered[r * sl / 2 + i * s.n + j] = word(0, i, s.col0 + j);
++            };
++        }
++        const whole = try a.alloc(u16, rows * n);
++        defer a.free(whole);
++        @memset(whole, 0);
++        for (0..world) |r| copy2D(gathered, whole, try placeFc(n, world, r, rows));
++        for (0..rows) |i| for (0..n) |c| try t.expectEqual(word(0, i, c), whole[i * n + c]);
++    };
++}
++
++test "GLM ingest split: each rank's k and v columns of every layer land in that layer's rows of [k, v]" {
++    const a = t.allocator;
++    const half = df.KVW;
++    const layers = df.LAYERS;
++    for (1..5) |world| for ([_]usize{ 1, 5, df.STEP_ROWS }) |rows| {
++        const sl = try slot(half, world, rows, 2 * layers);
++        const gathered = try a.alloc(u16, world * sl / 2);
++        defer a.free(gathered);
++        @memset(gathered, 0);
++        for (0..world) |r| { // rank r's five outputs: layer li's rows x [k share, v share] after layer li - 1's
++            const s = try share(half, world, r);
++            for (0..layers) |li| for (0..rows) |i| for (0..s.n) |j| {
++                const at = r * sl / 2 + (li * rows + i) * 2 * s.n;
++                gathered[at + j] = word(li, i, s.col0 + j);
++                gathered[at + s.n + j] = word(li, i, half + s.col0 + j);
++            };
++        }
++        const whole = try a.alloc(u16, layers * rows * 2 * half);
++        defer a.free(whole);
++        @memset(whole, 0);
++        for (0..world) |r| for (try placeKv(half, world, r, rows, layers)) |p| copy2D(gathered, whole, p);
++        for (0..layers) |li| for (0..rows) |i| for (0..2 * half) |c| {
++            try t.expectEqual(word(li, i, c), whole[(li * rows + i) * 2 * half + c]);
++        };
++    };
++}
++
++test "GLM ingest split: the gather slots fit the drafter's partial sums buffer at every world and row count" {
++    const least = 2 * df.MAX_M * df.D * 4; // carve's `sums`: two ranks' at the least, MLPSPLIT's or not
++    for (2..5) |world| for (1..df.STEP_ROWS + 1) |rows| {
++        const most = @max(try slot(df.D, world, rows, 1), try slot(df.KVW, world, rows, 2 * df.LAYERS));
++        try t.expect(world * most <= least);
++    };
++}
+diff --git a/zig/src/families/glm/dflash_load.zig b/zig/src/families/glm/dflash_load.zig
+--- a/zig/src/families/glm/dflash_load.zig
++++ b/zig/src/families/glm/dflash_load.zig
+@@ -7,6 +7,7 @@
+ const quant = @import("cuda_quant.zig");
+ const taps_mod = @import("cuda_taps.zig");
+ const df = @import("dflash.zig");
++const isplit = @import("dflash_ingest.zig");
+ const D = df.D;
+ const KVW = df.KVW;
+ const FF = df.FF;
+@@ -147,6 +148,29 @@
+     return .{ .bf16 = try l.linearB(&.{name}, &.{D}, FF, .{ 0, 0, col0, n }) };
+ }
+ 
++/// INGEST_SPLIT: device bytes of this rank's 4-bit fc columns and each layer's k and v columns.
++fn shareBytes(rank: usize, world: usize) !u64 {
++    const f = try isplit.share(D, world, rank);
++    const kv = try isplit.share(KVW, world, rank);
++    return q4Bytes(f.n, 5 * D) + df.LAYERS * q4Bytes(2 * kv.n, D);
++}
++
++/// INGEST_SPLIT: this rank's fc columns and each layer's k columns then v columns, each at its whole linear's K slices.
++fn loadShares(l: *Loader, rank: usize, world: usize) !isplit.Shares {
++    const f = try isplit.share(D, world, rank);
++    const kv = try isplit.share(KVW, world, rank);
++    var s: isplit.Shares = undefined;
++    s.fc = isplit.keepSlices((try l.linear(&.{"fc.weight"}, &.{D}, 5 * D, .{ f.col0, f.n, 0, 5 * D })).q4, D);
++    var nb: [2][96]u8 = undefined;
++    for (&s.kv, 0..) |*q, i| {
++        const k = try layerName(&nb[0], i, "self_attn.k_proj.weight");
++        const v = try layerName(&nb[1], i, "self_attn.v_proj.weight");
++        q.* = isplit.keepSlices((try l.linear(&.{ k, v }, &.{ KVW, KVW }, D, .{ kv.col0, kv.n, 0, D })).q4, 2 * KVW);
++    }
++    std.log.info("dflash2: a decode ingest's fc in {d} columns a rank and k, v in 2 x {d}, gathered (TF_GLM_OVN_DRAFT_INGEST_SPLIT)", .{ f.n, kv.n });
++    return s;
++}
++
+ /// The drafter from `dir` (config.json and model.safetensors, bf16) for rank `rank` of `world`, on engine `e`.
+ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
+     if (bits != 0 and bits != 4) return error.BadDrafterBits;
+@@ -177,13 +201,15 @@
+     const down4 = knobs.down4 and bits == 4; // DOWN4: every down form at 4 bits (production's dflash2.py:403)
+     const sff = try mlpSlice(knobs.mlpsplit, world); // MLPSPLIT: this rank's MLP slice at world 3+ (0: none)
+     const full = sff == 0 or knobs.mlpsplit < df.MAX_S; // the whole MLP too, unless every pass runs the slices
++    const shares = knobs.ingest_split and bits == 4 and world >= 2; // INGEST_SPLIT: each rank's fc, k, v columns too
++    const share_bytes: u64 = if (shares) try shareBytes(rank, world) else 0;
+     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2 + 16 * 256;
+     const per: u64 = if (bits == 4) 1 else 4; // quarter-bytes a weight: 4 bits (plus scales and biases below) or bf16
+     const gu_elems: u64 = if (full) 2 * ff * D else 0;
+     const lin_elems: u64 = df.QKV * D + 2 * KVW * D + D * D + gu_elems + 2 * KVW * D + 5 * D * D / df.LAYERS;
+     const down_bytes: u64 = if (!full) 0 else if (down4) q4Bytes(D, ff) else D * ff * 2;
+     const slice_bytes: u64 = if (sff == 0) 0 else linBytes(2 * sff, D, bits) + linBytes(D, sff, if (down4) 4 else 0);
+-    const total: u64 = df.LAYERS * (lin_elems * per / 2 + lin_elems / 16 + down_bytes + slice_bytes + small + 32 * 256) + df.RANK * D * 2 + 2 * D * 2 + 64 * 256;
++    const total: u64 = df.LAYERS * (lin_elems * per / 2 + lin_elems / 16 + down_bytes + slice_bytes + small + 32 * 256) + df.RANK * D * 2 + 2 * D * 2 + 64 * 256 + share_bytes;
+     var wbuf = try cuda.DeviceBuffer.alloc(d, total);
+     errdefer wbuf.free();
+     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
+@@ -242,6 +268,7 @@
+         lw.m_proj = try l.linear(&.{try layerName(&nb[1], i, "mlp_conv.kernel_projection.weight")}, &.{KVW}, D, null);
+     }
+     dr.fc = try l.linear(&.{"fc.weight"}, &.{D}, 5 * D, null);
++    if (shares) dr.shares = try loadShares(&l, rank, world);
+     dr.hproj = try l.linearB(&.{"candidate_selector.hidden_projection.weight"}, &.{df.RANK}, D, null);
+     dr.hnorm = try l.raw("hidden_norm.weight", D * 2);
+     dr.norm = try l.raw("norm.weight", D * 2);
+diff --git a/zig/src/families/glm/dflash_ovn.zig b/zig/src/families/glm/dflash_ovn.zig
+--- a/zig/src/families/glm/dflash_ovn.zig
++++ b/zig/src/families/glm/dflash_ovn.zig
+@@ -47,11 +47,13 @@
+     noisy: bool = false, // BETA set: the chances are softmax((score + noise) / beta), production's noisy_confidence
+     noise: f32 = 0, // NOISE: the target's keyed Gumbel draw's weight in a sampled stream's pick (0: off)
+     keepwin: bool = false, // KEEPWIN: kept prompt states carry the drafter's window rows and its start
++    ingest_split: bool = false, // INGEST_SPLIT: a decode ingest's fc and k, v run as each rank's columns, gathered
+     cuts: ?Cuts = null, // CUTS: the chain cut by streams in the pass (null: TF_GLM_DRAFT_CONFIDENCE, today's)
+ 
+     /// The knobs from the environment (every rank's is the same); `beta` the chances' temperature (1.0 unset).
+     pub fn read(beta: *f64) !Knobs {
+         var k: Knobs = .{ .onepass = cuda.ovn.on("DRAFT_ONEPASS"), .down4 = cuda.ovn.on("DRAFT_DOWN4"), .keepwin = cuda.ovn.on("DRAFT_KEEPWIN") };
++        k.ingest_split = cuda.ovn.on("DRAFT_INGEST_SPLIT");
+         k.mlpsplit = @intCast(try cuda.ovn.int("DRAFT_MLPSPLIT", 0));
+         if (try cuda.ovn.real("DRAFT_EDGE")) |v| k.edge = @floatCast(v);
+         if (try cuda.ovn.real("DRAFT_BETA")) |v| { // its row takes a finite number above 0

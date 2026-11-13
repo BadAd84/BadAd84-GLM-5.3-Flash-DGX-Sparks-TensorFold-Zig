@@ -377,3 +377,41 @@ The two `=4` cells differ from each other by 3.1 / 3.6 / 2.8 / 2.7 / 3.1% and th
 the split's stream count is neutral inside the run-to-run spread and `=4` stays. The section 18 figures of +3.1% and +4.0% at six
 and eight streams were one pair of cells inside that spread. On this box one identical arm repeated can read 3% low, so a single
 cell, and a gap under about 3%, decides nothing; a claim at that size needs the arm in both orders.
+
+## 20. Where the one-stream round goes, and two drafter-side levers that measured neutral
+
+The profile (`docs/audit-2026-11-12/drafter-lever.md`) is built from the only nsys exports there are, which predate the drafter knobs,
+plus the round counters of the five seven-knob cells; its stage table says which stages are stale. At one stream our round is
+38.0-39.7 ms against production's 35.6-36.8 ms, with 2.77 tokens against 3.01 a round (acceptance 0.651 against 0.686); the 8% in
+tokens is worth about 3.1 ms of our round. The largest stage gaps to production, in ms a round:
+
+| stage | ours | production | gap |
+|---|---:|---:|---:|
+| verify step, whole | 34.6-36.6 | 32.4 | +2.2 to +4.2 |
+| the 90 NCCL all-gathers in it | 3.12 (+0.35 idle before them) | 1.35-2.4, RoCE inside a CUDA graph | +0.7 to +1.8 |
+| GPU idle on the main stream in the verify | 1.34 | 0.66 for its whole round | +0.7 |
+| drafter step (with the drafter knobs) | 2.6-3.2 | 2.3 | +0.3 to +0.9 |
+
+So since the drafter knobs the drafter is within about a millisecond of production's; the verify step's all-gathers and idle, and the
+tokens kept a round, are the gaps. At four streams the verify (routed experts 50.7 ms of 75.2 in the stale capture) and the tokens
+a round are the gap.
+
+Two levers measured, image `isplit1` (the series plus `0034`), control and test each twice, order ctl, on, pdl, ctl, on, pdl, all
+seven knobs and the pad, replies equal and acceptance equal in every cell (tok/s; change against the first control):
+
+| arm | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| `is-ctl` | 70.46 | 79.44 | 99.90 | 135.14 | 164.57 |
+| `is-ctl-b` | 69.95 (-0.7%) | 78.90 (-0.7%) | 99.05 (-0.9%) | 133.84 (-1.0%) | 164.90 (+0.2%) |
+| `is-on` (`TF_GLM_OVN_DRAFT_INGEST_SPLIT=1`) | 70.69 (+0.3%) | 79.20 (-0.3%) | 99.97 (+0.1%) | 134.70 (-0.3%) | 164.93 (+0.2%) |
+| `is-on-b` | 70.81 (+0.5%) | 79.39 (-0.1%) | 99.76 (-0.1%) | 135.28 (+0.1%) | 164.76 (+0.1%) |
+| `is-pdl` (`TF_GLM_OVN_PDL_EARLY=1`) | 70.05 (-0.6%) | 78.70 (-0.9%) | 99.92 (0.0%) | 135.03 (-0.1%) | 165.37 (+0.5%) |
+| `is-pdl-b` | 70.22 (-0.4%) | 79.14 (-0.4%) | 99.64 (-0.3%) | 134.95 (-0.1%) | 165.05 (+0.3%) |
+
+The ingest split (the drafter's context ingest cut over the ranks, same K order so the drafts are identical; rank 0's log shows
+`a decode ingest's fc in 1408 columns a rank and k, v in 2 x 384, gathered`) moves nothing outside the controls' own spread of
+about 1%, which is what its estimate of 0.1-0.25 ms a round (0.3-0.6%) predicted. `PDL_EARLY` is the same. Neither ships: the
+ingest split is 253 added lines for a gain no cell can show, and it stays as `docs/audit-2026-11-12/0034-draft-ingest-split.patch.txt`
+(sha256 `773988ed1c05`, applies to the series' tree `4ed20ea3d175`, with a bit-exact check of its share matmuls on an RTX 5070:
+0 of 671,744 fc words and 0 of 1,679,360 k and v words differ). The levers the profile leaves are the all-gathers (v1.2.7's own RoCE
+path with `TF_GLM_ROCE_MULTI=1`, never measured here) and the tokens kept a round.
