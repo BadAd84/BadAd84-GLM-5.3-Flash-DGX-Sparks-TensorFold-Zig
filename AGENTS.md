@@ -7,8 +7,8 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 ## Branches (owner 2026-11-12)
 
 - **`production`** - the recipe the live serve runs and the target to match or beat: image
-  `tensorfold-glm53:v110hunt4-fix`, the Python engine, TP=3 on spark1-3. It is the same commit the Python repo
-  carries as its `production` (one sha in both repos), fetched from there and never added to here. Frozen: it changes
+  `tensorfold-glm53:v110hunt4-shard` (`v110hunt4-fix` plus the KV shard patch), the Python engine, TP=3 on spark1-3. It is the same commit the Python repo
+  carries as its `production` (`279cf79`, one sha in both repos), fetched from there and never added to here. Frozen: it changes
   only when production changes. Its history is unrelated to `main`'s: read it in its own worktree
   (`git worktree add work/prod production`), never by switching this checkout, and keep junctions out of it.
   As of 2026-11-12 the Python repo has not pushed that branch, so it does not exist here yet.

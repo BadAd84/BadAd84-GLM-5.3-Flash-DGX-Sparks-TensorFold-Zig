@@ -3,10 +3,6 @@
 OTS recipe for serving GLM-5.3-Flash (Mia-AiLab EXL3 4bpw checkpoint) with the TensorFold
 Zig engine on the DGX Spark fleet. Gitea is the home of this repo; GitHub carries a public mirror.
 
-**Open work order (owner 2026-11-12): [REPO-FORMAT.md](REPO-FORMAT.md).** The format is a `production` branch (the
-serving recipe, the target) and `main` for the in-flight work on the modern engine; that file lists what this repo
-still needs. Remove this paragraph with the file.
-
 ## Branches
 
 - `main` is the in-flight work on the modern engine: a pinned upstream TensorFold commit (`TF_REF` in
