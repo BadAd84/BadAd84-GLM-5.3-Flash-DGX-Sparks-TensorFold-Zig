@@ -66,11 +66,11 @@ ENV+=(-e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_MIN_NCHANNELS=4 -e NCC
 # docs/audit-2026-11-12/reseat-v127.md).
 DEFS="TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_KEPT_WALK=1
  TF_GLM_OVN_DRAFT_ONEPASS=1 TF_GLM_OVN_DRAFT_DOWN4=1 TF_GLM_OVN_DRAFT_MLPSPLIT=4
- TF_GLM_OVN_MLA_FUSEMERGE=1 TF_GLM_OVN_GLUE_FUSE=1
- TF_GLM_OVN_INDEX_SCHED=1 TF_GLM_OVN_POOLS32=1 TF_GLM_OVN_INDEX_REGROUP=1
- TF_GLM_OVN_MM_WIDE=1 TF_GLM_OVN_SPARSE_ONEPASS=1 TF_GLM_OVN_ROUTER_WARM=1"
-# Off by default: a knob is default-off until it has been A/B'd at 1/2/4/6/8 streams on this series (the arms are
-# running; docs/OVERNIGHT-2026-11-12.md has the cells). KNOBS=measured opts into the set below; KNOBS=all is the same
+ TF_GLM_OVN_MLA_FUSEMERGE=1"
+# These seven are the arm measured together (docs/OVERNIGHT-2026-11-12.md section 17). GLUE_FUSE, INDEX_SCHED, POOLS32,
+# INDEX_REGROUP, MM_WIDE, SPARSE_ONEPASS and ROUTER_WARM were measured one at a time, within the noise, so they stay out.
+# Off by default: a knob is default-off until it has been A/B'd at 1/2/4/6/8 streams on this series
+# (docs/OVERNIGHT-2026-11-12.md has the cells). KNOBS=measured opts into the set above; KNOBS=all is the same
 # list for an arm that means to test them all.
 case "${KNOBS:-off}" in
   measured|all)

@@ -49,8 +49,8 @@ one group.
 | this series, switches off | 51.55 | 60.88 | 83.11 | 111.63 | 137.43 |
 | this series, pad | 64.57 | 73.71 | 93.66 | 126.18 | 153.75 |
 | this series, pad + drafter knobs | 69.78 | 78.17 | 98.83 | 133.80 | 160.25 |
-| this series, pad + the recipe's measured set (`KNOBS=measured`) | 70.17 | 78.71 | 99.40 | 134.31 | 165.26 |
+| this series, pad + the seven-knob set (`KNOBS=measured`) | 70.17 | 78.71 | 99.40 | 134.31 | 165.26 |
 
-With production's own setting and the recipe's measured knob set the Zig engine leads at 6 and 8 streams (+17.0%, +25.9%)
+With production's own setting and the seven-knob set the Zig engine leads at 6 and 8 streams (+17.0%, +25.9%)
 and trails at 1, 2 and 4 (-14.1%, -11.8%, -15.8%). Production's one-stream round is 35.6 ms against our 38.5; the rest of the
 gap is in `docs/OVERNIGHT-2026-11-12.md` sections 11 to 17 and `docs/audit-2026-11-12/round-structure.md`.

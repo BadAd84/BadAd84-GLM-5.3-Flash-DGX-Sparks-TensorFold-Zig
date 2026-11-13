@@ -317,10 +317,12 @@ pad-only arm, tok/s (change against the first pad-only cell; a second and a thir
 |---|---:|---:|---:|---:|---:|
 | pad only | 64.57 | 73.71 | 93.66 | 126.18 | 153.75 |
 | `MLA_FUSEMERGE` alone | 65.46 (+1.4%) | 74.25 (+0.7%) | 94.66 (+1.1%) | 127.53 (+1.1%) | 155.17 (+0.9%) |
-| the recipe's measured set (`KNOBS=measured`) | 70.17 (+8.7%) | 78.71 (+6.8%) | 99.40 (+6.1%) | 134.31 (+6.4%) | 165.26 (+7.5%) |
+| the seven-knob set (`KNOBS=measured`) | 70.17 (+8.7%) | 78.71 (+6.8%) | 99.40 (+6.1%) | 134.31 (+6.4%) | 165.26 (+7.5%) |
 
-The measured set is `INDEX_CUDA`, `KEPT_WALK`, the three drafter knobs, `MLA_FUSEMERGE`, `GLUE_FUSE`, `INDEX_SCHED`, `POOLS32`,
-`INDEX_REGROUP`, `MM_WIDE`, `SPARSE_ONEPASS` and `ROUTER_WARM`, all of `scripts/serve.sh`'s `DEFS`. No level regresses. Against
+The seven-knob set is the pad plus `INDEX_CUDA`, `KEPT_WALK`, `DRAFT_ONEPASS`, `DRAFT_DOWN4`, `DRAFT_MLPSPLIT=4` and `MLA_FUSEMERGE`, passed
+as the arm's own `-e` list with `KNOBS=off`; `scripts/serve.sh`'s `DEFS` is exactly this list. The other seven knobs of the earlier `DEFS`
+(`GLUE_FUSE`, `INDEX_SCHED`, `POOLS32`, `INDEX_REGROUP`, `MM_WIDE`, `SPARSE_ONEPASS`, `ROUTER_WARM`) were never in one arm together;
+each was measured alone, below. No level regresses. Against
 production (81.73 / 89.22 / 117.98 / 114.78 / 131.28) it is -14.1%, -11.8% and -15.8% at one, two and four streams and +17.0% and
 +25.9% at six and eight; the round at one stream is 38.5 ms against production's 35.6.
 
