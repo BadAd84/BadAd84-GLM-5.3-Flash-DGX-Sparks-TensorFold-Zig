@@ -1,0 +1,108 @@
+# BootLeft-1 (lane BootLeft, 2026-10-30): the solo DFlash2 drafter's CUDA graphs are captured only when something
+# replays them (engine.solo_drafter_graphs). Their only replays are that drafter's own calls (the one-stream decode,
+# drafter_choice, draft_dump, GlmEngine._calibrate); under --parallel every request runs through MultiDecoder, whose
+# MultiDrafter has graphs of its own, and _calibrate runs there only without the batched windows' graphs. So they are
+# captured whenever the one-stream graphs are (--parallel 1, TF_GLM_SOLO_GRAPHS=1, lone stream, profile, serial seam)
+# or TF_GLM_MULTI_GRAPHS=0 (multi.batched_graphs, now the one reader of that variable), and not otherwise: production
+# --parallel 2-8 skips 17 graphs (16 context-update sizes + the block pass), their eager runs' gathers and their
+# private pool (64 MiB on the laptop rig). The decision joins the ranks' settings comparison. Replies unchanged.
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -481,6 +481,25 @@
+     return bool(s.lone or s.profile or verify_kind(e.get("TF_GLM_MULTI_VERIFY", "")) == "serial")
+ 
+ 
++def solo_drafter_graphs(solo: bool, env=None) -> bool:
++    """BootLeft: whether the solo DFlash2 drafter's CUDA graphs are captured at start (``dflash2.Drafter.capture``: its
++    block pass and context updates of 1 .. TF_GLM_MAX_ROWS rows, each after an eager run whose gathers every rank
++    joins). Only that drafter's own calls replay them (``Drafter.candidates`` / ``add_taps``: the one-stream decode,
++    ``drafter_choice``, ``draft_dump``, ``GlmEngine._calibrate``). Under --parallel every request runs through
++    ``MultiDecoder``, whose ``MultiDrafter`` captures graphs of its own over the same weights, so the one caller left
++    there is ``_calibrate``, which runs only when ``MultiDecoder.fcost_costs`` has no batched window graphs to price
++    on: TF_GLM_MULTI_GRAPHS=0 (``multi.batched_graphs``) or the serial verify seam (which sets ``solo``). So: captured
++    whenever the one-stream graphs are (``solo``: --parallel 1, TF_GLM_SOLO_GRAPHS=1, the lone stream, the profile,
++    the serial seam) or the batched windows have no graphs; otherwise nothing would ever replay them. Every rank
++    decides alike (the answer is in the ranks' settings comparison)."""
++
++    if solo:
++        return True
++    from .multi import batched_graphs
++
++    return not batched_graphs(env)
++
++
+ def slot_bytes(t: dict, world: int = 2, rows: int = MAX_ROWS, rank: int = 0) -> int:
+     """What one more stream slot (``forward.Slots``) takes on rank ``rank`` of ``world``, from the text config:
+     every KDA layer's recurrent states (two parities), conv window, a decode window's projections and replay
+@@ -1155,11 +1174,15 @@
+         # OTS 0104: the one-stream graphs' capture (``solo_graphs``), the same on every rank (their warm-up forwards
+         # all-gather)
+         self.solo = bool(graphs) and solo_graphs(parallel)
++        # BootLeft: the solo DFlash2 drafter's graphs (``solo_drafter_graphs``), alike on every rank (their eager runs
++        # all-gather)
++        self.drafter_graphs = bool(graphs) and solo_drafter_graphs(self.solo)
+         from .dflash2_multi import DRAFT_SKIP                 # TF_GLM_DRAFT_SKIP: every rank's DFlash2 rings alike
+         from .forward import prompt_overlap                   # PrefillLeftovers-3: TF_GLM_PROMPT_OVERLAP's blocks
+                                                               # (one all-gather each under the indexer shard)
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+-                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(DRAFT_SKIP),
++                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(self.drafter_graphs),
++                       int(DRAFT_SKIP),
+                        prompt_overlap()] + \
+             lay.owner_words(cfg.layers) + self.prx.code() + self.split.prompt_code()   # OTS 0105; TF_GLM_PRX*;
+                                                               # TF_GLM_PROMPT_MICROBATCH (MicrobatchPort)
+@@ -1173,7 +1196,8 @@
+                                "TF_GLM_MULTI_VERIFY, TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE / _WINDOW, "
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+-                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_DRAFT_SKIP, "
++                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_MULTI_GRAPHS, "
++                               "TF_GLM_DRAFT_SKIP, "
+                                "TF_GLM_PROMPT_OVERLAP, TF_GLM_PRX*, TF_GLM_PROMPT_MICROBATCH*, TF_GLM_PROMPT_OWN_FRONT): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+@@ -1319,7 +1343,8 @@
+         if rank == 0 and graphs and not self.solo:
+             print(f"[tensorfold] one-stream CUDA graphs not captured: --parallel {parallel} serves every request "
+                   "through the batched windows; the lone-stream path (TF_GLM_MULTI_LONE), the serial verify seam "
+-                  "(TF_GLM_MULTI_VERIFY) and the startup comparison (TF_GLM_MULTI_PROFILE) are off; "
++                  "(TF_GLM_MULTI_VERIFY) and the startup comparison (TF_GLM_MULTI_PROFILE) are off; nor the solo "
++                  "DFlash2 drafter's (its own calls are their only replays; kept with TF_GLM_MULTI_GRAPHS=0); "
+                   "TF_GLM_SOLO_GRAPHS=1 captures them as before", flush=True)
+         if display and rank == 0:
+             print(f"[tensorfold] {display >> 20} MiB of the pool in the GPU's display reservation "
+@@ -1365,7 +1390,7 @@
+             print(f"[tensorfold] shared-prefix prompt states: kept where a prompt stops sharing another and at the end "
+                   f"of its system block, when they add {self.shared}+ tokens (TF_GLM_SHARED_PREFIX)", flush=True)
+         if self.drafter is not None:
+-            if graphs:
++            if self.drafter_graphs:                  # BootLeft: not when nothing would replay them
+                 self.drafter.capture()
+             fastboot.mark("DFlash2 CUDA graphs")
+         self.costs = self._startup_costs(parallel)
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -647,6 +647,14 @@
+     return value
+ 
+ 
++def batched_graphs(env=None) -> bool:
++    """TF_GLM_MULTI_GRAPHS: the batched verify window's CUDA graphs, one a window size (1, the default; 0: eager
++    windows, the same bits). ``MultiDecoder`` captures them; ``engine.solo_drafter_graphs`` reads it too."""
++
++    e = os.environ if env is None else env
++    return e.get("TF_GLM_MULTI_GRAPHS", "1") != "0"
++
++
+ def forward_streams(verify, segments: Sequence[Segment]) -> Verified:
+     """The seam: every segment's logits (and taps) of one round, by ``verify`` (``verify.SerialVerify`` or
+     ``verify.BatchedVerify``, the same two calls)."""
+@@ -848,7 +856,7 @@
+                 taps = engine.drafter.tap_layers if engine.drafter is not None else ()
+                 verify = BatchedVerify(e, taps=taps, rows=self.window)
+                 # TF_GLM_MULTI_GRAPHS=0: eager windows (the same bits); by default a graph a window size
+-                if os.environ.get("TF_GLM_MULTI_GRAPHS", "1") != "0" and torch.cuda.is_available():
++                if batched_graphs() and torch.cuda.is_available():
+                     verify.capture()
+                     if COMMIT_GRAPHS:                   # RoundGraphs: a round's commit + drafter update, one graph
+                         verify.capture_commit(self.drafts)

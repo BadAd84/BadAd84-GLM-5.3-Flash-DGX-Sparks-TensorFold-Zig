@@ -1,0 +1,109 @@
+# DrafterBuckets-2 (2026-10-30): a DFlash2 context update's five kv matmuls (one per drafter layer, 768 x 4,096 4-bit at
+# TP=3) run as ONE launch over the layers' kv matrices stacked side by side, at each layer's own split_k (8) and
+# decode tile, so every column is the bits of its layer's own matmul (qmm.stack_parts / matmul_parts). Each layer's
+# kv becomes a view into the stacked buffer (no extra memory). Default path: the decode rounds' taps graphs, the
+# prompt chunks' update graphs, TF_GLM_DRAFT_WIDE's launches and the solo Drafter; bit-identical rings.
+--- tensorfold/families/glm5_next/cuda/qmm.py
++++ ../b/tensorfold/families/glm5_next/cuda/qmm.py
+@@ -347,6 +347,37 @@
+                          variant=dec_tile(q.n, q.k) if x.shape[0] <= 16 else None)
+ 
+ 
++def stack_parts(qs: list) -> tuple[Q4, list] | None:
++    """Several 4-bit matrices of one shape [n, k] side by side as one [len * n, k] (DrafterBuckets): the stacked Q4
++    and each part again as views into it (its weight a slice, its scales / biases strided column slices, which
++    ``matmul`` reads as they are), so the parts take no memory of their own. None when the shapes or groups differ or
++    n is not a multiple of 128 (``shared.pack`` pads n to 128: a part's columns would not start where its rows do)."""
++
++    q0 = qs[0]
++    if any(not isinstance(q, Q4 | shared.Q4) or (q.n, q.k, q.gs) != (q0.n, q0.k, q0.gs) for q in qs) or q0.n % 128:
++        return None
++    w = torch.cat([q.weight for q in qs])
++    s = torch.cat([q.scales for q in qs], dim=1)
++    b = torch.cat([q.biases for q in qs], dim=1)
++    t = w.shape[0] // len(qs)
++    stacked = type(q0)(weight=w, scales=s, biases=b, n=q0.n * len(qs), k=q0.k, gs=q0.gs)
++    views = [type(q0)(weight=w[i * t:(i + 1) * t], scales=s[:, i * q0.n:(i + 1) * q0.n],
++                      biases=b[:, i * q0.n:(i + 1) * q0.n], n=q0.n, k=q0.k, gs=q0.gs) for i in range(len(qs))]
++    return stacked, views
++
++
++def matmul_parts(x: torch.Tensor, q: Q4, parts: int) -> torch.Tensor:
++    """``matmul`` of ``parts`` equal matrices stacked side by side (``stack_parts``) in one launch: every output column
++    takes its own part's K slices (``split_k``) and decode tile (``dec_tile``) by the part's shape, and a column's
++    chain depends on nothing else, so each part's columns are the bits ``matmul`` gives it alone."""
++
++    if x.shape[1] != q.k or x.stride(1) != 1 or x.dtype != torch.bfloat16:
++        raise ValueError(f"matmul_parts: x {tuple(x.shape)} {x.dtype} does not match K={q.k}")
++    n = q.n // parts
++    return shared.matmul(x, q, group_sums(x), sk=split_k(n, q.k),
++                         variant=dec_tile(n, q.k) if x.shape[0] <= 16 else None)
++
++
+ # A decode window's [gate | up] 4-bit matmul whose K slices go through the partials buffer and reduce_kernel (qmm.cu's
+ # rule: up to 64 rows, fewer than 28 Mi values, unless TF_GLM_QMM_CLUSTERS=1) leaves the slices unreduced and the
+ # SwiGLU sums them (glue.swiglu_sum): the same bits, one launch and a bf16 round trip less a MoE layer
+--- tensorfold/families/glm5_next/cuda/dflash2.py
++++ ../b/tensorfold/families/glm5_next/cuda/dflash2.py
+@@ -470,6 +470,12 @@
+         self.mask_row = read_mask_embedding(path, self.mask_id, self.D)
+         if self.mask_row is not None:
+             self.mask_row = gpu(self.mask_row)
++        # DrafterBuckets-2: the layers' kv matrices side by side in one buffer, each layer's ``kv`` a view into it (no
++        # memory of their own): a context update projects every layer's rows in one launch (``_kv_rows``)
++        stacked = qmm.stack_parts([L.kv for L in self.layers])
++        self.kv_all = stacked[0] if stacked is not None else None
++        for L, v in zip(self.layers, stacked[1] if stacked is not None else []):
++            L.kv = v
+         torch.cuda.empty_cache()
+         self.inv_freq = 1.0 / theta ** (torch.arange(hd // 2, device=dev, dtype=torch.float32) * 2 / hd)
+         if self.rank == 0:
+@@ -584,12 +590,25 @@
+         return _dconv(self._row(act, L.down, axs), dyn, L.m_base, 1, self.gs, x)
+ 
+     # -- the context --------------------------------------------------------------------------------------------
++    def _kv_rows(self, ctx: torch.Tensor, mm=None) -> list[torch.Tensor]:
++        """Every layer's [k heads | v heads] rows of a context update's ``ctx``: one launch over the stacked matrices
++        (``kv_all``, DrafterBuckets-2: each layer's columns the bits of its own ``_mm``, ``qmm.matmul_parts``), or
++        ``mm`` over them (a prompt matmul: one fp32 chain over K a column, the bits of each layer's alone); a layer's
++        rows are a column slice (``_prep`` reads rows by their stride). Without ``kv_all``: a launch a layer."""
++
++        if self.kv_all is None:
++            return [(mm or _mm)(ctx, L.kv) for L in self.layers]
++        n = len(self.layers)
++        out = qmm.matmul_parts(ctx, self.kv_all, n) if mm is None else mm(ctx, self.kv_all)
++        w = out.shape[1] // n
++        return [out[:, i * w:(i + 1) * w] for i in range(n)]
++
+     def _taps_compute(self, n: int) -> None:
+         ctx, _ = self._norm(_mm(self.tap_in[:n], self.fc), self.hidden_norm)
+         cos, sin = self._rotary(n)
+         idx = self._slots(n)
+-        for i, L in enumerate(self.layers):
+-            self._prep(_mm(ctx, L.kv), L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
++        for i, (L, kv) in enumerate(zip(self.layers, self._kv_rows(ctx))):
++            self._prep(kv, L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
+         self.pos_dev += n
+ 
+     @torch.no_grad()
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py
++++ ../b/tensorfold/families/glm5_next/cuda/dflash2_multi.py
+@@ -341,14 +341,14 @@
+             self.cand[:size].copy_(packed.view(-1))
+ 
+     def _taps_rows(self, x: torch.Tensor, pos: torch.Tensor, idx: torch.Tensor, mm=_mm) -> None:
+-        """Rows x [rows, taps * D] at positions ``pos`` into ring rows ``idx``, the 4-bit projections on ``mm``:
+-        every kernel row-independent."""
++        """Rows x [rows, taps * D] at positions ``pos`` into ring rows ``idx``, the 4-bit projections on ``mm`` (every
++        layer's kv in one launch, ``Drafter._kv_rows``): every kernel row-independent."""
+ 
+         d = self.d
+         ctx, _ = d._norm(mm(x, d.fc), d.hidden_norm)
+         cos, sin = self._rotary(pos)
+-        for i, L in enumerate(d.layers):
+-            d._prep(mm(ctx, L.kv), L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
++        for i, (L, kv) in enumerate(zip(d.layers, d._kv_rows(ctx, None if mm is _mm else mm))):
++            d._prep(kv, L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
+ 
+     def _taps_compute(self, T: int) -> None:
+         """Context updates of T stacked rows (``t_meta``: each row's position and destination), then each updated

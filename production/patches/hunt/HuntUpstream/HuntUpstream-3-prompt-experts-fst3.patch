@@ -1,0 +1,137 @@
+# HuntUpstream-3: OTS ots0127 (lane ExpertsFable 'fst3'), scripts/glm53/v110/ots0127-glm-prompt-experts-fst3.patch with
+# its a/ b/ prefixes dropped for patch -p0. ACCOUNT kind 'later' (built into v110-ots127, never in production, not in
+# the synced ORDER). Applies CLEAN to work/hunt/tree (after the k64 port). Bits: unchanged (ab.py, seeds 11/12).
+# Measured (docs/notes/fst3-artifact-ab-2026-10-12.md): cold prefill ~119k-605k +0.2..+1.3% in 17 of 18 cells at
+# PARALLEL 4/6/8; A2: 4,096-row chunk -1.8%, 2,048-row chunk +0.7/+1.2% (warm-turn tails are short chunks: check r2/r3).
+# Apply: cd work/hunt/tree/.. && patch -p0 < HuntUpstream-3-prompt-experts-fst3.patch
+# OTS 0127 (lane ExpertsFable stage work rebased on ots0106 as `fst3`; artifact-runs-2026-10-09 (1).3; numbered 0125
+# in its lane and in the image A/B of 2026-10-11, renumbered 2026-10-12 because 0125 is the tool-tag patch):
+# the prompt experts' kernel (exl3.cu, ots0106's k64 form) with the cp.async addressing hoisted out of the stage
+# loop and the gate/up epilogue's scales read once a block, at 0106's 3-stage depth. Every arithmetic operation on a
+# value is 0106's, in its order: bits unchanged (ab.py, one GB10, seeds 11 and 12, 4,096 and 2,048 rows: xd and y
+# equal to the reference in every case). A2 (2026-10-11, 7 rounds, seeds 11/12, against production's exl3.cu in the
+# same run): a 4,096-row chunk 11.633 -> 11.427 ms and 11.684 -> 11.477 ms (-1.8%); a 2,048-row chunk 8.121 ->
+# 8.180 ms and 8.092 -> 8.191 ms (+0.7%, +1.2%). Production prefills in 4,096-row chunks (TF_GLM_PREFILL_ROWS /
+# TF_GLM_FILL_ROWS). exl3_mm.py: the extension renamed _ots0127 (its content changes).
+# kcache: shared (renames its extension tensorfold_glm_exl3_v20_ots0127)
+diff --git a/tensorfold/families/glm5_next/cuda/exl3.cu b/tensorfold/families/glm5_next/cuda/exl3.cu
+index 409410e..5e2a4bd 100644
+--- tensorfold/families/glm5_next/cuda/exl3.cu
++++ tensorfold/families/glm5_next/cuda/exl3.cu
+@@ -597,6 +597,7 @@ __global__ void __launch_bounds__(W * 32) dec_kernel(
+ constexpr int PBK = 64;              // k values a shared-memory stage (4 k tiles): one block barrier per 64 k
+ constexpr int PKT = PBK / 16;
+ constexpr int PSTAGES = 3;
++constexpr int PSTAGES1 = 3;         // stages when a stage holds one copy of the member rows (SHX gate/up, down)
+ constexpr int PXS = PBK;             // stage row stride in halves: 128 B rows, no pad (pswz spreads ldmatrix rows)
+ // The 16-byte chunk c of stage row r sits at chunk c ^ (r & 7): the 8 rows one ldmatrix 8x8 reads (the same chunk of
+ // 8 consecutive rows) land on 8 distinct 16-byte bank groups without a pad, so three 64-k stages (16 KiB each with
+@@ -630,7 +631,7 @@ template <int MATS, int PM, int NW, bool SHX = false>
+ struct PromptCfg {
+     static constexpr int MT = 16 / NW, NB = PM / 8, T = NW * 32;
+     static constexpr int XM = SHX ? 1 : MATS;               // member-row copies a stage holds
+-    static constexpr int NST = XM == 2 ? 2 : PSTAGES;       // two row copies (24 KiB a stage): 2 stages, 2 blocks/SM
++    static constexpr int NST = XM == 2 ? 2 : PSTAGES1;       // two row copies (24 KiB a stage): 2 stages, 2 blocks/SM
+     static constexpr size_t STAGE_HALVES = (size_t)XM * PM * PXS + 2 * PWORDS;
+ };
+ 
+@@ -660,24 +661,43 @@ __device__ __forceinline__ void prompt_mainloop(const half* __restrict__ X0, con
+ #pragma unroll
+             for (int c = 0; c < 4; ++c) acc[i][j][c] = 0.f;
+ 
++    // each thread's cp.async pieces, addressed once a block: a stage only advances the sources by PBK k values
++    constexpr int XP = C::XM * PM * (PBK / 8), WP = 16 * PKT * 8;
++    constexpr int RPT = (XP + C::T - 1) / C::T, WPT = (WP + C::T - 1) / C::T;
++    const half* xsrc[RPT];
++    int xoff[RPT];
++    bool xok[RPT];
++#pragma unroll
++    for (int p = 0; p < RPT; ++p) {
++        const int idx = threadIdx.x + p * C::T;
++        const int m = idx / (PM * (PBK / 8)), rem = idx % (PM * (PBK / 8)), i = rem / (PBK / 8), j = rem % (PBK / 8);
++        const int r = idx < XP ? rows_sh[i] : -1;
++        xsrc[p] = (m ? X1 : X0) + (size_t)(r < 0 ? 0 : r) * K + j * 8;
++        xoff[p] = ((size_t)m * PM + i) * PXS + pswz(i, j) * 8;
++        xok[p] = r >= 0;
++    }
++    const uint32_t* wsrc[WPT];
++    int woff[WPT];
++#pragma unroll
++    for (int p = 0; p < WPT; ++p) {
++        const int idx = threadIdx.x + p * C::T;
++        const int q = idx / (PKT * 8), kk = (idx / 8) % PKT, part = idx % 8;
++        int wm, nt;
++        prompt_tile<MATS>(q < 16 ? q : 0, cb, wm, nt);
++        wsrc[p] = (wm ? T1 : T0) + (((size_t)e * KT + kk) * NTILES + nt) * 32 + part * 4;
++        woff[p] = ((size_t)q * PKT + kk) * 32 + part * 4;
++    }
+     auto load = [&](int chunk) {
+         half* dst = stage + (size_t)(chunk % C::NST) * C::STAGE_HALVES;
+         const int k0 = chunk * PBK;
+-        for (int idx = threadIdx.x; idx < C::XM * PM * (PBK / 8); idx += C::T) {
+-            const int m = idx / (PM * (PBK / 8)), rem = idx % (PM * (PBK / 8)), i = rem / (PBK / 8),
+-                      j = rem % (PBK / 8);
+-            const int r = rows_sh[i];
+-            const half* src = (m ? X1 : X0) + (size_t)(r < 0 ? 0 : r) * K + k0 + j * 8;
+-            cp_async16(dst + ((size_t)m * PM + i) * PXS + pswz(i, j) * 8, src, r >= 0);
+-        }
++#pragma unroll
++        for (int p = 0; p < RPT; ++p)
++            if (RPT * C::T == XP || threadIdx.x + p * C::T < XP) cp_async16(dst + xoff[p], xsrc[p] + k0, xok[p]);
+         uint32_t* wdst = reinterpret_cast<uint32_t*>(dst + (size_t)C::XM * PM * PXS);
+-        for (int idx = threadIdx.x; idx < 16 * PKT * 8; idx += C::T) {       // 16 B pieces of 128-B tile words
+-            const int q = idx / (PKT * 8), kk = (idx / 8) % PKT, part = idx % 8;
+-            int wm, nt;
+-            prompt_tile<MATS>(q, cb, wm, nt);
+-            const uint32_t* src = (wm ? T1 : T0) + (((size_t)e * KT + chunk * PKT + kk) * NTILES + nt) * 32 + part * 4;
+-            cp_async16(wdst + ((size_t)q * PKT + kk) * 32 + part * 4, src, true);
+-        }
++#pragma unroll
++        for (int p = 0; p < WPT; ++p)
++            if (WPT * C::T == WP || threadIdx.x + p * C::T < WP)
++                cp_async16(wdst + woff[p], wsrc[p] + (size_t)chunk * PKT * NTILES * 32, true);
+     };
+ #pragma unroll
+     for (int c = 0; c < C::NST - 1; ++c) {
+@@ -847,6 +867,13 @@ __global__ void __launch_bounds__(NW * 32, 16 / NW) prompt_gateup_kernel(
+     prompt_tile<2>(warp * MT, cb, mat, nt);
+     const int col0 = (nt - cb * 8) * 16;
+     const int n = cb * 128 + 4 * lane;
++    float sg[4], su[4], sd[4];                           // the column's scales, once a block (the same floats)
++#pragma unroll
++    for (int j = 0; j < 4; ++j) {
++        sg[j] = __half2float(svh_g[(size_t)e * N + n + j]);
++        su[j] = __half2float(svh_u[(size_t)e * N + n + j]);
++        sd[j] = __half2float(suh_d[(size_t)e * N + n + j]);
++    }
+     for (int hf = 0; hf < 2 && hf * PH < cnt; ++hf) {
+     if (hf) __syncthreads();                             // the first half's rows are read
+     prompt_spill<MT, PM>(Eg + (size_t)mat * PH * GU_ES, GU_ES, col0, acc, hf);
+@@ -864,11 +891,10 @@ __global__ void __launch_bounds__(NW * 32, 16 / NW) prompt_gateup_kernel(
+         float v[4];
+ #pragma unroll
+         for (int j = 0; j < 4; ++j) {
+-            float gg = fminf(bf16r(gv[j] * HAD_SCALE * __half2float(svh_g[(size_t)e * N + n + j])), limit);
+-            float uu = fminf(fmaxf(bf16r(uv[j] * HAD_SCALE * __half2float(svh_u[(size_t)e * N + n + j])), -limit),
+-                             limit);
++            float gg = fminf(bf16r(gv[j] * HAD_SCALE * sg[j]), limit);
++            float uu = fminf(fmaxf(bf16r(uv[j] * HAD_SCALE * su[j]), -limit), limit);
+             float act = bf16r(bf16r(gg / (1.f + expf(-gg))) * uu);
+-            v[j] = act * __half2float(suh_d[(size_t)e * N + n + j]);
++            v[j] = act * sd[j];
+         }
+         fwht128(v, lane);
+         const half2 o01 = __halves2half2(__float2half_rn(v[0] * HAD_SCALE), __float2half_rn(v[1] * HAD_SCALE));
+diff --git a/tensorfold/families/glm5_next/cuda/exl3_mm.py b/tensorfold/families/glm5_next/cuda/exl3_mm.py
+index 15088f1..27e4380 100644
+--- tensorfold/families/glm5_next/cuda/exl3_mm.py
++++ tensorfold/families/glm5_next/cuda/exl3_mm.py
+@@ -87,7 +87,7 @@ def _ext():
+     from tensorfold.cuda.build import load
+ 
+     here = Path(__file__).parent
+-    return load(name="tensorfold_glm_exl3_v20_ots0106", sources=[str(here / "exl3.cpp"), str(here / "exl3.cu")],
++    return load(name="tensorfold_glm_exl3_v20_ots0127", sources=[str(here / "exl3.cpp"), str(here / "exl3.cu")],
+                 extra_cuda_cflags=["-O3"], verbose=False)
+ 
+ 

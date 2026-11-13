@@ -1,0 +1,592 @@
+# SwitchSave-1b (lane SwitchSave, 2026-11-01; replaces SwitchSave-1: SwitchReview's LOW-1 and LOW-2 fixed; P1ShortTTFT
+# follow-up 2): a conversation switch at --parallel 1 copies
+# out, and allocates, only the kept states' rows the incoming request can write, not their whole states.
+# Before: the first request of another conversation saved every kept state still held in the live caches whole: with
+# TF_GLM_ROW_LINEAGE the first write copied each one's rows from its start to the end of the caches (rows_written ->
+# _flush -> _fill) into a whole copy save_rows allocated (torch.empty_like); without it _take_over -> save_rows cloned
+# them. Both linear in the kept tokens: laptop rig, a cold 49-token prompt after a warm turn of a 200k / 300k
+# conversation +20..+35 / +52..+83 ms TTFT (GB10 at ~205k: +58-72 ms, P1ShortTTFT).
+# Now (TF_GLM_SAVE_BOUND, default on, both lineage modes):
+# - a write declares its end: rows_written(st, start, end); _run_once passes decode.write_end (the prompt, and with a
+#   reply past its first token prompt + max_tokens: the last row a verify window can reach, since every drafter caps
+#   its depth / copy room at max_tokens - len(out)); a shared-prefix / grid stop's prefill passes the stop;
+# - a saved state's rows stay pending in the caches as ranges (snap._pend: token and pooled-key row ranges); a write
+#   copies out only the pending rows in [start, end) and the pools it completes [start // 4, end // 4)
+#   (sparse._pool_keys stores complete pools only); rows past the end keep their old write's lineage tag;
+# - the copies are kept as pieces of the rows copied (decode._Pieces): nothing is allocated at the switch (the whole
+#   empty_like copy alone cost as much as the copy: a new segment of the kept tokens' size); complete_rows makes them
+#   whole before the spill tier reads them (engine._spill_snap); nbytes, and every keep / drop decision, unchanged;
+#   _fill is all or nothing (1b): every plane's pieces are made first (_Pieces.take returns a piece, adds nothing)
+#   and added, with the pending rows taken off and the counters moved, only once all exist, so an allocation failure
+#   leaves the copy and _pend as they were and the retry copies each row once (SwitchReview LOW-1);
+# - a forward past the declared end (forward.stage) saves the rows it reaches first (decode.rows_past): a short end
+#   costs a late copy, never a row; a write with no end (prefill(rows_end=None): callers other than _run_once) saves
+#   every row from its start, as before;
+# - load_rows copies back only rows it copied out (pending ones are intact) and, with the lineage, only where the
+#   lineages differ (as ranges, _unlike), plus the pool row past the state's end; the tokens of that pool past n get a
+#   new tag, rows past it keep theirs.
+# TF_GLM_ROW_LINEAGE=0 with the bound: the same pending rows and pieces, no lineage (a load copies back every row it
+# copied out). TF_GLM_SAVE_BOUND=0: as before (lineage off: every row out and back at once; on: every write runs to
+# the end, into a whole copy). Rank-local: every rank computes the same end from max_tokens (follow_one's header) and
+# saves its own share. After: +1 to +3 ms at 50k-300k. Replies, live caches and every kept state's reload
+# bit-identical to the tree without this patch (tests below).
+# Tests (work/hunt/SwitchSave): test_switch_cpu.py (decode's functions, random op sequences, four modes),
+# test_row_lineage.py (ForksP1's real-GlmEngine CPU rig + a four-arm fuzz), test_switch.py (laptop GPU rig: adv and
+# 200k sequences against today's tree, every kept state's reload digest after every request), test_partial_fill.py
+# (1b: injected failures inside _fill / complete_rows); mutants.py (22 of 22 killed).
+# This copy applies with `patch -p0` after PooledKeys3/PooledKeys-3-scales-plane.patch (stack/all6w.list, in place
+# of Hunt3/SwitchSave-1-bounded-save.rebased.patch): only decode.py's import context differs from the all6v copy.
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -16,7 +16,8 @@
+ from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
+ 
+ from . import glue, kv8, prof, qmm, tp
+-from .forward import Buffers, State, chunks_for, commit, compute, stage
++from . import forward as _forward
++from .forward import ROWS_OPEN, Buffers, State, chunks_for, commit, compute, stage
+ from .mtp import mtp_compute, mtp_forward, mtp_stage
+ from .sparse import pool_bucket
+ from .weights import Weights
+@@ -500,19 +501,38 @@
+ # and values, a token a row, and the indexer's pooled keys, four tokens a row), so a saved state's rows the caches
+ # still hold from that same write are not copied back. A write is one prefill (its resume point on: the prompt's rows,
+ # then its decode's) or a load of saved rows; each gets a tag no other write has. A lineage is ``((start, tag), ...)``
+-# over the rows from 0 on (None: unknown, nothing matches it). Two lineages that agree on rows [0, f) name the same
+-# writes there, and a row nothing wrote since holds the bytes its write left: the caches' and a saved copy's rows are
+-# then equal bit for bit. A pooled-key row holds what the last write of any of its four tokens left (a write runs
+-# from its start to the end), so it is equal when its four tokens' writes are; the row past a state's end (``n // 4``
+-# with tokens from n on) is always copied.
+-# The same in the other direction: ``save_rows`` copies no token or pooled-key row out at once. It takes the memory and
+-# leaves the rows in the caches; the next write (a prefill, a load) first copies out the saved states' rows it is about
+-# to change (``_flush``), from its start on, and only those. A state another request resumes from the same write never
+-# copies its shared rows out at all; one the spill tier writes is completed first (``complete_rows``). The memory a
+-# saved state takes, and so every keep and drop decision, is the same as before.
+-# Off (TF_GLM_ROW_LINEAGE=0): every row is copied, out and back, at once, as before.
++# over the rows from 0 on, each tag holding from its start to the next one's (None: unknown, nothing matches it). Rows
++# where two lineages name the same write hold the bytes that write left: the caches' and a saved copy's rows are then
++# equal bit for bit. A pooled-key row is written by the write of its pool's last token (``sparse._pool_keys``: a
++# window [s, e) completes pools [s // 4, e // 4)), from its four tokens' keys, so it is equal when its four tokens'
++# writes are; the row past a state's end (``n // 4``, with tokens from n on) is always copied unless it is pending.
++# The same in the other direction: ``save_rows`` copies no token or pooled-key row out at once. It counts the memory
++# (``nbytes``: the whole copy's) and leaves the rows in the caches as the state's pending rows (``snap._pend``: token
++# and pooled-key row ranges); a write (a prefill, its decode, a load) first copies out the pending rows it is about to
++# change (``_flush``), and only those, into a whole copy allocated at the save (TF_GLM_SAVE_BOUND=0) or into pieces of
++# just those rows (``_Pieces``). A state another request resumes from the same write never copies its shared rows out
++# at all; one the spill tier writes is completed first (``complete_rows``). The memory a saved state counts, and so
++# every keep and drop decision, is the same as before.
++# OTS SwitchSave (TF_GLM_SAVE_BOUND, default on): a write declares its end (``rows_written(st, start, end)``): a
++# request writes its prompt's rows from its resume point and its reply's, at most ``write_end`` (the prompt, then
++# max_tokens of reply including the last verify window's drafts), so a conversation switch copies only the other
++# states' rows in that range; rows past it keep their old write's tag and stay pending. A forward past the declared
++# end (``forward.stage``) first saves the rows it reaches (``rows_past``), so an end too short costs a late copy, never
++# a row. A write with no end (``end=None``: a caller that cannot bound it) saves every row from its start, as before.
++# Off (TF_GLM_ROW_LINEAGE=0): with TF_GLM_SAVE_BOUND, the pending rows and bounded writes as above, but no lineage:
++# a load copies back every row it copied out; with TF_GLM_SAVE_BOUND=0 every row is copied, out and back, at once, as
++# before (and with TF_GLM_ROW_LINEAGE=1, every write runs to the end, as before).
+ ROW_LINEAGE = os.environ.get("TF_GLM_ROW_LINEAGE", "1").strip() != "0"
++SAVE_BOUND = os.environ.get("TF_GLM_SAVE_BOUND", "1").strip() != "0"
+ _WRITES = itertools.count(1)
++# rows copied out of (``out_*``) and back into (``back_*``) the live caches for saved states, and the forwards past a
++# write's declared end (``late``): counters only, read by probes and tests
++SAVE_STATS = {"out_rows": 0, "out_bytes": 0, "back_rows": 0, "back_bytes": 0, "late": 0, "late_rows": 0}
++
++
++def _deferred() -> bool:
++    """Whether saved states leave their rows pending in the caches (``_flush`` copies them when a write needs them)."""
++    return ROW_LINEAGE or SAVE_BOUND
+ 
+ 
+ def _kinds(st) -> tuple[int, int]:
+@@ -522,24 +542,111 @@
+     return tokens, tokens + sum(len(kv8.planes_of(trio[2])) for trio in (st.index or [])[:len(st.kc)])
+ 
+ 
+-def _fill(st, snap, wt: int, wq: int) -> None:
+-    """A saved state whose token rows [0, p) and pooled-key rows [0, q) are still the caches' (``snap._pend``: p, q and
+-    the id of the rows list they belong to; an id, so a dropped state's rows are freed at once): its copies of token
+-    rows [wt, p) and pooled-key rows [wq, q) taken now."""
++def _isect(a, b) -> list:
++    """The rows two sorted lists of disjoint ``(lo, hi)`` ranges share, as such a list."""
++    out, i, j = [], 0, 0
++    while i < len(a) and j < len(b):
++        lo, hi = max(a[i][0], b[j][0]), min(a[i][1], b[j][1])
++        if lo < hi:
++            out.append((lo, hi))
++        if a[i][1] < b[j][1]:
++            i += 1
++        else:
++            j += 1
++    return out
++
++
++def _minus(a, b) -> list:
++    """The rows of range list ``a`` not in range list ``b`` (both sorted, disjoint)."""
++    out = []
++    for lo, hi in a:
++        for blo, bhi in b:
++            if bhi <= lo or blo >= hi:
++                continue
++            if blo > lo:
++                out.append((lo, blo))
++            lo = max(lo, bhi)
++            if lo >= hi:
++                break
++        if lo < hi:
++            out.append((lo, hi))
++    return out
++
++
++def _row_bytes_of(v: torch.Tensor) -> int:
++    return v[0].numel() * v.element_size() if v.dim() and v.shape[0] else 0
++
++
++class _Pieces(list):
++    """OTS SwitchSave (TF_GLM_SAVE_BOUND): a saved state's copy of one plane of token or pooled-key rows, held as the
++    row ranges copied out so far, ``[(lo, hi, rows)]``, so only those are allocated: a whole copy allocated at the
++    switch (``torch.empty_like`` of every saved state's rows, a new segment of the size of the kept tokens) cost the
++    next request as much as the copy itself (laptop rig, 300k: a2 - b2 +21 to +44 ms with it, +2 ms with the memory
++    already resident; work/hunt/SwitchSave/REPORT.md). ``shape`` / ``dtype`` / ``device``: the whole copy's
++    (``whole``, which the spill tier reads)."""
++
++    def __init__(self, like: torch.Tensor) -> None:
++        super().__init__()
++        self.shape, self.dtype, self.device = tuple(like.shape), like.dtype, like.device
++
++    def take(self, src: torch.Tensor, lo: int, hi: int) -> tuple:
++        """A copy of ``src`` rows [lo, hi) as a piece ``(lo, hi, rows)``, not yet part of this copy: the caller adds
++        it (``extend``) once every plane's piece of the same rows exists (``_fill``), so a failure leaves this copy
++        and the state's pending rows as they were. Never rows this copy holds already: those are no longer pending."""
++        t = torch.empty((hi - lo,) + self.shape[1:], dtype=self.dtype, device=self.device)
++        t.copy_(src[lo:hi])
++        return lo, hi, t
++
++    def put(self, dst: torch.Tensor, lo: int, hi: int) -> None:
++        """This copy's rows of [lo, hi) into ``dst`` (rows it never copied out are left as they are)."""
++        for plo, phi, t in self:
++            a, b = max(lo, plo), min(hi, phi)
++            if a < b:
++                dst[a:b].copy_(t[a - plo:b - plo])
++
++    def whole(self) -> torch.Tensor:
++        """The whole copy (its rows never copied out: unspecified, as an ``empty_like`` copy's were)."""
++        out = torch.empty(self.shape, dtype=self.dtype, device=self.device)
++        self.put(out, 0, self.shape[0])
++        return out
++
++
++def _fill(st, snap, wt: list, wq: list) -> None:
++    """A saved state whose token rows ``pend[0]`` and pooled-key rows ``pend[1]`` (range lists) are still the caches'
++    (``snap._pend``: those and the id of the rows list they belong to; an id, so a dropped state's rows are freed at
++    once): its copies of the pending token rows in ranges ``wt`` and pooled-key rows in ``wq`` taken now. All or
++    nothing: every plane's new pieces are made first and added, with the pending rows taken off, only once all exist
++    (an allocation failure on a later plane leaves the copy and ``pend`` as they were; a retry takes the same rows
++    once). A whole copy's rows are written in place: a failure there leaves them pending, and the retry writes the
++    same bytes again (the caches' rows have not changed: the write waits for this)."""
+     pend, rows = snap._pend, snap.rows
+-    p, q = pend[0], pend[1]
++    got = (_isect(pend[0], wt), _isect(pend[1], wq))
++    if not got[0] and not got[1]:
++        return
+     tokens, pools = _kinds(st)
+     views = _row_views(st, len(snap.ids), 0)
++    new, nbytes = [], 0
+     for k in range(pools):
+-        lo, hi = (wt, p) if k < tokens else (wq, q)
+-        if lo < hi:
+-            rows[k][lo:hi].copy_(views[k][lo:hi])
+-    pend[0], pend[1] = min(p, wt), min(q, wq)
+-
+-
+-def _flush(st, wt: int, wq: int) -> None:
+-    """A write of token rows from wt on and pooled-key rows from wq on is about to begin: every saved state still
+-    leaving rows there in the caches copies them out first."""
++        rb = _row_bytes_of(views[k])
++        made = []
++        for lo, hi in got[0 if k < tokens else 1]:
++            if isinstance(rows[k], _Pieces):
++                made.append(rows[k].take(views[k], lo, hi))
++            else:
++                rows[k][lo:hi].copy_(views[k][lo:hi])
++            nbytes += (hi - lo) * rb
++        new.append(made)
++    for k, made in enumerate(new):                     # (no device allocation from here on: all made above)
++        if made:
++            rows[k].extend(made)
++    pend[0], pend[1] = _minus(pend[0], got[0]), _minus(pend[1], got[1])
++    SAVE_STATS["out_bytes"] += nbytes
++    SAVE_STATS["out_rows"] += sum(hi - lo for lo, hi in got[0])
++
++
++def _flush(st, wt: list, wq: list) -> None:
++    """A write of token rows ``wt`` and pooled-key rows ``wq`` (range lists) is about to begin: every saved state
++    still leaving rows there in the caches copies them out first."""
+     keep = []
+     for ref in getattr(st, "row_pending", ()):
+         snap = ref()
+@@ -552,11 +659,17 @@
+     st.row_pending = keep
+ 
+ 
+-def complete_rows(e: Engine, snap: Snapshot) -> None:
+-    """A saved state's rows it still leaves in the caches copied out now (before the spill tier reads its copies)."""
++def complete_rows(e: Engine | None, snap: Snapshot) -> None:
++    """A saved state's copies made whole and the rows it still leaves in the caches copied out now (before the spill
++    tier reads its copies). ``e`` is read only when rows are still pending (None: none are)."""
+     pend = getattr(snap, "_pend", None)
+-    if pend is not None and id(snap.rows) == pend[2]:
+-        _fill(e.st, snap, 0, 0)
++    if pend is None or id(snap.rows) != pend[2]:
++        return
++    for k, r in enumerate(snap.rows):
++        if isinstance(r, _Pieces):
++            snap.rows[k] = r.whole()                    # (the list itself stays: its id is the pending rows' key)
++    if pend[0] or pend[1]:
++        _fill(e.st, snap, [(0, ROWS_OPEN)], [(0, ROWS_OPEN)])
+ 
+ 
+ def _cut(lineage, n: int):
+@@ -569,27 +682,86 @@
+     return _cut(getattr(st, "row_lineage", None), n)
+ 
+ 
+-def rows_written(st, start: int) -> None:
+-    """A write of ``st``'s rows from ``start`` to the end begins (a prefill from its resume point, and the decode
+-    after it): the saved states' rows there copied out first (``_flush``); a new tag there, the rows before it as they
+-    were (unknown ones as a new tag too: they match nothing)."""
+-    _flush(st, start, start // 4)
+-    head = _cut(getattr(st, "row_lineage", None), start) if start else ()
+-    if head is None:
+-        head = ((0, next(_WRITES)),)
+-    st.row_lineage = head + ((start, next(_WRITES)),)
+-
+-
+-def _first_unlike(a, b, n: int) -> int:
+-    """The first row below n where lineages ``a`` and ``b`` (both cut to n) name different writes (n: none)."""
++def _splice(lineage, lo: int, hi: int | None, tag: int):
++    """``lineage`` with rows [lo, hi) (hi None: to the end) now ``tag``'s, the rows past hi keeping theirs (unknown
++    rows, a None lineage's, as a new tag: they match nothing)."""
++    if lineage is None:
++        lineage = ((0, next(_WRITES)),)
++    out = [s for s in lineage if s[0] < lo] + [(lo, tag)]
++    if hi is not None:
++        past = [s for s in lineage if s[0] <= hi]           # the write holding row hi goes on from there
++        out.append((hi, past[-1][1]))
++        out += [s for s in lineage if s[0] > hi]
++    norm = []
++    for s in out:
++        while norm and norm[-1][0] >= s[0]:                 # (an empty range: the later entry at its start wins)
++            norm.pop()
++        if not norm or norm[-1][1] != s[1]:
++            norm.append(s)
++    return tuple(norm)
++
++
++def rows_written(st, start: int, end: int | None = None) -> None:
++    """A write of ``st``'s token rows [start, end) begins (a prefill from its resume point, and the decode after it;
++    ``end`` None: to the end of the caches, a write no caller bounds): the saved states' rows there, and the pooled
++    keys it completes, copied out first (``_flush``); a new tag there, the rows before and past it as they were.
++    A forward past ``end`` saves the rows it reaches first (``rows_past``)."""
++    if not SAVE_BOUND:
++        end = None
++    if end is None:                                      # no bound: every row from start out now, as before
++        hi = ROWS_OPEN
++    else:
++        hi = max(start, end)
++    _flush(st, [(start, hi)], [(start // 4, hi // 4)])
++    st.row_tag = next(_WRITES)
++    st.row_lineage = _splice(getattr(st, "row_lineage", None), start, None if hi == ROWS_OPEN else hi, st.row_tag)
++    st.row_end = hi
++
++
++def rows_past(st, upto: int) -> None:
++    """A forward of ``st`` is about to write token rows up to ``upto``, past the end its write declared
++    (``rows_written``): the saved states' rows from that end to ``upto`` (and the pools they complete) copied out
++    first, and the write's tag carried over them."""
++    lo = st.row_end
++    SAVE_STATS["late"] += 1
++    SAVE_STATS["late_rows"] += upto - lo
++    _flush(st, [(lo, upto)], [(lo // 4, upto // 4)])
++    st.row_lineage = _splice(getattr(st, "row_lineage", None), lo, upto, st.row_tag)
++    st.row_end = upto
++
++
++_forward.ROWS_PAST = rows_past
++
++
++def write_end(prompt_len: int, max_tokens: int, capacity: int) -> int:
++    """The token rows a request of ``prompt_len`` prompt tokens and ``max_tokens`` reply tokens can write end before
++    this (``rows_written``): the prompt's, and with a reply past its first token, the decode windows': a window at
++    position p verifies the last token and at most ``max_tokens - len(out)`` drafts (every drafter's depth and copy
++    room are capped so, ``mtp_decode`` / ``dflash_decode`` / ``auto_decode``), so the last row it writes is
++    prompt_len + max_tokens - 1. One token: no window."""
++    return min(capacity, prompt_len + (max_tokens if max_tokens > 1 else 0))
++
++
++def _unlike(a, b, n: int) -> list:
++    """The ranges of rows below n where lineages ``a`` and ``b`` name different writes (either None: all of them)."""
+     if a is None or b is None:
+-        return 0
+-    for x, y in zip(a, b):
+-        if x != y:
+-            return min(x[0], y[0])
+-    if len(a) == len(b):
+-        return n
+-    return (a if len(a) > len(b) else b)[min(len(a), len(b))][0]
++        return [(0, n)] if n else []
++    out, i, j, pos = [], 0, 0, 0
++    while pos < n:
++        na = a[i + 1][0] if i + 1 < len(a) else n
++        nb = b[j + 1][0] if j + 1 < len(b) else n
++        nxt = min(na, nb, n)
++        if a[i][1] != b[j][1]:
++            if out and out[-1][1] == pos:
++                out[-1] = (out[-1][0], nxt)
++            else:
++                out.append((pos, nxt))
++        pos = nxt
++        if na == nxt and i + 1 < len(a):
++            i += 1
++        if nb == nxt and j + 1 < len(b):
++            j += 1
++    return out
+ 
+ 
+ def _row_views(st, n: int, m: int) -> list[torch.Tensor]:
+@@ -630,20 +802,26 @@
+ def save_rows(e: Engine, snap: Snapshot, drafter=None) -> None:
+     """Copy a snapshot's attention rows out of the live caches before another conversation overwrites them; DFlash2's
+     context goes with them only given ``drafter`` (TF_GLM_SHARED_PREFIX), otherwise the snapshot no longer fits it.
+-    With ``ROW_LINEAGE``, the token and pooled-key rows are copied out by the writes that change them (``_flush``)."""
++    With ``ROW_LINEAGE`` or ``SAVE_BOUND``, the token and pooled-key rows are copied out by the writes that change them
++    (``_flush``), with ``SAVE_BOUND`` into pieces of the rows each copies (``_Pieces``: nothing allocated now); the
++    lineage of what they hold is kept with ``ROW_LINEAGE`` only. ``nbytes``, the memory every keep and drop decision
++    counts, is the whole copy's either way."""
+     views = _saved_views(e, snap, drafter)
+-    if ROW_LINEAGE:
++    pools = _kinds(e.st)[1] if _deferred() else 0
++    if pools:
+         import weakref
+ 
+         st = e.st
+-        pools = _kinds(st)[1]
+-        snap.rows = [torch.empty_like(v) if k < pools else v.clone() for k, v in enumerate(views)]
+-        snap._lineage = _lineage_to(st, len(snap.ids))     # (what these copies hold: the caches' rows now)
+-        snap._pend = [len(snap.ids), len(snap.ids) // 4 + 1, id(snap.rows)]
++        snap.rows = [(_Pieces(v) if SAVE_BOUND else torch.empty_like(v)) if k < pools else v.clone()
++                     for k, v in enumerate(views)]
++        # (what these copies hold: the caches' rows now; without the lineage, nothing a load can match)
++        snap._lineage = _lineage_to(st, len(snap.ids)) if ROW_LINEAGE else None
++        snap._pend = [[(0, len(snap.ids))], [(0, len(snap.ids) // 4 + 1)], id(snap.rows)]
+         st.row_pending = [r for r in getattr(st, "row_pending", ()) if r() is not None] + [weakref.ref(snap)]
+     else:
+         snap.rows = [v.clone() for v in views]
+-    snap.nbytes = sum(r.numel() * r.element_size() for r in snap.rows)
++    SAVE_STATS["out_bytes"] += sum(v.numel() * v.element_size() for v in views[pools:])
++    snap.nbytes = sum(v.numel() * v.element_size() for v in views)
+     if drafter is None or snap.drafter_end != len(snap.ids):
+         snap.drafter_end = -1
+         snap.drafter_rows = None
+@@ -665,33 +843,54 @@
+ 
+ def load_rows(e: Engine, snap: Snapshot, drafter=None) -> None:
+     """Put a saved snapshot's attention rows (and DFlash2's, when it saved them: the same ``drafter``) back: only the
+-    rows the live caches do not hold from the same write (``ROW_LINEAGE``): the token rows from the first row their
+-    lineages differ at, the pooled keys from its pool, and of those only the ones it copied out (the rest it left in
+-    the caches, which no write has changed since); the MTP head's and DFlash2's rows whole."""
++    token and pooled-key rows it copied out (the ones still pending it left in the caches, which no write has changed
++    since), and of those only the ones the live caches do not hold from the same write (``ROW_LINEAGE``: the token rows
++    where the lineages differ, a pooled-key row where any of its tokens' do, and the row past the end); the MTP head's
++    and DFlash2's rows whole. A state saved whole (TF_GLM_ROW_LINEAGE=0 and TF_GLM_SAVE_BOUND=0, or read from the
++    spill tier) goes back whole, as before."""
+     views = _saved_views(e, snap, drafter)
+     if len(views) != len(snap.rows):
+         raise ValueError("a saved snapshot's rows do not match the caches they go back to")
+-    if not ROW_LINEAGE:
++    st, n = e.st, len(snap.ids)
++    pend = getattr(snap, "_pend", None)
++    if pend is not None and id(snap.rows) != pend[2]:
++        pend = None
++    if not ROW_LINEAGE and pend is None:
+         for dst, src in zip(views, snap.rows):
+             dst.copy_(src)
++        SAVE_STATS["back_rows"] += n
++        SAVE_STATS["back_bytes"] += sum(v.numel() * v.element_size() for v in views)
+         return
+-    st, n = e.st, len(snap.ids)
+-    mine = getattr(snap, "_lineage", None)
+-    same = _first_unlike(_lineage_to(st, n), mine, n)
+-    pend = getattr(snap, "_pend", None)
+-    p, q = (pend[0], pend[1]) if pend is not None and id(snap.rows) == pend[2] else (0, 0)
+-    wt, wq = max(same, p), max(same // 4, q)
++    mine = getattr(snap, "_lineage", None) if ROW_LINEAGE else None
++    diff = _unlike(_lineage_to(st, n), mine, n)
++    pdiff = []                                           # a pooled-key row whose tokens differ, and the row past n
++    for lo, hi in diff + [(4 * (n // 4), 4 * (n // 4) + 1)]:
++        a, b = lo // 4, (hi - 1) // 4 + 1
++        if pdiff and a <= pdiff[-1][1]:
++            pdiff[-1] = (pdiff[-1][0], max(pdiff[-1][1], b))
++        else:
++            pdiff.append((a, b))
++    wt, wq = (_minus(diff, pend[0]), _minus(pdiff, pend[1])) if pend is not None else (diff, pdiff)
+     tokens, pools = _kinds(st)
+     _flush(st, wt, wq)                                   # (the other saved states' rows this load changes, out first)
+-    st.row_lineage = None                                # (rows changing: unknown until every copy is done)
+     for k, (dst, src) in enumerate(zip(views, snap.rows)):
+-        lo = wt if k < tokens else wq if k < pools else 0
+-        if lo:
+-            dst[lo:].copy_(src[lo:])
+-        else:
++        if k >= pools:
+             dst.copy_(src)
+-    # rows [0, n) are the snapshot's now; past n, a new tag (its pool row n // 4 came from the snapshot)
+-    st.row_lineage = (mine if mine is not None else ((0, next(_WRITES)),)) + ((n, next(_WRITES)),)
++            SAVE_STATS["back_bytes"] += src.numel() * src.element_size()
++            continue
++        rb = _row_bytes_of(dst)
++        for lo, hi in wt if k < tokens else wq:
++            if isinstance(src, _Pieces):
++                src.put(dst, lo, hi)
++            else:
++                dst[lo:hi].copy_(src[lo:hi])
++            SAVE_STATS["back_bytes"] += (hi - lo) * rb
++    SAVE_STATS["back_rows"] += sum(hi - lo for lo, hi in wt)
++    # rows [0, n) are the snapshot's now; the tokens of its last pool past n, a new tag (its pool row n // 4 came
++    # from the snapshot); past that pool, the rows as they were (this load wrote none of them)
++    live = _splice(getattr(st, "row_lineage", None), n, 4 * (n // 4) + 4, next(_WRITES))
++    head = _cut(mine, n) if mine is not None else ((0, next(_WRITES)),)
++    st.row_lineage = head + tuple(s for s in live if s[0] >= n)
+ 
+ 
+ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
+@@ -721,12 +920,15 @@
+ 
+ @torch.no_grad()
+ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True, drafter=None,
+-            resume: Snapshot | None = None, feed=None, sample: bool = True, keep_head: bool = False) -> int | None:
++            resume: Snapshot | None = None, feed=None, sample: bool = True, keep_head: bool = False,
++            rows_end: int | None = None) -> int | None:
+     """Commit the prompt in chunks and sample its first token; a resumed prompt ends in a fresh prefill's state; ``feed``: an image prompt's feature rows (``engine.VisionFeed``); ``sample=False``: commit only (no head, no first token, None), leaving the state a prompt of this length leaves before its sample.
+ 
+     ``resume`` may also be a state of the whole prompt that kept its head's logits row (``whole``, a replay): the
+     state goes back and the first token is sampled from that row, nothing prefilled. ``keep_head``: the head's
+-    logits row of the prompt's end, as sampled from (before a grammar's mask), is left in ``e.head`` for a snapshot."""
++    logits row of the prompt's end, as sampled from (before a grammar's mask), is left in ``e.head`` for a snapshot.
++    ``rows_end`` (OTS SwitchSave): the end of the token rows this prompt and the decode after it write
++    (``write_end``; None: unbounded), so saved states keep their rows past it in the caches (``rows_written``)."""
+ 
+     if not prompt:
+         raise ValueError("prefill requires at least one token")
+@@ -758,8 +960,10 @@
+         elif use_mtp:
+             k = resume.pending.shape[0]
+             _absorb_rows(e, resume.pending, list(prompt[begin - k + 1:begin + 1]))
+-    if ROW_LINEAGE:
+-        rows_written(st, begin)                          # (OTS, TF_GLM_ROW_LINEAGE: this prompt's rows and its reply's)
++    if _deferred():
++        # (OTS, TF_GLM_ROW_LINEAGE or TF_GLM_SAVE_BOUND: saved states' rows this prompt and its reply write, up to
++        # rows_end, copied out first; the lineage tagged)
++        rows_written(st, begin, rows_end)
+     last = None
+     if replay:
+         last = resume.head.clone()                       # a grammar's mask below writes into the rows it samples
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -386,6 +386,14 @@
+             + 16)
+ 
+ 
++# OTS SwitchSave: ``State.row_end``, the end of the token rows the current write declared (``decode.rows_written``);
++# ``stage`` calls ``ROWS_PAST(st, st.pos + R)`` (``decode.rows_past``, set when decode is imported: it saves the rows
++# from that end up to the forward's last row + 1) before a forward of R rows that writes past it. ROWS_OPEN: no end
++# (nothing declared, or a write to the end of the caches).
++ROWS_OPEN = 1 << 62
++ROWS_PAST = None
++
++
+ class State:
+     """Committed caches of one sequence (and of the MTP head's attention layer): views of its extent [base, base +
+     capacity) of the pool's ``Caches`` and of its stream slot (``Slots``). Without ``caches`` / ``slots`` it makes its
+@@ -419,6 +427,7 @@
+         self.keep_point = 0
+         self.kept_at = [-1] * n
+         self.kept_conv: torch.Tensor | None = None
++        self.row_end = ROWS_OPEN
+         self.bind(base, capacity)
+ 
+     def bind(self, base: int, capacity: int) -> None:
+@@ -1576,6 +1585,8 @@
+     if R > b.rows:
+         raise ValueError(f"window of {R} rows, buffers hold {b.rows}")
+     check_room(w, st, R)
++    if st.pos + R > st.row_end:                  # (OTS SwitchSave: past the write's declared end, saved rows first)
++        ROWS_PAST(st, st.pos + R)
+     b.staged.synchronize()
+     b.ids_host[:R].numpy()[:] = list(tokens)
+     b.ids[:R].copy_(b.ids_host[:R], non_blocking=True)
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1919,11 +1919,13 @@
+                 st.unwritten[why] = st.unwritten.get(why, 0) + 1
+             return
+         viewed = False
+-        pend = getattr(snap, "_pend", None)       # (OTS, TF_GLM_ROW_LINEAGE: saved rows still in the caches copied out)
+-        if pend is not None and (pend[0] or pend[1]) and pend[2] == id(snap.rows):
++        # (OTS, TF_GLM_ROW_LINEAGE or TF_GLM_SAVE_BOUND: saved rows still in the caches copied out; SwitchSave: a copy
++        # kept as pieces made whole, which needs no engine when nothing is pending)
++        pend = getattr(snap, "_pend", None)
++        if pend is not None and pend[2] == id(snap.rows):
+             from .decode import complete_rows
+ 
+-            complete_rows(self.e, snap)
++            complete_rows(self.e if pend[0] or pend[1] else None, snap)
+         try:
+             job = self.spill.save(snap.ids, snap, (), skip=self._SPILL_SKIP, materialize=self._spill_rows,
+                                   head=getattr(snap, "head", None) is not None, keep=keep, key=self._spill_key(snap))
+@@ -2034,9 +2036,13 @@
+     def _take_over(self, keep: list[int]) -> None:
+         """Save the rows of every kept snapshot the next prefill overwrites, dropping the oldest entries past the memory budget; both ranks decide alike.
+ 
+-        Decided first, copied after: which snapshots stay within the budget is worked out from their sizes alone, the
+-        rest are dropped without a copy, and only the survivors are cloned. Cloning each in turn and dropping it for the
+-        next grew the allocator's pool with every larger copy (reserved memory far past the budget)."""
++        Decided first, saved after: which snapshots stay within the budget is worked out from their sizes alone, the
++        rest are dropped without a copy, and only the survivors go to ``save_rows``. There, with TF_GLM_ROW_LINEAGE=0
++        and TF_GLM_SAVE_BOUND=0 their rows are cloned now; otherwise nothing is copied now (OTS ForksP1, SwitchSave):
++        each write copies out the rows of them it is about to change (``decode.rows_written``), into a whole copy
++        allocated now (lineage on, bound off) or into pieces of just those rows (the bound on, ``decode._Pieces``).
++        Cloning each in turn and dropping it for the next grew the allocator's pool with every larger copy (reserved
++        memory far past the budget)."""
+         from .decode import row_bytes, save_rows, snapshot_bytes
+ 
+         drafter = self._kept_drafter()
+@@ -2156,7 +2162,7 @@
+                   on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool,
+                   feed=None, shared=(), salt: str | None = None, ids=None) -> dict[str, Any]:
+         from .decode import (DepthPolicy, StopVote, dflash_decode, mtp_decode, prefill, serial_decode, take_snapshot,
+-                             whole)
++                             whole, write_end)
+         from .drafter_choice import DrafterChoice, auto_decode
+ 
+         auto, use_mtp, use_dflash = self._drafters(code)
+@@ -2197,7 +2203,7 @@
+         at, pid = (cut, snap_pid(hit)) if hit is not None and feed is None else (0, (0, 0))
+         for stop in stops:
+             head = prompt[:stop]                                  # (a list of its own: take_snapshot copies it)
+-            prefill(self.e, head, sampling, mtp=use_mtp, drafter=drafter, resume=resume, sample=False)
++            prefill(self.e, head, sampling, mtp=use_mtp, drafter=drafter, resume=resume, sample=False, rows_end=stop)
+             resume = take_snapshot(self.e, head, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
+                                    drafter=drafter)
+             resume.shared = stop != point                         # (a shared-prefix point; --spill-gib writes it)
+@@ -2212,8 +2218,10 @@
+         if inner:
+             self.e.st.mark(point)
+         try:
++            # (OTS SwitchSave: the rows this prompt and its reply can write, so a switch saves only those of the other
++            # conversations' states)
+             first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=resume, feed=feed,
+-                            keep_head=end)
++                            keep_head=end, rows_end=write_end(len(prompt), max_tokens, self.e.st.capacity))
+         finally:
+             if inner:
+                 self.e.st.mark(0)

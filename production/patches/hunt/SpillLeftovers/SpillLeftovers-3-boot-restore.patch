@@ -1,0 +1,224 @@
+--- tensorfold/cuda/spill_blocks.py
++++ tensorfold/cuda/spill_blocks.py
+@@ -1753,6 +1753,30 @@
+                 return pt
+         return None
+ 
++    def newest_states(self) -> list[Point]:
++        """Rank 0, before the first request (TF_GLM_SPILL_BOOT_RESTORE, ``MultiDecoder.boot_plan``): each
++        conversation's newest complete state (the newest leaf of its path, the one ``_victims`` keeps longest), most
++        recently used first, then the shared-prefix states, most recently used first."""
++
++        with self.lock:
++            parent, conv = self._tree()
++            children: dict[str, list[str]] = {}
++            for k, p in parent.items():
++                if p is not None:
++                    children.setdefault(p, []).append(k)
++            groups: dict[str, list[str]] = {}
++            for k, c in conv.items():
++                groups.setdefault(c, []).append(k)
++            out = []
++            for c, keys in groups.items():
++                if c is None:
++                    continue
++                leaves = [k for k in keys if not [x for x in children.get(k, []) if conv.get(x) == c]]
++                out.append(self.index[max(leaves or keys, key=lambda k: (self.index[k].used, self.index[k].n))])
++            out.sort(key=lambda p: (-p.used, -p.n))
++            out += sorted((self.index[k] for k in groups.get(None, [])), key=lambda p: (-p.used, -p.n))
++            return [p for p in out if all(b in self.have for b in p.blocks)]
++
+     def load_async(self, key: str, where) -> LoadJob:
+         """Start reading point ``key``'s blocks and small state on the reader thread; the engine copies them into extent
+         ``where`` (``step``, ``finish_load``). A point this rank lacks fails the read."""
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -68,6 +68,21 @@
+ IDLE_POLL_S = 0.005
+ 
+ 
++def boot_restore() -> tuple[bool, float, float]:
++    """TF_GLM_SPILL_BOOT_RESTORE=1 (off by default): an idle rank 0 reads stored states back into the pool from the
++    start (``GlmScheduler._boot_restore``), each conversation's newest first, so the first turn after a restart
++    resumes from memory rather than from disk. (on, TF_GLM_SPILL_BOOT_S: no read starts later than this many seconds
++    after the first (120), TF_GLM_SPILL_BOOT_FILL: the share of the pool's rows they may take (0.75)). Bits unchanged:
++    a restored state is the one a request's own read would load (the same ``_start_load`` / ``_finish_load``)."""
++
++    on = os.environ.get("TF_GLM_SPILL_BOOT_RESTORE", "0").strip() not in ("", "0")
++    secs = float(os.environ.get("TF_GLM_SPILL_BOOT_S", "120") or 120)
++    fill = float(os.environ.get("TF_GLM_SPILL_BOOT_FILL", "0.75") or 0.75)
++    if secs < 0 or not 0.0 < fill <= 1.0:
++        raise ValueError(f"TF_GLM_SPILL_BOOT_S >= 0 and TF_GLM_SPILL_BOOT_FILL in (0, 1], not {secs}, {fill}")
++    return on, secs, fill
++
++
+ def watchdog_seconds(value: str | None = None) -> float:
+     """TF_GLM_MULTI_WATCHDOG_S: seconds a rank-0 iteration (or a rank-1 message it is owed) may take before every
+     thread's Python stack is dumped to the log (faulthandler; 0: off; default 300)."""
+@@ -2169,14 +2184,76 @@
+         h.ids = pt.ids                           # (its int64 array: the check above compares arrays, no list made)
+         return h
+ 
+-    def _start_load(self, hi: int, lo: int, n: int, base: int, size: int, lid: int):
+-        """Both ranks: an extent at ``base`` for stored prompt (hi, lo), its read started on the reader thread."""
++    def boot_plan(self) -> list:
++        """Rank 0, before the first request (TF_GLM_SPILL_BOOT_RESTORE): the stored states to read back into the pool,
++        in the order to read them: each conversation's newest state, most recently used first, then the shared-prefix
++        states, while their rows fit TF_GLM_SPILL_BOOT_FILL of the pool, their count the cache's entries (one left for
++        the first request's own state) and their small states TF_GLM_KEPT_BYTES_GIB when set."""
++
++        on, _, fill = boot_restore()
++        if not on or self.disk is None or self.rank != 0:
++            return []
++        rows, count, held = int(fill * self.pool.rows), max(0, self.g.cache_entries - 1 - len(self.kept)), 0
++        cap = getattr(self, "kept_bytes_cap", 0) or 0
++        out = []
++        for pt in self.disk.newest_states():
++            if len(out) >= count:
++                break
++            if (self.grid and pt.n % self.grid) or self._need(pt.n) > self.pool.rows:
++                continue
++            size = align_up(pt.n)
++            if size > rows or (cap and held + pt.small_bytes > cap):
++                continue
++            rows, held = rows - size, held + pt.small_bytes
++            out.append(pt)
++        return out
++
++    def boot_read(self, pt):
++        """Rank 0, idle: a read of stored state ``pt`` into free rows (never evicting a kept prompt), started as
++        ``prestage`` starts one for a request (HAS, then LOAD with the boot flag), or None (kept or read already, a rank
++        lacks it, another part's) or False (no free rows for it: the restore ends)."""
++
++        if self.disk is None:
++            return None
++        self._check()
++        if any(h.key == pt.key for h in self.loads.values()) or any(
++                len(c.ids) == pt.n and np.array_equal(self._ident(c), pt.ids) for c in self.kept):
++            return None
++        half = None
++        if self.pool.half:                       # TF_GLM_KV_SHARD: back into the half whose rank holds its latents
++            half = (pt.fields or {}).get("half")
++            if half is None:
++                return None
++        from tensorfold.cuda.spill_blocks import key_ints
++
++        hi, lo, n = key_ints(pt.key)
++        self._emit(HAS, [hi, lo, n])              # every rank holds it complete, or nobody reads it
++        self._flush()
++        if not all(r[0] for r in self.g._gather_ints([int(self.disk.has(pt.key))])):
++            self.disk.stats["has_refused"] += 1
++            return None
++        size = align_up(pt.n)
++        base = self._spaced(size, half=half)      # free rows only: a restore never evicts
++        if base is None:
++            return False
++        lid = self.next_lid
++        self.disk.stats["boot_reads"] = self.disk.stats.get("boot_reads", 0) + 1
++        self._emit(LOAD, [hi, lo, n, base, size, lid, 1])
++        self._flush()
++        h = self._start_load(hi, lo, n, base, size, lid, 1)
++        h.ids = pt.ids
++        return h
++
++    def _start_load(self, hi: int, lo: int, n: int, base: int, size: int, lid: int, boot: int = 0):
++        """Both ranks: an extent at ``base`` for stored prompt (hi, lo), its read started on the reader thread.
++        ``boot``: a restore at start (``boot_read``; LOAD's seventh value), kept as the least recently used."""
+ 
+         import types
+ 
+         self.next_lid = lid + 1
+         x = self.pool.add(base, size)
+-        h = types.SimpleNamespace(lid=lid, key=(hi, lo), n=n, x=x, lj=None, err=None, done=False, ids=None)
++        h = types.SimpleNamespace(lid=lid, key=(hi, lo), n=n, x=x, lj=None, err=None, done=False, ids=None,
++                                  boot=bool(boot))
+         x.loading = h
+ 
+         from tensorfold.cuda.spill_blocks import ints_key
+@@ -2307,7 +2384,10 @@
+         snap.own, snap.chat = False, 0           # a restored state counts against no conversation's quota
+         snap.extent = x
+         x.kept.append(snap)
+-        self.kept.append(snap)
++        if h.boot:                               # a restore at start: older than any state a request kept or resumed,
++            self.kept.insert(0, snap)            # and read most recent first, so each goes before the ones read before
++        else:
++            self.kept.append(snap)
+         while len(self.kept) > max(1, self.g.cache_entries):
+             self._drop(cap_victim(self.kept))
+         return True
+@@ -3601,6 +3681,9 @@
+         self.ready: list = []            # items whose read ended: admitted before the queue
+         self.prefix: list = []           # (point, item): requests waiting for a prefix another one is prefilling
+         self.staged: set = set()         # streams a read was looked for already
++        self.boot: list | None = None    # TF_GLM_SPILL_BOOT_RESTORE: stored states still to read back (None: not planned)
++        self.boot_until = 0.0            # no restore read starts after this (time.monotonic)
++        self.serving = False             # the engine's start is over (``started``): the worker may gather unasked
+         # TF_GLM_MULTI_PREFILL_WAIT_MS: an idle server's wait for requests arriving with the first (their prompts then
+         # share its first chunk); only with TF_GLM_MULTI_PREFILL=1
+         self.gather_s = multi_prefill.wait_ms() / 1000.0 if getattr(decoder, "group", False) else 0.0
+@@ -3866,9 +3949,52 @@
+                 continue
+         return self.waiting.get()
+ 
++    def _boot_restore(self) -> None:
++        """TF_GLM_SPILL_BOOT_RESTORE: while nothing else runs or waits, the next stored state of ``boot_plan`` read back
++        into the pool, one at a time, as a request's read (``boot_read``; ``loading`` with no request), so each agent's
++        first turn after a restart resumes from memory. A request arriving meanwhile goes first (a read of the same
++        state is shared: ``prestage`` waits for it); nothing starts past TF_GLM_SPILL_BOOT_S, or once the pool's free
++        rows run out."""
++
++        if self.boot is None:
++            if not self.serving:                     # (the engine's start is not over: its own gathers first)
++                return
++            plan = getattr(self.decoder, "boot_plan", None)
++            self.boot = list(plan()) if plan is not None else []
++            self.boot_until = time.monotonic() + boot_restore()[1]
++            if self.boot:
++                print(f"[tensorfold] spill: restoring up to {len(self.boot)} stored states into the pool "
++                      f"(TF_GLM_SPILL_BOOT_RESTORE)", flush=True)
++        if not self.boot:
++            return
++        if time.monotonic() >= self.boot_until:
++            print(f"[tensorfold] spill: boot restore stopped at TF_GLM_SPILL_BOOT_S, {len(self.boot)} states left on "
++                  "disk", flush=True)
++            self.boot = []
++            return
++        if (self.loading or self.ready or self.prefix or self.held is not None or self.decoder.live()
++                or self.waiting.qsize()):
++            return
++        while self.boot:
++            got = self.decoder.boot_read(self.boot.pop(0))
++            if got is False:                         # no free rows left: the rest stay on disk
++                self.boot = []
++            elif got is not None:
++                self.loading.append((got, None))
++                return
++
++    def started(self) -> None:
++        """The engine, once its start is over (every gather of it done, ``comm.settle``): the worker may gather on its
++        own now (``_boot_restore``); woken in case it waits for a request."""
++
++        self.serving = True
++        if boot_restore()[0]:
++            self.waiting.put((self._Flush, None))
++
+     def _iteration(self) -> None:
+         self._cancel_waiting()
+         self._yield()
++        self._boot_restore()
+         reading = bool(self.loading or self.ready or self.prefix)
+         idle = not self.decoder.live() and self.held is None and not reading
+         if reading and not self.decoder.live():
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1192,6 +1192,9 @@
+         fastboot.mark("serving")
+         if hasattr(self.comm, "settle"):                # startup is over: RoCE gathers go without a barrier first
+             self.comm.settle()
++        started = getattr(getattr(self, "scheduler", None), "started", None)
++        if started is not None:                         # rank 0's scheduler may gather unasked from now on (never
++            started()                                   # during the start's own gathers): TF_GLM_SPILL_BOOT_RESTORE
+ 
+     def _calibrate(self) -> dict:
+         """Per-piece ms for ``drafter_choice.DrafterChoice``: fastest of interleaved passes, equal on both ranks."""

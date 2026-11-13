@@ -1,0 +1,39 @@
+# HuntSpill-5-persist-hash-overlap.patch (lane HuntSpill, 2026-10-30; the synced tree with sync/ORDER applied).
+# BlockStore.persist (every keep, every rank, the engine loop, before the turn's first token) hashes the state's ids
+# twice in a row: point_key (sha256 of every id) and block_hashes (sha256 chained over each 2,048-id block, with the
+# lineage). hashlib releases the GIL, so the block names now go to a one-thread executor while the engine thread
+# computes the key; when the ids are stored already ("stored") the names are not waited for. The same names and key.
+# Measured at 771,584 ids (micro_overlap.py, interleaved, 15 runs): WSL 7.0 -> 4.6 ms (min), Windows 8.3 -> 5.9 ms.
+# Test: test_persist_hash_overlap.py <tree> [--ref <pre-patch tree>] (CPU torch, Linux): the names are hashed off the
+# calling thread (the pre-patch tree: on it, FAIL), a second persist of the same ids is "stored", every file on disk
+# byte-identical to the pre-patch tree's.
+diff -ruN tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
+--- tensorfold/cuda/spill_blocks.py	2026-10-29 23:44:08.458799100 +0000
++++ tensorfold/cuda/spill_blocks.py	2026-10-29 23:57:21.459333800 +0000
+@@ -578,6 +578,9 @@
+         self.slot_events: list = []                        # a write slot's event, reused by every block it stages
+         self.read_slots: list[torch.Tensor] = []
+         self._hasher = ThreadPoolExecutor(2, thread_name_prefix=f"spill-hash-{self.rank}")
++        # a keep's block names beside its point key (``persist``): both hash every id (hashlib lets the GIL go), so
++        # the engine loop waits for the longer of the two, not their sum (~7.4 -> ~4.7 ms at 772k ids)
++        self._namer = ThreadPoolExecutor(1, thread_name_prefix=f"spill-name-{self.rank}")
+         self._readers = ThreadPoolExecutor(READERS, thread_name_prefix=f"spill-read-{self.rank}")
+         threading.Thread(target=self._writer, name=f"spill-writer-{self.rank}", daemon=True).start()
+         threading.Thread(target=self._read_loop, name=f"spill-reader-{self.rank}", daemon=True).start()
+@@ -813,6 +816,7 @@
+         t0 = time.perf_counter()
+         ids = np.asarray(ids, dtype=np.int64)
+         n = len(ids)
++        names = self._namer.submit(block_hashes, ids, self.block, lineage)   # (unused when the ids are stored)
+         key = point_key(ids)
+         with self.lock:
+             if key in self.index or key in self.inflight:
+@@ -828,7 +832,7 @@
+                         self.jobs.put(("shared", None, key, None))
+                 self.stats["skipped"] += 1
+                 return "stored"
+-        hashes = block_hashes(ids, self.block, lineage)
++        hashes = names.result()
+         pins = {h for _, _, h in hashes}
+         with self.lock:                                     # (making room below never takes a block this state names)
+             self.pinned |= pins

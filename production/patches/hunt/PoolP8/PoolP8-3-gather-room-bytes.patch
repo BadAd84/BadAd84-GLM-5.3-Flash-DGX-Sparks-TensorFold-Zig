@@ -1,0 +1,59 @@
+# PoolP8-3 (lane PoolP8, 2026-10-31): PoolP8-1's gather of every rank's room (bytes past the estimate and the pool's
+# share) went through GlmEngine._gather_ints, which sends int32: on GB10 a rank's room is GiBs, and every boot with
+# the spill tier at --parallel 2-8 died with "value cannot be converted to type int32 without overflow" (wave 6).
+# The rooms now go through engine.gather_bytes, exactly: each as two int32 words (value >> 30, value & 2**30 - 1)
+# joined again; a value below 0 or past 2**61 is refused. _gather_ints itself refuses a value past int32 with its
+# name before sending anything (instead of torch's overflow). The pool is unchanged (the same rooms, exact).
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -276,6 +276,25 @@
+     TF_GLM_CACHE_GIB leaves that room and pays nothing; a pool the budget sizes leaves none and pays all, as before."""
+ 
+     return max(0, int(pinned) - min(int(r) for r in rooms))
++
++
++INT32 = (-(1 << 31), (1 << 31) - 1)      # what ``_gather_ints`` sends: an int32 a value
++LOW_BITS = 30                         # gather_bytes: a value's low word (0 .. 2**30 - 1) and its high word
++
++
++def gather_bytes(gather: Callable[[list[int]], list[list[int]]], values: list[int]) -> list[list[int]]:
++    """Every rank's ``values`` (byte counts, 0 or more) through ``gather`` (``GlmEngine._gather_ints``: int32 a value),
++    exactly: each as two int32 words, value >> LOW_BITS and value & (2**LOW_BITS - 1), joined again. A GB10's room past
++    its estimate is GiBs, past int32's 2 GiB. A value below 0 or past what the high word holds (2**61 bytes) is refused
++    (ValueError) before anything is sent."""
++
++    words = []
++    for v in values:
++        v = int(v)
++        if v < 0 or v >> LOW_BITS > INT32[1]:
++            raise ValueError(f"gather_bytes: {v} is not a byte count from 0 to 2**{31 + LOW_BITS} - 1")
++        words += [v >> LOW_BITS, v & ((1 << LOW_BITS) - 1)]
++    return [[(row[2 * i] << LOW_BITS) | row[2 * i + 1] for i in range(len(values))] for row in gather(words)]
+ 
+ 
+ def pool_charge(value: str | None = None) -> str:
+@@ -1274,7 +1293,9 @@
+                 pinned = pin_read_ahead(per_token * ALIGN)
+                 # PoolP8: what every rank's budget still holds past its estimate and the agreed pool (above the reserve,
+                 # where spill.preallocate's buffers came from) takes the pinned bytes first, the pool only the rest
+-                rooms = [r[0] for r in self._gather_ints([max(0, plan["budget_bytes"] - plan["total_bytes_estimate"])])]
++                # (bytes: GiBs a rank, past int32: two words a value, ``gather_bytes``)
++                room = max(0, plan["budget_bytes"] - plan["total_bytes_estimate"])
++                rooms = [r[0] for r in gather_bytes(self._gather_ints, [room])]
+                 self.cache_bytes = max(0, self.cache_bytes - read_ahead_charge(pinned, rooms))
+             # TF_GLM_DISPLAY_KV_MIB: the display reservation's bytes too, which free memory never counted
+             display = display_kv.credit()
+@@ -1624,7 +1645,13 @@
+                 "taps_row": max(both.get("taps8", 0.0) / 8, 0.0), "timed": {k: round(v, 2) for k, v in both.items()}}
+ 
+     def _gather_ints(self, values: list[int]) -> list[list[int]]:
++        """Every rank's ``values`` (int32 each: a byte count goes through ``gather_bytes``). A value past int32 is
++        refused naming it before anything is sent, instead of torch's overflow error; as before, a rank that raises
++        here leaves the others to fail at this collective."""
+         torch = self.torch
++        bad = [v for v in values if not INT32[0] <= int(v) <= INT32[1]]
++        if bad:
++            raise ValueError(f"_gather_ints: {bad} past int32 in {list(values)} (byte counts: gather_bytes)")
+         mine = torch.tensor(values, dtype=torch.int32, device="cuda")
+         got = torch.empty((self.world * len(values),), dtype=torch.int32, device="cuda")
+         self.comm.all_gather(mine, got)

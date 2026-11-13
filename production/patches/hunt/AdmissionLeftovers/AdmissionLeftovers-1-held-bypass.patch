@@ -1,0 +1,139 @@
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -1116,6 +1116,36 @@
+                 return True
+         return False
+ 
++    def in_place(self, s: Stream) -> bool:
++        """Rank 0, read only (TF_GLM_HELD_BYPASS, ``GlmScheduler._bypass``): whether admitting ``s`` now takes a kept
++        extent over in place and grows it by free rows only. The longest kept prefix of its prompt (``_resume``, the hit
++        ``admit`` finds) lies in an extent no stream holds, with no other conversation's longer state in it (else
++        ``_place`` copies into new rows), and the pool's free rows cover the growth plus a block for each decoding stream
++        (``fits``' headroom). ``_place`` then grows that extent (``_grow``: in place, the extents in its way moved, or
++        compacted; never an eviction, since the free rows cover the growth), so the request takes no rows but its own
++        kept ones and free ones no decoder's headroom needs. False with parts (TF_GLM_KV_SHARD: carries, twins), the
++        spill tier (``prestage`` may read a longer stored prompt into new rows), TF_GLM_PREFIX_WAIT, pictures, or a
++        request that does not draft (it resumes nothing)."""
++
++        g = self.g
++        if (self.pool.half or self.disk is not None or PREFIX_WAIT or s.vision is not None or not s.draft
++                or g.serial_only):
++            return False
++        prompt, karr = stream_ids(s)
++        if not prompt or len(prompt) >= g.limit:
++            return False
++        hit = self._resume(prompt, (getattr(s, "glm", None) or {}).get("salt"), karr)
++        if hit is None:
++            return False
++        x = hit.extent
++        if x.owner is not None or x.twin or getattr(x, "loading", None) is not None:
++            return False
++        if any(len(c.ids) > len(hit.ids) and not key_is(c, len(c.ids), karr) for c in x.kept):
++            return False
++        grow = max(0, self._need(len(prompt)) - x.size)
++        busy = sum(1 for l in self.lanes.values() if l.decoding)
++        return grow + ALIGN * busy <= self.pool.free_rows()
++
+     def admit(self, s: Stream) -> None:
+         """Rank 0: place a request (slot, extent; resumed from the longest kept prefix of its prompt when it drafts)
+         and queue its ADMIT; its prompt is prefilled chunk by chunk in later iterations."""
+@@ -3611,6 +3641,22 @@
+         return min(stop, nxt)
+ 
+ 
++def held_bypass(value: str | None = None) -> int:
++    """TF_GLM_HELD_BYPASS (default 0: off): while a request is held first in line for room, at most this many later
++    requests that resume a kept state in place and need no more rows than are free (``MultiDecoder.in_place``) are
++    admitted past it, per hold (``GlmScheduler._bypass``). Scheduling only: every admitted request's ADMIT and tokens are
++    what they would be when it is admitted; only when it is admitted changes. Rank 0 decides, so only its setting
++    matters."""
++
++    raw = (os.environ.get("TF_GLM_HELD_BYPASS", "") if value is None else value).strip() or "0"
++    if not raw.isdecimal():
++        raise ValueError(f"TF_GLM_HELD_BYPASS: a count of requests per hold (0: off), not {raw!r}")
++    return int(raw)
++
++
++HELD_BYPASS = held_bypass()
++
++
+ # -- the scheduler ----------------------------------------------------------------------------------------------------
+ class GlmScheduler(Scheduler):
+     """``cuda.scheduler.Scheduler`` for the GLM decoder: a request's GLM settings ride on its stream (``glm``); a
+@@ -3794,6 +3840,7 @@
+             if not self.decoder.fits(stream):
+                 self.held = item                     # waits, first in line, for room
+                 self._why_held(stream, "no room (fits)")
++                self._bypass(done)
+                 break
+             waiter = getattr(self.decoder, "prefix_wait", None)
+             if waiter is not None and not getattr(stream, "prefix_waited", False):
+@@ -3823,6 +3870,7 @@
+                 self.boxes.pop(id(stream))
+                 self.held = item
+                 self._why_held(stream, f"NoRoom: {exc}")
++                self._bypass(done)
+                 break
+             except Exception as exc:                 # noqa: BLE001  (this request fails, the others go on)
+                 self.staged.discard(id(stream))
+@@ -3832,6 +3880,60 @@
+                 done.append(stream)
+         return done
+ 
++    bypass_for = None                    # TF_GLM_HELD_BYPASS: the held stream whose hold ``bypassed`` counts for
++    bypassed = 0                         # requests admitted past it during that hold
++
++    def _bypass(self, done: list[Stream]) -> None:
++        """TF_GLM_HELD_BYPASS=N (``HELD_BYPASS``; 0, the default: off). Right after a request is held first in line
++        (``held``: ``fits`` refused it, or ``admit`` raised NoRoom), queued requests that take a kept extent over in place
++        and need no more rows than are free (``MultiDecoder.in_place``) are admitted past it, in queue order, while
++        slots are free, at most N during one hold (from the held request's first hold until it is admitted or
++        cancelled); every other request keeps its place in line, and the held request is still the first tried at every
++        later iteration.
++
++        Fairness bound: after N have passed, admission is what it is with the knob off (the held request first, nothing
++        past it: ``ready``, ``prefix`` and the queue are all behind it), so the held request is admitted no later than
++        when every stream live at its first hold and the at most N admitted past it have ended or been given back (with
++        no stream live ``fits`` is True and ``admit`` may evict every kept state; a prompt past the pool fails either
++        way). Each of those ends within its own token count, so the hold stays bounded; with the knob off the bound is
++        the first set alone. A request passing evicts nothing and takes none of the headroom ``fits`` keeps for the
++        decoding streams. With the spill tier or TF_GLM_PREFIX_WAIT on nothing passes (``in_place``), so skipping
++        ``prestage`` and ``prefix_wait`` here skips nothing they would do."""
++
++        import heapq
++
++        held = self.held[0]
++        if self.bypass_for is not held:
++            self.bypass_for, self.bypassed = held, 0
++        while self.bypassed < HELD_BYPASS and self.decoder.live() + self._reading() < self.max_streams:
++            with self.waiting.mutex:
++                line = sorted(self.waiting.queue)
++            entry = next((e for e in line if e[2][0] is not self._Flush and self.decoder.in_place(e[2][0])), None)
++            if entry is None:
++                return
++            with self.waiting.mutex:            # (only this thread takes from the queue: the entry is still there)
++                self.waiting.queue.remove(entry)
++                heapq.heapify(self.waiting.queue)
++            if self._cancel_item(entry[2]):
++                continue
++            stream, box = entry[2]
++            self.boxes[id(stream)] = box
++            try:
++                self.decoder.admit(stream)
++            except NoRoom:                       # (a slot: ``in_place`` found the rows) its place in line again
++                self.boxes.pop(id(stream))
++                with self.waiting.mutex:
++                    heapq.heappush(self.waiting.queue, entry)
++                return
++            except Exception as exc:             # noqa: BLE001  (this request fails, the others go on)
++                self.boxes.pop(id(stream)).put(("error", exc))
++                continue
++            self.bypassed += 1
++            print(f"[tensorfold] request of {len(stream.prompt)} prompt tokens admitted past the held one "
++                  f"({self.bypassed} of {HELD_BYPASS} this hold), resumed {stream.cached} in place", flush=True)
++            if stream.done:
++                done.append(stream)
++
+     def _why_held(self, stream, why: str) -> None:
+         """Rank 0: a request held at the head of the queue (every later one waits behind it) is logged once, with why
+         and the pool's state then: what tells a placement hold from a fill-order wait (recipe issue #199)."""

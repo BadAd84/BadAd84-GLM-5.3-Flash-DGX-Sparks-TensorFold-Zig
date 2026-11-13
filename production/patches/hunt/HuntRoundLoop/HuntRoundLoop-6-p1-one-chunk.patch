@@ -1,0 +1,67 @@
+diff -ruN tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1333,6 +1333,23 @@
+                 best = snap
+         return best
+ 
++    def _one_chunk(self, n: int, point: int | None, begin: int, mtp: bool, drafter) -> bool:
++        """--parallel 1, TF_GLM_ONE_CHUNK_WARM (OTS 0121, as ``multi.MultiDecoder._inner_ok``; every rank alike): whether
++        an n-token prompt prefilled from ``begin`` keeps its grid point ``point`` (< n) inside its last chunk rather than
++        at a chunk of its own. Not with the MTP head (its pending rows are a chunk stop's), not when a chunk of the
++        prompt ends exactly at the point (it is kept at that stop as before), and not when the rows past the point
++        would overwrite its DFlash2 window in the drafter's ring (n - point >= ring - window). The point and n lie in
++        one grid cell and chunks start on the grid, so the chunk holding the point is the last."""
++
++        from .multi import ONE_CHUNK
++
++        if not ONE_CHUNK or point is None or mtp or not begin < point < n:
++            return False
++        if (point - begin) % self.e.prefill_rows == 0:
++            return False
++        ring = getattr(drafter, "ring", 0) if drafter is not None else 0
++        return not (ring and n - point >= ring - drafter.window)
++
+     def _drop(self, snap) -> None:
+         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object (with the
+         spill tier on, written there first)."""
+@@ -1678,6 +1695,11 @@
+         stats: dict[str, Any] = {"shared": list(stops)} if stops else {}
+         if point is not None and point < len(prompt):
+             stops.append(point)
++        # OTS 0121 on --parallel 1 (TF_GLM_ONE_CHUNK_WARM, as ``multi``): the point kept inside the prompt's last chunk,
++        # which fills past it (``_one_chunk``), instead of a chunk to it and one past it
++        inner = self._one_chunk(len(prompt), point, max([cut] + [p for p in stops if p != point]), use_mtp, drafter)
++        if inner:
++            stops.remove(point)
+         resume, kept = hit, []
+         # each kept state's identity (``prefix_pid``), from the resume point's on by the new rows alone
+         at, pid = (cut, snap_pid(hit)) if hit is not None and feed is None else (0, (0, 0))
+@@ -1694,9 +1716,25 @@
+         # nothing new; a prompt's own end state keeps the head's row it sampled from, for a later replay
+         replay = whole(hit, prompt)
+         end = point == len(prompt) and not replay
+-        first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=resume, feed=feed,
+-                        keep_head=end)
++        if inner:
++            self.e.st.mark(point)
++        try:
++            first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=resume, feed=feed,
++                            keep_head=end)
++        finally:
++            if inner:
++                self.e.st.mark(0)
+         prefill_s = time.perf_counter() - t0
++        if inner:                                 # the state the last chunk left at the point (its KDA split there)
++            from .multi import draft_window
++
++            snap = take_snapshot(self.e, prompt[:point], None, mtp=False, inner=True)
++            if drafter is not None:              # its DFlash2 window, still in the ring (``_one_chunk``)
++                snap.drafter_end, snap.drafter_rows = point, draft_window(drafter, point)
++            snap.shared = False
++            at, pid = point, prefix_pid(prompt, at, point, pid)
++            snap.pid = pid
++            kept.append(snap)
+         if end:
+             snap = take_snapshot(self.e, prompt, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
+                                  drafter=drafter)

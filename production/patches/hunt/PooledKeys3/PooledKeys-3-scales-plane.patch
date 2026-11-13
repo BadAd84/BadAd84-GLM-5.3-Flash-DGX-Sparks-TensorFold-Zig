@@ -1,0 +1,944 @@
+--- tensorfold/cuda/geometry.py
++++ tensorfold/cuda/geometry.py
+@@ -232,22 +232,24 @@
+ 
+ def mla_row_bytes(width: int, kv: str = "bf16", packed: bool = False) -> int:
+     """A GLM DSA cache row of ``width`` values: bf16, or TF_GLM_KV=fp8's e4m3 codes, fp32 scale and 12 pad bytes
+-    (families/glm5_next/cuda/kv8.py); ``packed`` (the indexer's pooled keys under TF_GLM_POOLED_PACK): no pad bytes."""
++    (families/glm5_next/cuda/kv8.py); ``packed`` (the indexer's pooled keys under TF_GLM_POOLED_PACK 1 or 2): no pad
++    bytes (the codes and the scale, in one row or in two planes)."""
+     if kv not in ("bf16", "fp8"):
+         raise ValueError(f"a GLM DSA cache is bf16 or fp8, not {kv!r}")
+     return width + (4 if packed else 16) if kv == "fp8" else 2 * width
+ 
+ 
+-def pooled_pack(env=None) -> bool:
+-    """TF_GLM_POOLED_PACK (default 0, PooledKeys): 1 lays the indexer's FP8 pooled keys as 132-byte rows (128 e4m3
+-    codes, then the fp32 scale) instead of 144 (12 pad bytes after the scale), 8.3% fewer bytes for the decode scoring
+-    to read and 3 bytes a token of every indexed layer back to the pool; 0 (or unset): the 16-byte-aligned rows of
+-    before, every kernel on its old path. The pooled keys' format: every kernel reads the row stride from the cache
+-    (kv8), the sizing reads this."""
++def pooled_pack(env=None) -> int:
++    """TF_GLM_POOLED_PACK (default 0, PooledKeys), the indexer's FP8 pooled keys' layout: 0 (or unset) the 144-byte
++    rows of before (128 e4m3 codes, the fp32 scale, 12 pad bytes; every kernel on its old path); 1 packed 132-byte
++    rows (the codes, then the scale: rows 4-byte aligned); 2 (kv8.SPLIT, PooledKeys-3) two planes of the same rows,
++    the codes in 128-byte rows (16-byte aligned) and the scales in [rows, 4] of their own. 1 and 2 hold 132 bytes a
++    pool: 8.3% fewer bytes for the scoring to read and 3 bytes a token of every indexed layer back to the pool. The
++    kernels read the layout from the cache (kv8), the sizing reads this."""
+     raw = str((os.environ if env is None else env).get("TF_GLM_POOLED_PACK", "0")).strip() or "0"
+-    if raw not in ("0", "1"):
+-        raise ValueError(f"TF_GLM_POOLED_PACK is 0 or 1, not {raw!r}")
+-    return raw == "1"
++    if raw not in ("0", "1", "2"):
++        raise ValueError(f"TF_GLM_POOLED_PACK is 0, 1 or 2, not {raw!r}")
++    return int(raw)
+ 
+ 
+ def mla_index_ring(capacity: int, rows: int) -> int:
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -15,7 +15,7 @@
+ from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank, readback
+ from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
+ 
+-from . import glue, prof, qmm, tp
++from . import glue, kv8, prof, qmm, tp
+ from .forward import Buffers, State, chunks_for, commit, compute, stage
+ from .mtp import mtp_compute, mtp_forward, mtp_stage
+ from .sparse import pool_bucket
+@@ -265,7 +265,7 @@
+             # every row past the dense limit: the sparse graph for this pool bucket (same kernels as eager)
+             # the pool buckets the graphs were captured for: the home view's (a stream at home with a smaller
+             # extent scores pools past its own too, all past its visible ones: -inf, the same selection)
+-            bucket = pool_bucket(self.st.pos, R, self.home.index[0][2].shape[0] - 2)
++            bucket = pool_bucket(self.st.pos, R, kv8.rows(self.home.index[0][2]) - 2)
+             g, kind = self.graphs.sparse.get((R, self.st.parity, bucket)), "sparse"
+         if g is not None:
+             self.replays[kind] += 1
+@@ -286,7 +286,7 @@
+             g = self.graphs.mtp.get(n)
+         elif (self.graphs is not None and not self.mbuf.zero_first and self.st.index is not None
+               and self.st.mtp_len >= self.w.cfg.dense_limit):
+-            bucket = pool_bucket(self.st.mtp_len, n, self.home.index[-1][2].shape[0] - 2)
++            bucket = pool_bucket(self.st.mtp_len, n, kv8.rows(self.home.index[-1][2]) - 2)
+             g, kind = self.graphs.sparse_mtp.get((n, bucket)), "sparse_mtp"
+         if g is not None:
+             self.replays[kind] += 1
+@@ -516,9 +516,10 @@
+ 
+ 
+ def _kinds(st) -> tuple[int, int]:
+-    """``_row_views``' order: its first ``tokens`` views hold token rows, the next ones up to ``pools`` pooled keys."""
++    """``_row_views``' order: its first ``tokens`` views hold token rows, the next ones up to ``pools`` pooled keys (a
++    split cache's two planes each: ``kv8.planes_of``)."""
+     tokens = len(st.kc) + sum(vc is not None for vc in st.vc)
+-    return tokens, tokens + len((st.index or [])[:len(st.kc)])
++    return tokens, tokens + sum(len(kv8.planes_of(trio[2])) for trio in (st.index or [])[:len(st.kc)])
+ 
+ 
+ def _fill(st, snap, wt: int, wq: int) -> None:
+@@ -593,18 +594,19 @@
+ 
+ def _row_views(st, n: int, m: int) -> list[torch.Tensor]:
+     """Views of the attention rows a snapshot of n tokens (m in the MTP head) depends on: latents or keys and values,
+-    and the indexer's pooled keys (its per-token keys and gates live in rings: the snapshot's ``tail``)."""
++    and the indexer's pooled keys (its per-token keys and gates live in rings: the snapshot's ``tail``; a split
++    cache's codes and scales planes, ``kv8.Split``, one view each)."""
+     views = [kc[:n] for kc in st.kc] + [vc[:n] for vc in st.vc if vc is not None]
+     idx = st.index or []
+     main_idx = idx[:len(st.kc)]
+     for _, _, pk in main_idx:
+-        views.append(pk[:n // 4 + 1])
++        views += [t[:n // 4 + 1] for t in kv8.planes_of(pk)]
+     if m > 0 and hasattr(st, "mtp_kc"):
+         views.append(st.mtp_kc[:m])
+         if getattr(st, "mtp_vc", None) is not None:
+             views.append(st.mtp_vc[:m])
+         if len(idx) > len(st.kc):
+-            views.append(idx[-1][2][:m // 4 + 1])
++            views += [t[:m // 4 + 1] for t in kv8.planes_of(idx[-1][2])]
+     return views
+ 
+ 
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -218,7 +218,9 @@
+ 
+     ``kv``: the latent planes' and pooled keys' format (TF_GLM_KV, ``kv8``): bf16, or fp8 (a uint8 row a token /
+     pool: e4m3 codes, an fp32 power-of-two scale, pad), with the latent cache only. FP8 pooled keys are packed (no
+-    pad: 132 bytes a pool, ``kv8.pool_pack``) under TF_GLM_POOLED_PACK=1; unset or 0: 144-byte rows as before.
++    pad: 132 bytes a pool, ``kv8.pool_pack``) under TF_GLM_POOLED_PACK=1, split under 2 (two planes of the pools' rows,
++    the codes [rows, 128] and the scales [rows, 4], viewed together as a ``kv8.Split``: ``pooled``); unset or 0:
++    144-byte rows as before.
+ 
+     ``display``: bytes of the GB10's display reservation the pool was sized with (``display_kv``); the first DSA
+     layers' latent planes are then carved from one span that holds them."""
+@@ -250,10 +252,14 @@
+                                                display)
+ 
+         def add(shape, div: int = 1, pad: int = 0, fmt: str = "bf16", tensor=None, half: bool = False,
+-                packed: bool = False) -> int:
++                packed: bool = False) -> int | tuple[int, int]:
+             n = shard.HALF + shard.TRASH if half else rows // div + pad
+             t = tensor if tensor is not None else (kv8.zeros(n, shape[0], fmt, dev, packed=packed) if fmt != "bf16"
+                                                    else torch.zeros((n, *shape), dtype=torch.bfloat16, device=dev))
++            if isinstance(t, kv8.Split):         # TF_GLM_POOLED_PACK=2: the codes' plane, then the scales'
++                planes.append(Plane(t.codes, div, pad, shard=half))
++                planes.append(Plane(t.scales, div, pad, shard=half))
++                return len(planes) - 2, len(planes) - 1
+             planes.append(Plane(t, div, pad, spanned=tensor is not None, shard=half))
+             return len(planes) - 1
+ 
+@@ -292,11 +298,19 @@
+             shard.ROW = kv8.row_bytes(c.kv_lora, kv)
+             shard.DTYPE = torch.uint8 if kv == "fp8" else torch.bfloat16
+ 
++    def pooled(self, spec, view):
++        """The pooled keys of plane ``spec`` (a plane, or a split cache's two: ``add``) through ``view`` (plane ->
++        tensor): a tensor, or a ``kv8.Split`` of both views."""
++
++        if isinstance(spec, tuple):
++            return kv8.Split(view(spec[0]), view(spec[1]))
++        return view(spec)
++
+     def index_tensors(self, i: int) -> tuple:
+-        """Indexed layer i's (keys, gates, pooled keys) over every stream: the rings (or planes) and the pool plane."""
++        """Indexed layer i's (keys, gates, pooled keys) over every stream: the rings (or planes), the pool plane(s)."""
+ 
+         planes = self.arena.planes
+-        pk = planes[self.index[i][2]].tensor
++        pk = self.pooled(self.index[i][2], lambda j: planes[j].tensor)
+         if self.rings is None:
+             return planes[self.index[i][0]].tensor, planes[self.index[i][1]].tensor, pk
+         return self.rings[i][0], self.rings[i][1], pk
+@@ -324,10 +338,10 @@
+         if self.index is None:
+             st.index = None
+         elif self.rings is None:
+-            st.index = [tuple(view(i) for i in trio) for trio in self.index]
++            st.index = [(view(ik), view(ig), self.pooled(pk, view)) for ik, ig, pk in self.index]
+         else:                        # the slot's rings (index_update's ring: their rows) and the extent's pools
+             r0 = self.ring_base(st.slot)
+-            st.index = [(ik[r0:r0 + self.ring], ig[r0:r0 + self.ring], view(trio[2]))
++            st.index = [(ik[r0:r0 + self.ring], ig[r0:r0 + self.ring], self.pooled(trio[2], view))
+                         for (ik, ig), trio in zip(self.rings, self.index)]
+ 
+ 
+@@ -835,7 +849,7 @@
+     if sparse_rows:
+         mm(b, b.qr[:R], ix.qb, b.xs_qr[:R], b.qi[:R])
+         tokens, counts = sparse.select_tokens(b.qi[:R], b.ikr[:R, c.index_dim:], pk, host_pos, R,
+-                                              pk.shape[0] - 2, pos_dev)
++                                              kv8.rows(pk) - 2, pos_dev)
+         sparse.sparse_attention(b.q[:R], kc, vc, tokens, counts, o, c.qk_dim ** -0.5)
+     o = o.view(R, HL * c.v_dim)
+     return out_proj(w, b, o, a.o, None if b.prefill else qmm.group_sums(o, b.xs_ao[:R]), R)
+@@ -891,7 +905,7 @@
+     return s
+ 
+ 
+-def _select_attend_blocks(w: Weights, b: Buffers, rs: slice, R: int, lc: torch.Tensor, pk: torch.Tensor,
++def _select_attend_blocks(w: Weights, b: Buffers, rs: slice, R: int, lc: torch.Tensor, pk: torch.Tensor | kv8.Split,
+                           host_pos: int, pos_dev: torch.Tensor, qa: torch.Tensor, ol: torch.Tensor, scale: float,
+                           shard_sel: bool, blocks: tuple) -> None:
+     """``dsa_rows``' token selection and sparse attention of a piece's rows (every row sparse) in ``blocks``: the
+@@ -904,7 +918,7 @@
+     c = w.cfg
+     dev = qa.device
+     qi, wts = b.qi[rs], b.ikr[rs, c.index_dim:]
+-    np_max = pk.shape[0] - 2
++    np_max = kv8.rows(pk) - 2
+     NP = sparse.pool_count(host_pos, R, np_max)
+     B = min(R, sparse.SELECT_ROWS)
+     buf = torch.empty((B * sparse.pool_bucket(host_pos, R, np_max),), dtype=torch.float32, device=dev)
+@@ -980,7 +994,7 @@
+         with prof.timed("dsa: select tokens"):
+             mm(b, b.qr[rs], ix.qb, b.xs_qr[rs], b.qi[rs])
+             tokens, counts = sparse.select_tokens(b.qi[rs], b.ikr[rs, c.index_dim:], index[2], host_pos, R,
+-                                                  index[2].shape[0] - 2, pos_dev, bucket=sparse_np)
++                                                  kv8.rows(index[2]) - 2, pos_dev, bucket=sparse_np)
+     _sharded_attend(a, w, lc, pos_dev, b, R, nch, host_pos, rs, qa, ol, scale, all_sparse, sparse_rows, tokens, counts,
+                     root)
+ 
+@@ -1134,10 +1148,11 @@
+                     # sparse._prompt_rank_pools), the pools all-gathered, then _tokens over every row - the same
+                     # bits as the _select_prompt above (per-row bits unchanged)
+                     tokens, counts = indexer_shard.prompt_shard(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
+-                                                                pk.shape[0] - 2, pos_dev, w.comm, side=_micro_side(b))
++                                                                kv8.rows(pk) - 2, pos_dev, w.comm,
++                                                                side=_micro_side(b))
+                 else:
+                     tokens, counts = sparse.select_tokens(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
+-                                                          pk.shape[0] - 2, pos_dev, bucket=sparse_np)
++                                                          kv8.rows(pk) - 2, pos_dev, bucket=sparse_np)
+             with prof.timed("dsa: sparse attention"):
+                 if b.prefill and latent.SPARSE_ONEPASS:     # prompt rows: one pass a row, no partials (their own bits)
+                     latent.sparse_onepass(qa, lc, tokens, counts, ol, scale)
+--- tensorfold/families/glm5_next/cuda/graphs.py
++++ tensorfold/families/glm5_next/cuda/graphs.py
+@@ -4,7 +4,7 @@
+ 
+ import torch
+ 
+-from . import latent, prof
++from . import kv8, latent, prof
+ from .forward import compute
+ from .mtp import mtp_compute
+ 
+@@ -68,7 +68,7 @@
+ 
+     def _capture_sparse(self, e, main_rows, mtp_rows, parities) -> None:
+         w, st = e.w, e.st
+-        np_max = st.index[0][2].shape[0] - 2
++        np_max = kv8.rows(st.index[0][2]) - 2
+         saved = list(st.cur)
+         for bucket in pool_buckets(np_max):
+             for R in main_rows:
+--- tensorfold/families/glm5_next/cuda/kernel_warm.py
++++ tensorfold/families/glm5_next/cuda/kernel_warm.py
+@@ -31,7 +31,7 @@
+ 
+ import torch
+ 
+-from . import forward, glue, latent, pool, sparse
++from . import forward, glue, kv8, latent, pool, sparse
+ 
+ 
+ def row_rules():
+@@ -170,12 +170,12 @@
+     ix = a.index
+     if ik is not None and ix is not None:                  # the indexer's key ring and pooled keys
+         iks, igs = torch.empty_like(ik), torch.empty_like(ig)
+-        pks = torch.empty((big // sparse.POOL + 4,) + tuple(pk.shape[1:]), dtype=pk.dtype, device=dev)
++        pks = kv8.empty_rows(pk, big // sparse.POOL + 4)   # (the live pooled keys' layout: a split cache's two planes)
+         for R in rows:
+             for pos in poss:
+                 sparse.index_update(b.ikr[:R, :c.index_dim], b.igr[:R], ix.ln_w, ix.ln_b, ix.ape, iks, igs, pks, pos)
+                 n += 1
+-    np_max = pk.shape[0] - 2                               # the home stream's pooled keys (under --parallel: the pool's)
++    np_max = kv8.rows(pk) - 2                             # the home stream's pooled keys (under --parallel: the pool's)
+     if streams > 1:                                        # ... a stream's extent at most its context's
+         np_max = min(np_max, pool.align_up(int(engine.limit)) // sparse.POOL)
+     nps = score_counts(np_max, streams)
+--- tensorfold/families/glm5_next/cuda/kv8.py
++++ tensorfold/families/glm5_next/cuda/kv8.py
+@@ -7,12 +7,16 @@
+ dequantized rows up to fp32 summation order (Triton lays converted tiles out for the tensor cores its own way).
+ 
+ A quantized cache is a uint8 tensor [rows, width + PAD]: the row's e4m3 codes, its fp32 scale, 12 zero bytes (rows
+-stay 16-byte aligned), or, packed (``zeros(.., packed=True)``: the indexer's pooled keys under TF_GLM_POOLED_PACK),
++stay 16-byte aligned), or, packed (``zeros(.., packed=True)``: the indexer's pooled keys under TF_GLM_POOLED_PACK=1),
+ [rows, width + SCALE]: the codes, then the scale, no pad (rows 4-byte aligned; the readers take any row stride, the
+ CUDA scorers a tile of rows at once). Widths are multiples of 16, so a row's size tells the two apart (``pad_of``).
+ One tensor a cache keeps the engine's generic row handling (slices, clones, kept snapshots'
+-saved rows, ``row_bytes``) as it is. The scale is 2^(ceil(log2 amax) - SHIFT): the row's largest value quantizes to
+-[128, 256], under e4m3's 448, so nothing saturates; a floating-point format's relative precision does not depend on
++saved rows, ``row_bytes``) as it is. Split (``Split``: the pooled keys under TF_GLM_POOLED_PACK=2, PooledKeys-3): two
++planes of the same rows, the codes [rows, width] (rows 16-byte aligned: every reader's loads stay 16 bytes) and the
++scales [rows, 4] (row r's fp32 scale); the engine handles them as two planes (each sliced, copied, saved and spilled
++as any plane), the kernels get both (``parts``). The scale is 2^(ceil(log2 amax) - SHIFT): the row's largest value
++quantizes to [128, 256], under e4m3's 448, so nothing saturates; a floating-point format's relative precision does not
++depend on
+ the scale, so a per-row power of two loses nothing to a finer or fp32 scale but the values it pushes below e4m3's
+ normal range (2^-6), under 2^-14 of the row's largest (DeepSeek-V3.2's indexer keeps FP8 keys with per-token ue8m0
+ scales alike). On GLM-5.3-Flash's own kv_a / kv_a_layernorm rows (amax ~3-5x the rms) per-token fp32, per-128-block
+@@ -21,6 +25,7 @@
+ from __future__ import annotations
+ 
+ import os
++from dataclasses import dataclass
+ 
+ import torch
+ import triton
+@@ -30,6 +35,7 @@
+ PAD = 16             # bytes after an FP8 row's codes: its fp32 scale, then zeros
+ SCALE = 4            # bytes after a packed FP8 row's codes: its fp32 scale alone (PooledKeys: the pooled keys)
+ SHIFT = 8            # a row's scale: 2^(ceil(log2 amax) - SHIFT), so its codes stay within +-256
++SPLIT = 2            # ``packed`` / TF_GLM_POOLED_PACK value of the split layout (``Split``, PooledKeys-3)
+ 
+ 
+ def kv_kind(env=None) -> str:
+@@ -42,36 +48,82 @@
+     return kind
+ 
+ 
+-def pool_pack(env=None) -> bool:
+-    """TF_GLM_POOLED_PACK (default 0; 1: the indexer's FP8 pooled keys packed): ``geometry.pooled_pack``, which the pool
+-    sizing reads too."""
++def pool_pack(env=None) -> int:
++    """TF_GLM_POOLED_PACK (default 0; 1: the indexer's FP8 pooled keys packed, 2: split into a codes and a scales
++    plane, ``Split``): ``geometry.pooled_pack``, which the pool sizing reads too."""
+     from tensorfold.cuda.geometry import pooled_pack
+ 
+     return pooled_pack(env)
+ 
+ 
++@dataclass(frozen=True, eq=False)
++class Split:
++    """An FP8 cache in two planes of the same rows (the pooled keys under TF_GLM_POOLED_PACK=2): ``codes`` uint8
++    [rows, width] (row r's e4m3 codes; contiguous, 16-byte aligned, so every row is) and ``scales`` uint8 [rows, 4]
++    (row r's fp32 scale; contiguous). Refused unless shaped so: a reader takes row r's codes at codes + r x width and
++    its scale at scales + 4 r."""
++
++    codes: torch.Tensor
++    scales: torch.Tensor
++
++    def __post_init__(self) -> None:
++        c, s = self.codes, self.scales
++        if c.dtype != torch.uint8 or s.dtype != torch.uint8 or c.dim() != 2 or s.dim() != 2:
++            raise ValueError("a split FP8 cache: uint8 codes [rows, width] and scales [rows, 4]")
++        if c.shape[1] % 16 or s.shape[1] != SCALE or s.shape[0] != c.shape[0] or s.device != c.device:
++            raise ValueError(f"a split FP8 cache: codes {tuple(c.shape)} and scales {tuple(s.shape)} on "
++                             f"{c.device} / {s.device}: a width of 16s, [the codes' rows, 4], one device")
++        if not c.is_contiguous() or not s.is_contiguous() or c.data_ptr() % 16 or s.data_ptr() % 4:
++            raise ValueError("a split FP8 cache: contiguous planes, the codes 16-byte aligned, the scales 4-byte")
++
++    def clone(self) -> "Split":
++        return Split(self.codes.clone(), self.scales.clone())
++
++
++def rows(cache) -> int:
++    """Rows of a cache (a tensor, or both planes of a ``Split``)."""
++    return cache.codes.shape[0] if isinstance(cache, Split) else cache.shape[0]
++
++
++def planes_of(cache) -> list[torch.Tensor]:
++    """The tensors holding a cache's rows (row r of each is the cache's row r): the cache, or a ``Split``'s codes and
++    scales planes."""
++    return [cache.codes, cache.scales] if isinstance(cache, Split) else [cache]
++
++
++def empty_rows(like, n: int):
++    """An uninitialised cache of ``n`` rows in the layout of ``like`` (a tensor or a ``Split``)."""
++    if isinstance(like, Split):
++        return Split(*(torch.empty((n,) + tuple(t.shape[1:]), dtype=t.dtype, device=t.device) for t in planes_of(like)))
++    return torch.empty((n,) + tuple(like.shape[1:]), dtype=like.dtype, device=like.device)
++
++
+ def row_bytes(width: int, kind: str, packed: bool = False) -> int:
+-    """Bytes a cache row of ``width`` values takes (``packed``: an FP8 row without pad)."""
++    """Bytes a cache row of ``width`` values takes (``packed``, 1 or SPLIT: an FP8 row without pad, in one row or
++    over both planes)."""
+     if kind not in KINDS:
+         raise ValueError(f"a cache is bf16 or fp8, not {kind!r}")
+     return width + (SCALE if packed else PAD) if kind == "fp8" else 2 * width
+ 
+ 
+-def zeros(rows: int, width: int, kind: str, device, packed: bool = False) -> torch.Tensor:
++def zeros(rows: int, width: int, kind: str, device, packed: bool = False):
+     """A zeroed cache of ``rows`` rows of ``width`` values (zero rows dequantize to zeros in either format);
+-    ``packed``: FP8 rows of the codes and the scale alone."""
++    ``packed``: FP8 rows of the codes and the scale alone; SPLIT: an FP8 ``Split`` (its two planes)."""
+     if kind == "fp8":
+         if width % 16:
+             raise ValueError(f"an FP8 cache row needs a width divisible by 16, not {width}")
++        if packed == SPLIT:
++            return Split(torch.zeros((rows, width), dtype=torch.uint8, device=device),
++                         torch.zeros((rows, SCALE), dtype=torch.uint8, device=device))
+         return torch.zeros((rows, row_bytes(width, kind, packed)), dtype=torch.uint8, device=device)
+     return torch.zeros((rows, row_bytes(width, kind) // 2), dtype=torch.bfloat16, device=device)
+ 
+ 
+-def quantized(cache: torch.Tensor) -> bool:
+-    return cache.dtype == torch.uint8
+-
+-
+-def kind_of(cache: torch.Tensor) -> str:
++def quantized(cache) -> bool:
++    return isinstance(cache, Split) or cache.dtype == torch.uint8
++
++
++def kind_of(cache) -> str:
+     return "fp8" if quantized(cache) else "bf16"
+ 
+ 
+@@ -83,15 +135,20 @@
+     return PAD if n % 16 == 0 else SCALE
+ 
+ 
+-def width(cache: torch.Tensor) -> int:
++def width(cache) -> int:
+     """Values a row of ``cache`` holds."""
++    if isinstance(cache, Split):
++        return cache.codes.shape[1]
+     return cache.shape[-1] - pad_of(cache) if quantized(cache) else cache.shape[-1]
+ 
+ 
+-def parts(cache: torch.Tensor):
++def parts(cache):
+     """A kernel's view of a cache: (codes or bf16 values, fp32 view for the scales, row stride in elements of the
+     first, FP8). A bf16 cache passes itself as the unused scale argument. The scale of an FP8 row r sits at fp32
+-    element r x (stride / 4) + width / 4 (``row_scales``), padded or packed alike."""
++    element r x (stride / 4) + width / 4 (``row_scales``), padded or packed alike; of a ``Split``'s (row stride =
++    width) at element r of its scales plane."""
++    if isinstance(cache, Split):
++        return cache.codes.view(torch.float8_e4m3fn), cache.scales.view(torch.float32), cache.codes.shape[1], True
+     if not quantized(cache):
+         return cache, cache, cache.shape[-1], False
+     pad_of(cache)
+@@ -108,20 +165,24 @@
+     return ((e - SHIFT).clamp(1, 254) << 23).view(torch.float32)
+ 
+ 
+-def quantize_rows(x: torch.Tensor, packed: bool = False) -> torch.Tensor:
+-    """bf16 (or fp32) rows [n, width] -> an FP8 cache's rows [n, width + PAD] (``packed``: [n, width + SCALE]), as the
+-    write kernels store them."""
++def quantize_rows(x: torch.Tensor, packed: bool = False):
++    """bf16 (or fp32) rows [n, width] -> an FP8 cache's rows [n, width + PAD] (``packed``: [n, width + SCALE]; SPLIT:
++    a ``Split``), as the write kernels store them."""
+     x = x.float()
+     s = scales(x.abs().amax(dim=1))
+     inv = ((254 - (s.view(torch.int32) >> 23)) << 23).view(torch.float32)
+     out = torch.zeros((x.shape[0], row_bytes(x.shape[1], "fp8", packed)), dtype=torch.uint8, device=x.device)
+     out[:, :x.shape[1]] = (x * inv[:, None]).to(torch.float8_e4m3fn).view(torch.uint8)
+     out[:, x.shape[1]:x.shape[1] + 4] = s[:, None].contiguous().view(torch.uint8)
++    if packed == SPLIT:
++        return Split(out[:, :x.shape[1]].contiguous(), out[:, x.shape[1]:].contiguous())
+     return out
+ 
+ 
+-def dequantize(cache: torch.Tensor) -> torch.Tensor:
++def dequantize(cache) -> torch.Tensor:
+     """A cache's rows as fp32 [n, width] (exact: e4m3 codes times a power of two; bf16 rows as they are)."""
++    if isinstance(cache, Split):
++        return cache.codes.view(torch.float8_e4m3fn).float() * cache.scales.view(torch.float32)
+     if not quantized(cache):
+         return cache.float()
+     w = width(cache)
+@@ -143,19 +204,28 @@
+ 
+ @triton.jit
+ def store_row(VALS, SCL, row, x, LW: tl.constexpr, RS: tl.constexpr, FP8: tl.constexpr):
+-    """Row ``row`` (int64) of a cache <- x fp32 [LW] as bf16 values, or FP8: the bf16 row's codes and scale."""
++    """Row ``row`` (int64) of a cache <- x fp32 [LW] as bf16 values, or FP8: the bf16 row's codes and scale (RS == LW,
++    a ``Split``: the scale at element ``row`` of its scales plane)."""
+     k = tl.arange(0, LW)
+     xb = x.to(tl.bfloat16)
+     if FP8:
+         xf = xb.to(tl.float32)
+         s, inv = scale_of(tl.max(tl.abs(xf), 0))
+         tl.store(VALS + row * RS + k, (xf * inv).to(tl.float8e4nv))
+-        tl.store(SCL + row * (RS // 4) + LW // 4, s)
++        if RS == LW:
++            tl.store(SCL + row, s)
++        else:
++            tl.store(SCL + row * (RS // 4) + LW // 4, s)
+     else:
+         tl.store(VALS + row * RS + k, xb)
+ 
+ 
+ @triton.jit
+ def row_scales(SCL, rows, ok, LW: tl.constexpr, RS: tl.constexpr):
+-    """The scales of cache rows ``rows`` (int64 [N]; 1 where not ok)."""
+-    return tl.load(SCL + rows * (RS // 4) + LW // 4, mask=ok, other=1.0)
++    """The scales of FP8 cache rows ``rows`` (int64 [N]; 1 where not ok): RS == LW (a ``Split``) from its scales
++    plane, else after each row's codes."""
++    if RS == LW:
++        at = SCL + rows
++    else:
++        at = SCL + rows * (RS // 4) + LW // 4
++    return tl.load(at, mask=ok, other=1.0)
+--- tensorfold/families/glm5_next/cuda/prompt_scores.cu
++++ tensorfold/families/glm5_next/cuda/prompt_scores.cu
+@@ -68,30 +68,34 @@
+ // One 64-pool key tile in two halves, so the next tile's global reads run under this tile's dots: ``fetch`` reads a
+ // thread's share (GPT 16-byte k16 groups of pool i) and the pool's fp32 scale into registers; ``put`` converts them
+ // to bf16 into tile[p][chunk] in mma slot order (logical chunk 2 s + c: step s's slots 8 c .. 8 c + 7) and the
+-// scale into ks[p] (1 where p >= NP: never read). PACKED (PooledKeys, TF_GLM_POOLED_PACK): rows of 132 bytes, 4-byte
+-// aligned, so a group comes in as 4 words (the same 16 bytes in the same order: the same bits).
++// scale into ks[p] (1 where p >= NP: never read). L, the pooled keys' layout (TF_GLM_POOLED_PACK): 0 rows of RS
++// (144) bytes, the scale after the codes; 1 (PooledKeys) packed rows of 132 bytes, 4-byte aligned, so a group comes in
++// as 4 words (the same 16 bytes in the same order: the same bits); 2 (PooledKeys-3) split: 128-byte code rows, 16-byte
++// aligned (a group is one 16-byte load, as with L 0), row p's scale at PKS[p] in the scales' own plane.
+ struct Fetch {
+     static constexpr int T = RB * 32, TPP = T / BP, GPT = KS / TPP;   // threads a pool, k16 groups a thread
+     uint4 c[GPT];
+     float s;
+ };
+ 
+-template <bool PACKED>
+-__device__ __forceinline__ void fetch(const uint8_t* __restrict__ PK, int RS, int NP, int pb, Fetch& f) {
++template <int L>
++__device__ __forceinline__ void fetch(const uint8_t* __restrict__ PK, int RS, const float* __restrict__ PKS, int NP,
++                                      int pb, Fetch& f) {
+     const int tid = threadIdx.x, i = tid / Fetch::TPP, part = tid % Fetch::TPP;
+     const int p = pb * BP + i;
+     const bool ok = p < NP;
+     const uint8_t* row = PK + (size_t)(ok ? p : 0) * RS;
+ #pragma unroll
+     for (int gg = 0; gg < Fetch::GPT; ++gg) {
+-        if constexpr (PACKED) {
++        if constexpr (L == 1) {
+             const uint32_t* w = reinterpret_cast<const uint32_t*>(row + 16 * (part * Fetch::GPT + gg));
+             f.c[gg] = ok ? make_uint4(w[0], w[1], w[2], w[3]) : make_uint4(0, 0, 0, 0);
+         } else {
+             f.c[gg] = ok ? *reinterpret_cast<const uint4*>(row + 16 * (part * Fetch::GPT + gg)) : make_uint4(0, 0, 0, 0);
+         }
+     }
+-    f.s = ok && part == 0 ? *reinterpret_cast<const float*>(row + D) : 1.0f;
++    if constexpr (L == 2) f.s = ok && part == 0 ? PKS[ok ? p : 0] : 1.0f;
++    else f.s = ok && part == 0 ? *reinterpret_cast<const float*>(row + D) : 1.0f;
+ }
+ 
+ __device__ __forceinline__ void put(const Fetch& f, uint4* tile, float* ks) {
+@@ -122,12 +126,13 @@
+ //   - the 8 n8 tiles fully unrolled (both groups), and in each k16 step pair both m16 chains' step j before their
+ //     step j + 1 (0084: chain 0's steps j, j + 1, then chain 1's): two independent mma in flight where 0084 issued a
+ //     dependent pair; each chain still takes its 8 steps in ascending order from +0.
+-template <bool PACKED>
++template <int L>
+ __global__ void __launch_bounds__(RB * 32, 2) scores_kernel(const __nv_bfloat16* __restrict__ QI,
+                                                             const __nv_bfloat16* __restrict__ W, int w_stride,
+                                                             const uint8_t* __restrict__ PK, int RS,
+                                                             float* __restrict__ OUT, const void* __restrict__ POS,
+-                                                            bool pos64, int R, int NP, float scale, float wscale) {
++                                                            bool pos64, int R, int NP, float scale, float wscale,
++                                                            const float* __restrict__ PKS) {
+     __shared__ __align__(16) uint4 tile[2][BP * CH];            // 2 x 16 KB: key tiles, bf16
+     __shared__ float ks[2][BP];
+     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+@@ -168,10 +173,10 @@
+ 
+     Fetch f;
+     if (vis(0)) {
+-        fetch<PACKED>(PK, RS, NP, b0, f);
++        fetch<L>(PK, RS, PKS, NP, b0, f);
+         put(f, tile[0], ks[0]);
+     }
+-    if (vis(1)) fetch<PACKED>(PK, RS, NP, b0 + 1, f);          // in flight during tile 0's dots
++    if (vis(1)) fetch<L>(PK, RS, PKS, NP, b0 + 1, f);          // in flight during tile 0's dots
+     __syncthreads();
+     for (int jb = 0; jb < nb; ++jb) {
+         const int cur = jb & 1, p0 = (b0 + jb) * BP;
+@@ -236,7 +241,7 @@
+             }
+         }
+         if (vis(jb + 1)) put(f, tile[cur ^ 1], ks[cur ^ 1]);     // the buffer every warp finished at jb - 1
+-        if (vis(jb + 2)) fetch<PACKED>(PK, RS, NP, b0 + jb + 2, f);
++        if (vis(jb + 2)) fetch<L>(PK, RS, PKS, NP, b0 + jb + 2, f);
+         __syncthreads();
+     }
+ }
+@@ -246,28 +251,45 @@
+ // OUT [R, NP] fp32 = the rows' pool scores, sparse._scores' outputs bit for bit: QI [R, 32 * 128] bf16 rows, W bf16
+ // head weights (row stride w_stride, unit column stride), PK an FP8 pooled-key cache (rows of 128 e4m3 codes, then
+ // the row's fp32 scale; RS bytes apart: 16-byte rows, or packed rows of 132 bytes, PooledKeys, from a 4-byte aligned
+-// PK), POS [1] int32 or int64 (row r's position is POS + r), NP a multiple of 64.
++// PK; or split, PooledKeys-3, RS = 128: the codes alone, from a 16-byte aligned PK, row p's scale at PKS[p], PKS (the
++// last argument) fp32 with one scale a code row; PKS is not read otherwise and may be left out, the call of before),
++// POS [1] int32 or int64 (row r's position is POS + r), NP a multiple of 64.
+ void scores(const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK, int64_t RS,
+-            at::Tensor OUT, const at::Tensor& POS, int64_t R, int64_t NP, double scale, double wscale) {
++            at::Tensor OUT, const at::Tensor& POS, int64_t R, int64_t NP, double scale, double wscale,
++            const at::Tensor& PKS) {
+     TORCH_CHECK(QI.is_cuda() && QI.scalar_type() == at::kBFloat16 && W.scalar_type() == at::kBFloat16 &&
+                 OUT.scalar_type() == at::kFloat && PK.element_size() == 1 &&
+                 (POS.scalar_type() == at::kInt || POS.scalar_type() == at::kLong), "prompt scores: dtypes");
+     TORCH_CHECK(QI.is_contiguous() && QI.size(-1) == H * D && QI.size(0) >= R && W.stride(-1) == 1 &&
+                 OUT.is_contiguous() && OUT.numel() >= R * NP, "prompt scores: shapes");
+-    const bool packed = RS % 16 != 0;
+-    TORCH_CHECK((packed ? RS == D + 4 && reinterpret_cast<uintptr_t>(PK.data_ptr()) % 4 == 0 : RS >= D + 4) &&
+-                PK.is_contiguous(), "prompt scores: an FP8 key cache of 16-byte rows, or packed 132-byte rows");
++    const int layout = RS == D ? 2 : RS % 16 != 0 ? 1 : 0;     // split, packed, 16-byte rows
++    TORCH_CHECK((layout == 2   ? reinterpret_cast<uintptr_t>(PK.data_ptr()) % 16 == 0
++                 : layout == 1 ? RS == D + 4 && reinterpret_cast<uintptr_t>(PK.data_ptr()) % 4 == 0
++                               : RS >= D + 4) &&
++                PK.is_contiguous(), "prompt scores: an FP8 key cache of 16-byte rows, packed 132-byte rows, or split "
++                "128-byte rows 16-byte aligned");
++    TORCH_CHECK(layout != 2 || (PKS.defined() && PKS.scalar_type() == at::kFloat && PKS.is_contiguous() &&
++                                PKS.device() == PK.device() && PKS.numel() * D == PK.numel()),
++                "prompt scores: a split cache's scales plane: fp32, contiguous, one scale a code row");
+     TORCH_CHECK(NP % BP == 0 && NP <= PK.numel() / RS, "prompt scores: NP a multiple of 64 within the cache");
+     if (R <= 0 || NP <= 0) return;
+     const c10::cuda::CUDAGuard guard(QI.device());
+     const int nblk = (int)(NP / BP);
+-    const auto kernel = packed ? scores_kernel<true> : scores_kernel<false>;
++    const auto kernel = layout == 2 ? scores_kernel<2> : layout == 1 ? scores_kernel<1> : scores_kernel<0>;
+     kernel<<<dim3((unsigned)((R + RB - 1) / RB), (unsigned)((nblk + LB - 1) / LB)), RB * 32, 0,
+              at::cuda::getCurrentCUDAStream()>>>(
+         reinterpret_cast<const __nv_bfloat16*>(QI.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(W.data_ptr()),
+         (int)w_stride, reinterpret_cast<const uint8_t*>(PK.data_ptr()), (int)RS, OUT.data_ptr<float>(), POS.data_ptr(),
+-        POS.scalar_type() == at::kLong, (int)R, (int)NP, (float)scale, (float)wscale);
++        POS.scalar_type() == at::kLong, (int)R, (int)NP, (float)scale, (float)wscale,
++        layout == 2 ? PKS.data_ptr<float>() : nullptr);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
+-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("scores", &scores); }
++// also in the call of before (no PKS: a cache of 144- or 132-byte rows; a split one is refused)
++PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++    m.def("scores", &scores);
++    m.def("scores", [](const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK, int64_t RS,
++                       at::Tensor OUT, const at::Tensor& POS, int64_t R, int64_t NP, double scale, double wscale) {
++        scores(QI, W, w_stride, PK, RS, OUT, POS, R, NP, scale, wscale, at::Tensor());
++    });
++}
+--- tensorfold/families/glm5_next/cuda/seg_scores.cu
++++ tensorfold/families/glm5_next/cuda/seg_scores.cu
+@@ -76,7 +76,10 @@
+ // cp.async from the 16-byte boundary at or below its first byte (the run starts 4 (pbase mod 4) bytes past it, the
+ // ``lead``), the bytes from its pool count's end on zero-filled as the padded stage's rows are; ``convert_packed``
+ // reads row i at lead + 132 i in 4-byte words (33 words a row: a warp's 8 rows x 4 threads on 32 distinct banks).
+-// The same codes and scales into the same tile slots: the same bits.
++// The same codes and scales into the same tile slots: the same bits. L, a kernel's layout: 0 rows of RS (144) bytes
++// (``issue``), 1 packed (``issue_packed``), 2 split (PooledKeys-3, TF_GLM_POOLED_PACK=2): 128-byte code rows (RS = 128,
++// 16-byte aligned) and row p's fp32 scale at PKS[p] in the scales' own plane, staged by ``issue`` as the rows of L 0
++// (16-byte copies of each row's codes, a 4-byte copy of each scale) into the same stage, converted by ``convert``.
+ constexpr int RSP = D + 4;                              // bytes a packed row
+ constexpr int STAGE_P = BP * RSP + 16;                  // bytes a packed raw stage: a run and its lead
+ constexpr int CHUNKS_P = STAGE_P / 16;                  // 16-byte copies a packed stage
+@@ -99,9 +102,10 @@
+ __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+ 
+ // tile pb's codes and scales into stage ``raw`` (``any`` false: past the CTA's blocks, an empty group, so the count
+-// of groups cp_wait sees stays uniform)
+-__device__ __forceinline__ void issue(const uint8_t* __restrict__ PK, int RS, long long pbase, int NP, int pb,
+-                                      bool any, uint8_t* raw) {
++// of groups cp_wait sees stays uniform); L 2: the scales from PKS (pool p's at PKS + pbase + p)
++template <int L>
++__device__ __forceinline__ void issue(const uint8_t* __restrict__ PK, int RS, const float* __restrict__ PKS,
++                                      long long pbase, int NP, int pb, bool any, uint8_t* raw) {
+     if (any) {
+         const uint32_t base = (uint32_t)__cvta_generic_to_shared(raw);
+ #pragma unroll
+@@ -114,7 +118,9 @@
+         if (threadIdx.x < BP) {
+             const int p = pb * BP + threadIdx.x;
+             const bool ok = p < NP;
+-            cp_async(base + BP * D + 4 * threadIdx.x, PK + (size_t)(pbase + (ok ? p : 0)) * RS + D, 4, ok);
++            const long long row = pbase + (ok ? p : 0);
++            if constexpr (L == 2) cp_async(base + BP * D + 4 * threadIdx.x, PKS + row, 4, ok);
++            else cp_async(base + BP * D + 4 * threadIdx.x, PK + (size_t)row * RS + D, 4, ok);
+         }
+     }
+     cp_commit();
+@@ -174,13 +180,14 @@
+     if (part == 0) ks[i] = reinterpret_cast<const float*>(row)[D / 4];
+ }
+ 
+-template <int ST, bool PACKED>
++template <int ST, int L>
+ __global__ void __launch_bounds__(RB * 32) seg_scores_kernel(
+     const __nv_bfloat16* __restrict__ QI, const __nv_bfloat16* __restrict__ W, int w_stride,
+     const uint8_t* __restrict__ PK, int RS, float* __restrict__ OUT, long long o_stride,
+     const int32_t* __restrict__ POS, const int32_t* __restrict__ SPR, const int32_t* __restrict__ SEG_START,
+     const int32_t* __restrict__ SEG_ROWS, const int32_t* __restrict__ SEG_PBASE, const int32_t* __restrict__ SEG_POOLS,
+-    int32_t* __restrict__ TRI_POOLS, int segs, int min_rows, int spread, float scale, float wscale) {
++    int32_t* __restrict__ TRI_POOLS, int segs, int min_rows, int spread, float scale, float wscale,
++    const float* __restrict__ PKS) {
+     extern __shared__ __align__(16) uint8_t smem[];
+     uint4* tile = reinterpret_cast<uint4*>(smem);                // 16 KB: one key tile, bf16
+     float* ks = reinterpret_cast<float*>(smem + BP * CH * 16);   // its 64 scales
+@@ -282,17 +289,17 @@
+     }
+ 
+     float* orow = OUT + (size_t)r * o_stride;
+-    // PACKED: a stage is STAGE_P bytes, its run lead bytes in (a CTA's tiles all start 4 (pbase mod 4) bytes past a
++    // L 1: a stage is STAGE_P bytes, its run lead bytes in (a CTA's tiles all start 4 (pbase mod 4) bytes past a
+     // 16-byte boundary: 64 rows are a multiple of 16 bytes)
+-    constexpr int SB = PACKED ? STAGE_P : STAGE;
+-    const int lead = PACKED ? (int)(pbase & 3) * 4 : 0;
+-    // PACKED: the CTA's tiles' runs: tile pb's at run0 + 8,448 pb (16-byte aligned) + lead; nch copies a stage
+-    const uint8_t* run0 = PK + (PACKED ? pbase * RSP - lead : 0);
++    constexpr int SB = L == 1 ? STAGE_P : STAGE;
++    const int lead = L == 1 ? (int)(pbase & 3) * 4 : 0;
++    // L 1: the CTA's tiles' runs: tile pb's at run0 + 8,448 pb (16-byte aligned) + lead; nch copies a stage
++    const uint8_t* run0 = PK + (L == 1 ? pbase * RSP - lead : 0);
+     const int nch = (lead + BP * RSP + 15) >> 4;
+     auto stage = [&](int pb, uint8_t* to) {
+-        if constexpr (PACKED)
++        if constexpr (L == 1)
+             issue_packed(run0 + (long long)pb * (BP * RSP), lead + min(BP, npm - pb * BP) * RSP, nch, pb < nblk, to);
+-        else issue(PK, RS, pbase, npm, pb, pb < nblk, to);
++        else issue<L>(PK, RS, PKS, pbase, npm, pb, pb < nblk, to);
+     };
+ #pragma unroll
+     for (int k = 0; k < ST - 1; ++k) stage(b0 + k * G, raw + k * SB);
+@@ -300,7 +307,7 @@
+         const int p0 = pb * BP;
+         cp_wait<ST - 2>();                                       // this thread's copies of tile pb landed
+         __syncthreads();                                         // everyone's; the previous tile's dots are done
+-        if constexpr (PACKED) convert_packed(raw + (jt % ST) * SB + lead, tile, ks);
++        if constexpr (L == 1) convert_packed(raw + (jt % ST) * SB + lead, tile, ks);
+         else convert(raw + (jt % ST) * SB, tile, ks);
+         // tile pb + (ST - 1) G into the stage converted last iteration
+         stage(pb + (ST - 1) * G, raw + ((jt + ST - 1) % ST) * SB);
+@@ -353,21 +360,21 @@
+     }
+ }
+ 
+-template <int ST, bool PACKED>
++template <int ST, int L>
+ void launch(dim3 grid, cudaStream_t stream, const __nv_bfloat16* QI, const __nv_bfloat16* W, int w_stride,
+             const uint8_t* PK, int RS, float* OUT, long long o_stride, const int32_t* POS, const int32_t* SPR,
+             const int32_t* SS, const int32_t* SR, const int32_t* SB, const int32_t* SP, int32_t* TP, int segs,
+-            int min_rows, int spread, float scale, float wscale) {
+-    constexpr int bytes = BP * CH * 16 + BP * 4 + ST * (PACKED ? STAGE_P : STAGE);
++            int min_rows, int spread, float scale, float wscale, const float* PKS) {
++    constexpr int bytes = BP * CH * 16 + BP * 4 + ST * (L == 1 ? STAGE_P : STAGE);
+     static bool sized = false;                                   // over 48 KB needs the opt-in (once a process)
+     if (!sized) {
+-        C10_CUDA_CHECK(cudaFuncSetAttribute(seg_scores_kernel<ST, PACKED>, cudaFuncAttributeMaxDynamicSharedMemorySize,
++        C10_CUDA_CHECK(cudaFuncSetAttribute(seg_scores_kernel<ST, L>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                             bytes));
+         sized = true;
+     }
+-    seg_scores_kernel<ST, PACKED><<<grid, RB * 32, bytes, stream>>>(QI, W, w_stride, PK, RS, OUT, o_stride, POS, SPR,
+-                                                                    SS, SR, SB, SP, TP, segs, min_rows, spread, scale,
+-                                                                    wscale);
++    seg_scores_kernel<ST, L><<<grid, RB * 32, bytes, stream>>>(QI, W, w_stride, PK, RS, OUT, o_stride, POS, SPR, SS,
++                                                               SR, SB, SP, TP, segs, min_rows, spread, scale, wscale,
++                                                               PKS);
+ }
+ 
+ // The most row groups the scored segments of a window of R rows in ``segs`` segments can hold (the grid's x): k of
+@@ -388,18 +395,19 @@
+ // [segs] (int32) <- SEG_POOLS for the other segments, 0 for these: _seg_scores launched after it over TRI_POOLS
+ // scores exactly the rest. QI [R, 32 * 128] bf16 contiguous rows, W bf16 head weights (row stride w_stride, unit
+ // column stride), PK an FP8 pooled-key arena (rows of 128 e4m3 codes then the row's fp32 scale, RS bytes apart: 16-byte
+-// rows, or packed rows of 132 bytes (PooledKeys) from a 16-byte aligned PK; a segment's pool p at row SEG_PBASE + p),
+-// the int32 SegRows tables (POS, SPR per row; SEG_START, SEG_ROWS, SEG_PBASE,
+-// SEG_POOLS per segment, ``segs`` of them). ``blocks``: CTAs a row group's pool blocks are split over, ``stages``:
+-// raw key tiles a CTA holds (2-4); ``min_rows`` (speed only, like both). seg_scores_spread's ``spread`` (speed only,
+-// DecodeAttnLeftovers F5): 0, the grid above (row groups x blocks: seg_scores); N > 0, a flat grid of N CTAs (at least
+-// the window's most row groups) spread over the window's row groups in proportion to their pool blocks, whatever the
+-// mix of streams.
++// rows, or packed rows of 132 bytes (PooledKeys) from a 16-byte aligned PK; or split (PooledKeys-3), RS = 128: the
++// codes alone from a 16-byte aligned PK, row p's scale at PKS[p], PKS (the last argument) fp32 with one scale a code
++// row; PKS is not read otherwise and may be left out, the call of before; a segment's pool p at row SEG_PBASE + p),
++// the int32 SegRows tables (POS, SPR per row; SEG_START, SEG_ROWS, SEG_PBASE, SEG_POOLS per segment, ``segs`` of
++// them). ``blocks``: CTAs a row group's pool blocks are split over, ``stages``: raw key tiles a CTA holds (2-4);
++// ``min_rows`` (speed only, like both). seg_scores_spread's ``spread`` (speed only, DecodeAttnLeftovers F5): 0, the
++// grid above (row groups x blocks: seg_scores); N > 0, a flat grid of N CTAs (at least the window's most row groups)
++// spread over the window's row groups in proportion to their pool blocks, whatever the mix of streams.
+ void seg_scores_spread(const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK, int64_t RS,
+                        at::Tensor OUT, int64_t o_stride, const at::Tensor& POS, const at::Tensor& SPR,
+                        const at::Tensor& SEG_START, const at::Tensor& SEG_ROWS, const at::Tensor& SEG_PBASE,
+                        const at::Tensor& SEG_POOLS, at::Tensor TRI_POOLS, int64_t segs, double scale, double wscale,
+-                       int64_t blocks, int64_t stages, int64_t min_rows, int64_t spread) {
++                       int64_t blocks, int64_t stages, int64_t min_rows, int64_t spread, const at::Tensor& PKS) {
+     TORCH_CHECK(QI.is_cuda() && QI.scalar_type() == at::kBFloat16 && W.scalar_type() == at::kBFloat16 &&
+                 OUT.scalar_type() == at::kFloat && PK.element_size() == 1, "seg scores: dtypes");
+     for (const at::Tensor* x :
+@@ -411,10 +419,15 @@
+                 POS.numel() >= QI.size(0) && SPR.numel() >= QI.size(0), "seg scores: shapes");
+     TORCH_CHECK(o_stride % 2 == 0 && reinterpret_cast<uintptr_t>(OUT.data_ptr()) % 8 == 0,
+                 "seg scores: score rows 8-byte aligned (float2 stores)");
+-    const bool packed = RS % 16 != 0;
+-    TORCH_CHECK((packed ? RS == D + 4 && reinterpret_cast<uintptr_t>(PK.data_ptr()) % 16 == 0 : RS >= D + 4) &&
+-                PK.is_contiguous(), "seg scores: an FP8 key cache of 16-byte rows, or packed 132-byte rows 16-byte "
+-                "aligned");
++    const int layout = RS == D ? 2 : RS % 16 != 0 ? 1 : 0;     // split, packed, 16-byte rows
++    TORCH_CHECK((layout == 2   ? reinterpret_cast<uintptr_t>(PK.data_ptr()) % 16 == 0
++                 : layout == 1 ? RS == D + 4 && reinterpret_cast<uintptr_t>(PK.data_ptr()) % 16 == 0
++                               : RS >= D + 4) &&
++                PK.is_contiguous(), "seg scores: an FP8 key cache of 16-byte rows, or packed 132-byte or split "
++                "128-byte rows 16-byte aligned");
++    TORCH_CHECK(layout != 2 || (PKS.defined() && PKS.scalar_type() == at::kFloat && PKS.is_contiguous() &&
++                                PKS.device() == PK.device() && PKS.numel() * D == PK.numel()),
++                "seg scores: a split cache's scales plane: fp32, contiguous, one scale a code row");
+     TORCH_CHECK(blocks >= 1 && blocks <= 65535 && segs >= 1 && segs <= 65535 && stages >= 2 && stages <= 4 &&
+                 min_rows >= 1 && spread >= 0 && spread < (int64_t(1) << 31), "seg scores: grid / stages / rows");
+     const int64_t R = QI.size(0);
+@@ -427,15 +440,16 @@
+     auto qi = reinterpret_cast<const __nv_bfloat16*>(QI.data_ptr());
+     auto w = reinterpret_cast<const __nv_bfloat16*>(W.data_ptr());
+     auto pk = reinterpret_cast<const uint8_t*>(PK.data_ptr());
++    const float* pks = layout == 2 ? PKS.data_ptr<float>() : nullptr;
+     auto go = [&](auto f) {
+         f(grid, stream, qi, w, (int)w_stride, pk, (int)RS, OUT.data_ptr<float>(), (long long)o_stride,
+           POS.data_ptr<int32_t>(), SPR.data_ptr<int32_t>(), SEG_START.data_ptr<int32_t>(),
+           SEG_ROWS.data_ptr<int32_t>(), SEG_PBASE.data_ptr<int32_t>(), SEG_POOLS.data_ptr<int32_t>(),
+-          TRI_POOLS.data_ptr<int32_t>(), (int)segs, (int)min_rows, (int)(spread > 0), (float)scale, (float)wscale);
++          TRI_POOLS.data_ptr<int32_t>(), (int)segs, (int)min_rows, (int)(spread > 0), (float)scale, (float)wscale, pks);
+     };
+-    if (stages == 2) packed ? go(launch<2, true>) : go(launch<2, false>);
+-    else if (stages == 3) packed ? go(launch<3, true>) : go(launch<3, false>);
+-    else packed ? go(launch<4, true>) : go(launch<4, false>);
++    if (stages == 2) layout == 2 ? go(launch<2, 2>) : layout == 1 ? go(launch<2, 1>) : go(launch<2, 0>);
++    else if (stages == 3) layout == 2 ? go(launch<3, 2>) : layout == 1 ? go(launch<3, 1>) : go(launch<3, 0>);
++    else layout == 2 ? go(launch<4, 2>) : layout == 1 ? go(launch<4, 1>) : go(launch<4, 0>);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
+@@ -443,13 +457,31 @@
+                 at::Tensor OUT, int64_t o_stride, const at::Tensor& POS, const at::Tensor& SPR,
+                 const at::Tensor& SEG_START, const at::Tensor& SEG_ROWS, const at::Tensor& SEG_PBASE,
+                 const at::Tensor& SEG_POOLS, at::Tensor TRI_POOLS, int64_t segs, double scale, double wscale,
+-                int64_t blocks, int64_t stages, int64_t min_rows) {
++                int64_t blocks, int64_t stages, int64_t min_rows, const at::Tensor& PKS) {
+     seg_scores_spread(QI, W, w_stride, PK, RS, OUT, o_stride, POS, SPR, SEG_START, SEG_ROWS, SEG_PBASE, SEG_POOLS,
+-                      TRI_POOLS, segs, scale, wscale, blocks, stages, min_rows, 0);
+-}
+-
++                      TRI_POOLS, segs, scale, wscale, blocks, stages, min_rows, 0, PKS);
++}
++
++// both also in the call of before (no PKS: a cache of 144- or 132-byte rows; a split one is refused)
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     m.def("seg_scores", &seg_scores);
++    m.def("seg_scores", [](const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK,
++                           int64_t RS, at::Tensor OUT, int64_t o_stride, const at::Tensor& POS, const at::Tensor& SPR,
++                           const at::Tensor& SEG_START, const at::Tensor& SEG_ROWS, const at::Tensor& SEG_PBASE,
++                           const at::Tensor& SEG_POOLS, at::Tensor TRI_POOLS, int64_t segs, double scale,
++                           double wscale, int64_t blocks, int64_t stages, int64_t min_rows) {
++        seg_scores(QI, W, w_stride, PK, RS, OUT, o_stride, POS, SPR, SEG_START, SEG_ROWS, SEG_PBASE, SEG_POOLS,
++                   TRI_POOLS, segs, scale, wscale, blocks, stages, min_rows, at::Tensor());
++    });
+     m.def("seg_scores_spread", &seg_scores_spread);
++    m.def("seg_scores_spread", [](const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK,
++                                  int64_t RS, at::Tensor OUT, int64_t o_stride, const at::Tensor& POS,
++                                  const at::Tensor& SPR, const at::Tensor& SEG_START, const at::Tensor& SEG_ROWS,
++                                  const at::Tensor& SEG_PBASE, const at::Tensor& SEG_POOLS, at::Tensor TRI_POOLS,
++                                  int64_t segs, double scale, double wscale, int64_t blocks, int64_t stages,
++                                  int64_t min_rows, int64_t spread) {
++        seg_scores_spread(QI, W, w_stride, PK, RS, OUT, o_stride, POS, SPR, SEG_START, SEG_ROWS, SEG_PBASE, SEG_POOLS,
++                          TRI_POOLS, segs, scale, wscale, blocks, stages, min_rows, spread, at::Tensor());
++    });
+     m.def("groups_most", &groups_most);
+ }
+--- tensorfold/families/glm5_next/cuda/sparse.py
++++ tensorfold/families/glm5_next/cuda/sparse.py
+@@ -73,8 +73,17 @@
+     kv8.store_row(PK, PKS, p, ((t0 + t1) + t2) + t3, D, RS, FP8)
+ 
+ 
++def pooled_parts(pk, who: str):
++    """``kv8.parts`` of the pooled keys: 128 values a row (bf16 rows, FP8 rows of 144 or 132 bytes, or a ``kv8.Split``:
++    the codes' and the scales' planes, TF_GLM_POOLED_PACK=2), anything else refused (a bare tensor of 128-byte FP8
++    rows is no layout of them: a split cache's codes without its scales)."""
++    if kv8.width(pk) != 128:
++        raise ValueError(f"{who}: 128-wide pooled keys")
++    return kv8.parts(pk)
++
++
+ def index_update(k_raw: torch.Tensor, gate: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor, ape: torch.Tensor,
+-                 ik: torch.Tensor, ig: torch.Tensor, pk: torch.Tensor, pos: torch.Tensor) -> None:
++                 ik: torch.Tensor, ig: torch.Tensor, pk, pos: torch.Tensor) -> None:
+     """Window rows' index keys and gates into their ring (ik, ig: bf16 [ring, 128], token t at row t % ring), then
+     every pool the window completes into pk (bf16, or TF_GLM_KV=fp8's kv8 rows). Only the pool a token belongs to
+     ever reads its key and gate, so the ring needs the window's rows and the 3 before it: ring >= R + 3
+@@ -85,9 +94,7 @@
+     if ik.dtype != torch.bfloat16 or ig.shape != ik.shape or not ik.is_contiguous() or not ig.is_contiguous():
+         raise ValueError("index_update: bf16 key and gate rings of one shape, contiguous")
+     _index_write[(R,)](k_raw, k_raw.stride(0), gate, ln_w, ln_b, ik, ig, pos, ring, 1e-6, D=128, num_warps=1)
+-    if kv8.width(pk) != 128:
+-        raise ValueError("index_update: 128-wide pooled keys")
+-    pkv, pks, rs, fp8 = kv8.parts(pk)
++    pkv, pks, rs, fp8 = pooled_parts(pk, "index_update")
+     _pool_keys[(R // 4 + 2,)](ik, ig, ape, pkv, pks, pos, R, ring, D=128, RS=rs, FP8=fp8, num_warps=1)
+ 
+ 
+@@ -170,7 +177,7 @@
+         try:
+             if not triton_matches_ptx():
+                 raise RuntimeError(f"Triton {triton.__version__}: the kernel reproduces Triton {TRITON_PTX}'s PTX")
+-            _SCORES_EXT = load(name="tensorfold_glm_scores_pk1",       # PooledKeys: packed pooled-key rows
++            _SCORES_EXT = load(name="tensorfold_glm_scores_pks",       # PooledKeys-3: + split pooled keys (PKS)
+                                sources=[str(Path(__file__).parent / "prompt_scores.cu")],
+                                extra_cuda_cflags=["-O3"], verbose=False)
+         except Exception as exc:
+@@ -521,7 +528,7 @@
+     D = qi.shape[1] // H
+     wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5 exactly as before
+     grid = row_score_programs(np_max)
+-    pkv, pks, rs, fp8 = kv8.parts(pk)
++    pkv, pks, rs, fp8 = pooled_parts(pk, "select_tokens")
+     _scores_rows[(R, grid)](qi, wts, wts.stride(0), pkv, pks, scores, np_max, pos_dev, pos_dev, pos_dev, R, np_max,
+                             D ** -0.5, wscale, H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, G=grid,
+                             SEG=False, RS=rs, FP8=fp8, K=TOPK_POOLS, num_warps=4)
+@@ -558,7 +565,7 @@
+     H = wts.shape[1]
+     D = qi.shape[1] // H
+     wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5
+-    pkv, pks, rs, fp8 = kv8.parts(pk)
++    pkv, pks, rs, fp8 = pooled_parts(pk, "prompt scores")
+     # the CUDA scoring when it is used, decided once (HuntPrefill-2: prompt_scores_cuda() is True before the first
+     # load is tried, so a failed load now falls back to _scores here, as seg_select_tokens' path does, instead of
+     # calling .scores on None)
+@@ -568,7 +575,7 @@
+         at = pos_dev if a == 0 else pos_dev + a
+         scores = buf[:n * NP].view(n, NP)
+         if ext is not None:
+-            ext.scores(qi[a:a + n], wts[a:a + n], wts.stride(0), pk, rs, scores, at, n, NP, D ** -0.5, wscale)
++            ext.scores(qi[a:a + n], wts[a:a + n], wts.stride(0), pkv, rs, scores, at, n, NP, D ** -0.5, wscale, pks)
+         else:
+             _scores[(n, triton.cdiv(triton.cdiv(NP, 64), SCORE_LOOP))](qi[a:a + n], wts[a:a + n], wts.stride(0), pkv,
+                                                                        pks, scores, at, n, NP, D ** -0.5, wscale, H=H,
+@@ -817,7 +824,7 @@
+     R = k_raw.shape[0]
+     _seg_index_write[(R,)](k_raw, k_raw.stride(0), gate, ln_w, ln_b, ik, ig, rows.pos, rows.ibase, rows.ring_rows,
+                            1e-6, D=128, num_warps=1)
+-    pkv, pks, rs, fp8 = kv8.parts(pk)
++    pkv, pks, rs, fp8 = pooled_parts(pk, "seg_index_update")
+     _seg_pool_keys[(R,)](ik, ig, ape, pkv, pks, rows.pos, rows.base, rows.ibase, rows.ring_rows, D=128, RS=rs,
+                          FP8=fp8, num_warps=1)
+ 
+@@ -966,7 +973,7 @@
+         try:
+             if not triton_matches_ptx():
+                 raise RuntimeError(f"Triton {triton.__version__}: the kernel reproduces Triton {TRITON_PTX}'s PTX")
+-            _SEG_SCORES_EXT = load(name="tensorfold_glm_segscores_pk2",       # PooledKeys: packed pooled-key rows
++            _SEG_SCORES_EXT = load(name="tensorfold_glm_segscores_pks",       # PooledKeys-3: + split pooled keys
+                                    sources=[str(Path(__file__).parent / "seg_scores.cu")],
+                                    extra_cuda_cflags=["-O3"], verbose=False)
+         except Exception as exc:
+@@ -992,15 +999,15 @@
+     H = wts.shape[1]
+     D = qi.shape[1] // H
+     wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # select_tokens' constants
+-    pkv, pks, rs, fp8 = kv8.parts(pk)
++    pkv, pks, rs, fp8 = pooled_parts(pk, "seg scores")
+     segs = min(rows.max_segs, R)
+     ext = _seg_scores_ext() if fp8 and H == 32 and D == 128 and seg_scores_cuda() else None
+     tri_pools = pools
+     if ext is not None and R >= SEG_SCORE_CUDA_ROWS:
+         tri_pools = tri
+-        ext.seg_scores_spread(qi, wts, wts.stride(0), pk, rs, scores, scores.stride(0), rows.pos, rows.sparse,
++        ext.seg_scores_spread(qi, wts, wts.stride(0), pkv, rs, scores, scores.stride(0), rows.pos, rows.sparse,
+                               rows.seg_start, rows.seg_rows, pbase, pools, tri, segs, D ** -0.5, wscale,
+-                              SEG_SCORE_CTAS, SEG_SCORE_STAGES, SEG_SCORE_CUDA_ROWS, seg_score_blocks())
++                              SEG_SCORE_CTAS, SEG_SCORE_STAGES, SEG_SCORE_CUDA_ROWS, seg_score_blocks(), pks)
+         if SEG_SCORE_CUDA_ROWS <= 1:
+             return                                    # every segment scored above: tri holds only zeros
+     grid = min(SEG_SCORE_GRID, triton.cdiv(scores.shape[1], 64))

@@ -1,0 +1,96 @@
+--- tensorfold/cuda/literal_tokens.py	2026-10-30 07:33:54.999698400 +0000
++++ tensorfold/cuda/literal_tokens.py	2026-10-30 07:33:55.013323700 +0000
+@@ -98,11 +98,16 @@
+         self._remember(fresh)
+         if not maybe:
+             return messages, tools, False
+-        out = [[self._message(m) if isinstance(m, dict) else m for m in messages],
+-               self._sub(tools) if tools is not None else None]
++        # (OTS: a string this walk or an earlier request found nothing to mask in is left as it is, without the
++        # substitution's scan (it would change nothing): ``known``; every string masking did scan is in ``seen``)
++        known, seen = (clean, set(fresh)), []
++        out = [[self._message(m, known, seen) if isinstance(m, dict) else m for m in messages],
++               self._sub(tools, known, seen) if tools is not None else None]
+         # OTS: nothing was masked after all (a "\u" escape that decodes to no guarded token): the masked values equal
+-        # the request's, so it renders and encodes as an unmasked one, through the prompt ids (OTS 0110) like any other
+-        if not _any_string(out, self._collides):
++        # the request's, so it renders and encodes as an unmasked one, through the prompt ids (OTS 0110) like any other.
++        # A mask character can only be in a string masking scanned (every other string of ``out`` is the request's,
++        # which the walk above found none in): ``seen`` holds those that went into ``out``
++        if not any(self._collides(text) for text in seen):
+             return messages, tools, False
+         return out[0], out[1], True
+ 
+@@ -127,22 +132,22 @@
+ 
+         return bool(self._any_text.search(text)) or "\\u" in text
+ 
+-    def _message(self, message: dict[str, Any]) -> dict[str, Any]:
++    def _message(self, message: dict[str, Any], known: tuple = ((), ()), seen: list | None = None) -> dict[str, Any]:
+         out = dict(message)
+         separated = isinstance(out.get("reasoning_content"), str) or isinstance(out.get("reasoning"), str)
+         # An assistant turn that carries its reasoning inline ("<think>...</think>answer") is left as the template
+         # expects it; every other content is text.
+         inline = out.get("role") == "assistant" and not separated and "</think>" in _flat_text(out.get("content"))
+         if "content" in out and not inline:
+-            out["content"] = self._sub(out["content"])
++            out["content"] = self._sub(out["content"], known, seen)
+         for key in ("reasoning_content", "reasoning"):
+             if isinstance(out.get(key), str):
+-                out[key] = self._sub(out[key])
++                out[key] = self._sub(out[key], known, seen)
+         if isinstance(out.get("tool_calls"), list):
+-            out["tool_calls"] = [self._call(call) for call in out["tool_calls"]]
++            out["tool_calls"] = [self._call(call, known, seen) for call in out["tool_calls"]]
+         return out
+ 
+-    def _call(self, call: Any) -> Any:
++    def _call(self, call: Any, known: tuple = ((), ()), seen: list | None = None) -> Any:
+         if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
+             return call
+         function = dict(call["function"])
+@@ -155,23 +160,35 @@
+             except ValueError:
+                 parsed = None
+             if isinstance(parsed, dict):
+-                masked = self._sub(parsed)
+-                function["arguments"] = masked if masked != parsed else arguments
++                mine: list | None = [] if seen is not None else None
++                masked = self._sub(parsed, known, mine)
++                if masked != parsed:
++                    function["arguments"] = masked
++                    if seen is not None:
++                        seen.extend(mine)
++                else:
++                    function["arguments"] = arguments
+             else:
+-                function["arguments"] = self._sub(arguments)
++                function["arguments"] = self._sub(arguments, known, seen)
+         elif arguments is not None:
+-            function["arguments"] = self._sub(arguments)
++            function["arguments"] = self._sub(arguments, known, seen)
+         return {**call, "function": function}
+ 
+-    def _sub(self, value: Any) -> Any:
+-        """Masks guarded text in every string a value holds, mapping keys included."""
++    def _sub(self, value: Any, known: tuple = ((), ()), seen: list | None = None) -> Any:
++        """Masks guarded text in every string a value holds, mapping keys included. (OTS) A string in ``known``'s
++        collections holds none and is returned as it is; each string scanned is added to ``seen``."""
+ 
+         if isinstance(value, str):
+-            return self._find.sub(lambda m: self._mask_of[m.group(0)], value)
++            if value in known[0] or value in known[1]:
++                return value
++            value = self._find.sub(lambda m: self._mask_of[m.group(0)], value)
++            if seen is not None:
++                seen.append(value)
++            return value
+         if isinstance(value, list):
+-            return [self._sub(v) for v in value]
++            return [self._sub(v, known, seen) for v in value]
+         if isinstance(value, dict):
+-            return {self._sub(k): self._sub(v) for k, v in value.items()}
++            return {self._sub(k, known, seen): self._sub(v, known, seen) for k, v in value.items()}
+         return value
+ 
+     def _collides(self, text: str) -> bool:

@@ -1,0 +1,148 @@
+--- tensorfold/cuda/spill_blocks.py
++++ tensorfold/cuda/spill_blocks.py
+@@ -64,6 +64,7 @@
+ 
+ from __future__ import annotations
+ 
++import collections
+ import concurrent.futures
+ import contextlib
+ import errno
+@@ -94,6 +95,21 @@
+                                # free again only once the engine copied it out, so beside a decoding stream a load moves
+                                # at most this many a round (pin_read_ahead)
+ STAGE_MIB = 256                # TF_GLM_SPILL_STAGE_MIB: the pinned ring writes go through (at least two blocks)
++HASH_AHEAD = 2                 # TF_GLM_SPILL_HASH_AHEAD: blocks queued for the writer whose CRC-32 and digest it starts
++                               # while it writes the one before (0: each block hashed when its turn comes, as before)
++
++
++def hash_ahead() -> int:
++    """TF_GLM_SPILL_HASH_AHEAD: the writer's hashing look-ahead (``BlockStore._look_ahead``), in blocks (0: none)."""
++
++    raw = str(os.environ.get("TF_GLM_SPILL_HASH_AHEAD", "") or "").strip() or str(HASH_AHEAD)
++    try:
++        n = int(raw)
++    except ValueError:
++        n = -1
++    if n < 0:
++        raise ValueError(f"TF_GLM_SPILL_HASH_AHEAD: whole blocks >= 0, not {raw!r}")
++    return n
+ 
+ 
+ def read_blocks() -> int:
+@@ -649,6 +665,7 @@
+         self.cfg, self.planes, self.block = cfg, list(planes), int(block)
+         self.read_blocks = read_blocks()
+         self.stage_mib = _count("TF_GLM_SPILL_STAGE_MIB", STAGE_MIB, "MiB")
++        self.hash_ahead = hash_ahead()
+         for p in self.planes:
+             if self.block % p.div:
+                 raise ValueError(f"--spill-gib: a cache plane of {p.div} tokens a row does not divide {self.block}")
+@@ -750,7 +767,9 @@
+         self.dev_slot: torch.Tensor | None = None
+         self.slot_events: list = []                        # a write slot's event, reused by every block it stages
+         self.read_slots: list[torch.Tensor] = []
+-        self._hasher = ThreadPoolExecutor(2, thread_name_prefix=f"spill-hash-{self.rank}")
++        # a block's CRC-32 and digest side by side, for the block being written and the ``hash_ahead()`` queued after it
++        # (``_look_ahead``: blake2b alone is ~18 ms a 12.1 MiB block on x86, so the writer was bound by its hashing)
++        self._hasher = ThreadPoolExecutor(2 * (self.hash_ahead + 1), thread_name_prefix=f"spill-hash-{self.rank}")
+         # a keep's block names beside its point key (``persist``): both hash every id (hashlib lets the GIL go), so
+         # the engine loop waits for the longer of the two, not their sum (~7.4 -> ~4.7 ms at 772k ids)
+         self._namer = ThreadPoolExecutor(1, thread_name_prefix=f"spill-name-{self.rank}")
+@@ -1328,13 +1347,24 @@
+                 self.stats["released_blocks"] += 1
+             job.next = len(job.new)
+ 
+-    def _write_block(self, h: str, mv: memoryview, nb: int, room: bool) -> None:
+-        """The writer: a block (its CRC-32 and digest computed beside the write), or a link to a block on disk with the
+-        same bytes. Through a temporary name, fsynced, renamed; a failure leaves no temporary file."""
++    def _hash(self, data, ev=None) -> tuple:
++        """A block's CRC-32 and digest started side by side on the hashing pool, each once ``ev`` (its slot's copy off
++        the device) ended: (crc future, digest future)."""
++
++        def after(fn):
++            if ev is not None:
++                ev.synchronize()
++            return fn(data)
++
++        return self._hasher.submit(after, _crc), self._hasher.submit(after, _digest)
++
++    def _write_block(self, h: str, mv: memoryview, nb: int, room: bool, pre: tuple | None = None) -> None:
++        """The writer: a block (its CRC-32 and digest computed beside the write, or started earlier: ``pre``, from
++        ``_look_ahead``), or a link to a block on disk with the same bytes. Through a temporary name, fsynced, renamed;
++        a failure leaves no temporary file."""
+ 
+         data = mv[:nb]                                      # ``room``: mv runs on to a 4 KiB multiple (O_DIRECT)
+-        crc_f = self._hasher.submit(_crc, data)
+-        dig_f = self._hasher.submit(_digest, data)
++        crc_f, dig_f = pre if pre is not None else self._hash(data)
+         dig = dig_f.result()
+         crc = crc_f.result()
+         path, tmp = self._block_path(h), os.path.join(self.blocks_dir, f".{h}.bin")
+@@ -1400,11 +1430,37 @@
+                 pass
+             raise
+ 
++    def _look_ahead(self, ahead: collections.deque) -> None:
++        """The writer, before it writes the item it took: the items queued after it (taken now, still written in their
++        order) until ``hash_ahead`` blocks among them have their CRC-32 and digest started, so the hashing of the next
++        blocks runs beside this one's write. Bits and names are unchanged: each block is still looked up (a link to the
++        same bytes) and written when its turn comes."""
++
++        started = sum(1 for it in ahead if it[4] is not None)
++        while started < self.hash_ahead and len(ahead) < 4 * self.hash_ahead + 8:
++            try:
++                kind, job, h, item = self.jobs.get_nowait()
++            except queue.Empty:
++                return
++            pre = None
++            if kind in ("block", "rows") and job.failed is None:
++                if kind == "block":
++                    slot, nb, ev = item
++                    pre = self._hash(memoryview(self.slots[slot].numpy())[:nb], ev)
++                else:
++                    pre = self._hash(memoryview(item.view(-1).view(torch.uint8).numpy()))
++                started += 1
++            ahead.append((kind, job, h, item, pre))
++
+     def _writer(self) -> None:
++        ahead: collections.deque = collections.deque()      # items taken ahead (``_look_ahead``), in queue order
+         while True:
+-            if self.carry_poll > 0:                         # (a quiet writer looks for a gate's grant now and then)
++            if ahead:
++                kind, job, h, item, pre = ahead.popleft()
++            elif self.carry_poll > 0:                       # (a quiet writer looks for a gate's grant now and then)
+                 try:
+                     kind, job, h, item = self.jobs.get(timeout=self.carry_poll)
++                    pre = None
+                 except queue.Empty:
+                     try:
+                         self._take_grants()
+@@ -1413,14 +1469,17 @@
+                     continue
+             else:
+                 kind, job, h, item = self.jobs.get()
++                pre = None
+             t0 = time.perf_counter()
++            if kind in ("block", "rows") and self.hash_ahead:
++                self._look_ahead(ahead)
+             if kind == "block":
+                 slot, nb, ev = item
+                 try:
+                     if ev is not None:
+                         ev.synchronize()
+                     if job.failed is None:
+-                        self._write_block(h, memoryview(self.slots[slot].numpy()), nb, True)
++                        self._write_block(h, memoryview(self.slots[slot].numpy()), nb, True, pre)
+                 except Exception as exc:                    # noqa: BLE001  (a full or failing disk: not kept on disk)
+                     job.failed = exc
+                 finally:
+@@ -1440,7 +1499,7 @@
+                 try:
+                     if job.failed is None:
+                         raw = item.view(-1).view(torch.uint8)
+-                        self._write_block(h, memoryview(raw.numpy()), raw.numel(), False)
++                        self._write_block(h, memoryview(raw.numpy()), raw.numel(), False, pre)
+                 except Exception as exc:                    # noqa: BLE001
+                     job.failed = exc
+                 finally:

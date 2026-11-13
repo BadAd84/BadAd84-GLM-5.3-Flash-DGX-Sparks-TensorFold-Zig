@@ -1,0 +1,141 @@
+--- tensorfold/cuda/roce.cu
++++ tensorfold/cuda/roce.cu
+@@ -8,9 +8,13 @@
+ //   1. every block stages its share of the local shard into send[seq & 1];
+ //   2. the last block to finish staging (a free-running arrival counter) publishes nbytes and rings ctrl.seq after
+ //      a system fence; the proxy thread RDMA-writes the payload to every peer, then a flag per HCA stripe;
+-//   3. one thread per (peer, HCA) spins on that stripe's flag with system-scope acquire loads (a limit poisons);
+-//   4. every block copies the shards in rank order: its own from the input, the peers' from the NIC-written slots;
++//   3. every block copies the local shard into its place in the output (it needs no peer), then one thread per
++//      (peer, HCA) spins on that stripe's flag with system-scope acquire loads (a limit poisons);
++//   4. every block copies the peers' shards in rank order from the NIC-written slots, each thread issuing all of its
++//      system-scope loads (UNROLL positions x every peer) before any store, so their latencies overlap;
+ //   5. the last block to finish advances the device epoch, so CUDA graphs replay the exchange.
++// HuntComms (OTS): steps 3 and 4 were one loop over every source after the wait, each thread's sys-scope load waiting
++// out the previous one's store; the output bytes are the same.
+ 
+ #include <ATen/ATen.h>
+ #include <ATen/cuda/CUDAContext.h>
+@@ -57,17 +61,29 @@
+ 
+ // ctrl record, in 32-bit words
+ constexpr int C_SEQ = 0, C_NBYTES = 1, C_ERROR = 2, C_PEER = 3, C_SLOT_NBYTES = 4, C_HCA = 6;
++constexpr int UNROLL = 4;            // shard positions a thread loads from every peer before it stores any
++
++// pack i of ``source``'s shard in the output: rank order, or row-interleaved when a row is narrower than the shard
++__device__ __forceinline__ long long out_at(int i, int source, int world, int row_packs, bool flat, int shard_packs) {
++    if (flat) return (long long)source * shard_packs + i;
++    const int row = i / row_packs, col = i - row * row_packs;
++    return (long long)row * world * row_packs + (long long)source * row_packs + col;
++}
+ 
++// W: the world size when known at compile time (2 to 4: every peer's loads in flight together), 0: any world
++template <int W>
+ __global__ void gather_kernel(const uint4* __restrict__ in, uint4* __restrict__ out, int shard_packs, uint32_t nbytes,
+                               int row_packs, char* recv_base, char* flag_base, char* send_base, uint32_t* ctrl,
+                               long long slot_bytes, uint32_t* epoch, uint32_t* stage_ctr, uint32_t* tail_ctr,
+-                              uint32_t* poison, uint32_t spin_limit, int world, int rank, int slots, int flag_stride,
++                              uint32_t* poison, uint32_t spin_limit, int world_arg, int rank, int slots, int flag_stride,
+                               int n_hca) {
++    const int world = W ? W : world_arg;
+     const int tid = threadIdx.x;
+     const uint32_t seq = ld_relaxed_gpu(epoch) + 1u;
+     const uint32_t slot = seq & 1u;
+     uint4* send_slot = reinterpret_cast<uint4*>(send_base + (long long)slot * slot_bytes);
+     const int index = blockIdx.x * blockDim.x + tid, stride = gridDim.x * blockDim.x;
++    const bool flat = row_packs == shard_packs;
+     // a recorded timeout poisons the runtime: later launches do nothing until the host raises
+     if (ld_relaxed_gpu(poison) != 0u) return;
+ 
+@@ -83,7 +99,9 @@
+             st_relaxed_sys(ctrl + C_SEQ, seq);
+         }
+     }
+-    if (tid < world * n_hca) {                                                                      // 3. wait
++    // 3. the local shard while the peers' are on the wire
++    for (int i = index; i < shard_packs; i += stride) out[out_at(i, rank, world, row_packs, flat, shard_packs)] = in[i];
++    if (tid < world * n_hca) {                                                                      //    the wait
+         const int peer = tid / n_hca, hca = tid - peer * n_hca;
+         if (peer != rank) {
+             const uint32_t* flag = reinterpret_cast<const uint32_t*>(
+@@ -102,15 +120,44 @@
+     }
+     __syncthreads();
+     if (ld_relaxed_gpu(poison) == 0u) {                                                             // 4. copy out
+-        const int out_row_packs = world * row_packs;
+-        for (int source = 0; source < world; ++source) {
+-            const uint4* peer_slot = reinterpret_cast<const uint4*>(
+-                recv_base + ((long long)source * slots + slot) * slot_bytes);
+-            for (int i = index; i < shard_packs; i += stride) {
+-                const int row = i / row_packs, col = i - row * row_packs;
+-                const uint4 w = source == rank ? in[i] : ld_relaxed_sys_v4(peer_slot + i);
+-                out[(long long)row * out_row_packs + (long long)source * row_packs + col] = w;
++        if (W) {
++            constexpr int P = W > 1 ? W - 1 : 1;               // peers
++            const uint4* peer_slot[P];
++            int source[P];
++#pragma unroll
++            for (int k = 0; k < P; ++k) {
++                source[k] = k < rank ? k : k + 1;
++                peer_slot[k] = reinterpret_cast<const uint4*>(recv_base + ((long long)source[k] * slots + slot) *
++                                                              slot_bytes);
+             }
++            for (int base = index; base < shard_packs; base += UNROLL * stride) {
++                uint4 v[UNROLL][P];
++#pragma unroll
++                for (int u = 0; u < UNROLL; ++u) {
++                    const int i = base + u * stride;
++                    if (i < shard_packs) {
++#pragma unroll
++                        for (int k = 0; k < P; ++k) v[u][k] = ld_relaxed_sys_v4(peer_slot[k] + i);
++                    }
++                }
++#pragma unroll
++                for (int u = 0; u < UNROLL; ++u) {
++                    const int i = base + u * stride;
++                    if (i < shard_packs) {
++#pragma unroll
++                        for (int k = 0; k < P; ++k)
++                            out[out_at(i, source[k], world, row_packs, flat, shard_packs)] = v[u][k];
++                    }
++                }
++            }
++        } else {
++            for (int source = 0; source < world; ++source) {
++                if (source == rank) continue;
++                const uint4* peer_slot = reinterpret_cast<const uint4*>(
++                    recv_base + ((long long)source * slots + slot) * slot_bytes);
++                for (int i = index; i < shard_packs; i += stride)
++                    out[out_at(i, source, world, row_packs, flat, shard_packs)] = ld_relaxed_sys_v4(peer_slot + i);
++            }
+         }
+     }
+     fence_sc_gpu();                                                                                 // 5. epoch
+@@ -132,12 +179,20 @@
+                       int64_t world, int64_t rank, int64_t slots, int64_t flag_stride, int64_t n_hca, int64_t grid,
+                       int64_t threads) {
+     auto stream = at::cuda::getCurrentCUDAStream();
+-    gather_kernel<<<(unsigned)grid, (unsigned)threads, 0, stream>>>(
+-        reinterpret_cast<const uint4*>(in.data_ptr()), reinterpret_cast<uint4*>(out.data_ptr()), (int)shard_packs,
+-        (uint32_t)nbytes, (int)row_packs, reinterpret_cast<char*>(recv_base), reinterpret_cast<char*>(flag_base),
+-        reinterpret_cast<char*>(send_base), reinterpret_cast<uint32_t*>(ctrl), (long long)slot_bytes,
+-        reinterpret_cast<uint32_t*>(epoch), reinterpret_cast<uint32_t*>(stage_ctr),
+-        reinterpret_cast<uint32_t*>(tail_ctr), reinterpret_cast<uint32_t*>(poison), (uint32_t)spin_limit, (int)world,
+-        (int)rank, (int)slots, (int)flag_stride, (int)n_hca);
++    auto launch = [&](auto kernel) {
++        kernel<<<(unsigned)grid, (unsigned)threads, 0, stream>>>(
++            reinterpret_cast<const uint4*>(in.data_ptr()), reinterpret_cast<uint4*>(out.data_ptr()), (int)shard_packs,
++            (uint32_t)nbytes, (int)row_packs, reinterpret_cast<char*>(recv_base), reinterpret_cast<char*>(flag_base),
++            reinterpret_cast<char*>(send_base), reinterpret_cast<uint32_t*>(ctrl), (long long)slot_bytes,
++            reinterpret_cast<uint32_t*>(epoch), reinterpret_cast<uint32_t*>(stage_ctr),
++            reinterpret_cast<uint32_t*>(tail_ctr), reinterpret_cast<uint32_t*>(poison), (uint32_t)spin_limit,
++            (int)world, (int)rank, (int)slots, (int)flag_stride, (int)n_hca);
++    };
++    switch (world) {
++        case 2: launch(gather_kernel<2>); break;
++        case 3: launch(gather_kernel<3>); break;
++        case 4: launch(gather_kernel<4>); break;
++        default: launch(gather_kernel<0>); break;
++    }
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }

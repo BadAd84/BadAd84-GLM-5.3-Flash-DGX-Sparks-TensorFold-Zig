@@ -1,0 +1,7 @@
+[Unit]
+Description=GLM disk guard - prune the NVMe KV cache before the volume fills (runs on each node)
+Documentation=file:///home/adam/.local/bin/glm-disk-guard.sh
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/glm-disk-guard.sh

@@ -1,0 +1,123 @@
+diff -u tensorfold/cuda/sampling.py tensorfold/cuda/sampling.py
+--- tensorfold/cuda/sampling.py
++++ tensorfold/cuda/sampling.py
+@@ -6,6 +6,7 @@
+ from fractions import Fraction
+ import math
+ import os
++import threading
+ 
+ import numpy as np
+ import torch
+@@ -15,6 +16,35 @@
+ MASS = 2.0 ** 40        # a token's share of the mass in fixed point: shard sums are exact, so ranks agree bit for bit
+ NUCLEUS = 1024          # candidates a rank reads for a top_k-off draw; a row they don't cover reads whole shards
+ 
++_READBACK: dict = {}
++
++
++def readback(t: torch.Tensor, slot=0) -> torch.Tensor:
++    """``t.cpu()``'s values (a CPU tensor of t's shape and dtype) through a pinned host buffer and an event; ``slot``:
++    one buffer a slot, device and thread, which the slot's next readback on that thread reuses (read the result
++    before). LEADS #3: a pageable ``.cpu()`` is a synchronous copy that holds every other thread's CUDA call until the
++    round ends (8-9 ms a call beside decode, docs/notes/pr124-round2-2026-10-11.md); a pinned copy and an event wait
++    do not. A CPU tensor: ``.cpu()``. Slots in use: 0 / 1 (multi.sample_streams, MsgGather.take,
++    multi_tune.sample_packed), "nucleus" / "nucleus+" (``nucleus_rows``' first and later candidate reads),
++    "sample_rows" (``decode.sample_rows``), "gather_ints" (``GlmEngine._gather_ints``, which the spill
++    tier also calls)."""
++
++    if t.device.type != "cuda":
++        return t.cpu()
++    t = t.contiguous()
++    nbytes = t.numel() * t.element_size()
++    key = (t.device.index, slot, threading.get_ident())
++    held = _READBACK.get(key)
++    if held is None or held[0].numel() < nbytes:
++        size = max(nbytes, 1 << 16, 2 * held[0].numel() if held is not None else 0)
++        held = _READBACK[key] = (torch.empty((size,), dtype=torch.uint8, pin_memory=True), torch.cuda.Event())
++    buf, ev = held
++    host = buf[:nbytes].view(t.dtype).view(t.shape)
++    host.copy_(t, non_blocking=True)
++    ev.record()
++    ev.synchronize()
++    return host
++
+ 
+ def sample_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None) -> list[int]:
+     """Sample each row from its logits and absolute position; serial and verify-window rows share this one path."""
+@@ -185,7 +215,7 @@
+     scaled = logits.float().double() / max(float(sampling.temperature), 1e-6)
+     top = _stacked(gather, scaled.max(dim=-1).values).max(dim=0).values           # every rank's maxima
+     mass = torch.floor(torch.exp(scaled - top[:, None]) * MASS).to(torch.int64)
+-    got = _shares(gather, scaled, mass, NUCLEUS, offset, id_map)
++    got = _shares(gather, scaled, mass, NUCLEUS, offset, id_map, slot="nucleus")   # (read again below: its own slot)
+     drawn = _draw(got, positions, sampling)
+     if drawn is None and union_cover() and int(got[4].max()) > WIDER:     # wider candidates first (the same draw)
+         drawn = _draw(_shares(gather, scaled, mass, WIDER, offset, id_map), positions, sampling)
+@@ -196,8 +226,9 @@
+     return [token for token, _ in drawn]
+ 
+ 
+-def _shares(gather, scaled, mass, count, offset, id_map):
+-    """Every rank's padded top (value, id, mass) per row, plus the shard's mass and width sums."""
++def _shares(gather, scaled, mass, count, offset, id_map, slot="nucleus+"):
++    """Every rank's padded top (value, id, mass) per row, plus the shard's mass and width sums; read back through
++    ``readback``'s ``slot`` (the arrays are views of its pinned buffer until the slot's next readback)."""
+ 
+     rows, width = scaled.shape
+     vals, cols = torch.topk(scaled, min(count, width), dim=-1)
+@@ -210,7 +241,7 @@
+     kept = torch.cat([kept, kept.new_zeros((rows, pad))], dim=1) if pad else kept
+     shard = torch.tensor([[width]], dtype=torch.int64, device=scaled.device).expand(rows, 1)
+     packed = torch.cat([vals.view(torch.int64), ids, kept, mass.sum(dim=-1, keepdim=True), shard], dim=1)
+-    both = _stacked(gather, packed).cpu().numpy()
++    both = readback(_stacked(gather, packed), slot).numpy()
+     return (np.ascontiguousarray(both[:, :, :count]).view(np.float64), both[:, :, count:2 * count],
+             both[:, :, 2 * count:3 * count], both[:, :, 3 * count], both[:, :, 3 * count + 1])
+ 
+diff -u tensorfold/families/glm5_next/cuda/decode.py tensorfold/families/glm5_next/cuda/decode.py
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -9,7 +9,7 @@
+ import numpy as np
+ import torch
+ 
+-from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank
++from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank, readback
+ from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
+ 
+ from . import glue, prof, qmm, tp
+@@ -87,8 +87,8 @@
+     vals, ids = torch.topk(logits.float(), k, dim=-1)
+     ids = (ids + (w.vocab_offset if offset is None else offset)).to(torch.int32)
+     if w.comm is None:
+-        values = vals.cpu().numpy().astype(np.float32)
+-        tokens = ids.cpu().numpy().astype(np.int64)
++        values = readback(vals, "sample_rows").numpy().astype(np.float32)          # (pinned: LEADS #3; astype copies,
++        tokens = readback(ids, "sample_rows").numpy().astype(np.int64)             # so one slot serves both)
+         if vote is not None:
+             vote.gather(one_rank)(vals.new_zeros((0,)))
+     else:
+@@ -98,7 +98,7 @@
+             w.comm.all_gather(packed.view(-1), got)
+         else:
+             got = vote.gather(comm_gather(w.comm))(packed.view(-1))
+-        g = got.reshape(w.world, R, 2 * k).cpu()
++        g = readback(got.reshape(w.world, R, 2 * k), "sample_rows")     # (pinned buffer + event: LEADS #3)
+         # every rank's columns side by side, as one numpy view (the per-rank torch.cat and .numpy cost ~30 us a round)
+         h = g.numpy()
+         values = h[:, :, :k].transpose(1, 0, 2).reshape(R, w.world * k).astype(np.float32)
+diff -u tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1281,7 +1281,9 @@
+         mine = torch.tensor(values, dtype=torch.int32, device="cuda")
+         got = torch.empty((self.world * len(values),), dtype=torch.int32, device="cuda")
+         self.comm.all_gather(mine, got)
+-        return got.view(self.world, len(values)).tolist()
++        from tensorfold.cuda.sampling import readback
++
++        return readback(got.view(self.world, len(values)), "gather_ints").tolist()      # (pinned: LEADS #3)
+ 
+     # the idle doorbell: the followers wait for each request on the rendezvous store (no store: no doorbell), not in
+     # NCCL; a key a follower and request, which only that follower deletes

@@ -1,0 +1,90 @@
+--- tensorfold/cuda/streams.py
++++ tensorfold/cuda/streams.py
+@@ -41,6 +41,7 @@
+     accepted: int = 0
+     cached: int = 0
+     prefill_s: float = 0.0
++    fill_wait_s: float = 0.0                              # decode seconds spent while other prompts' chunks ran
+     started: float = 0.0
+     finished: float = 0.0
+ 
+@@ -69,10 +70,10 @@
+     def stats(self) -> dict:
+         own = {"prefill_s": round(self.prefill_s, 4), "decode_s": round(max(self.finished - self.started, 0.0), 4),
+                "rounds": self.rounds, "drafts": self.draft, "cached": self.cached, "min_rows": self.min_rows,
+-               "drafted": self.drafted, "accepted": self.accepted}
++               "drafted": self.drafted, "accepted": self.accepted, "fill_wait_s": round(self.fill_wait_s, 4)}
+         if self.carry is None:
+             return own
+-        both = {k: round(self.carry[k] + own[k], 4) for k in ("prefill_s", "decode_s")}
++        both = {k: round(self.carry[k] + own[k], 4) for k in ("prefill_s", "decode_s", "fill_wait_s")}
+         both.update({k: self.carry[k] + own[k] for k in ("rounds", "drafted", "accepted")})
+         rows = [r for r in (self.carry["min_rows"], own["min_rows"]) if r]
+         return {**own, **both, "cached": self.carry["cached"], "min_rows": min(rows, default=0)}
+--- tensorfold/cuda/health.py
++++ tensorfold/cuda/health.py
+@@ -10,7 +10,8 @@
+ from tensorfold.server import metrics
+ 
+ STATS = {"prefill_s": "prefill_seconds_total", "decode_s": "decode_seconds_total", "cached": "cached_tokens_total",
+-         "rounds": "rounds_total", "drafted": "drafted_total", "accepted": "accepted_total"}
++         "rounds": "rounds_total", "drafted": "drafted_total", "accepted": "accepted_total",
++         "fill_wait_s": "fill_wait_seconds_total"}
+ _MADE = threading.Lock()
+ 
+ 
+--- tensorfold/server/metrics.py
++++ tensorfold/server/metrics.py
+@@ -184,6 +184,7 @@
+     ("rounds_total", "counter", "Decode rounds of finished requests."),
+     ("prefill_seconds_total", "counter", "Engine prefill seconds of finished requests."),
+     ("decode_seconds_total", "counter", "Engine decode seconds of finished requests."),
++    ("fill_wait_seconds_total", "counter", "Of those, seconds a decoding request waited for other prompts' chunks."),
+     ("prefix_waits_total", "counter", "Requests that waited for a prefix another request was prefilling."),
+     ("prefix_wait_tokens_total", "counter", "Prompt tokens those requests did not prefill again."),
+ )
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -3121,6 +3121,7 @@
+             self.grouped["chunks"] += 1
+             self.grouped["pieces"] += len(group)
+             self.grouped["rows"] += rows
++            self._waited(time.perf_counter() - t, group)
+             if prof is not None:
+                 prof.fill(time.perf_counter() - t)
+             return [l.s for l, _ in group if l.s.done]
+@@ -3132,6 +3133,7 @@
+             first = self._fill(lane, stop)
+             if first is not None:
+                 lane.s.take([first], self._ends(lane))
++            self._waited(time.perf_counter() - t, [(lane, stop)])
+             if prof is not None:
+                 prof.fill(time.perf_counter() - t)
+             return [lane.s] if lane.s.done else []
+@@ -3223,6 +3225,18 @@
+ 
+     fill_fast_slices = False     # TF_GLM_FILL_FAST_SLICES (``__init__`` sets it; a decoder built without it: off)
+ 
++    def _waited(self, seconds: float, group) -> None:
++        """A prompt chunk (or slice) of ``group`` took ``seconds``; every other stream decoding meanwhile had its decode
++        clock running (``decode_s`` starts at ``_started``) with no round: booked as its ``fill_wait_s`` (/health
++        fill_wait_seconds_total), so decode seconds net of other prompts' fills are exact. Called by rank 0's
++        ``_iterate`` fill branches and by ``_part`` (which followers run too; only rank 0's stats are reported).
++        Time accounting only: nothing a reply or a decision reads."""
++
++        filled = {l.sid for l, _ in group}
++        for l in self.lanes.values():
++            if l.decoding and l.sid not in filled:      # (a finished stream leaves at `finish`, before any fill)
++                l.s.fill_wait_s += seconds
++
+     def _slice_end(self, pending, busy: bool) -> int:
+         """Rank 0: the layer the pending prompt chunk's next slice runs to. Every layer left when no stream decodes;
+         else the slice TF_GLM_FILL_BUDGET_MS takes (``LayerCosts.stop``), a decode round after it - unless, OTS 0122
+@@ -3275,6 +3289,7 @@
+         pending.slice_layer_ms = begin.elapsed_time(pending.layer_event)
+         for (lane, _), elapsed in zip(group, before):
+             lane.s.prefill_s = elapsed + dt           # include the slice's GPU execution, not just its enqueue
++        self._waited(dt, group)
+         for (lane, _), first in zip(group, firsts):
+             if first is not None and lane.sid not in pending.retired:
+                 lane.s.take([first], self._ends(lane))

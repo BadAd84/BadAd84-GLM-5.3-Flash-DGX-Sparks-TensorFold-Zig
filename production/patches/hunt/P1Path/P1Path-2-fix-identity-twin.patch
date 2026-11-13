@@ -1,0 +1,18 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1958,8 +1958,14 @@
+                   *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
+                   int(constraint is not None), len(positions),
+                   *(shared + [0] * SHARED_MOST)[:SHARED_MOST]] + code + [int(salt is not None)]   # OTS 0120
+-        # the kept state it resumes from by identity (``prefix_pid``; -1: none), then the ids past it alone
++        # the kept state it resumes from by identity (``prefix_pid``; -1: none), then the ids past it alone. A follower
++        # picks the first state of that length, salted-ness and identity, so when another kept state shares all three
++        # (the identity is linear in the ids: ids changed by +1, -3, +3, -1 at four adjacent positions keep both sums)
++        # the whole prompt goes, and the follower finds the state by its ids as before
+         pid = snap_pid(hit) if cached > 0 and feed is None else None
++        if pid is not None and any(c is not hit and len(c.ids) == cached and snap_pid(c) == pid
++                                   and (getattr(c, "salt", None) is None) == (salt is None) for c in self.cache):
++            pid = None
+         header += list(pid) if pid is not None else [-1, -1]
+         from tensorfold.engine.grammar import pack
+ 

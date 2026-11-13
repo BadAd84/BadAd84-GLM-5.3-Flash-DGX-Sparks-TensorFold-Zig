@@ -1,0 +1,46 @@
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -4083,16 +4083,31 @@
+ 
+     def _check_admission(self, background: bool) -> None:
+         """``Scheduler._check_admission`` (patch 0082), with requests whose stored prompt is being read or was read
+-        (--spill-gib) counted too: each holds the lane it will take."""
++        (--spill-gib) counted too: each holds the lane it will take. A lane ``_yield`` would give a waiting foreground
++        request (a decoding background reply, ``_yields``) holds nothing against a foreground request: the cap
++        (TF_GLM_MAX_QUEUED) refused one while every lane decoded background replies, which yield to it."""
+ 
+         if background or self.max_in_system is None:
+             return
+-        held = self.decoder.live() + self._reading() + len(self.ready) + len(self.prefix)
++        held = self.decoder.live() - self._yieldable() + self._reading() + len(self.ready) + len(self.prefix)
+         if reply_prefill.MODE:              # OTS: a reply job's lane is given up for any request (``_end_jobs``)
+             held -= self.decoder.live_jobs()
+         if held + self.waiting.foreground_count() >= self.max_in_system:
+             raise CapacityError("all serving lanes are busy; retry shortly")
+ 
++    @staticmethod
++    def _yields(s) -> bool:
++        """Whether ``_yield`` may give live stream ``s``'s lane to a waiting foreground request: a background reply,
++        not finished, with no grammar or images (which cannot replay)."""
++
++        return s.background and not s.done and s.constraint is None and s.vision is None and len(s.out) < s.count
++
++    def _yieldable(self) -> int:
++        """Lanes ``_yield`` may give up now: decoding streams that ``_yields`` (any thread: the lanes are copied in one
++        step, never iterated while the worker changes them)."""
++
++        return sum(1 for lane in list(self.decoder.lanes.values()) if lane.decoding and self._yields(lane.s))
++
+     def _reading(self) -> int:
+         """Requests whose stored prompt is being read (--spill-gib): each keeps the stream slot it will take."""
+ 
+@@ -4303,8 +4318,7 @@
+         if self.decoder.live() + self._reading() < self.max_streams or not self._foreground_waits():
+             return
+         live = list(self.decoder.streams.values())
+-        stream = next((s for s in reversed(live) if s.background and not s.done and s.constraint is None
+-                       and s.vision is None and len(s.out) < s.count), None)
++        stream = next((s for s in reversed(live) if self._yields(s)), None)
+         if stream is None:
+             return
+         box = self.boxes.pop(id(stream))

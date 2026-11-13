@@ -1,0 +1,181 @@
+--- tensorfold/cuda/prompt_ids.py
++++ tensorfold/cuda/prompt_ids.py
+@@ -42,6 +42,8 @@
+ from typing import Any, Callable
+ 
+ import numpy as np
++
++from tensorfold.engine.exact_sampling import comma_lengths, comma_text, text_table
+ 
+ SUM_STEP = 2048         # tokens between kept sha256 states of ``seed_for``'s text (a new prompt hashes at most this
+                         # many of the kept ids again, plus its own; OTS: 16384 -> 2048, ~1.3 -> ~0.2 ms a turn, with the
+@@ -163,6 +165,7 @@
+         if problem:
+             print(f"[tensorfold] prompt ids: every prompt is tokenized in full ({problem})", file=sys.stderr, flush=True)
+             return None
++        text_table()            # (OTS) the seed text's table at load (~27 ms), not at the first request's seed
+         return cls({t["content"]: int(t["id"]) for t in spec["added_tokens"]}, tok.get_vocab_size(with_added_tokens=True),
+                    encode_fast, entries)
+ 
+@@ -265,19 +268,40 @@
+ 
+ def _summer(e: _Kept, lock: threading.Lock | None) -> Callable[[], Any]:
+     """A function giving the sha256 of ``seed_for``'s text of ``e.ids`` (a new one each call, the caller's to update),
+-    from its last kept state; with ``lock``, it keeps the states it passes for the prompts that continue this one."""
++    from its last kept state; with ``lock``, it keeps the states it passes for the prompts that continue this one.
++    (OTS: the text of the ids past that state is made in one pass, ``exact_sampling.comma_text``, and fed in the same
++    ``SUM_STEP`` pieces: ~60-85 -> ~10 ms with the GIL held for a 650k-token prompt seen first, e.g. after a restart.)"""
+ 
+     def summed() -> Any:
+         n, h = (e.sums[-1][0], e.sums[-1][1].copy()) if e.sums else (0, hashlib.sha256())
+         end = len(e.ids)
+-        while n < end:
+-            step = min(end, (n // SUM_STEP + 1) * SUM_STEP)
+-            _feed(h, e.ids, n, step)
+-            n = step
+-            if n % SUM_STEP == 0 and lock is not None:
+-                with lock:
+-                    if not e.sums or e.sums[-1][0] < n:
+-                        e.sums.append((n, h.copy()))
++        if n >= end:
++            return h
++        ids = np.frombuffer(e.ids, dtype=np.uint32)[n:end]
++        text = comma_text(ids)
++        if text is None:                # an id past the table: joined a piece at a time, as before
++            while n < end:
++                step = min(end, (n // SUM_STEP + 1) * SUM_STEP)
++                _feed(h, e.ids, n, step)
++                n = step
++                _keep(e, n, h, lock)
++            return h
++        # where each SUM_STEP piece ends in ``text`` (every id is its comma and digits there); the first comma goes
++        # only after ids already fed
++        bounds = list(range((n // SUM_STEP + 1) * SUM_STEP, end, SUM_STEP)) + [end]
++        lengths = np.add.reduceat(comma_lengths(ids), [b - n for b in [n] + bounds[:-1]], dtype=np.int64)
++        view, at = memoryview(text), 0 if n else 1
++        for step, stop in zip(bounds, np.cumsum(lengths).tolist()):
++            h.update(view[at:stop])
++            at, n = stop, step
++            _keep(e, n, h, lock)
+         return h
+ 
+     return summed
++
++
++def _keep(e: _Kept, n: int, h: Any, lock: threading.Lock | None) -> None:
++    if n % SUM_STEP == 0 and lock is not None:
++        with lock:
++            if not e.sums or e.sums[-1][0] < n:
++                e.sums.append((n, h.copy()))
+--- tensorfold/cuda/server.py
++++ tensorfold/cuda/server.py
+@@ -20,6 +20,7 @@
+ from tensorfold.server.stopping import matched_stop, stop_options
+ from tensorfold.server.tool_policy import ToolCallPolicy
+ from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
++from tensorfold.engine.exact_sampling import ids_text
+ from tensorfold.engine.loop_guard import LoopGuard
+ from tensorfold.engine.tool_draft import ToolCallStreamer
+ from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
+@@ -827,9 +828,10 @@
+ 
+ 
+ def token_sha(tokens: list[int]) -> str:
+-    """A reply's token ids, hashed as the Mac server does: drafted and ``"draft": false`` replies must match."""
+-
+-    return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
++    """A reply's token ids, hashed as the Mac server does: drafted and ``"draft": false`` replies must match. (OTS:
++    the same text through ``exact_sampling.ids_text``: ~2.3 -> ~0.5 ms at the end of a 16k-token reply.)"""
++
++    return hashlib.sha256(ids_text(tokens)).hexdigest()[:12]
+ 
+ 
+ from tensorfold.cuda.http import Server, make_handler, serve, usage_of  # noqa: E402,F401  (the HTTP side)
+--- tensorfold/engine/exact_sampling.py
++++ tensorfold/engine/exact_sampling.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++from array import array
+ from dataclasses import dataclass
+ import hashlib
+ import math
+@@ -35,7 +36,7 @@
+ def seed_for(tokens: Sequence[int], salt: int = 0) -> int:
+     """A reproducible seed from the prompt: the same conversation samples the same reply."""
+ 
+-    return seed_of(hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()), salt)
++    return seed_of(hashlib.sha256(ids_text(tokens)), salt)
+ 
+ 
+ def seed_of(joined: Any, salt: int = 0) -> int:
+@@ -45,6 +46,68 @@
+     joined.update(f"|{salt}".encode())
+     digest = joined.digest()
+     return int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
++
++
++# (OTS) the decimal text of token ids without an int object or a str a token: each id's row of a table is its digits
++# behind a comma, right-aligned in 8 bytes with NULs before (",154855" at most), so the text of many ids is one gather
++# of rows and one deletion of the NULs. ``",".join(str(int(t)) ...)`` of a 650k-token prompt took ~60-85 ms with the
++# GIL held (seed_for, on the request's path before its ADMIT, which carries the seed to every rank); this ~10.
++_TEXT_IDS = 1 << 18             # ids the table covers (GLM-5.3's are below 154,880); others go the join's way
++_TEXT: tuple[np.ndarray, np.ndarray] | None = None     # (rows as uint64, each row's bytes), made once (2.25 MiB)
++
++
++def text_table() -> tuple[np.ndarray, np.ndarray]:
++    """The table, made at its first use (~27 ms; ``PromptIds.make`` makes it at load, not at the first request)."""
++
++    global _TEXT
++    table = _TEXT
++    if table is None:
++        x = np.arange(_TEXT_IDS, dtype=np.int64)
++        digits = np.ones(_TEXT_IDS, dtype=np.int64)
++        for p in range(1, len(str(_TEXT_IDS - 1))):     # its digits: 1 plus the powers of ten it reaches
++            digits += x >= 10 ** p
++        rows = np.zeros((_TEXT_IDS, 8), dtype=np.uint8)
++        for col in range(7, 0, -1):             # column 7 holds the units, column 7 - d + 1 the leading digit
++            rows[:, col] = np.where(col > 7 - digits, x // 10 ** (7 - col) % 10 + 48, 0)
++        rows[np.arange(_TEXT_IDS), 7 - digits] = 44         # the comma before them
++        _TEXT = table = (rows.view(np.uint64).ravel(), (digits + 1).astype(np.uint8))
++    return table
++
++
++def comma_text(ids: np.ndarray) -> bytes | None:
++    """``ids`` (non-negative integers) as ``","`` and its decimal before each (``",12,7,301"``), or None when one is
++    outside the table (the caller joins them itself)."""
++
++    if ids.size == 0:
++        return b""
++    if int(ids.min()) < 0 or int(ids.max()) >= _TEXT_IDS:
++        return None
++    return text_table()[0][ids].tobytes().translate(None, b"\0")
++
++
++def comma_lengths(ids: np.ndarray) -> np.ndarray:
++    """Each id's bytes in ``comma_text(ids)`` (its comma and digits), for ids ``comma_text`` took."""
++
++    return text_table()[1][ids]
++
++
++def ids_text(ids: Any) -> Any:
++    """``",".join(str(int(t)) for t in ids).encode()``, the same bytes (bytes-like: ``seed_for``'s and ``token_sha``'s
++    text). A list or tuple whose items are not all ints (``int64``), any other iterable, or an id outside the table:
++    joined as before."""
++
++    view = None
++    if isinstance(ids, np.ndarray):
++        view = ids if ids.ndim == 1 and ids.dtype.kind in "iu" else None
++    elif type(ids) in (list, tuple, array):
++        try:
++            view = np.frombuffer(array("q", ids), dtype=np.int64)
++        except (TypeError, OverflowError):
++            view = None
++    text = comma_text(view) if view is not None else None
++    if text is None:
++        return ",".join(str(int(t)) for t in ids).encode()
++    return memoryview(text)[1:]
+ 
+ 
+ def _mix(x: np.ndarray) -> np.ndarray:

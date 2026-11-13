@@ -1,0 +1,627 @@
+# HuntSpill-7-spill-carry.patch (lane HuntSpill, 2026-10-30; the synced tree with every patch in sync/ORDER applied):
+# OTS 0123's gated carry (docs/notes/tier-carry-2026-10-10.md; TTFT map lever 2: 17.3% of all TTFT seconds in the
+# 10-08/10 window) on upstream's spill blocks, which the synced base adopted in place of our tier. The spill folder is
+# keyed by the build and every agreed setting (PARALLEL among them), so a restart onto a new image or setting found
+# none of the agents' stored states. Now:
+# - the store writes its key by parts (<folder>/rank<r>/key.json: format, block, world, rank, this rank's weights id and
+#   the signature's parts by name: engine, build, drafter, kv, dense, tp, planes, grid, drafts, agreed[, kvshard]);
+#   joined they are the signature the folder was always named by, so every existing folder keeps its name;
+# - the gate (python3 -m tensorfold.cuda.spill_carry, in the NEW image): plan / keys / ids / check / grant / status;
+#   check compares a state the new image re-prefilled with the old folder's copy byte for byte (ids, every block's
+#   bytes, every small-state tensor, the head row when the old state kept one, drafter_end / mtp_len; only the lineage
+#   and the bookkeeping field ``after`` may differ); grant writes carry/spill-<old>.grant.json only when every checked
+#   state is equal and the two keys differ in build / agreed ALONE (spill_blocks.CARRY_PARTS);
+# - the store takes a grant at start and on a quiet writer every TF_GLM_SPILL_CARRY_POLL_S (10 s; 0: start only) after
+#   checking it names this folder's key and an old folder of this root and rank by name whose key is the one checked,
+#   that the keys may carry, and that every checked state still has the ids and block CRC-32s / digests the gate saw;
+#   then links the old folder's whole points in (load_point: the start's own check, shared now), newest first while
+#   they fit the cap, blocks first and the json last, keeping their file times (the cap drops them first); a block name
+#   held with other bytes, or ids held or being written, keep a point out. Refused grants are renamed .refused.json
+#   (counted: carry_refused); taken ones .done.json (carried). Each rank decides alone: a point carried on some ranks
+#   only is never read (HAS).
+# Not here: the multi-node driver that samples the states every rank holds, replays them through the serve and runs
+# check / grant on every node (tier_carry_gate.py's role for 0123); the node commands are in the lane's REPORT.md.
+# Test: test_spill_carry.py <tree> (CPU torch, Linux): a state written under key A is found and loads byte-identical
+# under key B after the gate granted on an equal re-prefill; one byte of a block or one recurrence value different:
+# DIFF, no grant, nothing carried; a forged grant across plane shapes and a grant whose checked state changed since
+# are refused by the store; B's folder name is the joined signature's (the pre-patch tree: FAIL, no key by parts).
+diff -ruN tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
+--- tensorfold/cuda/spill_blocks.py	2026-10-29 23:44:08.458799100 +0000
++++ tensorfold/cuda/spill_blocks.py	2026-10-30 00:28:37.883922000 +0000
+@@ -70,6 +70,7 @@
+ import json
+ import os
+ import queue
++import re
+ import shutil
+ import struct
+ import threading
+@@ -439,6 +440,167 @@
+     return [h for s, e, h in block_hashes(ids, block) if e - s == block]
+ 
+ 
++def load_point(points_dir: str, key: str, block: int, present, used: float | None = None) -> Point:
++    """Point ``key`` of a rank folder's ``points`` (``present``: the names of the blocks its ``blocks`` holds), whole or
++    an error: its json, of this format and naming it; its ids file, against its CRC-32; its small state's file; every
++    block it names, on disk; its block list, the one its ids and lineage give. The start's check (``_scan``), the
++    carry gate's and the carry's (``compare_points``, ``BlockStore._carry_from``)."""
++
++    path = lambda suffix: os.path.join(points_dir, f"{key}{suffix}")      # noqa: E731
++    with open(path(".json")) as fh:
++        m = json.load(fh)
++    if m.get("format") != FORMAT or m["key"] != key:
++        raise ValueError("another format")
++    with open(path(".ids"), "rb") as fh:
++        raw = fh.read()
++    if zlib.crc32(raw) != m["ids_crc"] or not os.path.exists(path(".st")):
++        raise ValueError("ids or small state")
++    arr = np.frombuffer(raw, dtype=np.int64)
++    n = int(m["n"])
++    ids, tokens = arr[:n].copy(), (arr[n:].copy() if len(arr) > n else None)
++    blocks = list(m["blocks"])
++    if (len(ids) != n or point_key(ids) != key or not all(b in present for b in blocks)
++            or [h for _, _, h in block_hashes(ids, block, m["lineage"])] != blocks):
++        raise ValueError("blocks")
++    if used is None:
++        used = os.stat(path(".json")).st_mtime
++    return Point(key, n, ids, tokens, m["lineage"], blocks, [int(c) for c in m["crcs"]],
++                 [bytes.fromhex(x) for x in m["digests"]], int(m["small_crc"]), int(m["small_bytes"]),
++                 bool(m["shared"]), bool(m["head"]), float(used), _chain(ids, block), m.get("fields") or {})
++
++
++# -- the gated carry: stored states across a build or settings change ---------------------------------------------------
++# A folder is keyed by everything its bits may depend on (``BlockStore.compat``), so a new image or setting starts on an
++# empty folder. Its states may enter the new folder only on proof, as OTS 0123 does for our former tier: a gate
++# (``spill_carry``, run in the new image) re-prefills sampled stored states on the new image, compares what the new
++# image wrote with the old states byte for byte (``compare_points``) and only then writes a grant into the new
++# folder (``grant``); the store takes it (``BlockStore._take_grants``) only when the two folders' keys
++# (``key.json``, ``BlockStore.manifest``) differ in ``CARRY_PARTS`` alone.
++CARRY_PARTS = ("build", "agreed")         # the only parts of a folder's key a carried state's folder may differ in
++GRANT = "tensorfold-cuda-spill-carry-1"
++BIT_FIELDS = ("drafter_end", "mtp_len")   # a small state's plain fields that are computation (the rest is bookkeeping)
++_COMPAT_NAME = re.compile(r"[0-9a-f]{16}")
++
++
++def read_manifest(rank_dir: str) -> dict | None:
++    """A rank folder's key (``key.json``: what ``BlockStore`` was keyed by), or None."""
++
++    try:
++        with open(os.path.join(rank_dir, "key.json")) as fh:
++            m = json.load(fh)
++    except (OSError, ValueError):
++        return None
++    return m if isinstance(m, dict) else None
++
++
++def carry_refusal(old: dict | None, new: dict | None) -> str | None:
++    """Why states of a folder keyed ``old`` may not enter one keyed ``new`` (None: they may, on a gate's proof): both
++    keys known, other folders, every field equal (format, block, rank layout, this rank's weights, every part of the
++    signature) but the parts in ``CARRY_PARTS``, one of which differs."""
++
++    if old is None or new is None:
++        return "a folder without its key (key.json)"
++    if old.get("compat") == new.get("compat"):
++        return "the same folder"
++    top = sorted(k for k in set(old) | set(new) if k not in ("parts", "compat") and old.get(k) != new.get(k))
++    if top:
++        return f"they differ in {', '.join(top)}"
++    po, pn = old.get("parts") or {}, new.get("parts") or {}
++    other = sorted(k for k in set(po) | set(pn) if k not in CARRY_PARTS and po.get(k) != pn.get(k))
++    if other:
++        return f"they differ in {', '.join(other)} (only {' and '.join(CARRY_PARTS)} may)"
++    if all(po.get(k) == pn.get(k) for k in CARRY_PARTS):
++        return f"they differ in another rank's weights only (only {' and '.join(CARRY_PARTS)} may)"
++    return None
++
++
++def _small_tensors(raw) -> tuple[dict, dict, str | None]:
++    """A small state's file: its tensors as (dtype, shape, bytes) by name, its layer's plain fields, its class."""
++
++    (size,) = struct.unpack("<Q", bytes(raw[:8]))
++    header = json.loads(bytes(raw[8:8 + size]))
++    at = 8 + size
++    meta = header.pop("__metadata__", None) or {}
++    layer = json.loads(meta.get("layer") or "{}")
++    plain = {k: s["v"] for k, s in (layer.get("fields") or {}).items() if isinstance(s, dict) and "v" in s}
++    tensors = {name: (d["dtype"], tuple(d["shape"]), bytes(raw[at + d["data_offsets"][0]:at + d["data_offsets"][1]]))
++               for name, d in header.items()}
++    return tensors, plain, layer.get("class")
++
++
++def compare_points(old_dir: str, new_dir: str, key: str, block: int) -> list[str]:
++    """The gate's check of state ``key`` stored in two rank folders (``old_dir``: the old key's, ``new_dir``: the new
++    image's own computation of the same ids): every difference that matters to its bits, one line each; [] when they
++    are byte for byte the same: the ids (and tokens), every block's bytes, the small state's class, every one of its
++    tensors (KDA recurrences, conv windows, index-ring tails, the DFlash2 window; the head row when the old state kept
++    one) and its ``BIT_FIELDS``. Not compared: the lineage (the names of another computation of the same rows) and the
++    small state's bookkeeping fields (``after``: how the prompt that kept it went on)."""
++
++    pts = []
++    for d in (old_dir, new_dir):
++        bdir = os.path.join(d, "blocks")
++        try:
++            present = {f[:-4] for f in os.listdir(bdir) if f.endswith(".bin")}
++            pts.append(load_point(os.path.join(d, "points"), key, block, present))
++        except Exception as exc:                            # noqa: BLE001
++            return [f"{key}: not whole in {d}: {exc!r}"]
++    a, b = pts
++    if (a.n != b.n or not np.array_equal(a.ids, b.ids) or (a.tokens is None) != (b.tokens is None)
++            or (a.tokens is not None and not np.array_equal(a.tokens, b.tokens))):
++        return [f"{key}: ids"]
++    out = []
++    for i, (ha, hb) in enumerate(zip(a.blocks, b.blocks)):
++        with open(os.path.join(old_dir, "blocks", f"{ha}.bin"), "rb") as fa, \
++                open(os.path.join(new_dir, "blocks", f"{hb}.bin"), "rb") as fb:
++            if fa.read() != fb.read():
++                out.append(f"{key}: block {i} ({ha} / {hb})")
++    small = []
++    for d in (old_dir, new_dir):
++        with open(os.path.join(d, "points", f"{key}.st"), "rb") as fh:
++            small.append(_small_tensors(fh.read()))
++    (ta, fa, ca), (tb, fb, cb) = small
++    if ca != cb:
++        out.append(f"{key}: small state class {ca} / {cb}")
++    for name in sorted(set(ta) | set(tb)):
++        if name not in ta and name.rsplit(".", 1)[-1] == "head":
++            continue                                        # (the old state kept no head row: nothing to compare)
++        if ta.get(name) != tb.get(name):
++            out.append(f"{key}: small state {name}")
++    out += [f"{key}: small state {k} {fa.get(k)!r} / {fb.get(k)!r}" for k in BIT_FIELDS if fa.get(k) != fb.get(k)]
++    return out
++
++
++def grant(old_dir: str, new_dir: str, keys: Sequence[str], owner=None) -> tuple[bool, list[str]]:
++    """The gate, on one rank folder of one node: states ``keys`` (sampled from the old folder, re-prefilled on the new
++    image, stored by it) compared (``compare_points``); only when the keys may carry (``carry_refusal``), at least one
++    state was checked and every one is equal, ``new_dir/carry/spill-<old>.grant.json`` names the old folder, both keys
++    and each checked state's block digests and CRC-32s (the store re-reads them when it takes the grant: a folder that
++    changed since is refused). (granted, lines)."""
++
++    old, new = read_manifest(old_dir), read_manifest(new_dir)
++    why = carry_refusal(old, new)
++    if why is not None:
++        return False, [f"refused: {why}"]
++    if not keys:
++        return False, ["refused: no state checked"]
++    diffs = [line for k in keys for line in compare_points(old_dir, new_dir, k, int(old["block"]))]
++    if diffs:
++        return False, [f"DIFF {line}" for line in diffs] + ["refused: a checked state differs"]
++    checked = {}
++    for k in keys:
++        with open(os.path.join(old_dir, "points", f"{k}.json")) as fh:
++            m = json.load(fh)
++        checked[k] = {"n": m["n"], "ids_crc": m["ids_crc"], "crcs": m["crcs"], "digests": m["digests"]}
++    carry = os.path.join(new_dir, "carry")
++    os.makedirs(carry, mode=0o700, exist_ok=True)
++    path = os.path.join(carry, f"spill-{old['compat']}.grant.json")
++    if os.path.exists(path):
++        return False, ["refused: a grant of that folder is pending"]
++    _put(path, json.dumps({"format": GRANT, "from": old["compat"], "to": new["compat"], "from_key": old,
++                           "to_key": new, "checked": checked}).encode(), owner)
++    return True, [f"granted: {len(keys)} states equal, spill-{old['compat']} -> spill-{new['compat']}"]
++
++
+ class Job:
+     """A kept state waiting to be written: its new rows' blocks still in the pool at ``where.base`` (its extent, which
+     may move), the next one to stage, its small state's host bytes."""
+@@ -482,7 +644,7 @@
+ 
+     def __init__(self, cfg, *, planes, block: int, rank: int = 0, world: int = 1, device: Any = "cuda",
+                  signature: str = "", weights: str = "", model_id: str = "", gather=None, classes: Sequence[str] = (),
+-                 quiet: bool = False, turns: int = TURNS, quota: float = 0.0) -> None:
++                 quiet: bool = False, turns: int = TURNS, quota: float = 0.0, parts: dict | None = None) -> None:
+         self.cfg, self.planes, self.block = cfg, list(planes), int(block)
+         self.read_blocks = read_blocks()
+         self.stage_mib = _count("TF_GLM_SPILL_STAGE_MIB", STAGE_MIB, "MiB")
+@@ -506,6 +668,12 @@
+                       "rank 0, so no rank can resume another's stored prompts until they match", flush=True)
+             words = [w for row in rows for w in row[:8]]
+         self.compat = hashlib.sha256(np.asarray(words, dtype=np.int32).tobytes()).hexdigest()[:16]
++        # the folder's key by its parts (``key.json``; ``parts``: the signature's, by name, whose values joined by "|"
++        # are ``signature``): what the carry gate and ``_take_grants`` compare (``carry_refusal``); None: no carry
++        self.manifest = None if parts is None else {
++            "format": FORMAT, "block": self.block, "world": self.world, "rank": self.rank, "weights": weights,
++            "parts": {str(k): str(v) for k, v in parts.items()}, "compat": self.compat}
++        self.carry_poll = float(os.environ.get("TF_GLM_SPILL_CARRY_POLL_S", "10") or 0)   # (0: grants at start only)
+         self.top = os.path.join(cfg.root, f"spill-{self.compat}")
+         self.dir = os.path.join(self.top, f"rank{self.rank}")
+         self.points_dir, self.blocks_dir = os.path.join(self.dir, "points"), os.path.join(self.dir, "blocks")
+@@ -540,13 +708,14 @@
+             "backlog_skipped", "write_failed", "pruned_turns", "pruned_forks", "pruned_conversations",
+             "pruned_shared", "quota_trims", "loaded", "loaded_tokens", "loaded_bytes", "load_failed", "crc_failed",
+             "load_unfit", "staged_blocks", "released_blocks", "unwritten_evicted", "dropped", "trimmed_turns",
+-            "written_small_bytes", "disk_lookups", "disk_hits", "has_refused", "release_dropped")}
++            "written_small_bytes", "disk_lookups", "disk_hits", "has_refused", "release_dropped", "carried",
++            "carry_refused")}
+         self.stats.update(write_s=0.0, load_s=0.0, keep_s=0.0, pump_s=0.0, load_small_s=0.0)
+         self.unwritten_by: dict[str, int] = {}
+         self.restore_ms: list[float] = []
+         self.direct = bool(getattr(cfg, "direct", True)) and hasattr(os, "O_DIRECT")
+         self.small_direct = self.direct                     # small states: O_DIRECT through their own aligned buffer
+-        problem, pruned_builds, busy = "", 0, ""
++        problem, pruned_builds, busy, carried = "", 0, "", 0
+         self._held = None                                 # the folder's lock for this rank (``spill.hold``)
+         try:
+             os.makedirs(cfg.root, exist_ok=True)
+@@ -557,6 +726,9 @@
+                 _chown(d, self.owner)
+             pruned_builds = self._prune_builds()
+             self._scan()
++            if self.manifest is not None:                 # (rewritten every start: the serving folder's is the newest)
++                _put(os.path.join(self.dir, "key.json"), json.dumps(self.manifest).encode(), self.owner)
++            carried = self._take_grants()
+         except _sp.Busy as exc:
+             busy = str(exc)
+         except OSError as exc:
+@@ -588,7 +760,8 @@
+                   f"({self.read_blocks * _span_bytes(self.planes, 0, self.block) / (1 << 20):.0f} MiB), a "
+                   f"{self.stage_mib} MiB write ring): {len(self.index)} stored prompts from before this start, "
+                   f"{self.stored() / (1 << 30):.1f} GiB"
+-                  + (f"; pruned {pruned_builds} older builds" if pruned_builds else ""), flush=True)
++                  + (f"; pruned {pruned_builds} older builds" if pruned_builds else "")
++                  + (f"; carried {carried} from an earlier build (a gate's grant)" if carried else ""), flush=True)
+ 
+     # -- housekeeping --------------------------------------------------------------------------------------------------
+     def close(self) -> None:
+@@ -693,27 +866,9 @@
+                     pass
+         for used, key in sorted(metas):
+             try:
+-                with open(self._point_path(key, ".json")) as fh:
+-                    m = json.load(fh)
+-                if m.get("format") != FORMAT or m["key"] != key:
+-                    raise ValueError("another format")
+-                with open(self._point_path(key, ".ids"), "rb") as fh:
+-                    raw = fh.read()
+-                if zlib.crc32(raw) != m["ids_crc"] or not os.path.exists(self._point_path(key, ".st")):
+-                    raise ValueError("ids or small state")
+-                arr = np.frombuffer(raw, dtype=np.int64)
+-                n = int(m["n"])
+-                ids, tokens = arr[:n].copy(), (arr[n:].copy() if len(arr) > n else None)
+-                blocks = list(m["blocks"])
+-                if (len(ids) != n or point_key(ids) != key or not all(b in present for b in blocks)
+-                        or [h for _, _, h in block_hashes(ids, self.block, m["lineage"])] != blocks):
+-                    raise ValueError("blocks")
+-                pt = Point(key, n, ids, tokens, m["lineage"], blocks, [int(c) for c in m["crcs"]],
+-                           [bytes.fromhex(x) for x in m["digests"]], int(m["small_crc"]), int(m["small_bytes"]),
+-                           bool(m["shared"]), bool(m["head"]), float(used), _chain(ids, self.block),
+-                           m.get("fields") or {})
++                pt = load_point(self.points_dir, key, self.block, present, used)
+                 self.index[key] = pt
+-                for b, c, dg in zip(blocks, pt.crcs, pt.digests):
++                for b, c, dg in zip(pt.blocks, pt.crcs, pt.digests):
+                     if b not in self.have:
+                         self._add_block(b, c, dg)
+                 self.small_on_disk += pt.small_bytes
+@@ -734,6 +889,163 @@
+             self.parent[pt.key] = self._parent_of(pt)
+             self._ref(pt.blocks, 1)
+ 
++    # -- the gated carry (``carry_refusal``, ``compare_points``, ``grant``) ---------------------------------------------
++    def _take_grants(self) -> int:
++        """Grants the carry gate wrote into this folder (``carry/spill-<old>.grant.json``, never one under its
++        temporary dot name), at start and on a quiet writer every TF_GLM_SPILL_CARRY_POLL_S: each one checked
++        (``_grant_refusal``), then the old folder's whole points taken (``_carry_from``); the grant then renamed
++        ``.done.json``, or ``.refused.json`` (counted). The points carried."""
++
++        carry = os.path.join(self.dir, "carry")
++        try:
++            names = sorted(f for f in os.listdir(carry) if f.endswith(".grant.json") and not f.startswith("."))
++        except OSError:
++            return 0
++        total = 0
++        for name in names:
++            path = os.path.join(carry, name)
++            stem = path[:-len(".grant.json")]
++            try:
++                with open(path) as fh:
++                    g = json.load(fh)
++                why = self._grant_refusal(g)
++                if why is None:
++                    n = self._carry_from(os.path.join(self.cfg.root, f"spill-{g['from']}", f"rank{self.rank}"))
++                    total += n
++                    os.replace(path, stem + ".done.json")
++                    print(f"[tensorfold] spill rank {self.rank}: carried {n} stored prompts from spill-{g['from']} "
++                          "(the carry gate's grant)", flush=True)
++                    continue
++            except Exception as exc:                        # noqa: BLE001  (a grant that cannot be read is refused)
++                why = repr(exc)
++            with self.lock:
++                self.stats["carry_refused"] += 1
++            try:
++                os.replace(path, stem + ".refused.json")
++            except OSError:
++                pass
++            print(f"[tensorfold] spill rank {self.rank}: carry grant {name} refused: {why}", flush=True)
++        return total
++
++    def _grant_refusal(self, g: dict) -> str | None:
++        """Why grant ``g`` is not taken (None: it is): of this format; for this folder, by its key; naming an old
++        folder of this root and rank by its name only, whose key is still the one the gate checked; the two keys may
++        carry (``carry_refusal``); at least one state checked, and every checked state still in both folders with the
++        ids and block CRC-32s and digests the gate saw (a folder changed since is refused)."""
++
++        if not isinstance(g, dict) or g.get("format") != GRANT:
++            return "another format"
++        if self.manifest is None or g.get("to") != self.compat or g.get("to_key") != self.manifest:
++            return "not this folder's grant"
++        frm = str(g.get("from", ""))
++        if not _COMPAT_NAME.fullmatch(frm):
++            return "no folder name"
++        old_dir = os.path.join(self.cfg.root, f"spill-{frm}", f"rank{self.rank}")
++        old = read_manifest(old_dir)
++        if old is None or old != g.get("from_key") or old.get("compat") != frm:
++            return f"spill-{frm} is not the folder the gate checked"
++        why = carry_refusal(old, self.manifest)
++        if why is not None:
++            return why
++        checked = g.get("checked")
++        if not isinstance(checked, dict) or not checked:
++            return "no state checked"
++        for key, seen in checked.items():
++            for d in (old_dir, self.dir):
++                try:
++                    with open(os.path.join(d, "points", f"{key}.json")) as fh:
++                        m = json.load(fh)
++                except (OSError, ValueError):
++                    return f"{key}: gone from {d} since the check"
++                if any(m.get(k) != seen.get(k) for k in ("n", "ids_crc", "crcs", "digests")):
++                    return f"{key}: changed in {d} since the check"
++        return None
++
++    def _carry_from(self, old_dir: str) -> int:
++        """The old folder's whole points (``load_point``) this folder neither holds nor is writing, most recently used
++        first, while they fit the cap: each taken by ``_carry_point``. The points taken."""
++
++        pdir = os.path.join(old_dir, "points")
++        present = {f[:-4] for f in os.listdir(os.path.join(old_dir, "blocks")) if f.endswith(".bin")}
++        metas = []
++        for f in os.listdir(pdir):
++            if f.endswith(".json") and not f.startswith("."):
++                try:
++                    metas.append((os.stat(os.path.join(pdir, f)).st_mtime, f[:-5]))
++                except OSError:
++                    pass
++        n = 0
++        for used, key in sorted(metas, reverse=True):
++            try:
++                pt = load_point(pdir, key, self.block, present, used)
++            except Exception:                               # noqa: BLE001, S112  (not whole there: not carried)
++                continue
++            n += self._carry_point(old_dir, pt)
++        return n
++
++    def _carry_point(self, old_dir: str, pt: Point) -> bool:
++        """Point ``pt`` of ``old_dir`` into this folder as hard links (no bytes copied; the old folder unchanged): its
++        blocks this folder lacks, its ids, its small state, its json last (a point with its json is whole); then the
++        index (its file times kept: the cap drops it before this folder's own). Not when this folder holds or writes
++        its ids, holds one of its block names with other bytes, or has no room under the cap."""
++
++        with self.lock:
++            if pt.key in self.index or pt.key in self.inflight or pt.key in self.waiting:
++                return False
++            for h, c, dg in zip(pt.blocks, pt.crcs, pt.digests):
++                got = self.have.get(h)
++                if got is not None and (got[0], got[2]) != (c, dg):
++                    return False                            # (that name holds other bytes here)
++            new = [(h, c, dg) for h, c, dg in zip(pt.blocks, pt.crcs, pt.digests) if h not in self.have]
++            size = sum(os.path.getsize(os.path.join(old_dir, "blocks", f"{h}.bin")) for h, _, _ in new)
++            if self.stored() + self.backlog + size + pt.small_bytes > self.cap:
++                return False
++            self.inflight.add(pt.key)                       # (a keep of the same ids meanwhile: "stored")
++            self.pinned |= set(pt.blocks)
++        linked: list[str] = []
++        ok = False
++        try:
++            for h, c, dg in new:
++                tmp = os.path.join(self.blocks_dir, f".carry-{h}.bin")
++                with contextlib.suppress(FileNotFoundError):
++                    os.unlink(tmp)
++                os.link(os.path.join(old_dir, "blocks", f"{h}.bin"), tmp)
++                os.replace(tmp, self._block_path(h))
++                linked.append(h)
++                with self.lock:
++                    self._add_block(h, c, dg)
++            _fsync_dir(self.blocks_dir)                     # the blocks before the point naming them
++            for suffix in (".ids", ".st", ".json"):
++                if suffix == ".json":
++                    _fsync_dir(self.points_dir)
++                tmp = os.path.join(self.points_dir, f".carry-{pt.key}{suffix}")
++                with contextlib.suppress(FileNotFoundError):
++                    os.unlink(tmp)
++                os.link(os.path.join(old_dir, "points", f"{pt.key}{suffix}"), tmp)
++                os.replace(tmp, self._point_path(pt.key, suffix))
++            _fsync_dir(self.points_dir)
++            ok = True
++        finally:
++            with self.lock:
++                self.inflight.discard(pt.key)
++                self.pinned -= set(pt.blocks)
++                if ok and pt.key not in self.index:
++                    self.index[pt.key] = pt
++                    self._ref(pt.blocks, 1)
++                    self._adopt(pt)
++                    self.small_on_disk += pt.small_bytes
++                    self.version += 1
++                    self.stats["carried"] += 1
++                else:
++                    ok = False
++                    for suffix in (".json", ".st", ".ids"):
++                        with contextlib.suppress(OSError):
++                            if os.path.samefile(self._point_path(pt.key, suffix),
++                                                os.path.join(old_dir, "points", f"{pt.key}{suffix}")):
++                                os.remove(self._point_path(pt.key, suffix))
++                    self._gc(linked)
++        return ok
++
+     # -- the staging ring and read buffers ---------------------------------------------------------------------------
+     def ring(self) -> None:
+         """Pinned host slots of one block each for writes (carved from ``spill.preallocate``'s write buffers, else
+@@ -1092,7 +1404,17 @@
+ 
+     def _writer(self) -> None:
+         while True:
+-            kind, job, h, item = self.jobs.get()
++            if self.carry_poll > 0:                         # (a quiet writer looks for a gate's grant now and then)
++                try:
++                    kind, job, h, item = self.jobs.get(timeout=self.carry_poll)
++                except queue.Empty:
++                    try:
++                        self._take_grants()
++                    except Exception as exc:                # noqa: BLE001  (a carry never stops the writer)
++                        print(f"[tensorfold] spill rank {self.rank}: carry failed: {exc!r}", flush=True)
++                    continue
++            else:
++                kind, job, h, item = self.jobs.get()
+             t0 = time.perf_counter()
+             if kind == "block":
+                 slot, nb, ev = item
+diff -ruN tensorfold/cuda/spill_carry.py tensorfold/cuda/spill_carry.py
+--- tensorfold/cuda/spill_carry.py	1970-01-01 00:00:00.000000000 +0000
++++ tensorfold/cuda/spill_carry.py	2026-10-30 00:29:07.291845400 +0000
+@@ -0,0 +1,111 @@
++"""The spill tier's carry gate, a node's side (``python3 -m tensorfold.cuda.spill_carry <command> ...``, in the NEW
++image, with the spill folder mounted): stored states of an earlier build or setting enter the serving folder only on
++proof that the new image computes the same bytes for them (``spill_blocks.compare_points``), the store taking the
++grant on its own (``BlockStore._take_grants``). The orchestration across nodes (pick the samples every rank holds,
++replay them through the serve, check and grant on every node, all or none) is the caller's.
++
++  plan <root> <rank>                  the serving folder (the newest key.json) and the one it may carry from (the newest
++                                      other whose key differs in spill_blocks.CARRY_PARTS alone), or why none
++  keys <rank dir>                     its whole points: key, tokens, last use, shared, head, with pictures
++  ids <rank dir> <key>                a point's ids as JSON (what a replay sends as its prompt)
++  check <old rank dir> <new rank dir> <key>...   EQUAL / DIFF lines (spill_blocks.compare_points)
++  grant <old rank dir> <new rank dir> <key>...   the check again, then the grant (spill_blocks.grant), or why not
++  status <rank dir>                   its grants: pending, done, refused
++Exit 0 on EQUAL / granted, 1 otherwise."""
++
++from __future__ import annotations
++
++import json
++import os
++import sys
++
++from . import spill_blocks as sb
++
++
++def _points(rank_dir: str, block: int):
++    pdir, bdir = os.path.join(rank_dir, "points"), os.path.join(rank_dir, "blocks")
++    present = {f[:-4] for f in os.listdir(bdir) if f.endswith(".bin")}
++    out = []
++    for f in sorted(os.listdir(pdir)):
++        if f.endswith(".json") and not f.startswith("."):
++            try:
++                out.append(sb.load_point(pdir, f[:-5], block, present))
++            except Exception:                               # noqa: BLE001, S112  (not whole: not a point)
++                continue
++    return sorted(out, key=lambda p: -p.used)
++
++
++def plan(root: str, rank: int) -> tuple[str | None, str | None, list[str]]:
++    """(the serving rank folder, the one it may carry from, notes)."""
++
++    folders = []
++    for d in os.listdir(root):
++        rd = os.path.join(root, d, f"rank{rank}")
++        m = sb.read_manifest(rd) if d.startswith("spill-") else None
++        if m is not None:
++            folders.append((os.path.getmtime(os.path.join(rd, "key.json")), rd, m))
++    if not folders:
++        return None, None, ["no folder with a key (key.json)"]
++    folders.sort(key=lambda f: -f[0])
++    _, to, new = folders[0]
++    notes = []
++    for _, rd, m in folders[1:]:
++        why = sb.carry_refusal(m, new)
++        if why is None:
++            return to, rd, notes
++        notes.append(f"{rd}: {why}")
++    return to, None, notes
++
++
++def main(argv: list[str]) -> int:
++    if not argv:
++        print(__doc__)
++        return 1
++    cmd, args = argv[0], argv[1:]
++    if cmd == "plan":
++        to, frm, notes = plan(args[0], int(args[1]))
++        print(json.dumps({"to": to, "from": frm, "notes": notes}))
++        return 0 if to and frm else 1
++    if cmd == "keys":
++        m = sb.read_manifest(args[0])
++        for p in _points(args[0], int((m or {}).get("block", 2048))):
++            print(json.dumps({"key": p.key, "n": p.n, "used": p.used, "shared": p.shared, "head": p.head,
++                              "pictures": p.tokens is not None}))
++        return 0
++    if cmd == "ids":
++        m = sb.read_manifest(args[0])
++        pdir, bdir = os.path.join(args[0], "points"), os.path.join(args[0], "blocks")
++        present = {f[:-4] for f in os.listdir(bdir) if f.endswith(".bin")}
++        p = sb.load_point(pdir, args[1], int((m or {}).get("block", 2048)), present)
++        print(json.dumps([int(t) for t in (p.tokens if p.tokens is not None else p.ids)]))
++        return 0
++    if cmd == "check":
++        old, new, keys = args[0], args[1], args[2:]
++        why = sb.carry_refusal(sb.read_manifest(old), sb.read_manifest(new))
++        if why is not None:
++            print(f"REFUSED {why}")
++            return 1
++        block = int(sb.read_manifest(old)["block"])
++        bad = 0
++        for k in keys:
++            diffs = sb.compare_points(old, new, k, block)
++            bad += bool(diffs)
++            print("\n".join(f"DIFF {d}" for d in diffs) if diffs else f"EQUAL {k}")
++        return 1 if bad or not keys else 0
++    if cmd == "grant":
++        ok, lines = sb.grant(args[0], args[1], args[2:])
++        print("\n".join(lines))
++        return 0 if ok else 1
++    if cmd == "status":
++        carry = os.path.join(args[0], "carry")
++        for f in sorted(os.listdir(carry)) if os.path.isdir(carry) else []:
++            state = next((s for s in ("grant", "done", "refused") if f.endswith(f".{s}.json")), None)
++            if state is not None and not f.startswith("."):
++                print(f"{'pending' if state == 'grant' else state} {f}")
++        return 0
++    print(f"unknown command {cmd!r}\n{__doc__}")
++    return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 23:44:08.593576600 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:28:48.940550100 +0000
+@@ -1923,11 +1923,15 @@
+         # grid, and the settings every rank agreed at start; TF_GLM_KV_SHARD's points hold a rank's part of the
+         # latents, another layout than an unsharded run's (it would read them as corrupt and drop them), so a store
+         # of their own (appended only when on: an unsharded run keeps its store)
+-        signature = "|".join(["multi", build_id(self.g.model_dir, self.g.drafter_dir),
+-                              "" if drafter is None else type(drafter).__name__,
+-                              os.environ.get("TF_GLM_KV", ""), os.environ.get("TF_GLM_DENSE", ""),
+-                              f"tp{self.w.world}", repr(planes), str(self.grid), str(self.drafts is not None),
+-                              repr(self.g.agreed)] + ([f"kvshard{self.pool.parts}"] if shard.ON else []))
++        # (by part, in this order: joined by "|" they are the signature the folder was always named by; the store
++        # writes them as its key, key.json, which the carry gate compares: only "build" and "agreed" may differ)
++        parts = {"engine": "multi", "build": build_id(self.g.model_dir, self.g.drafter_dir),
++                 "drafter": "" if drafter is None else type(drafter).__name__,
++                 "kv": os.environ.get("TF_GLM_KV", ""), "dense": os.environ.get("TF_GLM_DENSE", ""),
++                 "tp": f"tp{self.w.world}", "planes": repr(planes), "grid": str(self.grid),
++                 "drafts": str(self.drafts is not None), "agreed": repr(self.g.agreed),
++                 **({"kvshard": f"kvshard{self.pool.parts}"} if shard.ON else {})}
++        signature = "|".join(parts.values())
+         self.loads: dict = {}                  # load id -> a stored prompt being read into a new extent
+         self.next_lid = 0
+         self.load_budget = float(os.environ.get("TF_GLM_SPILL_LOAD_MS") or LOAD_MS_DEFAULT) / 1000.0
+@@ -1938,7 +1942,8 @@
+                                device=self.w.device, signature=signature,
+                                weights=weights_id(self.g.model_dir, self.g.drafter_dir), model_id=model,
+                                gather=self.g._gather_ints,
+-                               classes=["tensorfold.families.glm5_next.cuda.decode:Snapshot"], turns=turns, quota=quota)
++                               classes=["tensorfold.families.glm5_next.cuda.decode:Snapshot"], turns=turns, quota=quota,
++                               parts=parts)
+         except Busy as exc:                     # (raised on every rank alike: the tier is off on all of them)
+             print(f"[tensorfold] spill rank {self.rank}: {exc}: the spill tier is off for this engine (give each "
+                   "engine its own SPILL_DIR)", flush=True)

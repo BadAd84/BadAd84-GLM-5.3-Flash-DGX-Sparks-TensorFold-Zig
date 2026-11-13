@@ -1,0 +1,31 @@
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -4297,9 +4297,10 @@
+         return done.wait(timeout)
+ 
+     def _yield(self) -> None:
+-        """``Scheduler._yield``, the stream's GLM settings carried to its replay."""
++        """``Scheduler._yield``, the stream's GLM settings carried to its replay; only for a waiting foreground
++        REQUEST (``_foreground_waits``)."""
+ 
+-        if self.decoder.live() + self._reading() < self.max_streams or not self.waiting.foreground():
++        if self.decoder.live() + self._reading() < self.max_streams or not self._foreground_waits():
+             return
+         live = list(self.decoder.streams.values())
+         stream = next((s for s in reversed(live) if s.background and not s.done and s.constraint is None
+@@ -4313,6 +4314,15 @@
+         again.glm = getattr(stream, "glm", {})
+         self.waiting.put((again, box))
+ 
++    def _foreground_waits(self) -> bool:
++        """Whether a foreground request waits in the queue. ``Waiting.foreground`` counts every entry not marked
++        background, so a shutdown flush's wake-up item (``_Flush``, the class itself) counted too and made a
++        background stream give its lane up -- its decode thrown away and replayed -- with nobody waiting for the lane
++        (the flush runs at the top of the next ``_admit`` whatever the lanes hold)."""
++
++        with self.waiting.mutex:
++            return any(not e[2][0].background and e[2][0] is not self._Flush for e in self.waiting.queue)
++
+     def _requeue(self) -> None:
+         for stream in self.decoder.requeue:
+             box = self.boxes.pop(id(stream), None)

@@ -1,0 +1,105 @@
+# BatchFixes-1 (2026-10-30): the two latent findings of the 2026-10-30 upstream batch, on the hunt stack (applies at
+# the END of stack/all6r.list; the same lines as the batch's 0134 / 0135 and the new sync ports).
+# 1. indexer_shard.scratch_for: `got.rows < sel.rows` could never hold (the ShardScratch is made with sel.rows and
+#    cached on that very SelectScratch, whose rows never change; scratch_for is the only writer of sel.shard): the
+#    clause goes. What it stood for, a window of more rows than the scratch, was unguarded in the sharded path
+#    (seg_select_tokens refuses it, seg_shard_rank did not): driven on CPU with a 5-row window on a 4-row scratch at
+#    1,048,576 tokens of context, the kernels wrote past the scratch (heap corruption, SIGSEGV). seg_shard_rank now
+#    refuses it with seg_select_tokens' message. The serve's windows are sliced from buffers of the scratch's rows, so
+#    production never hit it.
+# 2. tp.expert_owners (TF_GLM_EXPERT_ROTATE): a rotation over a checkpoint whose mlp_layer_types is not one entry a
+#    layer (num_hidden_layers) is refused, naming the field and both lengths, by both layouts (from_text, from_config)
+#    and so before the loader opens a weight file; before, a short list left the last layers unrotated. Off: unchanged.
+# Checks: upstream/glm-pr-indexer-shard and glm-pr-expert-rotate (their check tools and mutants.sh).
+diff -ru tensorfold/families/glm5_next/cuda/indexer_shard.py tensorfold/families/glm5_next/cuda/indexer_shard.py
+--- tensorfold/families/glm5_next/cuda/indexer_shard.py	2026-10-30 23:07:29.219336839 +0000
++++ tensorfold/families/glm5_next/cuda/indexer_shard.py	2026-10-30 23:07:36.462086086 +0000
+@@ -334,9 +334,10 @@
+ 
+ def scratch_for(sel, world: int, max_segs: int):
+     """The ShardScratch cached on a SelectScratch (made at the first eager call: the batched window's warm-up
+-    runs precede its capture)."""
++    runs precede its capture), sized for its sel.rows rows, which never change: remade for another rank count or a
++    larger segment table only (seg_shard_rank refuses a window of more rows than the scratch)."""
+     got = getattr(sel, "shard", None)
+-    if got is None or got.world != world or got.rows < sel.rows or got.pbase.numel() < max_segs:
++    if got is None or got.world != world or got.pbase.numel() < max_segs:
+         got = sel.shard = ShardScratch(sel.rows, world, max_segs, sel.scores.device)
+     return got
+ 
+@@ -344,8 +345,11 @@
+ def seg_shard_rank(qi, wts, pk, rows, sel, rank: int, world: int):
+     """Rank ``rank``'s share of the decode answer, the part one rank runs before the gather: its segment tables,
+     its pool blocks scored compacted into sel.scores by the production kernels, its K best pairs a row into
+-    sel.shard.send[:R]. Returns the send view [R, 2 K]."""
++    sel.shard.send[:R]. Returns the send view [R, 2 K]. A window of more rows than ``sel`` holds is refused
++    (seg_select_tokens' guard): its kernels would write past the scratch's buffers."""
+     R = qi.shape[0]
++    if R > sel.rows:
++        raise ValueError(f"seg_shard_rank: {R} rows, the scratch holds {sel.rows}")
+     sc = scratch_for(sel, world, rows.max_segs)
+     if sel.split.numel() < R * 2 * sparse.SEG_FLOOR[0]:
+         raise ValueError("seg_shard_rank: the scratch's split buffer holds no candidates")
+diff -ru tensorfold/families/glm5_next/cuda/tp.py tensorfold/families/glm5_next/cuda/tp.py
+--- tensorfold/families/glm5_next/cuda/tp.py	2026-10-30 23:07:22.120326908 +0000
++++ tensorfold/families/glm5_next/cuda/tp.py	2026-10-30 23:07:36.462629385 +0000
+@@ -70,7 +70,7 @@
+         totals = {f: int(getattr(cfg, a)) for f, a in names.items() if getattr(cfg, a, None) is not None}
+         moe = [k == "moe" for k in (getattr(cfg, "mlp_kinds", None) or ())]
+         kinds = tuple(getattr(cfg, "kinds", ()) or ())
+-        return cls(int(rank), int(world), totals, kinds, _owners(moe, totals, world))
++        return cls(int(rank), int(world), totals, kinds, _owners(moe, totals, world, getattr(cfg, "layers", None)))
+ 
+     @classmethod
+     def from_text(cls, t: dict, rank: int, world: int) -> "Layout":
+@@ -93,7 +93,7 @@
+         n = int(t.get("num_hidden_layers", len(kinds)))
+         dense = int(t.get("first_k_dense_replace", 3))         # ``weights.Config.read``'s MoE layers
+         moe = [k == "sparse" for k in (t.get("mlp_layer_types") or ["dense"] * dense + ["sparse"] * (n - dense))]
+-        return cls(int(rank), int(world), totals, kinds, _owners(moe, totals, world))
++        return cls(int(rank), int(world), totals, kinds, _owners(moe, totals, world, n))
+ 
+     def owner(self, layer: int | None) -> int:
+         """The rank holding the first share of layer ``layer``'s ROTATED families: the partial its MoE site sums
+@@ -209,19 +209,23 @@
+     return parts(total, world, unit)
+ 
+ 
+-def expert_owners(moe: list[bool], world: int, spec: str | None = None) -> tuple:
++def expert_owners(moe: list[bool], world: int, spec: str | None = None, n_layers: int | None = None) -> tuple:
+     """OTS 0105, TF_GLM_EXPERT_ROTATE (``spec``): per layer the rank holding the first (widest) share of its routed
+     and shared experts, -1 for a layer without a MoE block (``moe``: per layer whether it has one; the MTP layer past
+     them keeps rank 0's). ``0`` (default): () = upstream's split, rank 0 first in every layer; ``mod``: MoE layer i
+     on rank i mod ``world``; ``C0,C1,...`` (a count a rank, summing to the MoE layers): rank r first in that many,
+     interleaved by a smooth weighted round robin (ties to the lower rank). Every rank must be given the same value
+-    (the engine compares them at startup)."""
++    (the engine compares them at startup). ``n_layers``: the checkpoint's layer count (num_hidden_layers); a
++    rotation over a ``moe`` (its mlp_layer_types) of another length is refused, before any weight is read."""
+ 
+     import os
+ 
+     spec = (os.environ.get("TF_GLM_EXPERT_ROTATE", "0") if spec is None else str(spec)).strip().lower()
+     if spec in ("", "0", "off"):
+         return ()
++    if n_layers is not None and len(moe) != int(n_layers):
++        raise ValueError(f"TF_GLM_EXPERT_ROTATE={spec!r}: the checkpoint's mlp_layer_types has {len(moe)} entries "
++                         f"for its {int(n_layers)} layers (num_hidden_layers); a rotation needs one a layer")
+     layers = [i for i, m in enumerate(moe) if m]
+     if spec in ("1", "mod"):
+         first = {i: i % world for i in layers}
+@@ -242,11 +246,12 @@
+     return tuple(first.get(i, -1) for i in range(len(moe)))
+ 
+ 
+-def _owners(moe: list[bool], totals: dict, world: int) -> tuple:
+-    """``expert_owners`` for a layout of ``totals``: () where the ROTATED families split evenly (nothing to spread)."""
++def _owners(moe: list[bool], totals: dict, world: int, n_layers: int | None) -> tuple:
++    """``expert_owners`` for a layout of ``totals`` over ``n_layers`` layers: () where the ROTATED families split
++    evenly (nothing to spread)."""
+ 
+     even = all(len(set(split_sizes(totals[f], world, UNITS[f]))) == 1 for f in ROTATED if f in totals)
+-    return () if even or "moe" not in totals else expert_owners(moe, world)
++    return () if even or "moe" not in totals else expert_owners(moe, world, n_layers=n_layers)
+ 
+ 
+ def of(w) -> Layout:

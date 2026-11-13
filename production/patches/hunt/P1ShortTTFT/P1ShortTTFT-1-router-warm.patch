@@ -1,0 +1,131 @@
+--- tensorfold/families/glm5_next/cuda/glue.py
++++ tensorfold/families/glm5_next/cuda/glue.py
+@@ -488,12 +488,34 @@
+ 
+ # Router kernel choice is fixed by shape because the sliced and single-pass reductions differ in their last bits.
+ ROUTER_KS = 8
++ROUTER_BLOCKS = (16, 32, 64, 128)    # the row blocks (BM) of the router kernels: the first that holds the rows
++
++
++def router_block(m: int) -> int:
++    """The router kernels' row block (their BM constexpr) for m rows: ``router`` and ``route_select`` both."""
++
++    return next((bm for bm in ROUTER_BLOCKS if m <= bm), ROUTER_BLOCKS[-1])
++
++
++def router_warm_rows() -> list[int]:
++    """Row counts that launch every variant of the router kernels a window can need (P1ShortTTFT). A variant is
++    one row block (``router_block``) and Triton's own specialisation of the row count M (1, a multiple of 16, or
++    other: the other int arguments, D and the totals, are multiples of 16 at every call): per block its smallest
++    count and its largest (a multiple of 16), and 2 (the first block's other). Each variant's first launch loads
++    it (a Triton cache read and a module load, a few ms); a prompt chunk that is the first of its variant pays that
++    in its first token."""
+ 
++    rows, lo = [2], 1
++    for bm in ROUTER_BLOCKS:
++        rows += [lo, bm]
++        lo = bm + 1
++    return sorted(set(rows))
++
+ 
+ def router(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+     m, d = x.shape
+     ne = w.shape[0]
+-    bm = 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128
++    bm = router_block(m)
+     ks = ROUTER_KS
+     if ks <= 1 or d % (ks * 64) or not out.is_contiguous():
+         _router[(triton.cdiv(m, bm), triton.cdiv(ne, 64))](x, w, out, m, x.stride(0), D=d, NE=ne, BM=bm,
+@@ -600,7 +622,7 @@
+         router(x, w, logits)
+         select(logits, bias, pick, wts, top_k, experts, scale, norm)
+         return
+-    bm = 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128
++    bm = router_block(m)
+     part = torch.empty((ROUTER_KS, m, ne), dtype=torch.float32, device=x.device)
+     _router_part[(triton.cdiv(m, bm), triton.cdiv(ne, 32), ROUTER_KS)](x, w, part, m, x.stride(0), D=d, NE=ne, BM=bm,
+                                                                         BLOCK_E=32, BK=64, KS=ROUTER_KS, num_warps=4,
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -1018,7 +1018,7 @@
+         with prof.timed("dsa: indexer update"):
+             if not fronted:
+                 mm(b, b.normed[rs], ix.kw, b.xs[rs], b.ikr[rs])
+-                glue.router(b.normed[rs], ix.gate, b.igr[rs])
++                index_gate(ix, b, rs)
+             sparse.index_update(b.ikr[rs, :c.index_dim], b.igr[rs], ix.ln_w, ix.ln_b, ix.ape, ik, ig, pk, pos_dev)
+     with prof.timed("dsa: absorb"):
+         qa = latent.absorb_q(b.q[rs], a.absorb, s.qa[rs], prompt=b.prefill and latent.PROMPT_MMA)
+@@ -1179,8 +1179,7 @@
+             shared_front(layer, w, b, 0, R)
+         done = (0, R)
+     with prof.timed("moe: route"):
+-        glue.route_select(b.normed[:R], m.router, b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts,
+-                          c.routed_scale, c.norm_topk)
++        _route(layer.moe, c, b, R)
+         grouped.route(b.pick[:R], b.plan, b.plan.tile)   # the plan keeps its pass (TF_GLM_EXL3_PASS)
+     if m.shared is not None:
+         # EXL3: the routed slots through the trellis kernels, the shared expert (last slot) through BF16 matmuls
+@@ -1223,6 +1222,50 @@
+     return partials(w, b, R, fill, "moe: all-gather", site=(layer.index, "f"))
+ 
+ 
++def _route(m, c, b: Buffers, R: int) -> None:
++    """A window's MoE routing (``moe_block``; ``warm_routers``): rows 0 .. R of ``b.normed`` to their experts' picks
++    and weights."""
++
++    glue.route_select(b.normed[:R], m.router, b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts,
++                      c.routed_scale, c.norm_topk)
++
++
++def index_gate(ix, b: Buffers, rs: slice) -> None:
++    """The DSA indexer's head gates of rows ``rs`` (``_dsa_latent``'s, a prompt chunk's or a window's; and
++    ``warm_routers``; ``own_front`` and the plain-cache path make the same call on their rows)."""
++
++    glue.router(b.normed[rs], ix.gate, b.igr[rs])
++
++
++def warm_routers(w: Weights, b: Buffers) -> int:
++    """At start, every rank (P1ShortTTFT): each router kernel variant a window can need (``glue.router_warm_rows``)
++    launched once on ``b``'s rows through the windows' own calls (``_route``, ``index_gate``), so none is first
++    loaded inside a request's first token. A --parallel 1 server met them first in the 1-63-row prompt chunks a
++    grid point left (one per off-grid prompt); OTS 0121 on --parallel 1 (HuntRoundLoop-6) runs those prompts as one
++    chunk, so the first prompt of 33-63 tokens loaded the 64-row block's in its own first token (two variants, ~2 ms
++    each on the laptop, on every rank). Only scratch rows are written (picks, weights, logits and gates the next
++    window's routing writes before reading); the same bits. TF_GLM_ROUTER_WARM=0: not run. Returns the launches."""
++
++    import os
++
++    if os.environ.get("TF_GLM_ROUTER_WARM", "1").strip() == "0":
++        return 0
++    c = w.cfg
++    moe = next((l.moe for l in w.layers if l.moe is not None), None)
++    ix = next((l.dsa.index for l in w.layers if l.dsa is not None and l.dsa.index is not None), None)
++    n = 0
++    for R in glue.router_warm_rows():
++        if R > b.normed.shape[0]:
++            break
++        if moe is not None:
++            _route(moe, c, b, R)
++            n += 1
++        if ix is not None:
++            index_gate(ix, b, slice(0, R))
++            n += 1
++    return n
++
++
+ def _mixer(layer: LayerW, w: Weights, st: State, b: Buffers, R: int, nch: int | None, host_pos: int | None,
+            sparse_np: int | None, done: tuple[int, int] | None = None) -> torch.Tensor | None:
+     """The layer's KDA or DSA block on b.normed: every rank's partials, or None row-split (``partials``)."""
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1443,6 +1443,9 @@
+                 self.drafter.capture()
+             fastboot.mark("DFlash2 CUDA graphs")
+         self.costs = self._startup_costs(parallel)
++        from .forward import warm_routers
++
++        warm_routers(w, self.e.pbuf)        # P1ShortTTFT: every router variant loaded now, not in a first token
+         fastboot.mark("calibration")
+         if rank == 0 and self.costs is not None:
+             self._print_costs()

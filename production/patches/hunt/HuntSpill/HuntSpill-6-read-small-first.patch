@@ -1,0 +1,59 @@
+# HuntSpill-6-read-small-first.patch (lane HuntSpill, 2026-10-30; the synced tree with sync/ORDER applied).
+# A read from the spill tier (BlockStore._read, the reader thread) read the state's small state (~64 MB a rank at
+# TP=3: an O_DIRECT read and ONE CRC-32 over it on one thread) only after the last block had been handed to the reader
+# pool, and LOADED waits for it: its read and CRC were the load's tail. It now starts first on the reader pool, beside
+# the blocks, and the block list is checked against the ids and lineage beside the reads too (block_hashes, 4 ms at
+# 772k ids, was before the first read). Any mismatch, damaged small state or failed block still fails the read, the
+# point is forgotten on every rank and the request prefills; the same bytes land in the same rows.
+# Expected size (not measured on GB10): the small state's CRC-32 of 64 MiB is 10 ms (WSL zlib) to 25-43 ms (Windows
+# zlib) on the workstation, plus its O_DIRECT read (~30 ms at the 2.1 GiB/s one reader got on spark5, F68) not
+# overlapped with the last ~16 blocks: up to ~40-70 ms of a 772k resume (1-2%); GB10's zlib speed: gb10_probe.py cpu.
+# Measured on the CPU rig (bench_read_small_first.py: real block size, a 64 MB small state, 24 blocks, tmpfs: the CPU
+# side only, WSL's zlib at ~7 GB/s), interleaved, 7 loads each: min 74.8 -> 62.8 ms, median 85.0 -> 70.3 ms.
+# Test: test_read_small_first.py <tree> (CPU torch, Linux): a 64-block state read back whole after a restart (rows
+# and small state equal), the small state's read starting before more than 16 of the 64 block reads ended (the
+# pre-patch tree: after 64 of 64, FAIL), and a damaged small state still failing the read with crc_failed counted.
+diff -ruN tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
+--- tensorfold/cuda/spill_blocks.py	2026-10-29 23:44:08.458799100 +0000
++++ tensorfold/cuda/spill_blocks.py	2026-10-29 23:58:33.411400100 +0000
+@@ -1525,17 +1525,22 @@
+ 
+     def _read(self, lj: LoadJob) -> None:
+         """The reader: ``lj``'s blocks into pinned slots, in order, as slots come free (several read at once on the
+-        reader pool, each checked against its CRC-32), then its small state. Issues no CUDA work."""
++        reader pool, each checked against its CRC-32), its small state read and checked on the pool from the start
++        (not after the last block, where its read and CRC-32 were the load's tail), and its block list checked against
++        its ids and lineage beside the reads (a mismatch fails the read at its end). Issues no CUDA work."""
+ 
+         pt = lj.point
+         job = self.waiting.get(pt.key)
+         if job is not None and not job.done.wait(LOAD_WAIT_S):   # (a point is only read once complete; safety)
+             raise OSError(f"{pt.key}: its write did not end in time")
+         self.ring()
+-        spans = list(block_hashes(pt.ids, self.block, pt.lineage))
+-        if [h for _, _, h in spans] != pt.blocks:
++        n, blk = pt.n, self.block
++        if len(pt.blocks) != -(-n // blk) or len(pt.crcs) != len(pt.blocks):
+             raise Corrupt(f"{pt.key}: its block list does not match its ids and lineage")
+-        for i, (s, e, h) in enumerate(spans):
++        small = self._readers.submit(self._read_small, lj)
++        names = self._readers.submit(block_hashes, pt.ids, blk, pt.lineage)
++        for i, h in enumerate(pt.blocks):
++            s, e = i * blk, min(n, (i + 1) * blk)
+             b = self._slot(lj)
+             if b is None:
+                 return
+@@ -1544,8 +1549,11 @@
+             with lj.cond:
+                 lj.queued[i] = (b, nb, fut, s, e, h)
+                 lj.cond.notify_all()
+-        if not lj.stop:
+-            self._read_small(lj)
++        if lj.stop:
++            return
++        if [h for _, _, h in names.result()] != pt.blocks:
++            raise Corrupt(f"{pt.key}: its block list does not match its ids and lineage")
++        small.result()
+ 
+     def _read_small(self, lj) -> None:
+         pt = lj.point

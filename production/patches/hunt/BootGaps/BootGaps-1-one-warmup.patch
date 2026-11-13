@@ -1,0 +1,182 @@
+# BootGaps-1 (lane BootGaps, 2026-10-30): ONE eager run before each CUDA graph capture (graphs.capture), was two.
+# Every GLM capture site (decode one-stream Graphs: main/sparse/MTP; verify.BatchedVerify.capture; dflash2.Drafter.capture;
+# dflash2_multi.MultiDrafter.capture) ran its graph body eagerly twice before capturing it. None of the bodies changes
+# host state a later call reads (parities are set by the caller before each capture; positions, extents, tables are
+# device tensors), so the second eager run leaves every recorded launch as the first did. Boot only; replies unchanged.
+# Boot estimate from run-20261029-185803: P=1 one-stream graphs 234 x ~44 ms eager window (calibration's eager v1) ~= -10 s
+# of the 27.8 s phase; P=2/4 BatchedVerify 64 graphs (94 ms a graph incl. 2 warm-ups) ~= -2 to -3 s of the 11.1 s
+# MultiDecoder phase; P=6/8 128 graphs ~= -4 to -6 s of 17.1 s. Test: test_one_warmup.py (GPU). Applies with patch -p0.
+diff -r tensorfold/families/glm5_next/cuda/dflash2.py ../new/tensorfold/families/glm5_next/cuda/dflash2.py
+--- tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-30 02:31:02.842484900 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-30 02:47:16.099657000 +0000
+@@ -597,26 +597,16 @@
+     def capture(self) -> None:
+         """CUDA graphs for the block pass and for context updates of 1..tap_rows rows (both ranks together)."""
+ 
++        from .graphs import capture                     # one eager run, then the capture
++
+         self.pool = torch.cuda.graph_pool_handle()
+         self.reset()
+         self.tap_in.zero_()
+         self.ids[0] = 0
+         for n in range(1, self.tap_rows + 1):
+-            for _ in range(2):
+-                self._taps_compute(n)
+-            torch.cuda.synchronize()
+-            g = torch.cuda.CUDAGraph()
+-            with torch.cuda.graph(g, pool=self.pool):
+-                self._taps_compute(n)
+-            self.tap_graphs[n] = g
++            self.tap_graphs[n] = capture(lambda: self._taps_compute(n), self.pool)
+             self.reset()
+-        for _ in range(2):
+-            self._block_compute()
+-        torch.cuda.synchronize()
+-        g = torch.cuda.CUDAGraph()
+-        with torch.cuda.graph(g, pool=self.pool):
+-            self._block_compute()
+-        self.block_graph = g
++        self.block_graph = capture(self._block_compute, self.pool)
+         torch.cuda.synchronize()
+         self.reset()
+ 
+diff -r tensorfold/families/glm5_next/cuda/dflash2_multi.py ../new/tensorfold/families/glm5_next/cuda/dflash2_multi.py
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-30 02:31:02.842484900 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-30 02:47:22.677060600 +0000
+@@ -338,26 +338,16 @@
+         """CUDA graphs for block passes of 1..streams streams and context updates of each row bucket (a multiple of
+         the block up to ``t_max``), both ranks together. Stream contexts are left as they were."""
+ 
++        from .graphs import capture                     # one eager run, then the capture
++
+         ends = [c.context_end for c in self.contexts]
+         saved = self.pos.clone()
+         self.pool = torch.cuda.graph_pool_handle()
+         self._trash_tables()
+         for T in self.buckets:
+-            for _ in range(2):
+-                self._taps_compute(T)
+-            torch.cuda.synchronize()
+-            g = torch.cuda.CUDAGraph()
+-            with torch.cuda.graph(g, pool=self.pool):
+-                self._taps_compute(T)
+-            self.tap_graphs[T] = g
++            self.tap_graphs[T] = capture(lambda: self._taps_compute(T), self.pool)
+         for S in range(1, self.streams + 1):
+-            for _ in range(2):
+-                self._block_compute(S)
+-            torch.cuda.synchronize()
+-            g = torch.cuda.CUDAGraph()
+-            with torch.cuda.graph(g, pool=self.pool):
+-                self._block_compute(S)
+-            self.block_graphs[S] = g
++            self.block_graphs[S] = capture(lambda: self._block_compute(S), self.pool)
+         torch.cuda.synchronize()
+         self.pos.copy_(saved)
+         for c, e in zip(self.contexts, ends):
+diff -r tensorfold/families/glm5_next/cuda/graphs.py ../new/tensorfold/families/glm5_next/cuda/graphs.py
+--- tensorfold/families/glm5_next/cuda/graphs.py	2026-10-30 02:31:02.850494200 +0000
++++ tensorfold/families/glm5_next/cuda/graphs.py	2026-10-30 02:46:55.132757300 +0000
+@@ -9,6 +9,24 @@
+ from .mtp import mtp_compute
+ 
+ 
++def capture(run, pool) -> torch.cuda.CUDAGraph:
++    """A CUDA graph of ``run()`` (lane BootGaps): ONE eager run first, then the capture into ``pool``. The eager run
++    does what a window's first call does once (extension builds and loads, Triton specialisations, cuBLAS handles and
++    workspaces, the caching allocator's blocks); none of the captured windows changes host state a later call reads
++    (positions, parities, extents and tables are device tensors or set by the caller before each capture), so a second
++    eager run left every launch the capture records as the first one did. Every capture site of the GLM engine takes
++    this (one-stream graphs here, ``verify.BatchedVerify``, ``dflash2.Drafter``, ``dflash2_multi.MultiDrafter``); it
++    was two eager runs a graph, ~44 ms each at boot (an eager window's RoCE gathers each wait in an NCCL barrier until
++    ``RoceComm.settle``)."""
++
++    run()
++    torch.cuda.synchronize()
++    g = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g, pool=pool):
++        run()
++    return g
++
++
+ def pool_buckets(np_max: int) -> list[int]:
+     """Every value ``sparse.pool_bucket`` can return for a sparse step (past TOPK_POOLS complete pools)."""
+     out, b = [], 1024
+@@ -33,24 +51,12 @@
+             for R in main_rows:
+                 for parity in parities:
+                     st.cur = [parity] * len(st.cur)
+-                    for _ in range(2):
+-                        compute(w, st, e.buf, R)
+-                    torch.cuda.synchronize()
+-                    g = torch.cuda.CUDAGraph()
+-                    with torch.cuda.graph(g, pool=self.pool):
+-                        compute(w, st, e.buf, R)
+-                    self.main[(R, parity)] = g
++                    self.main[(R, parity)] = capture(lambda: compute(w, st, e.buf, R), self.pool)
+             st.cur = saved
+             if w.mtp is not None:
+                 e.mbuf.zero_first = False
+                 for n in mtp_rows:
+-                    for _ in range(2):
+-                        mtp_compute(w, st, e.mbuf, n)
+-                    torch.cuda.synchronize()
+-                    g = torch.cuda.CUDAGraph()
+-                    with torch.cuda.graph(g, pool=self.pool):
+-                        mtp_compute(w, st, e.mbuf, n)
+-                    self.mtp[n] = g
++                    self.mtp[n] = capture(lambda: mtp_compute(w, st, e.mbuf, n), self.pool)
+             if st.index is not None and latent.ENABLED:
+                 self._capture_sparse(e, main_rows, mtp_rows, parities)
+         torch.cuda.synchronize()
+@@ -63,20 +69,10 @@
+             for R in main_rows:
+                 for parity in parities:
+                     st.cur = [parity] * len(st.cur)
+-                    for _ in range(2):
+-                        compute(w, st, e.buf, R, sparse_np=bucket)
+-                    torch.cuda.synchronize()
+-                    g = torch.cuda.CUDAGraph()
+-                    with torch.cuda.graph(g, pool=self.pool):
+-                        compute(w, st, e.buf, R, sparse_np=bucket)
+-                    self.sparse[(R, parity, bucket)] = g
++                    self.sparse[(R, parity, bucket)] = capture(lambda: compute(w, st, e.buf, R, sparse_np=bucket),
++                                                               self.pool)
+             if w.mtp is not None:
+                 for n in mtp_rows:
+-                    for _ in range(2):
+-                        mtp_compute(w, st, e.mbuf, n, sparse_np=bucket)
+-                    torch.cuda.synchronize()
+-                    g = torch.cuda.CUDAGraph()
+-                    with torch.cuda.graph(g, pool=self.pool):
+-                        mtp_compute(w, st, e.mbuf, n, sparse_np=bucket)
+-                    self.sparse_mtp[(n, bucket)] = g
++                    self.sparse_mtp[(n, bucket)] = capture(lambda: mtp_compute(w, st, e.mbuf, n, sparse_np=bucket),
++                                                           self.pool)
+         st.cur = saved
+diff -r tensorfold/families/glm5_next/cuda/verify.py ../new/tensorfold/families/glm5_next/cuda/verify.py
+--- tensorfold/families/glm5_next/cuda/verify.py	2026-10-30 02:31:02.873013900 +0000
++++ tensorfold/families/glm5_next/cuda/verify.py	2026-10-30 02:47:06.923714200 +0000
+@@ -151,6 +151,7 @@
+ 
+         from . import indexer_shard
+         from .forward import compute
++        from .graphs import capture
+         from .sparse import SPARSE_FROM
+ 
+         e, w, b = self.e, self.w, self.b
+@@ -167,13 +168,7 @@
+                 variants.append((self.dense_graphs, False, False))
+             for into, sharded, select in variants:
+                 run = lambda: compute(w, None, b, R, mixer=lambda layer: self._mixer(layer, R, select, sharded))  # noqa: E731
+-                for _ in range(2):
+-                    run()
+-                torch.cuda.synchronize()
+-                g = torch.cuda.CUDAGraph()
+-                with torch.cuda.graph(g, pool=pool):
+-                    run()
+-                into[R] = g
++                into[R] = capture(run, pool)          # one eager run, then the capture (graphs.capture)
+         torch.cuda.synchronize()
+         e.slots.rec[0].zero_()
+         e.slots.conv[0].zero_()

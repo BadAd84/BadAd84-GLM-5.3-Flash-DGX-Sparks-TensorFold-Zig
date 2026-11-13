@@ -1,0 +1,66 @@
+# HuntSpill-2-persist-ids.patch (lane HuntSpill, 2026-10-30; the synced tree with every patch in sync/ORDER applied).
+# Every kept state of 8,192+ tokens is written to the spill tier when it is kept (MultiDecoder._keep -> _persist ->
+# BlockStore.persist), on every rank, on the engine loop, before the turn's first token is sampled. _persist passed the
+# state's ids LIST (_ident: c.ids) and persist converted it with np.asarray, although _keep had given the state that
+# int64 array already (OTS 0124: _ids, a view of its stream's array). Now _ident returns kept_ids(c) (a text state) or
+# the keyed ids converted without caching them on the state (known_key would set key_array, which spill.encode would
+# store); persist gives the point its own copy when handed a view (np copy, 0.3-0.9 ms at 772k: a point never keeps a
+# stream's longer array alive) and converts a picture state's tokens once instead of twice. The same files on disk.
+# Measured: np.asarray of a 771,584-id list 9 ms (WSL) / 22 ms (Windows) per keep per rank; the real _persist
+# interleaved against the pre-patch tree at 771,584 ids (bench_persist_ids.py, WSL, a loaded laptop): min 22.5 -> 13.8 ms.
+# Test: test_persist_ids.py <tree> [--ref <pre-patch tree>] (CPU torch, Linux): no id list converted for a text state
+# (the pre-patch tree: 1, FAIL), one for a state with pictures (pre-patch: 3); the point owns its ids; every file on
+# disk byte-identical to the pre-patch tree's (14 files: 11 blocks, .ids, .st, .json), text and pictures.
+diff -ruN tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
+--- tensorfold/cuda/spill_blocks.py	2026-10-29 23:44:08.458799100 +0000
++++ tensorfold/cuda/spill_blocks.py	2026-10-29 23:46:53.812049200 +0000
+@@ -847,7 +847,10 @@
+         small_n = sum(t.numel() * t.element_size() for _, t in items) + 4096
+         size = sum(self._span(extent.base, s, e) for s, e, _ in new)
+         need = size + small_n + 8 * n * (2 if tokens is not None else 1)
+-        pt = Point(key, n, ids, None if tokens is None else np.asarray(tokens, dtype=np.int64), lineage,
++        if ids.base is not None:                            # (a view of the caller's array, e.g. a stream's whole
++            ids = ids.copy()                                # prompt: the point keeps n ids of its own)
++        tokens = None if tokens is None else np.array(tokens, dtype=np.int64)
++        pt = Point(key, n, ids, tokens, lineage,
+                    [h for _, _, h in hashes], [], [], 0, small_n, bool(shared), bool(head), time.time(), None,
+                    fields)
+         if self.quota > 0:
+@@ -874,7 +877,7 @@
+             self.host_bytes += sum(t.numel() * t.element_size() for _, t in cut)   # (at most a block a state)
+             self.inflight.add(key)
+             self.inflight.update(h for _, _, h in new)
+-            ids_bytes = ids.tobytes() + (b"" if tokens is None else np.asarray(tokens, dtype=np.int64).tobytes())
++            ids_bytes = ids.tobytes() + (b"" if tokens is None else tokens.tobytes())
+             job = Job(pt, new[:len(new) - len(cut)], (items, layer), size, extent, ids_bytes)
+             job.cut = [h for h, _ in cut]
+             self.waiting[key] = job
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 23:44:08.593576600 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 23:46:44.778112500 +0000
+@@ -1993,10 +1993,13 @@
+         self._release_rows(x, cut - cut % div)
+ 
+     @staticmethod
+-    def _ident(c) -> list[int]:
+-        """What the tier stores and matches a kept prompt by: its ids, or its keyed ids when it has pictures."""
++    def _ident(c) -> np.ndarray:
++        """What the tier stores and matches a kept prompt by: its ids, or its keyed ids when it has pictures, as int64
++        arrays: a text state's is the array it already holds (``kept_ids``: a view of its stream's array), not its list
++        converted again at every keep (at 772k tokens ~22 ms of the engine loop a rank). Keyed ids are converted here
++        and not cached on the state (``known_key`` would set ``key_array``, which ``spill.encode`` would then store)."""
+ 
+-        return c.key if c.images else c.ids
++        return np.asarray(c.key, dtype=np.int64) if c.images else kept_ids(c)
+ 
+     def _unspillable(self, c) -> str | None:
+         """Why kept prompt ``c`` is not written (None: it is)."""
+@@ -2038,7 +2041,7 @@
+             return
+         try:
+             self.disk.persist(self._ident(c), c, extent=c.extent, lineage=self._lineage(c),
+-                              tokens=c.ids if c.images else None, shared=bool(c.shared), head=c.head is not None,
++                              tokens=kept_ids(c) if c.images else None, shared=bool(c.shared), head=c.head is not None,
+                               skip=self._SPILL_SKIP,
+                               fields={"half": self.pool.half_of(c.extent)} if self.pool.half else None)
+         except Exception as exc:                 # noqa: BLE001  (a spill never fails the engine)

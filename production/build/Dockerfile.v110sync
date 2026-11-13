@@ -1,0 +1,26 @@
+# The base build of the production image (tag tensorfold-glm53:v110sync, 2026-10-29), reconstructed from the image's
+# own history (`docker history --no-trunc tensorfold-glm53:v110hunt4-shard`): the instructions and their order are the
+# history's; the Dockerfile itself was not kept. Base: nvcr.io/nvidia/pytorch:26.07-py3 (repo digest
+# sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c); the production image's first 67 layers are
+# that image's 67 layers.
+#
+# Context: a checkout of MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold at bf5f94523a82 with
+#   tfsrc/    a checkout of ashhart/TensorFold at c4646171139e (tag v0.6.0)
+#   patches/  the recipe's 123 patches plus ../patches/base/*.patch (131 files; SERIES lines `recipe` and `base`)
+#   .dockerignore  two lines: .git and tests
+# Build: docker build -f Dockerfile.v110sync --build-arg EXTRAS="av xgrammar" --build-arg PATCHES_HASH=v110sync \
+#          -t tensorfold-glm53:v110sync <context>
+# The pip installs are not pinned: the image recorded av 19.0.2, xgrammar 0.2.8 and TensorFold's dependencies as PyPI
+# served them on 2026-10-29 (PRODUCTION.md, What cannot be rebuilt).
+FROM nvcr.io/nvidia/pytorch:26.07-py3
+ARG EXTRAS
+COPY tfsrc /opt/tf-src
+RUN pip install --no-cache-dir --upgrade /opt/tf-src && pip install --no-cache-dir ${EXTRAS} && tensorfold --version
+COPY patches /opt/tf-patches
+RUN cd "$(python -c 'import os, tensorfold; print(os.path.dirname(os.path.dirname(tensorfold.__file__)))')" && \
+    for p in /opt/tf-patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; patch -p0 --forward < "$p" || exit 1; done && \
+    python -c "import tensorfold.cuda.server, tensorfold.families.glm5_next.cuda.engine, tensorfold.vision.glm, av, xgrammar"
+ARG PATCHES_HASH
+LABEL tf.patches=${PATCHES_HASH}
+ENV HF_HOME=/root/.cache/huggingface TORCH_EXTENSIONS_DIR=/cache/torch_extensions TRITON_CACHE_DIR=/cache/triton
+WORKDIR /workspace

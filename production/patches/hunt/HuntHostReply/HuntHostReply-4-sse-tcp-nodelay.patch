@@ -1,0 +1,13 @@
+--- tensorfold/cuda/http.py
++++ tensorfold/cuda/http.py
+@@ -109,6 +109,10 @@
+ def make_handler(app: App):
+     class Handler(Rearming):              # USR1's stack dump armed again after each request
+         protocol_version = "HTTP/1.1"
++        # TCP_NODELAY on each connection (StreamRequestHandler.setup): a streamed reply is many small writes, one an
++        # event, and with Nagle's algorithm a write waits for the client's ACK of the one before it; a client that
++        # delays its ACKs (Windows: ~40 ms measured) then gets every other event late and the reply's end with them
++        disable_nagle_algorithm = True
+ 
+         def log_message(self, fmt, *args):  # quiet
+             pass

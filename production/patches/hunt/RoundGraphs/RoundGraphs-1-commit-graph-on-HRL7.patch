@@ -1,0 +1,353 @@
+diff -u tensorfold/families/glm5_next/cuda/kda.py tensorfold/families/glm5_next/cuda/kda.py
+--- tensorfold/families/glm5_next/cuda/kda.py
++++ tensorfold/families/glm5_next/cuda/kda.py
+@@ -127,10 +127,10 @@
+ SEG_ROW0, SEG_ROWS, SEG_SLOT, SEG_PARITY, SEG_CONV, SEG_KEEP = range(SEG_COLS)
+ 
+ 
+-def segment_table(segments, device, out: torch.Tensor | None = None) -> torch.Tensor:
+-    """The table of ``segments`` [(rows, state slot, parity[, conv slot[, keep]])] laid back to back from row 0;
+-    conv slot defaults to the state slot, keep to rows. With ``out`` ([n >= len, SEG_COLS] int32) it is written in
+-    place (rows past the list become empty segments) and returned."""
++def segment_rows_into(out, segments) -> None:
++    """``segment_table``'s rows written into ``out`` (numpy integer [n >= len, SEG_COLS], in place; rows past the list
++    become empty segments): the one implementation of the table (RoundGraphs: the batched window writes it straight
++    into its pinned upload buffer, with no tensor built from a list)."""
+ 
+     rows_ = []
+     row0 = 0
+@@ -140,16 +140,29 @@
+         keep = int(s[4]) if len(s) > 4 and s[4] is not None else rows
+         if rows < 0 or parity not in (0, 1) or not 0 <= keep <= rows:
+             raise ValueError(f"bad segment {s!r}")
+-        rows_.append([row0, rows, slot, parity, conv, keep])
++        rows_.append((row0, rows, slot, parity, conv, keep))
+         row0 += rows
+-    n = len(rows_) if out is None else out.shape[0]
++    n = out.shape[0]
+     if len(rows_) > n:
+         raise ValueError(f"{len(rows_)} segments do not fit a table of {n}")
+-    rows_ += [[row0, 0, 0, 0, 0, 0]] * (n - len(rows_))
+-    host = torch.tensor(rows_, dtype=torch.int32).reshape(n, SEG_COLS)
++    out[len(rows_):] = 0
++    out[len(rows_):, SEG_ROW0] = row0
++    if rows_:
++        out[:len(rows_)] = rows_
++
++
++def segment_table(segments, device, out: torch.Tensor | None = None) -> torch.Tensor:
++    """The table of ``segments`` [(rows, state slot, parity[, conv slot[, keep]])] laid back to back from row 0;
++    conv slot defaults to the state slot, keep to rows. With ``out`` ([n >= len, SEG_COLS] int32) it is written in
++    place (rows past the list become empty segments) and returned."""
++
++    import numpy as np
++
++    host = np.empty((len(segments) if out is None else out.shape[0], SEG_COLS), dtype=np.int32)
++    segment_rows_into(host, segments)
+     if out is None:
+-        return host.to(device)
+-    out.copy_(host, non_blocking=False)
++        return torch.from_numpy(host).to(device)
++    out.copy_(torch.from_numpy(host), non_blocking=False)
+     return out
+ 
+ 
+diff -u tensorfold/families/glm5_next/cuda/verify.py tensorfold/families/glm5_next/cuda/verify.py
+--- tensorfold/families/glm5_next/cuda/verify.py
++++ tensorfold/families/glm5_next/cuda/verify.py
+@@ -24,6 +24,11 @@
+ # token selection and replays it for windows with no sparse row (the same bits: a dense row reads no selected token);
+ # 0: those windows replay the graphs that run the selection, as before
+ DENSE_WINDOW_GRAPHS = __import__("os").environ.get("TF_GLM_DENSE_WINDOW_GRAPHS", "1") != "0"
++# RoundGraphs (HuntRoundLoop finding 7): TF_GLM_COMMIT_GRAPHS (default 1): BatchedVerify captures at boot, a DFlash2
++# update bucket at a time, ONE graph of a round's commit (KDA replay, conv shift, positions) and the drafter's context
++# update from the window's own tap rows (``capture_commit`` / ``commit_taps``); 0: the eager commit and the drafter's
++# update graph after it, as before (the same bits either way)
++COMMIT_GRAPHS = __import__("os").environ.get("TF_GLM_COMMIT_GRAPHS", "1") != "0"
+ 
+ 
+ @dataclass
+@@ -41,6 +46,30 @@
+     taps: list[torch.Tensor | None]         # per segment [rows, taps * D] (DFlash2's inputs), or None
+ 
+ 
++class WindowTaps(Sequence):
++    """A batched window's taps by segment, each [rows, taps * D] made (``torch.cat`` of the window's tap buffers' rows)
++    when first read: a round whose commit graph takes the kept rows straight from the window's buffers
++    (``BatchedVerify.commit_taps``) never makes them. Read before the next forward on the same buffers."""
++
++    def __init__(self, bufs: list[torch.Tensor], spans: list[tuple[int, int]]) -> None:
++        self.bufs, self.spans = bufs, spans
++        self.made: dict[int, torch.Tensor] = {}
++
++    def __len__(self) -> int:
++        return len(self.spans)
++
++    def __getitem__(self, k):
++        if isinstance(k, slice):
++            return [self[i] for i in range(*k.indices(len(self)))]
++        k = range(len(self))[k]
++        t = self.made.get(k)
++        if t is None:
++            at, n = self.spans[k]
++            t = self.made[k] = torch.cat([b[at:at + n] for b in self.bufs], dim=1)
++        return t
++
++
++
+ class SerialVerify:
+     """The reference: each segment's window as its own forward on its own state. Logits and taps are copied out
+     before the next segment's forward reuses the buffers; each slot keeps its own KDA window scratch, so the commits
+@@ -84,6 +113,12 @@
+     holds (its segment tables and the kernels' segment grids; default ``segments.seg_count`` of the engine's stream
+     slots: 4 up to four streams, one a stream up to ``segments.MAX_SEGS``)."""
+ 
++    # RoundGraphs: class-level defaults, so an instance a test builds without __init__ commits eagerly (its own
++    # ``commit_graphs`` / ``commits`` are set in __init__; ``capture_commit`` assigns a dict of its own)
++    commit_graphs: dict | None = None
++    commit_drafts = None
++    commits: dict | None = None
++
+     def __init__(self, e, *, taps: Sequence[int] = (), rows: int = 32, segs: int | None = None) -> None:
+         from . import kda as kda_mod
+         from . import latent
+@@ -133,6 +168,10 @@
+         self.dense_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+         self.dense_windows = bool(e.caches.index is not None and DENSE_WINDOW_GRAPHS)
+         self.replays = {"graph": 0, "eager": 0, "sharded": 0, "dense": 0}
++        # RoundGraphs (finding 7): the commit graphs by DFlash2 update bucket (0: no drafter rows), ``capture_commit``
++        self.commit_graphs: dict[int, torch.cuda.CUDAGraph] = {}
++        self.commit_drafts = None
++        self.commits = {"graph": 0, "eager": 0}
+ 
+     @torch.no_grad()
+     def capture(self, rows: Sequence[int] | None = None) -> None:
+@@ -322,13 +361,14 @@
+             self.replays["sharded"] += int(sharded)
+             select = index and self.seg_rows.any_sparse()
+             logits = compute(w, None, b, R, mixer=lambda layer: self._mixer(layer, R, select, sharded))
+-        out, taps, at = [], [], 0
++        out, spans_, at = [], [], 0
+         for seg in segments:
+             n = len(seg.tokens)
+             out.append(logits[at:at + n])
+-            taps.append(torch.cat([t[at:at + n] for t in b.taps], dim=1) if self.taps else None)
++            spans_.append((at, n))
+             at += n
+-        return Verified(out, taps)
++        # (RoundGraphs: each segment's taps made when read, WindowTaps; the commit graph reads the buffers itself)
++        return Verified(out, WindowTaps(b.taps, spans_) if self.taps else [None] * len(segments))
+ 
+     def _mixer(self, layer, R: int, select: bool, shard_decode: bool = False):
+         """A layer's KDA or DSA block over the whole window, each segment on its own stream's state;
+@@ -376,3 +416,162 @@
+                 st.cur = [1 - st.cur[0]] * len(st.cur)
+             st.set_pos(st.pos + keep)
+         self.segments = []
++        if self.commits is not None:                     # (None: an instance built without __init__, e.g. a stand-in)
++            self.commits["eager"] += 1
++
++    # -- RoundGraphs (finding 7): the commit and the drafter's update as one graph -----------------------------------
++    @torch.no_grad()
++    def capture_commit(self, drafts=None) -> None:
++        """CUDA graphs of a round's commit, one per DFlash2 update bucket a window can need (0: no drafter rows): the
++        KDA segment table from a packed device table, ``replay_layers_segments`` (its kernel skips a segment that
++        keeps all its rows, so running it every round gives the eager commit's bits), ``conv_shift_segments``, each
++        segment's device position, and with ``drafts`` (a ``MultiDrafter`` whose update graphs are captured: the
++        same bucket, so the same kernels) its update table, every kept row's taps gathered from the window's own tap
++        buffers into its ``tap_in`` (bit copies) and ``_taps_compute`` of the bucket. ``commit_taps`` then fills one
++        pinned table, makes ONE upload and replays ONE graph where the eager round ran a table upload, two commit
++        kernels, a fill a segment, a tap concat and a copy a stream, a second table upload and the update graph.
++        Captured on tables that touch nothing (no segment rows, every update row to the drafter's trash rows; the
++        positions and the drafter's device ends saved and put back), before any stream is admitted."""
++
++        from . import kda as kda_mod
++        from .forward import conv_shift_segments
++
++        if self.scratch is None or not torch.cuda.is_available():
++            return
++        e, b, d = self.e, self.b, drafts
++        if d is not None and not (self.taps and d.tap_graphs and d.tap_in.shape[1] == sum(t.shape[1] for t in b.taps)):
++            d = None                                     # (no update graphs: the eager update's own row count stays)
++        segs, C = self.segs, kda_mod.SEG_COLS
++        Tm, St = (d.t_max, d.streams) if d is not None else (0, 0)
++        K = segs * C
++        at = self._cm_at = (K, K + Tm, K + 3 * Tm + 2 * St, K + 3 * Tm + 2 * St + segs)   # src, meta, pslot, pval
++        size = at[3] + segs
++        dev = self.w.device
++        self.cm_host = torch.zeros((size,), dtype=torch.int64, pin_memory=True)
++        self.cm_dev = torch.zeros((size,), dtype=torch.int64, device=dev)
++        self.cm_ready = torch.cuda.Event()
++        self._cm = self.cm_host.numpy()
++        kseg_v = self.cm_dev[:K].view(segs, C)
++        src_v, meta_v = self.cm_dev[at[0]:at[1]], self.cm_dev[at[1]:at[2]]
++        pslot_v, pval_v = self.cm_dev[at[2]:at[3]], self.cm_dev[at[3]:size]
++        pos_dev = e.slots.pos_dev.view(-1)
++
++        def body(T: int) -> None:
++            self.kseg.copy_(kseg_v)
++            kda_mod.replay_layers_segments(self.kseg, e.slots.rec, self.scratch)
++            conv_shift_segments(e.slots.conv, self.proj, self.kseg)
++            pos_dev.index_copy_(0, pslot_v, pval_v.to(pos_dev.dtype))
++            if T:
++                d.t_meta.copy_(meta_v)
++                torch.cat([t.index_select(0, src_v[:T]) for t in b.taps], dim=1, out=d.tap_in[:T])
++                d._taps_compute(T)
++
++        h = self._cm                                     # tables that touch nothing: no segment rows, the trash
++        h[:] = 0
++        if d is not None:
++            h[at[1] + Tm:at[1] + 2 * Tm] = St * d.cap + torch.arange(Tm).numpy()
++            h[at[1] + 2 * Tm:at[1] + 2 * Tm + St] = St
++        self.cm_dev.copy_(self.cm_host)
++        torch.cuda.synchronize()
++        saved_pos, saved_ends = e.slots.pos_dev.clone(), d.pos.clone() if d is not None else None
++        pool = torch.cuda.graph_pool_handle()
++        buckets = [0] + ([T for T in d.buckets if T - d.block < self.rows_max] if d is not None else [])
++        graphs: dict[int, torch.cuda.CUDAGraph] = {}
++        for T in buckets:
++            for _ in range(2):
++                body(T)
++            torch.cuda.synchronize()
++            g = torch.cuda.CUDAGraph()
++            with torch.cuda.graph(g, pool=pool):
++                body(T)
++            graphs[T] = g
++        torch.cuda.synchronize()
++        e.slots.pos_dev.copy_(saved_pos)
++        if d is not None:
++            d.pos.copy_(saved_ends)
++        torch.cuda.synchronize()
++        self.commit_graphs, self.commit_drafts = graphs, d
++
++    @torch.no_grad()
++    def commit_taps(self, segments: Sequence[Segment], keeps: Sequence[int], drafts=None,
++                    dctx: Sequence[tuple] = ()) -> bool:
++        """``commit(segments, keeps)`` and then ``drafts.commit([(ctx, taps[k][:keeps[k]]) for ctx, k in dctx])``
++        through one captured graph (``capture_commit``): the same device writes, the same host state after. False
++        (nothing done) when no graph covers the round (no graphs, another drafter, more kept rows than one update,
++        a ring skip, a state outside the engine's slots): the caller runs the two calls."""
++
++        from . import kda as kda_mod
++
++        if not self.commit_graphs or (dctx and (drafts is None or drafts is not self.commit_drafts)):
++            return False
++        if [id(s) for s in segments] != [id(s) for s in self.segments]:
++            raise ValueError("commit takes the segments of the last forward")
++        for seg, keep in zip(segments, keeps):
++            if not 1 <= keep <= len(seg.tokens):
++                raise ValueError("keep must be in 1..rows")
++        e = self.e
++        if any(s.st.slots is not e.slots for s in segments):
++            return False
++        T = 0
++        if dctx:
++            from .dflash2 import ring_skip
++
++            d = drafts
++            seen: set[int] = set()
++            for c, k in dctx:
++                if c.owner is not d or c.slot in seen:
++                    raise ValueError("commit takes each of this drafter's streams at most once")
++                seen.add(c.slot)
++                if c.context_end + keeps[k] > c.capacity:
++                    raise ValueError("drafter context past its capacity")
++            total = sum(keeps[k] for _, k in dctx)
++            if total > d.t_max or ring_skip(keeps[dctx[0][1]], d.d.ring, d.t_max):
++                return False
++            T = next(b for b in d.buckets if b >= total)
++        g = self.commit_graphs.get(T)
++        if g is None:
++            return False
++        segs, (a_src, a_meta, a_ps, a_pv) = self.segs, self._cm_at
++        if self.cm_ready is not None:
++            self.cm_ready.synchronize()                 # the last commit's table has left the pinned buffer
++        h = self._cm
++        kda_mod.segment_rows_into(h[:a_src].reshape(segs, -1), self._table_rows(segments, keeps))
++        h[a_ps:a_pv] = segments[0].st.slot              # (unused entries repeat segment 0's write)
++        h[a_pv:a_pv + segs] = segments[0].st.pos + keeps[0]
++        for k, (seg, keep) in enumerate(zip(segments, keeps)):
++            h[a_ps + k], h[a_pv + k] = seg.st.slot, seg.st.pos + keep
++        if dctx:
++            import numpy as np
++
++            Tm, St, cap, ring = d.t_max, d.streams, d.cap, d.d.ring
++            src, m = h[a_src:a_meta], h[a_meta:a_ps]
++            starts = np.cumsum([0] + [len(s.tokens) for s in segments])
++            m[2 * Tm:2 * Tm + St] = St
++            m[2 * Tm + St:] = 0
++            off = 0
++            for j, (c, k) in enumerate(dctx):           # as MultiDrafter._launch_taps writes its table
++                r, p0 = keeps[k], c.context_end
++                p = np.arange(p0, p0 + r)
++                src[off:off + r] = starts[k] + np.arange(r)
++                m[off:off + r] = p
++                m[Tm + off:Tm + off + r] = c.slot * cap + (p % ring if ring else p)
++                m[2 * Tm + j], m[2 * Tm + St + j] = c.slot, p0 + r
++                off += r
++            if T > off:                                  # padded rows: the trash
++                src[off:T] = 0
++                m[off:T] = 0
++                m[Tm + off:Tm + T] = St * cap + np.arange(off, T)
++        self.cm_dev.copy_(self.cm_host, non_blocking=True)
++        if self.cm_ready is not None:
++            self.cm_ready.record()
++        g.replay()
++        for seg, keep in zip(segments, keeps):
++            st = seg.st
++            if st.cur:
++                st.cur = [1 - st.cur[0]] * len(st.cur)
++            st.pos = st.pos + keep                       # (State.set_pos's host half: the graph wrote pos_dev)
++        for c, k in dctx:
++            c.context_end = c.context_end + keeps[k]
++        self.segments = []
++        self.commits["graph"] += 1
++        return True
+diff -u tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -54,7 +54,7 @@
+ from . import multi_prefill, shard, sliced_fill
+ from .multi_tune import MultiSettings, RoundProfile, allocate, reach_of, sample_packed, scaled_confidence
+ from .pool import ALIGN, Pool, align_up
+-from .verify import BatchedVerify, Segment, SerialVerify, Verified
++from .verify import COMMIT_GRAPHS, BatchedVerify, Segment, SerialVerify, Verified
+ 
+ ADMIT, EVICT, MOVE, GROW, FILL, ROUND, FINISH, IDLE, SLOT, MFILL, FILLPART, MFILLPART, LOAD, FLUSH, LOADED, \
+     HAS, LOADPART, UNTWIN, XMOVE = range(1, 20)
+@@ -807,6 +807,8 @@
+                 # TF_GLM_MULTI_GRAPHS=0: eager windows (the same bits); by default a graph a window size
+                 if os.environ.get("TF_GLM_MULTI_GRAPHS", "1") != "0" and torch.cuda.is_available():
+                     verify.capture()
++                    if COMMIT_GRAPHS:                   # RoundGraphs: a round's commit + drafter update, one graph
++                        verify.capture_commit(self.drafts)
+             else:
+                 verify = SerialVerify(e, taps=self.drafts is not None)
+         self.verify = verify
+@@ -3297,13 +3299,19 @@
+             keeps.append(keep)
+         if prof is not None:
+             prof.mark("accept")
+-        verify.commit(segments, keeps)
+-        if prof is not None:
+-            prof.mark("commit")
+-        if self.drafts is not None:
+-            items = [(self._ctx(l), v.taps[k][:keep]) for k, (l, keep) in enumerate(zip(lanes, keeps)) if l.dflash]
+-            if items:
+-                self.drafts.commit(items)
++        # RoundGraphs (HuntRoundLoop finding 7): the commit and the drafter's update of the kept rows' taps as one
++        # captured graph (``BatchedVerify.commit_taps``); else the two calls
++        dctx = [(self._ctx(l), k) for k, l in enumerate(lanes) if l.dflash] if self.drafts is not None else []
++        fused = getattr(verify, "commit_taps", None)
++        if fused is not None and fused(segments, keeps, self.drafts, dctx):
++            if prof is not None:
++                prof.mark("commit")
++        else:
++            verify.commit(segments, keeps)
++            if prof is not None:
++                prof.mark("commit")
++            if dctx:
++                self.drafts.commit([(c, v.taps[k][:keeps[k]]) for c, k in dctx])
+         if prof is not None:
+             prof.mark("taps")
+         for l, seg, rows, keep, was_copy in zip(lanes, segments, sampled, keeps, copied):

@@ -1,0 +1,39 @@
+--- tensorfold/families/glm5_next/cuda/kept_reasoning.py	2026-10-30 07:33:55.098689400 +0000
++++ tensorfold/families/glm5_next/cuda/kept_reasoning.py	2026-10-30 07:33:55.111698500 +0000
+@@ -81,20 +81,28 @@
+ 
+ class _History:
+     """A running hash of a conversation's message shapes (role, text stripped as the template renders it, calls;
+-    no ids or reasoning), each length-prefixed: the key of calls after any prefix costs one copy of the hash."""
++    no ids or reasoning), each length-prefixed: the key of calls after any prefix costs one copy of the hash.
++    (OTS: the role and text go in as their UTF-8 bytes behind their lengths, the calls as their JSON; before, the
++    whole entry was JSON, whose escaping of every message's text was ~70% of a walk: 9.3 -> 2.7 ms over a ~671k-token
++    conversation. Two conversations share a key exactly when they did before: both encodings are one-to-one, and a
++    key lives only in this process's memory.)"""
+ 
+     def __init__(self) -> None:
+-        self.hash = hashlib.sha256(b"tf-kept-reasoning-v2\0")
++        self.hash = hashlib.sha256(b"tf-kept-reasoning-v3\0")
+ 
+     def add(self, m: Any) -> None:
+         if not isinstance(m, dict):
+             return
+-        entry = [str(m.get("role") or ""), _text(m.get("content")).strip()]
+-        if m.get("role") == "assistant" and m.get("tool_calls"):
+-            entry.append(_calls(m.get("tool_calls")))
+-        data = _encode(entry)
+-        self.hash.update(len(data).to_bytes(8, "little"))
+-        self.hash.update(data)
++        role = str(m.get("role") or "").encode("utf-8", "surrogatepass")
++        text = _text(m.get("content")).strip().encode("utf-8", "surrogatepass")
++        calls = (_encode(_calls(m.get("tool_calls"))) if m.get("role") == "assistant" and m.get("tool_calls")
++                 else None)
++        h = self.hash
++        h.update(b"%d,%d,%d\0" % (len(role), len(text), -1 if calls is None else len(calls)))
++        h.update(role)
++        h.update(text)
++        if calls is not None:
++            h.update(calls)
+ 
+     def key(self, calls: Any) -> str:
+         h = self.hash.copy()

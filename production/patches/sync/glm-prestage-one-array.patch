@@ -1,0 +1,124 @@
+# glm-prestage-one-array.patch (sync, 2026-10-29; no production counterpart): a waiting request's prompt ids are made
+# once (multi.stream_ids: a list of ints and an int64 array, kept on the stream for the prompt object it holds) and
+# read by prefix_wait, prestage and admit; BlockStore.best takes the caller's array. On the synced base, upstream's
+# spill prestage (recipe 0128) converted the prompt with a list comprehension and then to an array twice (_resume and
+# best) before admit converted it again (OTS 0124's one array a request, undone by the code in front of it).
+# Measured on the real functions (prestage with nothing on disk, then admit's ids; workstation CPU, 600,000 ids): 66 ms
+# -> 26 ms of rank 0's host before the ADMIT, with the spill tier on (prestage returns at once without it). The same
+# ids and arrays: every decision is unchanged.
+# Test: tests/host/test_prestage_ids.py (CPU; one conversion at 600k through prestage and admit's read, a new prompt
+# object converted again, best's answer the same with and without the caller's array); mutants:
+# tests/host/mutants_prestage_ids.py (5 of 5 killed). Applies after glm-fill-fast-ported.patch.
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 19:07:11.066086500 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 20:10:26.841378800 +0000
+@@ -386,6 +386,21 @@
+     return not k or bool(karr[k - 1] == arr[k - 1]) and bool(np.array_equal(karr[:k], arr))
+ 
+ 
++def stream_ids(s, array: bool = True) -> tuple[list[int], np.ndarray | None]:
++    """Rank 0: a waiting request's prompt ids as a list of ints and (``array``) as an int64 array, made once for the
++    prompt object it holds and kept on the stream (``ids_cache``): ``prefix_wait``, ``prestage`` and ``admit`` read the
++    same ids, and at 600k tokens each conversion is 10-20 ms of rank 0's host before the first token. A stream holding
++    another prompt object (``_admitted`` copies it) makes them again; ``admit`` drops them once the stream is in."""
++
++    c = getattr(s, "ids_cache", None)
++    if c is None or c[0] is not s.prompt:
++        c = (s.prompt, list(map(int, s.prompt)), None)
++    if array and c[2] is None:
++        c = (c[0], c[1], np.asarray(c[1], dtype=np.int64))
++    s.ids_cache = c
++    return c[1], c[2]
++
++
+ def cap_victim(kept: list):
+     """The kept prompt to drop past TF_GLM_CACHE_ENTRIES (``kept``: least recently used first). An extent's kept
+     prompts are prefixes of its rows, so one shorter than another in its extent is an earlier point of that
+@@ -1077,7 +1092,7 @@
+ 
+         self._check()
+         g = self.g
+-        prompt = list(map(int, s.prompt))
++        prompt, parr = stream_ids(s, array=bool(s.draft) and not g.serial_only)   # (prestage made them already)
+         if not prompt:
+             raise ValueError("a request needs at least one prompt token")
+         if len(prompt) >= g.limit:
+@@ -1115,9 +1130,9 @@
+         # shared-prefix points, its kept states and copy drafts all read them)
+         karr = ids = None
+         if draft and key is not None:
+-            karr = np.asarray(key, dtype=np.int64)
++            karr = parr if key is prompt else np.asarray(key, dtype=np.int64)
+         if draft:
+-            ids = karr if key is prompt else np.asarray(prompt, dtype=np.int64)
++            ids = karr if key is prompt else parr
+         hit = self._resume(key, salt, karr) if draft and key is not None else None
+         encoded_from = len(hit.ids) if hit is not None else 0
+         if s.vision is not None:              # encoded before anything is sent: a failure stops here
+@@ -1158,6 +1173,7 @@
+             self._break(exc)
+             raise
+         self.lanes[sid].key = key
++        s.ids_cache = None                    # (the stream's prompt is _admitted's copy now)
+ 
+     carry_kind = None                     # rank 0: which rule chose the carry ``_place_hit`` just decided (counted at the ADMIT)
+ 
+@@ -1855,8 +1871,8 @@
+ 
+         if not PREFIX_WAIT or not s.draft or s.vision is not None or not self.g.shared or self.g.serial_only:
+             return None
+-        prompt = [int(t) for t in s.prompt]
+-        hit = self._resume(prompt)
++        prompt, karr = stream_ids(s)
++        hit = self._resume(prompt, karr=karr)
+         have = len(hit.ids) if hit is not None else 0
+         best = None
+         for lane in self.lanes.values():
+@@ -2052,22 +2068,24 @@
+         if self.disk is None or not s.draft or (getattr(s, "glm", None) or {}).get("salt") is not None:
+             return None                          # (a salted request reads no store: OTS 0120)
+         self._check()
+-        prompt = [int(t) for t in s.prompt]
+         if s.vision is not None:                 # pictures: matched by content (keyed ids), or not at all
+             v = s.vision
+             keys = getattr(v, "item_keys", None)
+             if not keys or sum(v.item_rows) != len(v.positions):
+                 return None
+-            prompt = keyed_ids(prompt, [int(p) for p in v.positions], [int(r) for r in v.item_rows],
++            prompt = keyed_ids(s.prompt, [int(p) for p in v.positions], [int(r) for r in v.item_rows],
+                                [int(k) for k in keys])
++            karr = np.asarray(prompt, dtype=np.int64)
++        else:
++            prompt, karr = stream_ids(s)         # made once a request (prefix_wait and admit read them too)
+         if self._need(len(prompt)) > self.pool.rows:
+             return None
+         for h in self.loads.values():            # the same stored prompt on its way already: wait for that read
+             if len(prompt) >= h.n and prompt[:h.n] == h.ids:
+                 return h
+-        hit = self._resume(prompt)
++        hit = self._resume(prompt, karr=karr)
+         self.disk.stats["disk_lookups"] += 1
+-        pt = self.disk.best(prompt, len(hit.ids) if hit is not None else 0, self.grid)
++        pt = self.disk.best(prompt, len(hit.ids) if hit is not None else 0, self.grid, arr=karr)
+         if pt is None:
+             return None
+         from tensorfold.cuda.spill_blocks import key_ints
+--- tensorfold/cuda/spill_blocks.py	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/cuda/spill_blocks.py	2026-10-29 20:10:30.765588600 +0000
+@@ -1412,11 +1412,14 @@
+                 self._remove(key, why)
+ 
+     # -- read ----------------------------------------------------------------------------------------------------------
+-    def best(self, prompt: Sequence[int], longer_than: int = 0, grid: int = 0, usable=None) -> Point | None:
++    def best(self, prompt: Sequence[int], longer_than: int = 0, grid: int = 0, usable=None,
++             arr: np.ndarray | None = None) -> Point | None:
+         """Rank 0: the longest complete point ``prompt`` extends (or equals, when it kept its head's row), longer than
+-        ``longer_than`` tokens, on the grid when there is one."""
++        ``longer_than`` tokens, on the grid when there is one. ``arr``: ``prompt`` as an int64 array already (the
++        caller's, so a long prompt is not converted again)."""
+ 
+-        arr = np.asarray(prompt, dtype=np.int64)
++        if arr is None:
++            arr = np.asarray(prompt, dtype=np.int64)
+         with self.lock:
+             cands = sorted(self.index.values(), key=lambda p: -p.n)
+         for pt in cands:

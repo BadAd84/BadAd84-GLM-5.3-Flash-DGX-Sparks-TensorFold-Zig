@@ -1,0 +1,29 @@
+--- tensorfold/families/glm5_next/cuda/app.py	2026-10-30 07:33:55.642347500 +0000
++++ tensorfold/families/glm5_next/cuda/app.py	2026-10-30 07:33:55.643915900 +0000
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import importlib.util
+ import os
+ from pathlib import Path
+ from typing import Any, Callable
+@@ -106,6 +107,18 @@
+         literal = self.literal
+         self.literal_prompt_ids = (PromptIds.make(self.tok, lambda text: literal.encode(self.tok, text))
+                                    if literal is not None else None)
++        # OTS: TF_GLM_GRAMMAR_AT_LOAD=1 builds the structured-output compiler at load, not at the first request that
++        # asks for one (measured on a workstation: importing xgrammar ~11 s cold, the tokenizer's grammar info ~2.1 s,
++        # all before that request's first token). Off by default (unset or 0: built at the first structured request,
++        # as before): it costs every boot 10-42 s on rank 0 (BootGaps) for clients that send no response_format
++        at_load = os.environ.get("TF_GLM_GRAMMAR_AT_LOAD", "0").strip() or "0"
++        if at_load not in ("0", "1"):
++            raise ValueError(f"TF_GLM_GRAMMAR_AT_LOAD={at_load!r}: expected 0 or 1")
++        if at_load == "1" and importlib.util.find_spec("xgrammar") is not None:
++            try:
++                self._grammars()
++            except Exception as exc:  # noqa: BLE001 - the first structured request reports it, as before
++                print(f"[tensorfold] structured output compiler not built at load: {exc}", flush=True)
+ 
+     def _messages_to_mask(self, messages: Any) -> Any:
+         """The kept reasoning put back before the messages are masked (patch 0116): found by the messages as sent

@@ -1,0 +1,321 @@
+--- tensorfold/families/glm5_next/cuda/hcsplit.py
++++ tensorfold/families/glm5_next/cuda/hcsplit.py
+@@ -6,7 +6,8 @@
+ partial of the peer's rows (fp32), adds the two partials of its own rows rank 0's first (``glue.hc_post_pair``, the
+ same kernel as hc_post), runs hc_post and the next hc_pre on its own rows, and swaps its normed rows (bf16) for the
+ peer's, so both ranks hold the next block's full input. The residual streams (b.x) stay current for own rows only;
+-DFlash2 taps and the final stream mean (b.hidden) are computed on own rows and swapped like the normed rows. Every
++DFlash2 taps and the final stream mean (b.hidden) are computed on own rows and swapped like the normed rows (the final
++mean only of the rows something reads, when the caller names them: ``glue``'s ``rows``). Every
+ glue kernel is row-independent and the partial sum order is unchanged, so every bit is the unsplit path's.
+ 
+ The group sums b.xs of the normed rows are not swapped: no prompt-chunk matmul reads them (4-bit projections of a
+@@ -161,6 +162,7 @@
+         self.pieces: list[tuple[int, int]] = []
+         self.got: list[torch.Tensor] = []
+         self.stream = None
++        self.fin: torch.Tensor | None = None        # the final rows' all-gather staging (``_fin``)
+         if settings.overlap:
+             # TF_GLM_OVERLAP_PRIORITY: the side stream's priority, 0 (normal, the default) or -1 (high). Two Sparks, two
+             # boots each: prefill the same, decode rounds after a high-priority prompt ~0.5-1% slower
+@@ -333,18 +335,23 @@
+             glue.hc_post_own(x, x, self.got[j], own, self.rank, b.post[lo:hi], b.comb[lo:hi], rot)
+ 
+     def glue(self, hc=None, norm=None, taps: tuple[int, ...] = (), final: bool = False,
+-             front: Callable[[int, int], None] | None = None, rot: int = 0) -> None:
++             front: Callable[[int, int], None] | None = None, rot: int = 0,
++             rows: tuple[int, ...] | None = None) -> None:
+         """hc_post of this rank's rows, then (in order) the layer's DFlash2 taps, the final stream mean (``final``)
+         and the next hc_pre (``hc``, ``norm``); their rows swapped with the peers'. ``front(lo, hi)``
+         (TF_GLM_PREFILL_OVERLAP=2): the next block's row-independent start on this rank's rows of each piece, on the
+         main stream right after the piece's glue, while its swap (and the later pieces' partials) are on the wire;
+         the caller runs it on the peers' rows (``own`` is what was done) after this returns. ``rot``: the rank whose
+-        partial hc_post sums first (``_post``)."""
++        partial hc_post sums first (``_post``). ``rows`` (with ``final``): the only rows of b.hidden anything reads
++        (sorted, below R; ``forward.compute``'s ``need``): their stream means alone, by their owners, then one
++        all-gather of those rows instead of every row in the swaps (None: every row, as before)."""
+ 
+         b, c = self.b, self.w.cfg
+         mine = self.mine()
+         main = torch.cuda.current_stream()
+-        outs = [b.taps[slot] for slot in taps] + ([b.hidden] if final else []) + ([b.normed] if hc is not None else [])
++        whole = final and rows is None
++        outs = [b.taps[slot] for slot in taps] + ([b.hidden] if whole else []) + ([b.normed] if hc is not None else [])
++        fin = self._fin(len(rows)) if final and rows else None
+         for j, (off, n) in enumerate(self.pieces):
+             lo, hi = mine + off, mine + off + n
+             if self.stream is not None:
+@@ -353,22 +360,47 @@
+             x = b.x[lo:hi]
+             for slot in taps:
+                 glue.stream_mean(x, b.taps[slot][lo:hi])
+-            if final:
++            if whole:
+                 glue.stream_mean(x, b.hidden[lo:hi])
++            elif fin is not None:
++                for k, r in enumerate(rows):
++                    if lo <= r < hi:
++                        glue.stream_mean(b.x[r:r + 1], fin[self.rank, k:k + 1])
+             if hc is not None:
+                 glue.hc_pre(x, hc.fn, hc.base, hc.scale, norm, b.normed[lo:hi], b.xs[lo:hi], b.post[lo:hi],
+                             b.comb[lo:hi], b.hcpart[lo:hi], c.eps, c.hc_eps, c.hc_iters, prompt=True)
+             if self.stream is None:
+-                self._swap_rows(j, outs)
++                if outs:
++                    self._swap_rows(j, outs)
+                 if front is not None:
+                     self._fill(front, lo, hi)
+                 continue
+             self.ev_glue[j].record(main)
+-            with torch.cuda.stream(self.stream):
+-                self.stream.wait_event(self.ev_glue[j])
+-                self._swap_rows(j, outs)
++            if outs:
++                with torch.cuda.stream(self.stream):
++                    self.stream.wait_event(self.ev_glue[j])
++                    self._swap_rows(j, outs)
+             if front is not None:
+                 self._fill(front, lo, hi)
+         if self.stream is not None:
+             self.ev_done.record(self.stream)
+             main.wait_event(self.ev_done)
++        if fin is not None:
++            self._gather_final(rows, fin)
++
++    def _fin(self, k: int) -> torch.Tensor:
++        """[N, k, D] bf16 staging for the final rows' all-gather (rank r's slot: its rows' means), grown as needed."""
++
++        d = self.b.hidden.shape[1]
++        need = self.world * k * d
++        if self.fin is None or self.fin.numel() < need:
++            self.fin = torch.empty((need,), dtype=self.b.hidden.dtype, device=self.b.hidden.device)
++        return self.fin[:need].view(self.world, k, d)
++
++    def _gather_final(self, rows: tuple[int, ...], fin: torch.Tensor) -> None:
++        """The final rows from their owners (row r's: rank r // H) into every rank's b.hidden, on the main stream
++        after every swap: one in-place NCCL all-gather of [N, k, D] (the same bytes the owner's stream mean wrote)."""
++
++        self.all_gather(fin[self.rank].reshape(-1), fin.reshape(-1))
++        for k, r in enumerate(rows):
++            self.b.hidden[r:r + 1].copy_(fin[r // self.H, k:k + 1])
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -1096,7 +1096,7 @@
+ 
+ 
+ def split_layer_steps(w: Weights, st: State, b: Buffers, R: int, nch: int | None, host_pos: int | None,
+-                      mixer=None):
++                      mixer=None, need: tuple[int, ...] | None = None):
+     """Every layer of a prompt chunk with its hyper-connection glue split by rows between the ranks
+     (``hcsplit``): the first hc_pre runs on every row as unsplit, each later one on this rank's rows, and b.normed,
+     the taps and b.hidden come back whole from the peer. The same bits as the unsplit loop and its final mean.
+@@ -1128,7 +1128,7 @@
+             with prof.timed("hc (layer end)"):
+                 sp.glue(nxt.attn_hc if nxt is not None else None, nxt.in_norm if nxt is not None else None,
+                         taps=tuple(b.tap_at.get(layer.index, ())), final=nxt is None, front=front,
+-                        rot=tp.of(w).owner(layer.index))
++                        rot=tp.of(w).owner(layer.index), rows=need)
+             done = sp.own() if front is not None else None
+             yield layer.index
+     finally:
+@@ -1136,30 +1136,75 @@
+ 
+ 
+ def split_layers(w: Weights, st: State, b: Buffers, R: int, nch: int | None, host_pos: int | None,
+-                 mixer=None) -> None:
+-    for _ in split_layer_steps(w, st, b, R, nch, host_pos, mixer):
++                 mixer=None, need: tuple[int, ...] | None = None) -> None:
++    for _ in split_layer_steps(w, st, b, R, nch, host_pos, mixer, need):
+         pass
+ 
+ 
++def final_rows(b: Buffers, R: int, need, head: bool) -> tuple[int, ...] | None:
++    """The rows of a forward's final norm (b.hidden, b.fnormed, b.fxs) anything reads: ``need`` (the caller's rows,
++    sorted, deduplicated) plus the head's last row with ``head``; None (every row) for decode buffers or without
++    ``need``. Every other row of those buffers is left as it was (every rank alike: the split's final all-gather).
++    Readers (OTS F4 audit): the head and ``last_hidden`` read row R - 1; a multi-prompt chunk each prompt's end row;
++    the MTP absorb every row (its callers pass None)."""
++
++    if need is None or not b.prefill:
++        return None
++    rows = {int(r) for r in need} | ({R - 1} if head else set())
++    if rows and (min(rows) < 0 or max(rows) >= R):
++        raise ValueError(f"final rows {sorted(rows)} outside a chunk of {R}")
++    return tuple(sorted(rows))
++
++
++def row_runs(R: int, rows: tuple[int, ...] | None) -> list[tuple[int, int]]:
++    """``rows`` (sorted) as [lo, hi) runs; None: [(0, R)]."""
++
++    if rows is None:
++        return [(0, R)]
++    runs: list[tuple[int, int]] = []
++    for r in rows:
++        if runs and runs[-1][1] == r:
++            runs[-1] = (runs[-1][0], r + 1)
++        else:
++            runs.append((r, r + 1))
++    return runs
++
++
++def final_mean(b: Buffers, R: int, rows: tuple[int, ...] | None) -> None:
++    """The unsplit final stream mean of ``rows`` (None: every row) into b.hidden (row-independent kernel)."""
++
++    for lo, hi in row_runs(R, rows):
++        glue.stream_mean(b.x[lo:hi], b.hidden[lo:hi])
++
++
++def final_norm(w: Weights, b: Buffers, R: int, rows: tuple[int, ...] | None) -> None:
++    """The final RMSNorm of ``rows`` (None: every row) into b.fnormed and b.fxs (row-independent kernel)."""
++
++    for lo, hi in row_runs(R, rows):
++        glue.rmsnorm(b.hidden[lo:hi], w.norm, w.cfg.eps, b.fnormed[lo:hi], b.fxs[lo:hi])
++
++
+ def compute_steps(w: Weights, st: State, b: Buffers, R: int, *, nch: int | None = None,
+-                  host_pos: int | None = None, inject=None, head: bool = True, mixer=None):
++                  host_pos: int | None = None, inject=None, head: bool = True, mixer=None,
++                  need: Sequence[int] | None = None):
+     """Prompt-only forward yielding after each complete layer; returns the head on exhaustion.
+ 
+     All live rows, taps and overlapped fronts stay in the engine's dedicated pbuf. A split boundary retains
+     only this rank's hidden rows plus the already prepared next front, exactly as the uninterrupted split loop.
+     The scheduler drains CUDA before a decode round; verify never borrows pbuf. KDA's global temporary scratch
+-    is consumed inside a layer, so nothing in it needs to survive this yield.
++    is consumed inside a layer, so nothing in it needs to survive this yield. ``need``: as ``compute``'s.
+     """
+     if not b.prefill:
+         raise ValueError("layer-sliced forwards require prompt buffers")
+     c = w.cfg
++    rows_needed = final_rows(b, R, need, head)
+     glue.embed(b.ids[:R], w.embed, c.hidden, c.streams, b.x[:R])
+     if inject is not None:
+         rows, features = inject
+         b.x.index_copy_(0, rows, features.repeat(1, c.streams))
+     split = b.split is not None and b.split.applies(R)
+     if split:
+-        steps = split_layer_steps(w, st, b, R, nch, host_pos, mixer)
++        steps = split_layer_steps(w, st, b, R, nch, host_pos, mixer, rows_needed)
+         try:
+             for i in steps:
+                 b.split.finish()                    # main stream joins the overlap exchanges/fronts
+@@ -1177,8 +1222,8 @@
+             for slot in b.tap_at.get(layer.index, ()):
+                 glue.stream_mean(b.x[:R], b.taps[slot][:R])
+             yield layer.index
+-        glue.stream_mean(b.x[:R], b.hidden[:R])
+-    glue.rmsnorm(b.hidden[:R], w.norm, c.eps, b.fnormed[:R], b.fxs[:R])
++        final_mean(b, R, rows_needed)
++    final_norm(w, b, R, rows_needed)
+     if head:
+         return mm(b, b.fnormed[R - 1:R], w.head, b.fxs[R - 1:R], b.logits[:1])
+     return None
+@@ -1208,8 +1253,9 @@
+ 
+ 
+ def compute(w: Weights, st: State, b: Buffers, R: int, *, logits: bool = True, nch: int | None = None,
+-            host_pos: int | None = None, sparse_np: int | None = None, inject=None, head: bool = True, mixer=None):
+-    """Run capturable GPU work on static buffers and device positions; eager long contexts use host_pos (graphs sparse_np) to select sparse attention; ``inject``: (rows, features) replacing those rows' embeddings (an image prompt's tower output, on every hyper-connection stream)."""
++            host_pos: int | None = None, sparse_np: int | None = None, inject=None, head: bool = True, mixer=None,
++            need: Sequence[int] | None = None):
++    """Run capturable GPU work on static buffers and device positions; eager long contexts use host_pos (graphs sparse_np) to select sparse attention; ``inject``: (rows, features) replacing those rows' embeddings (an image prompt's tower output, on every hyper-connection stream). ``need`` (prompt buffers): the only rows of the final norm (b.fnormed, b.fxs, b.hidden) the caller reads besides the head's last row; only those are swapped and normalised (``final_rows``; None: every row)."""
+ 
+     c = w.cfg
+     pf = w.meta.get("l2pf")
+@@ -1217,32 +1263,34 @@
+         l2pf.ACTIVE = pf                 # TF_GLM_L2PF: this decode window's sites prefetch (joined below)
+         try:
+             return _compute(w, st, b, R, logits=logits, nch=nch, host_pos=host_pos, sparse_np=sparse_np,
+-                            inject=inject, head=head, mixer=mixer)
++                            inject=inject, head=head, mixer=mixer, need=need)
+         finally:
+             pf.join()
+             l2pf.ACTIVE = None
+     return _compute(w, st, b, R, logits=logits, nch=nch, host_pos=host_pos, sparse_np=sparse_np, inject=inject,
+-                    head=head, mixer=mixer)
++                    head=head, mixer=mixer, need=need)
+ 
+ 
+ def _compute(w: Weights, st: State, b: Buffers, R: int, *, logits: bool = True, nch: int | None = None,
+-             host_pos: int | None = None, sparse_np: int | None = None, inject=None, head: bool = True, mixer=None):
+-    c = w.cfg
++             host_pos: int | None = None, sparse_np: int | None = None, inject=None, head: bool = True, mixer=None,
++             need: Sequence[int] | None = None):
++    c = w.cfg
++    rows_needed = final_rows(b, R, need, head and logits)
+     glue.embed(b.ids[:R], w.embed, c.hidden, c.streams, b.x[:R])
+     if inject is not None:
+         rows, features = inject
+         b.x.index_copy_(0, rows, features.repeat(1, c.streams))
+     if b.prefill and b.split is not None and sparse_np is None and b.split.applies(R):
+-        split_layers(w, st, b, R, nch, host_pos, mixer)      # also leaves the taps and b.hidden[:R]
++        split_layers(w, st, b, R, nch, host_pos, mixer, rows_needed)   # also leaves the taps and b.hidden's rows
+     else:
+         for layer in w.layers:
+             layer_forward(layer, w, st, b, R, nch, host_pos, sparse_np, mixer)
+             for slot in b.tap_at.get(layer.index, ()):
+                 glue.stream_mean(b.x[:R], b.taps[slot][:R])
+-        glue.stream_mean(b.x[:R], b.hidden[:R])
++        final_mean(b, R, rows_needed)
+     if not logits:
+         return None
+-    glue.rmsnorm(b.hidden[:R], w.norm, c.eps, b.fnormed[:R], b.fxs[:R])
++    final_norm(w, b, R, rows_needed)
+     if not head:                         # the normed rows (MTP, last_hidden) without the head: None
+         return None
+     if b.prefill:                        # the head reads the last row only (fnormed keeps every row for the MTP)
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -644,8 +644,9 @@
+     w, st, b = e.w, e.st, e.pbuf
+     chunk = list(prompt[start:start + R])
+     inject = feed.chunk(start, R) if feed is not None else None
++    # the final norm's rows read below: the last (head, last_hidden), every row for the MTP absorb (forward.final_rows)
+     out = compute(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R), host_pos=st.pos, inject=inject,
+-                  head=head)
++                  head=head, need=None if mtp else (R - 1,))
+     out = out.clone() if head else None
+     e.last_hidden = b.fnormed[R - 1:R].clone()
+     if drafter is not None:
+@@ -669,7 +670,7 @@
+     chunk = list(prompt[start:start + R])
+     inject = feed.chunk(start, R) if feed is not None else None
+     out = yield from compute_steps(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R),
+-                                   host_pos=st.pos, inject=inject, head=head)
++                                   host_pos=st.pos, inject=inject, head=head, need=(R - 1,))
+     out = out.clone() if head else None
+     e.last_hidden = b.fnormed[R - 1:R].clone()
+     if drafter is not None:
+--- tensorfold/families/glm5_next/cuda/multi_prefill.py
++++ tensorfold/families/glm5_next/cuda/multi_prefill.py
+@@ -157,6 +157,12 @@
+     b.staged.record()
+ 
+ 
++def head_rows(pieces: Sequence[Piece]) -> tuple[int, ...]:
++    """The chunk rows whose final norm is read: each piece's last row when it ends its prompt (its head's row)."""
++
++    return tuple(p.lo + p.rows - 1 for p in pieces if p.head)
++
++
+ @torch.no_grad()
+ def prefill_pieces(e, pieces: Sequence[Piece]) -> list[torch.Tensor | None]:
+     """One prompt chunk over every piece (``decode.prefill_chunk`` for several streams at once): the forward, then per
+@@ -171,7 +177,7 @@
+     w, b = e.w, e.pbuf
+     R = layout(pieces, b.rows)
+     _stage(w, b, pieces, R)
+-    compute(w, None, b, R, head=False, mixer=PieceMixer(w, b, pieces, R))     # leaves b.fnormed's rows
++    compute(w, None, b, R, head=False, mixer=PieceMixer(w, b, pieces, R), need=head_rows(pieces))   # those rows
+     heads: list[torch.Tensor | None] = []
+     for p in pieces:
+         if p.head:                       # the head on the piece's last row: the one-row matmul a chunk of its own runs
+@@ -197,7 +203,7 @@
+     w, b = e.w, e.pbuf
+     R = layout(pieces, b.rows)
+     _stage(w, b, pieces, R)
+-    yield from compute_steps(w, None, b, R, head=False, mixer=PieceMixer(w, b, pieces, R))
++    yield from compute_steps(w, None, b, R, head=False, mixer=PieceMixer(w, b, pieces, R), need=head_rows(pieces))
+     heads = []
+     for p in pieces:
+         if p.head:

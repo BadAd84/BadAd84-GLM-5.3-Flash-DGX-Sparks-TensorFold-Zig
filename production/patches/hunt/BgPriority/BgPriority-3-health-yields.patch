@@ -1,0 +1,80 @@
+--- tensorfold/cuda/health.py
++++ tensorfold/cuda/health.py
+@@ -13,6 +13,11 @@
+          "rounds": "rounds_total", "drafted": "drafted_total", "accepted": "accepted_total",
+          "fill_wait_s": "fill_wait_seconds_total"}
+ _MADE = threading.Lock()
++# A concurrent engine's scheduler counters /health publishes under these names: ``yields``, background streams that
++# gave their lane to a waiting foreground request (``Scheduler.yields``, the one counter of that, kept by the base
++# scheduler's ``_yield`` and the GLM scheduler's override); ``requeues``, streams the GLM pool gave back for room
++# (``GlmScheduler.requeues``). A scheduler without one leaves it out.
++SCHEDULER_COUNTS = ("yields", "requeues")
+ 
+ 
+ class Request:
+@@ -92,6 +97,10 @@
+                     extra = {}
+                 body["streams"].update(extra.pop("streams", {}))
+                 body.update(extra)
++        for key in SCHEDULER_COUNTS:                    # the scheduler's own counters (one int each, read unlocked)
++            value = getattr(scheduler, key, None)
++            if isinstance(value, int) and not isinstance(value, bool):
++                body[key] = value
+         # Read the latch independently of mutable counters: a failed counters read must not hide a broken engine.
+         broken = getattr(decoder, "broken", None)
+         if broken is not None:
+--- tensorfold/server/metrics.py
++++ tensorfold/server/metrics.py
+@@ -176,7 +176,8 @@
+ 
+ 
+ # /health's fields under HEALTH: (field, type, help); the totals are the finished requests' engine stats, then the GLM
+-# engine's prefix-wait counters (/health names them without the suffix: _HEALTH_RENAMED)
++# engine's prefix-wait counters and the scheduler's yields / requeues (/health names them without the suffix:
++# _HEALTH_RENAMED)
+ _HEALTH_TOTALS = (
+     ("requests_total", "counter", "Finished requests (as /health's requests_total)."),
+     ("completion_tokens_total", "counter", "Reply tokens, the running replies' tokens so far included."),
+@@ -187,8 +188,12 @@
+     ("fill_wait_seconds_total", "counter", "Of those, seconds a decoding request waited for other prompts' chunks."),
+     ("prefix_waits_total", "counter", "Requests that waited for a prefix another request was prefilling."),
+     ("prefix_wait_tokens_total", "counter", "Prompt tokens those requests did not prefill again."),
++    ("yields_total", "counter",
++     "Background streams that gave their lane to a waiting foreground request (priority background), to replay."),
++    ("requeues_total", "counter", "Streams the GLM pool gave back to the queue for room, to replay."),
+ )
+-_HEALTH_RENAMED = {"prefix_waits": "prefix_waits_total", "prefix_wait_tokens": "prefix_wait_tokens_total"}
++_HEALTH_RENAMED = {"prefix_waits": "prefix_waits_total", "prefix_wait_tokens": "prefix_wait_tokens_total",
++                   "yields": "yields_total", "requeues": "requeues_total"}
+ # the spill tier's gauges in /health's spill (highwater, writers: the one-stream engine's SpillStore; the rest from
+ # entries on: either store, or the block store alone); its other numbers are counters
+ _SPILL_GAUGES = {"entries", "pending", "stored_bytes", "disk_free_bytes", "highwater", "writers", "blocks",
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -4004,6 +4004,9 @@
+         self.boot: list | None = None    # TF_GLM_SPILL_BOOT_RESTORE: stored states still to read back (None: not planned)
+         self.boot_until = 0.0            # no restore read starts after this (time.monotonic)
+         self.serving = False             # the engine's start is over (``started``): the worker may gather unasked
++        # streams the pool gave back (``MultiDecoder._give_back``: every stream waits for room, the youngest replays):
++        # /health ``requeues``. ``yields`` (``Scheduler``) counts only lanes given to a waiting foreground request.
++        self.requeues = 0
+         # TF_GLM_MULTI_PREFILL_WAIT_MS: an idle server's wait for requests arriving with the first (their prompts then
+         # share its first chunk); only with TF_GLM_MULTI_PREFILL=1
+         self.gather_s = multi_prefill.wait_ms() / 1000.0 if getattr(decoder, "group", False) else 0.0
+@@ -4340,13 +4343,15 @@
+             return any(not e[2][0].background and e[2][0] is not self._Flush for e in self.waiting.queue)
+ 
+     def _requeue(self) -> None:
++        """The streams the pool gave back (``MultiDecoder._give_back``) to the queue to replay, counted in ``requeues``:
++        a pool with no room, not a priority yield (``yields``)."""
+         for stream in self.decoder.requeue:
+             box = self.boxes.pop(id(stream), None)
+             if box is None:
+                 continue
+             again = stream.continued()
+             again.glm = getattr(stream, "glm", {})
+-            self.yields += 1
++            self.requeues += 1
+             self.waiting.put((again, box))
+         self.decoder.requeue = []
+ 

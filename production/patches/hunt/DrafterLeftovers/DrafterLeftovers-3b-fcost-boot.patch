@@ -1,0 +1,185 @@
+# DrafterLeftovers-3b (lane DrafterLeftovers, 2026-10-30; HuntDrafter F8): no _calibrate in a --parallel boot.
+# GlmEngine._calibrate spent ~4.5 s of every boot (boot log "calibration (4.5s)") timing eager one-stream windows,
+# MTP steps and a solo DFlash2 pass for a cost table that under --parallel only a request naming an fcost policy reads
+# (decode_policy -> round_costs); production's fnc7:0.3 (and every other policy) never reads it. Under --parallel the
+# table is now priced once the scheduler is built, on its own graphs (MultiDecoder.fcost_costs): one stream's batched
+# window of 1..8 rows (_time_rows(most=8), or TF_GLM_MULTI_DEPTH=joint's table), a one-stream block pass and the
+# smallest row bucket's update per row (MultiDrafter.time_passes, on the trash tables), the larger of the ranks'.
+# --parallel 1 calibrates as before. Policy decisions: unchanged for every policy but fcost (tested); fcost is now
+# priced on the windows it runs (the eager v1 44 ms against ~21 ms graphed was a latent mispricing).
+# Boot only; replies unchanged. Applies with `patch -p0` in the folder holding tensorfold/, after DrafterLeftovers-2.
+# 3b: re-made against stack/all6's base + DrafterLeftovers-2b (no fuzz).
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py
+@@ -364,6 +364,30 @@
+         for c, e in zip(self.contexts, ends):
+             c.context_end = e
+ 
++    @torch.no_grad()
++    def time_passes(self, reps: int = 3) -> tuple[float, float]:
++        """GPU ms of a one-stream block pass and of the smallest row bucket's context update (each captured graph
++        replayed once unmeasured, then the fastest of ``reps``) on the trash tables, as ``capture`` runs them: the
++        streams' ring rows, device ends and context ends are not touched (the update writes the trash rows and the
++        trash end only). Both ranks together (the pass all-gathers), before any stream decodes
++        (``multi.MultiDecoder.fcost_costs``, lane DrafterLeftovers)."""
++
++        torch.cuda.synchronize()
++        self._trash_tables()
++        start, stop = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
++        out = []
++        for g in (self.block_graphs[1], self.tap_graphs[self.buckets[0]]):
++            best = float("inf")
++            for i in range(max(1, int(reps)) + 1):
++                start.record()
++                g.replay()
++                stop.record()
++                stop.synchronize()
++                if i:
++                    best = min(best, start.elapsed_time(stop))
++            out.append(best)
++        return out[0], out[1]
++
+     def drop_graphs(self) -> None:
+         self.block_graphs, self.tap_graphs = {}, {}
+ 
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -366,7 +366,8 @@
+ 
+ def decode_policy(code: list[int], costs: dict | None = None):
+     """Decode a serial, MTP, or automatic policy, retaining exploration, sampling, and margin settings; ``costs``: the
+-    startup cost table (``GlmEngine._calibrate``) the fcost rule weighs a round's depths by."""
++    startup cost table (``GlmEngine._calibrate``; under --parallel ``MultiDecoder.fcost_costs``) the fcost rule weighs
++    a round's depths by."""
+ 
+     from .decode import DepthPolicy
+ 
+@@ -433,8 +434,9 @@
+     windows (``multi.BatchedVerify``, graphs of its own), so ``Engine.forward`` - the only replay site - is reached
+     only by a lone stream moved home (TF_GLM_MULTI_LONE=1), by the serial verify seam (TF_GLM_MULTI_VERIFY=serial:
+     ``verify.SerialVerify``, where a stream at the graphs' home replays them) and by the startup comparison
+-    (TF_GLM_MULTI_PROFILE); with all three off nothing ever replays them and they are not captured (``_calibrate``
+-    then times eager windows, which only the fcost policies read). TF_GLM_SOLO_GRAPHS=1 captures them as before.
++    (TF_GLM_MULTI_PROFILE); with all three off nothing ever replays them and they are not captured (the fcost
++    policies' cost table is then priced on the batched windows' graphs, ``MultiDecoder.fcost_costs``).
++    TF_GLM_SOLO_GRAPHS=1 captures them as before.
+     Every rank decides alike (the inputs are in the ranks' settings comparison): the warm-up forwards all-gather, so
+     one rank capturing alone would hang."""
+ 
+@@ -1237,16 +1239,10 @@
+             if graphs:
+                 self.drafter.capture()
+             fastboot.mark("DFlash2 CUDA graphs")
+-        self.costs = self._calibrate()
++        self.costs = self._startup_costs(parallel)
+         fastboot.mark("calibration")
+-        if rank == 0:
+-            c = self.costs
+-            print(f"[tensorfold] drafter timings (ms, fastest of 7{'' if self.solo else ', eager one-stream windows'}): "
+-                  f"{c['timed']}", flush=True)
+-            mtp = (f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row)"
+-                   if w.mtp is not None else "")
+-            print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) + mtp +
+-                  f"; DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
++        if rank == 0 and self.costs is not None:
++            self._print_costs()
+         self.vision = None                   # rank 0's image tower (``tensorfold.vision.glm.GlmVision``), --vision
+         if vision:
+             from tensorfold.vision.glm import GlmVision, vision_lazy
+@@ -1281,6 +1277,13 @@
+             self.multi = MultiDecoder(self, parallel)
+             self.multi.model_dir = self.model_dir
+             fastboot.mark("MultiDecoder: drafter and batched-verify graphs, the tier")
++            if self.costs is None:                   # both ranks, before any stream (lane DrafterLeftovers)
++                self.costs = self.multi.fcost_costs()
++                if self.costs is None:
++                    self.costs = self._calibrate()
++                fastboot.mark("fcost table")
++                if rank == 0:
++                    self._print_costs()
+             if rank == 0:
+                 self.scheduler = GlmScheduler(self.multi, max_streams=parallel)
+                 self.concurrent = True
+@@ -1301,6 +1304,26 @@
+         if started is not None:                         # rank 0's scheduler may gather unasked from now on (never
+             started()                                   # during the start's own gathers): TF_GLM_SPILL_BOOT_RESTORE
+ 
++    def _startup_costs(self, parallel: int) -> dict | None:
++        """The cost table the fcost policies price a round by (``decode_policy``; ``drafter_choice`` for the serial
++        auto policy): ``_calibrate`` without --parallel. Under --parallel None for now (lane DrafterLeftovers): only a
++        request's fcost policy reads it there, and ``_calibrate`` spent ~4.5 s of every boot timing eager one-stream
++        windows no --parallel round runs; ``MultiDecoder.fcost_costs`` prices it on the batched windows' own graphs
++        once they are captured (``_calibrate`` again when they are not)."""
++
++        return self._calibrate() if int(parallel) <= 1 else None
++
++    def _print_costs(self) -> None:
++        c = self.costs
++        how = "fastest of 7" + ("" if self.solo else ", eager one-stream windows")
++        if c.get("batched"):
++            how = "--parallel: one stream's batched window graphs, a one-stream block pass, a row bucket's update"
++        print(f"[tensorfold] drafter timings (ms, {how}): {c['timed']}", flush=True)
++        mtp = (f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row)"
++               if self.w.mtp is not None and not c.get("batched") else "")
++        print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) + mtp +
++              f"; DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
++
+     def _calibrate(self) -> dict:
+         """Per-piece ms for ``drafter_choice.DrafterChoice``: fastest of interleaved passes, equal on both ranks."""
+ 
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -1010,20 +1010,49 @@
+ 
+         self.g._share_nowait(values)
+ 
+-    def _time_rows(self, reps: int = 5) -> list[float]:
+-        """TF_GLM_MULTI_DEPTH=joint: the batched window's ms for 1 .. its rows (its graphs, fastest of
+-        ``reps``), the larger of both ranks' (so both allocate alike)."""
++    def _time_rows(self, reps: int = 5, most: int | None = None) -> list[float]:
++        """TF_GLM_MULTI_DEPTH=joint: the batched window's ms for 1 .. its rows (``most`` at most; its graphs, fastest
++        of ``reps``), the larger of both ranks' (so both allocate alike)."""
+ 
+         v = self.verify
+         if not isinstance(v, BatchedVerify) or not v.graphs:
+             raise ValueError("TF_GLM_MULTI_DEPTH=joint needs the batched verify window's graphs "
+                              "(TF_GLM_MULTI_VERIFY=batched, TF_GLM_MULTI_GRAPHS=1)")
+-        mine = torch.tensor(v.time_rows(reps), dtype=torch.float32, device=self.w.device)
++        mine = torch.tensor(v.time_rows(reps, most), dtype=torch.float32, device=self.w.device)
+         world = self.g.world
+         got = torch.empty((world * mine.numel(),), dtype=torch.float32, device=self.w.device)
+         self.g.comm.all_gather(mine, got)
+         return [float(x) for x in got.view(world, -1).max(dim=0).values.tolist()]
+ 
++    def fcost_costs(self, reps: int = 2) -> dict | None:
++        """Both ranks, at start before any stream (lane DrafterLeftovers): the cost table a request's fcost policy
++        prices a round by under --parallel (``engine.decode_policy`` / ``round_costs``, its only reader there), from
++        this scheduler's own graphs: one stream's batched window of 1 .. 8 rows (``_time_rows``, or the joint
++        policy's table), a one-stream block pass and the smallest row bucket's context update per row
++        (``MultiDrafter.time_passes``; ``_calibrate``'s ``taps8`` / 8 likewise); fastest of ``reps`` + 1, the larger
++        of both ranks'. None without the window's graphs (``GlmEngine._calibrate`` then times its own)."""
++
++        from .engine import GRAPH_ROWS
++
++        v = self.verify
++        if not isinstance(v, BatchedVerify) or not v.graphs:
++            return None
++        widest = max(GRAPH_ROWS)
++        rows = list(self.row_ms[:widest]) if self.row_ms is not None and len(self.row_ms) >= widest else \
++            self._time_rows(reps, most=widest)
++        block = taps = 0.0
++        if self.drafts is not None and self.drafts.block_graphs and self.drafts.tap_graphs:
++            mine = torch.tensor(self.drafts.time_passes(reps), dtype=torch.float32, device=self.w.device)
++            world = self.g.world
++            got = torch.empty((world * 2,), dtype=torch.float32, device=self.w.device)
++            self.g.comm.all_gather(mine, got)
++            block, taps = (float(x) for x in got.view(world, 2).max(dim=0).values.tolist())
++        timed = {f"v{r + 1}": round(ms, 2) for r, ms in enumerate(rows)}
++        taps_row = taps / self.drafts.buckets[0] if taps else 0.0
++        timed.update(block=round(block, 2), taps=round(taps, 3))
++        return {"verify": rows, "mtp": 0.0, "mtp_step": 0.0, "mtp_row": 0.0, "block": block, "taps_row": taps_row,
++                "timed": timed, "batched": True}
++
+     @torch.no_grad()
+     def _time_prompt_layers(self):
+         """Both ranks calibrate isolated prompt forwards before requests are admitted (0 budget: no work)."""

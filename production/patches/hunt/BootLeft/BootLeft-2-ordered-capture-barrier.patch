@@ -1,0 +1,111 @@
+# BootLeft-2 (lane BootLeft, 2026-10-30): a CUDA graph capture's eager run (graphs.capture, every GLM capture site)
+# orders its pre-settle RoCE barriers on the stream (roce.ordered_barriers): before each eager RoCE gather an NCCL
+# all-gather on the same stream, no torch.cuda.synchronize. A GPU still starts the RoCE gather only after every rank's
+# GPU reached the same gather's NCCL step (NCCL waits without a limit), so a rank still building or compiling holds
+# the others in NCCL, never in the 20 s RoCE wait (the first-start guarantee RoceComm.settle names); what goes is the
+# host's wait after every gather. Timed startup work (calibration, the prompt-layer timing, fcost) keeps the host
+# barrier. TF_ROCE_ORDERED_BARRIERS=0: the host barrier as before (the old path; ranks may differ: both forms are
+# the same one-float NCCL all-gather). Boot only; replies unchanged.
+--- tensorfold/families/glm5_next/cuda/graphs.py
++++ tensorfold/families/glm5_next/cuda/graphs.py
+@@ -17,9 +17,13 @@
+     eager run left every launch the capture records as the first one did. Every capture site of the GLM engine takes
+     this (one-stream graphs here, ``verify.BatchedVerify``, ``dflash2.Drafter``, ``dflash2_multi.MultiDrafter``); it
+     was two eager runs a graph, ~44 ms each at boot (an eager window's RoCE gathers each wait in an NCCL barrier until
+-    ``RoceComm.settle``)."""
++    ``RoceComm.settle``). The eager run's barriers are ordered on the stream (``roce.ordered_barriers``, lane BootLeft):
++    every rank's GPU still meets the others in NCCL before each RoCE gather, without the host waiting for the GPU."""
+ 
+-    run()
++    from tensorfold.cuda.roce import ordered_barriers
++
++    with ordered_barriers():
++        run()
+     torch.cuda.synchronize()
+     g = torch.cuda.CUDAGraph()
+     with torch.cuda.graph(g, pool=pool):
+--- tensorfold/cuda/roce.py
++++ tensorfold/cuda/roce.py
+@@ -16,6 +16,7 @@
+ import shutil
+ import subprocess
+ import threading
++from contextlib import contextmanager
+ from functools import lru_cache
+ from pathlib import Path
+ 
+@@ -510,6 +511,32 @@
+             self.ctx = None
+ 
+ 
++class _Ordered(threading.local):
++    on = False
++
++
++_ORDERED = _Ordered()          # BootLeft: inside ``ordered_barriers`` (this thread)
++
++
++@contextmanager
++def ordered_barriers():
++    """BootLeft: a CUDA graph capture's eager run (``graphs.capture``; nothing in it is timed) makes each pre-settle
++    eager RoCE gather's barrier an NCCL all-gather on the gather's own stream, no host synchronize. The first-start
++    guarantee ``RoceComm.settle`` describes holds as before: a GPU starts the RoCE gather only after that NCCL
++    all-gather completes (stream order), which needs every rank's GPU to have reached the same gather's NCCL step,
++    and NCCL waits without a limit; so a rank still building an extension or compiling a kernel holds the others in
++    NCCL, never in a RoCE wait (TF_ROCE_WAIT_S). What goes is the host's wait for the GPU after every gather (the
++    barrier's ``torch.cuda.synchronize``), which serialised an eager window's launches with its kernels.
++    TF_ROCE_ORDERED_BARRIERS=0: the host barrier as before (both forms are the same NCCL all-gather of one float a
++    rank, so ranks with different settings still pair)."""
++
++    _ORDERED.on = os.environ.get("TF_ROCE_ORDERED_BARRIERS", "1") != "0"
++    try:
++        yield
++    finally:
++        _ORDERED.on = False
++
++
+ class RoceComm:
+     """NCCL with small all-gathers over RoCE: the same call, output layout and bits."""
+ 
+@@ -520,11 +547,13 @@
+         rail_check(nccl, rank, world, self.roce)             # TF_ROCE_RAIL_CHECK: a loud warning, nothing more
+         self.small = self.large = 0
+         self.settled = False
++        self.marks = None                                     # ``ordered_barriers``' gather buffers (at first use)
+ 
+     def settle(self) -> None:
+         """Startup is over on this rank (its engine is built). Until then each eager RoCE gather waits for the peer in
+         an NCCL barrier first: the ranks build their CUDA extensions on their own and can drift tens of seconds apart
+-        on a first start, past what a RoCE wait allows; NCCL waits without that limit. Captured gathers never do."""
++        on a first start, past what a RoCE wait allows; NCCL waits without that limit (inside ``ordered_barriers`` the
++        barrier is ordered on the stream instead of the host). Captured gathers never do."""
+ 
+         self.settled = True
+ 
+@@ -541,7 +570,10 @@
+             r = recv if recv.is_contiguous() and recv.data_ptr() % PACK == 0 else torch.empty_like(recv,
+                                                                                                memory_format=torch.contiguous_format)
+             if not self.settled and not torch.cuda.is_current_stream_capturing():
+-                self.nccl.barrier()
++                if _ORDERED.on:
++                    self._ordered_barrier()
++                else:
++                    self.nccl.barrier()
+             self.roce.all_gather(s, r)
+             if r is not recv:
+                 recv.copy_(r)
+@@ -549,6 +581,14 @@
+             self.large += 1
+             self.nccl.all_gather(send, recv)
+ 
++    def _ordered_barrier(self) -> None:
++        """``ordered_barriers``: the barrier's NCCL all-gather on the current stream, no host synchronize."""
++
++        if self.marks is None:
++            self.marks = (torch.zeros((1,), dtype=torch.float32, device="cuda"),
++                          torch.zeros((self.world,), dtype=torch.float32, device="cuda"))
++        self.nccl.all_gather(*self.marks)
++
+     def barrier(self) -> None:
+         self.nccl.barrier()
+ 

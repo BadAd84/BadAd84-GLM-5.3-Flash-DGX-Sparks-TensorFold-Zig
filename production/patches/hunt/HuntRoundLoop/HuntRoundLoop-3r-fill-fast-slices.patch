@@ -1,0 +1,63 @@
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -774,6 +774,7 @@
+         self.fill_budget = sliced_fill.budget_ms()
+         # OTS 0122, TF_GLM_FILL_FAST_MS: rank 0 decides each slice's layers (``_slice_end``); rank 1 follows them
+         self.fill_fast = sliced_fill.fast_ms()
++        self.fill_fast_slices = sliced_fill.fast_slices()   # rank 0: a finishing chunk's slices at fill_fast's budget
+         self.fast_fills = 0                               # chunks run whole where the budget would slice (/health)
+         self.fill_drafts = sliced_fill.drafted_rounds()     # rank 0 decides; the ROUND message carries it
+         self.partial = None
+@@ -2924,20 +2925,25 @@
+         self.short_round_due = not self.fill_drafts
+         return done
+ 
++    fill_fast_slices = False     # TF_GLM_FILL_FAST_SLICES (``__init__`` sets it; a decoder built without it: off)
++
+     def _slice_end(self, pending, busy: bool) -> int:
+         """Rank 0: the layer the pending prompt chunk's next slice runs to. Every layer left when no stream decodes;
+         else the slice TF_GLM_FILL_BUDGET_MS takes (``LayerCosts.stop``), a decode round after it - unless, OTS 0122
+         (TF_GLM_FILL_FAST_MS), the chunk ends every prompt in it (its layers left are all those prompts still fill)
+         and they are estimated at most that many ms (``LayerCosts.remaining``): then every layer left, so the
+         prompts take their first tokens without a decode round between their slices. /health's ``fill_fast``
+-        counts the chunks this kept from being sliced (the budget's slice would have ended earlier)."""
++        counts the chunks this kept from being sliced (the budget's slice would have ended earlier). With
++        TF_GLM_FILL_FAST_SLICES=1 such a chunk's slices are budgeted at TF_GLM_FILL_FAST_MS too (the pause 0122
++        already allows the decoding streams), so it waits for fewer decode rounds in all."""
+ 
+         layers = len(self.w.layers)
+         if not busy:
+             return layers
+-        hi = self.fill_costs.stop(pending.rows, pending.layer, self.fill_budget)
+-        if (hi < layers and self.fill_fast and all(stop == len(lane.s.prompt) for lane, stop in pending.group)
+-                and self.fill_costs.remaining(pending.rows, pending.layer) <= self.fill_fast):
++        ends = self.fill_fast and all(stop == len(lane.s.prompt) for lane, stop in pending.group)
++        budget = max(self.fill_budget, self.fill_fast) if ends and self.fill_fast_slices else self.fill_budget
++        hi = self.fill_costs.stop(pending.rows, pending.layer, budget)
++        if hi < layers and ends and self.fill_costs.remaining(pending.rows, pending.layer) <= self.fill_fast:
+             self.fast_fills += 1
+             return layers
+         return hi
+diff -ruN tensorfold/families/glm5_next/cuda/sliced_fill.py tensorfold/families/glm5_next/cuda/sliced_fill.py
+--- tensorfold/families/glm5_next/cuda/sliced_fill.py
++++ tensorfold/families/glm5_next/cuda/sliced_fill.py
+@@ -58,6 +58,18 @@
+     return ms
+ 
+ 
++def fast_slices(value: str | None = None) -> bool:
++    """TF_GLM_FILL_FAST_SLICES (0, the default: off; needs TF_GLM_FILL_FAST_MS): a prompt chunk that ends every prompt in
++    it runs in slices of up to TF_GLM_FILL_FAST_MS instead of TF_GLM_FILL_BUDGET_MS beside decoding streams, so a warm
++    turn waits for fewer decode rounds; the decoding streams pause up to TF_GLM_FILL_FAST_MS a slice, which 0122 already
++    allows for the chunk's last slice. Scheduling only: the same bits."""
++
++    raw = (os.environ.get("TF_GLM_FILL_FAST_SLICES", "") if value is None else value).strip() or "0"
++    if raw not in ("0", "1"):
++        raise ValueError(f"TF_GLM_FILL_FAST_SLICES: 0 or 1, not {raw!r}")
++    return raw == "1"
++
++
+ class LayerCosts:
+     """Startup timings at several row counts, interpolated separately for every KDA/DSA/dense layer.
+ 

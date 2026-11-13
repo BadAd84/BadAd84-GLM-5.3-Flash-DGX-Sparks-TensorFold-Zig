@@ -1,0 +1,84 @@
+diff -r base/tensorfold/families/glm5_next/cuda/verify.py p2/tensorfold/families/glm5_next/cuda/verify.py
+--- tensorfold/families/glm5_next/cuda/verify.py	2026-10-29 23:40:06.567115900 +0000
++++ tensorfold/families/glm5_next/cuda/verify.py	2026-10-30 00:19:27.928409800 +0000
+@@ -20,6 +20,11 @@
+ 
+ import torch
+ 
++# HuntDecodeAttn: TF_GLM_DENSE_WINDOW_GRAPHS (default 1): BatchedVerify captures a graph set without the indexer's
++# token selection and replays it for windows with no sparse row (the same bits: a dense row reads no selected token);
++# 0: those windows replay the graphs that run the selection, as before
++DENSE_WINDOW_GRAPHS = __import__("os").environ.get("TF_GLM_DENSE_WINDOW_GRAPHS", "1") != "0"
++
+ 
+ @dataclass
+ class Segment:
+@@ -126,7 +131,12 @@
+         self.R = 0
+         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+         self.shard_graphs: dict[int, torch.cuda.CUDAGraph] = {}      # the sharded selection's, by row count
+-        self.replays = {"graph": 0, "eager": 0, "sharded": 0}
++        # HuntDecodeAttn: with the indexer, a third set a row count for windows with no sparse row (every row before
++        # SPARSE_FROM: short chats, every stream's first 2,051 tokens): the eager path's own choice (select only with a
++        # sparse row), so no index-query matmul, scoring or selection launch whose tokens no dense row reads
++        self.dense_graphs: dict[int, torch.cuda.CUDAGraph] = {}
++        self.dense_windows = bool(e.caches.index is not None and DENSE_WINDOW_GRAPHS)
++        self.replays = {"graph": 0, "eager": 0, "sharded": 0, "dense": 0}
+ 
+     @torch.no_grad()
+     def capture(self, rows: Sequence[int] | None = None) -> None:
+@@ -134,9 +144,10 @@
+         extents, slots and parities live in the device tables, so one graph a row count covers every mix. Captured on
+         a window of slot 0 at the pool's first rows (the warm-up runs write there; slot 0's states are cleared after,
+         so capture before any stream is admitted). With the indexer the graphs always run the token selection (its
+-        dense rows ignore it: the same bits as a window that skips it). With the decode shard on, a second graph for
+-        each row count from indexer_shard.SHARD_ROWS_MIN runs the selection split between the ranks (its gather
+-        included; every rank captures the same set, from the switch and the row count alone)."""
++        dense rows ignore it: the same bits as a window that skips it), and (DENSE_WINDOW_GRAPHS) a third set skips
++        it for windows with no sparse row. With the decode shard on, a second graph for each row count from
++        indexer_shard.SHARD_ROWS_MIN runs the selection split between the ranks (its gather included; every rank
++        captures the same sets, from the switches and the row count alone)."""
+ 
+         from . import indexer_shard
+         from .forward import compute
+@@ -149,16 +160,20 @@
+             self._stage([0] * R)
+             self.seg_rows.set([self._span(e.home, 0, R)], sparse_from=SPARSE_FROM if index else None)
+             self._write_table([(R, 0, 0, 0, R)])
+-            variants = [False] + ([True] if self.decode_shard and R >= indexer_shard.SHARD_ROWS_MIN else [])
+-            for sharded in variants:
+-                run = lambda: compute(w, None, b, R, mixer=lambda layer: self._mixer(layer, R, index, sharded))  # noqa: E731
++            variants = [(self.graphs, False, index)]
++            if self.decode_shard and R >= indexer_shard.SHARD_ROWS_MIN:
++                variants.append((self.shard_graphs, True, index))
++            if self.dense_windows:
++                variants.append((self.dense_graphs, False, False))
++            for into, sharded, select in variants:
++                run = lambda: compute(w, None, b, R, mixer=lambda layer: self._mixer(layer, R, select, sharded))  # noqa: E731
+                 for _ in range(2):
+                     run()
+                 torch.cuda.synchronize()
+                 g = torch.cuda.CUDAGraph()
+                 with torch.cuda.graph(g, pool=pool):
+                     run()
+-                (self.shard_graphs if sharded else self.graphs)[R] = g
++                into[R] = g
+         torch.cuda.synchronize()
+         e.slots.rec[0].zero_()
+         e.slots.conv[0].zero_()
+@@ -249,10 +264,14 @@
+         self.segments, self.R = list(segments), R
+         # the window's choice (the same on every rank: from its segments' rows and positions alone)
+         sharded = self.decode_shard and indexer_shard.decode_window(spans, w.world)
+-        g = (self.shard_graphs if sharded else self.graphs).get(R)
++        # no sparse row (the spans' last rows all before SPARSE_FROM): the graph without the token selection
++        dense = (not sharded and self.dense_windows
++                 and all(sp[1] + sp[2] - 1 < SPARSE_FROM for sp in spans))
++        g = (self.shard_graphs if sharded else self.dense_graphs if dense else self.graphs).get(R)
+         if g is not None:
+             self.replays["graph"] += 1
+             self.replays["sharded"] += int(sharded)
++            self.replays["dense"] += int(dense)
+             g.replay()
+             logits = b.logits[:R]
+         else:

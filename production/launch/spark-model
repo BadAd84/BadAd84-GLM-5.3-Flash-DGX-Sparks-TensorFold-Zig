@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# spark-model glm <start|stop|status> - one-command management of the GLM serve on the Sparks.
+# Runs on the head (spark1). The stack (TP=2/TP=3), port, containers and worker hosts come from
+# ~/.config/glm-stack.env (override with GLM_STACK_ENV). Box copy: ~/.local/bin/spark-model.
+# Launch is setsid-detached (its own session, so it outlives the ssh that ran it; an inline `nohup ... &` over ssh is
+# torn down with the session). Not tmux: kindling spark-os's image has none, and the root overlay loses an install.
+set -uo pipefail
+M="${1:-}"; A="${2:-}"
+usage(){ echo "usage: spark-model glm <start|stop|status>"; exit 2; }
+[ "$M" = glm ] && [ -n "$A" ] || usage
+
+STACK_ENV="${GLM_STACK_ENV:-$HOME/.config/glm-stack.env}"
+# shellcheck disable=SC1090
+. "$STACK_ENV" || { echo "spark-model: cannot read $STACK_ENV" >&2; exit 1; }
+SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
+LOG="$HOME/glm53_start.log"
+# The stop command: glm-stack.env's GLM_STOP (the TensorFold stack's tf-tp3-stop.sh), else the vLLM recipe's
+# stop.sh with GLM_STOP_ARGS.
+stop_stack(){ if [ -n "${GLM_STOP:-}" ]; then bash "$GLM_STOP"; else bash "$HOME/glm53-current/stop.sh" $GLM_STOP_ARGS; fi; }
+
+health(){ curl -s -m5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GLM_PORT/v1/models" 2>/dev/null; }
+served(){ curl -s -m5 "http://127.0.0.1:$GLM_PORT/v1/models" 2>/dev/null | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4; }
+
+case "$A" in
+  status)
+    hc=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -Fx "$GLM_HEAD_CONTAINER" || true)
+    ws=""
+    for w in $GLM_WORKERS; do
+      c=$($SSH "$w" "docker ps --format '{{.Names}}'" 2>/dev/null | grep "^$GLM_CONTAINER_PREFIX" | head -1)
+      ws="$ws ${w#*@}=${c:-DOWN}"
+    done
+    h=$(health)
+    echo "stack=$GLM_STACK  head=${hc:-DOWN}  workers:$ws  port=$GLM_PORT  health=$h"
+    if [ "$h" = 200 ] && [ -n "$hc" ]; then echo "  SERVING: $(served)"
+    elif [ -n "$hc" ]; then echo "  head up, not serving yet (booting - shard load / graph capture)"
+    else echo "  stopped"; fi ;;
+  stop)
+    echo "stopping $GLM_STACK ..."
+    stop_stack
+    echo "stopped $GLM_STACK." ;;
+  start)
+    echo "starting $GLM_STACK (stopping any running instance first) ..."
+    stop_stack >/dev/null 2>&1 || true
+    sleep 3
+    : > "$LOG"
+    LC=$(mktemp /tmp/sparkboot.XXXXXX.sh)
+    {
+      if [ "${GLM_DISK_GUARD:-0}" = 1 ]; then
+        printf '%q --both >>%q 2>&1\n' "$HOME/.local/bin/glm-disk-guard.sh" "$HOME/glm-disk-guard.log"
+      fi
+      # SKIP_BUILD passes through (the watchdog restarts with SKIP_BUILD=1: keep the image).
+      printf 'SKIP_BUILD=%q bash %q\n' "${SKIP_BUILD:-0}" "$GLM_START"
+    } > "$LC"
+    chmod +x "$LC"
+    setsid nohup bash "$LC" >"$LOG" 2>&1 < /dev/null &
+    sleep 1
+    if kill -0 $! 2>/dev/null || grep -q . "$LOG"; then
+      echo "launched $GLM_STACK detached (pid $!, log: $LOG)"
+    else
+      echo "launch of $GLM_STACK failed (log: $LOG)"; exit 1
+    fi
+    echo "readiness (~10 min): watch 'spark-model glm status' until it prints SERVING" ;;
+  *) usage ;;
+esac

@@ -1,0 +1,130 @@
+# Sync port of ots0106-glm-prompt-experts-k64.patch (production v110-ots124) onto the synced base, applied in production order after the
+# ports before it; re-based by patch(1) (1 hunk(s) at fuzz 2, every fuzzed hunk read: the change lands where
+# the original put it). The original's header (what, why, measurements, tests) is the reference: ots0106-glm-prompt-experts-k64.patch.
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/exl3.cu next/tensorfold/families/glm5_next/cuda/exl3.cu
+--- tensorfold/families/glm5_next/cuda/exl3.cu	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/exl3.cu	2026-10-29 19:06:18.593950600 +0000
+@@ -594,10 +594,15 @@
+ // Each output is one fp32 chain of mma over ascending k tiles (no split K, no partials in memory), so a row's bits
+ // depend on its own values only (any chunking gives the same prompt state), though they are not the decode
+ // kernel's (which sums split and warp partials). The epilogues are gateup/down_epilogue_kernel's formulas.
+-constexpr int PBK = 32;              // k values a shared-memory stage (2 k tiles)
++constexpr int PBK = 64;              // k values a shared-memory stage (4 k tiles): one block barrier per 64 k
+ constexpr int PKT = PBK / 16;
+ constexpr int PSTAGES = 3;
+-constexpr int PXS = PBK + 8;         // stage row stride in halves (+16 B: ldmatrix rows on distinct banks)
++constexpr int PXS = PBK;             // stage row stride in halves: 128 B rows, no pad (pswz spreads ldmatrix rows)
++// The 16-byte chunk c of stage row r sits at chunk c ^ (r & 7): the 8 rows one ldmatrix 8x8 reads (the same chunk of
++// 8 consecutive rows) land on 8 distinct 16-byte bank groups without a pad, so three 64-k stages (16 KiB each with
++// the trellis words) and the epilogue fit two blocks an SM. Only where bytes sit changes: the same values feed the
++// same mma in the same order.
++__device__ __forceinline__ int pswz(int row, int chunk) { return chunk ^ (row & 7); }
+ 
+ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) {
+     const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
+@@ -625,6 +630,7 @@
+ struct PromptCfg {
+     static constexpr int MT = 16 / NW, NB = PM / 8, T = NW * 32;
+     static constexpr int XM = SHX ? 1 : MATS;               // member-row copies a stage holds
++    static constexpr int NST = XM == 2 ? 2 : PSTAGES;       // two row copies (24 KiB a stage): 2 stages, 2 blocks/SM
+     static constexpr size_t STAGE_HALVES = (size_t)XM * PM * PXS + 2 * PWORDS;
+ };
+ 
+@@ -655,14 +661,14 @@
+             for (int c = 0; c < 4; ++c) acc[i][j][c] = 0.f;
+ 
+     auto load = [&](int chunk) {
+-        half* dst = stage + (size_t)(chunk % PSTAGES) * C::STAGE_HALVES;
++        half* dst = stage + (size_t)(chunk % C::NST) * C::STAGE_HALVES;
+         const int k0 = chunk * PBK;
+         for (int idx = threadIdx.x; idx < C::XM * PM * (PBK / 8); idx += C::T) {
+             const int m = idx / (PM * (PBK / 8)), rem = idx % (PM * (PBK / 8)), i = rem / (PBK / 8),
+                       j = rem % (PBK / 8);
+             const int r = rows_sh[i];
+             const half* src = (m ? X1 : X0) + (size_t)(r < 0 ? 0 : r) * K + k0 + j * 8;
+-            cp_async16(dst + ((size_t)m * PM + i) * PXS + j * 8, src, r >= 0);
++            cp_async16(dst + ((size_t)m * PM + i) * PXS + pswz(i, j) * 8, src, r >= 0);
+         }
+         uint32_t* wdst = reinterpret_cast<uint32_t*>(dst + (size_t)C::XM * PM * PXS);
+         for (int idx = threadIdx.x; idx < 16 * PKT * 8; idx += C::T) {       // 16 B pieces of 128-B tile words
+@@ -674,16 +680,16 @@
+         }
+     };
+ #pragma unroll
+-    for (int c = 0; c < PSTAGES - 1; ++c) {
++    for (int c = 0; c < C::NST - 1; ++c) {
+         if (c < chunks) load(c);
+         cp_async_commit();
+     }
+     for (int c = 0; c < chunks; ++c) {
+-        cp_async_wait<PSTAGES - 2>();
++        cp_async_wait<C::NST - 2>();
+         __syncthreads();
+-        if (c + PSTAGES - 1 < chunks) load(c + PSTAGES - 1);
++        if (c + C::NST - 1 < chunks) load(c + C::NST - 1);
+         cp_async_commit();
+-        const half* base = stage + (size_t)(c % PSTAGES) * C::STAGE_HALVES;
++        const half* base = stage + (size_t)(c % C::NST) * C::STAGE_HALVES;
+         const half* xs = base + (size_t)(SHX ? 0 : mat) * PM * PXS;
+         const uint32_t* ws = reinterpret_cast<const uint32_t*>(base + (size_t)C::XM * PM * PXS);
+ #pragma unroll
+@@ -700,7 +706,7 @@
+                 if (jb < nblocks) {
+                     uint32_t r[4];
+                     const int row = jb * 16 + (lane & 7) + ((lane >> 4) & 1) * 8;
+-                    ldsm_x4(r, xs + (size_t)row * PXS + kk * 16 + ((lane >> 3) & 1) * 8);
++                    ldsm_x4(r, xs + (size_t)row * PXS + pswz(row, kk * 2 + ((lane >> 3) & 1)) * 8);
+                     const uint32_t bl[2] = {r[0], r[1]}, bh[2] = {r[2], r[3]};
+                     const bool upper = jb * 16 + 8 < cnt;         // members 8..15 of the block (else zero rows)
+ #pragma unroll
+@@ -737,9 +743,10 @@
+ constexpr int GU_ES = 128 + 4, DN_ES = 256 + 4;
+ template <int PM, int XM = 2>
+ constexpr size_t prompt_smem() {
+-    // max of: gate/up stages (XM copies of the member rows), down stages, gate/up epilogue half (2 x PM/2 x GU_ES),
++    // max of: gate/up stages (XM copies of the member rows; down: XM 1), gate/up epilogue half (2 x PM/2 x GU_ES),
+     // down half (PM/2 x DN_ES)
+-    const size_t gu = (size_t)PSTAGES * (XM * PM * PXS + 2 * PWORDS) * 2;
++    using C = PromptCfg<XM, PM, 8, XM == 1>;                 // its stage count and size
++    const size_t gu = (size_t)C::NST * C::STAGE_HALVES * 2;
+     const size_t ep = (size_t)2 * (PM / 2) * GU_ES * 4;
+     const size_t dn = (size_t)(PM / 2) * DN_ES * 4;
+     return gu > ep ? (gu > dn ? gu : dn) : (ep > dn ? ep : dn);
+@@ -1075,13 +1082,14 @@
+                           const at::Tensor& suh_d, const at::Tensor& svh_d, at::Tensor& xd, at::Tensor& y, int64_t D,
+                           int64_t N, int64_t E, int64_t max_items, double limit, int64_t slots, bool shx,
+                           const int* order) {
+-    constexpr size_t SMEM = prompt_smem<PM>(), SMEM_SHX = prompt_smem<PM, 1>();
++    // down's stages hold one copy of the member rows (XM 1, as SHX gate/up): 48 KiB at PM 64, two blocks an SM
++    constexpr size_t SMEM = prompt_smem<PM>(), SMEM_SHX = prompt_smem<PM, 1>(), SMEM_DN = prompt_smem<PM, 1>();
+     static bool once = [] {
+         cudaFuncSetAttribute(prompt_gateup_kernel<PM, NW, false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                              (int)SMEM);
+         cudaFuncSetAttribute(prompt_gateup_kernel<PM, NW, true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                              (int)SMEM_SHX);
+-        cudaFuncSetAttribute(prompt_down_kernel<PM, NW>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)SMEM);
++        cudaFuncSetAttribute(prompt_down_kernel<PM, NW>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)SMEM_DN);
+         return true;
+     }();
+     (void)once;
+@@ -1100,7 +1108,7 @@
+             h(svh_g), h(svh_u), h(suh_d), reinterpret_cast<half*>(xd.data_ptr()), (int)D, (int)N, (int)E,
+             (float)limit, (int)slots, order);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+-    prompt_down_kernel<PM, NW><<<dim3((unsigned)(D / 256), (unsigned)max_items), NW * 32, SMEM, stream>>>(
++    prompt_down_kernel<PM, NW><<<dim3((unsigned)(D / 256), (unsigned)max_items), NW * 32, SMEM_DN, stream>>>(
+         reinterpret_cast<const half*>(xd.data_ptr()), w(Td), items.data_ptr<int>(), counts.data_ptr<int>(),
+         members.data_ptr<int>(), h(svh_d), y.data_ptr<float>(), (int)N, (int)D, (int)E, order);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/exl3_mm.py next/tensorfold/families/glm5_next/cuda/exl3_mm.py
+--- tensorfold/families/glm5_next/cuda/exl3_mm.py	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/exl3_mm.py	2026-10-29 19:06:18.603238700 +0000
+@@ -87,7 +87,7 @@
+     from tensorfold.cuda.build import load
+ 
+     here = Path(__file__).parent
+-    return load(name="tensorfold_glm_exl3_v20", sources=[str(here / "exl3.cpp"), str(here / "exl3.cu")],
++    return load(name="tensorfold_glm_exl3_v20_ots0106", sources=[str(here / "exl3.cpp"), str(here / "exl3.cu")],
+                 extra_cuda_cflags=["-O3"], verbose=False)
+ 
+ 

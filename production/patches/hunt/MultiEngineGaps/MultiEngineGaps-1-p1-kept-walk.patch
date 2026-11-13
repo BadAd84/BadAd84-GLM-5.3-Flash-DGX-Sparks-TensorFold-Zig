@@ -1,0 +1,205 @@
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 02:29:54.075556100 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 03:02:34.651651400 +0000
+@@ -530,6 +530,44 @@
+     return struct.unpack("<d", struct.pack("<2i", lo, hi))[0]
+ 
+ 
++def kept_array(snap):
++    """--parallel 1: a kept snapshot's ids as an int64 array (``ids_array``), made once for the ids list it holds: id
++    lists are replaced, never changed in place, so ``_array_of`` (the list it was made from; ``spill.encode`` leaves
++    ``_`` fields out) tells a stale one."""
++
++    arr = getattr(snap, "ids_array", None)
++    if arr is None or getattr(snap, "_array_of", None) is not snap.ids:
++        import numpy as np
++
++        arr = snap.ids_array = np.asarray(snap.ids, dtype=np.int64)
++        snap._array_of = snap.ids
++    return arr
++
++
++class IdsOf:
++    """--parallel 1: ``seq[:len(snap.ids)] == snap.ids`` for one id list ``seq`` against many kept snapshots, the
++    list's int64 array (``arr``: one known to hold exactly its ids) made once and only if a snapshot passes the length
++    and last-id checks (``kept_array`` on the other side): a request's walk of the kept states no longer copies and
++    compares a list slice of every kept turn of its conversation (~5 ms each at 600k ids, 32 of them a turn)."""
++
++    def __init__(self, seq, arr=None) -> None:
++        self.seq, self.arr = seq, arr
++
++    def starts(self, snap) -> bool:
++        n, ids = len(snap.ids), snap.ids
++        if n > len(self.seq):
++            return False
++        if not n:
++            return True
++        if self.seq[n - 1] != ids[n - 1]:
++            return False
++        import numpy as np
++
++        if self.arr is None:
++            self.arr = np.asarray(self.seq, dtype=np.int64)
++        return bool(np.array_equal(self.arr[:n], kept_array(snap)))
++
++
+ MTP_DEFAULT = "1"                     # TF_GLM_MTP when unset: the MTP head stays beside DFlash2 (auto, 0: left out)
+ 
+ 
+@@ -1372,22 +1410,26 @@
+         dflash = (auto or code[0] // 10 == 1) and self.drafter is not None
+         return auto, auto or not dflash, dflash
+ 
+-    def _resume(self, prompt: list[int], code: list[int], salt: str | None = None):
++    def _resume(self, prompt: list[int], code: list[int], salt: str | None = None, arr=None):
+         """The longest snapshot of a strict prefix of ``prompt`` whose draft caches fit the request's drafters, or of
+         the whole prompt when it kept its head's logits row (a replay of an earlier prompt, ``decode.whole``); only one
+-        a request with the same ``cache_salt`` kept (OTS 0120; None: unsalted)."""
++        a request with the same ``cache_salt`` kept (OTS 0120; None: unsalted). ``arr``: ``prompt`` as an int64 array,
++        when one is at hand."""
+ 
+         _, mtp, dflash = self._drafters(code)
+-        best = None
+-        for snap in self.cache:
+-            fits = (not dflash or snap.drafter_end == len(snap.ids)) and (not mtp or snap.mtp_len >= 0)
+-            fits = fits and not (self.grid and len(snap.ids) % self.grid)     # prompt chunks start on the grid
++        ids = IdsOf(prompt, arr)
++        # longest first, equal lengths in cache order (the walk this replaced kept the first of the longest match): the
++        # first state whose ids prefix the prompt is the answer, and its last id is compared before the whole prefix, so
++        # a request no longer copies and compares the prompt against every kept turn of its conversation (MultiEngineGaps)
++        for snap in sorted(self.cache, key=lambda c: -len(c.ids)):
++            n = len(snap.ids)
++            fits = (not dflash or snap.drafter_end == n) and (not mtp or snap.mtp_len >= 0)
++            fits = fits and not (self.grid and n % self.grid)     # prompt chunks start on the grid
+             fits = fits and getattr(snap, "salt", None) == salt
+-            short = len(snap.ids) < len(prompt) or (len(snap.ids) == len(prompt) and snap.head is not None)
+-            if fits and short and prompt[:len(snap.ids)] == snap.ids and (
+-                    best is None or len(snap.ids) > len(best.ids)):
+-                best = snap
+-        return best
++            short = n < len(prompt) or (n == len(prompt) and snap.head is not None)
++            if fits and short and ids.starts(snap):
++                return snap
++        return None
+ 
+     def _drop(self, snap) -> None:
+         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object (with the
+@@ -1395,7 +1437,12 @@
+         if getattr(self, "spill", None) is not None:
+             self._spill_snap(snap, leaving=True)
+         snap.rows, snap.nbytes, snap.drafter_rows = None, 0, None
+-        self.cache.remove(snap)
++        # by identity: ``list.remove`` compares the entries before it by ``Snapshot``'s dataclass ``__eq__``, which on an
++        # equal-ids twin (OTS 0120: kept salted and unsalted) reaches the tensors and raises (and compares ids lists)
++        at = next((i for i, c in enumerate(self.cache) if c is snap), None)
++        if at is None:
++            raise ValueError("a kept snapshot dropped twice")
++        del self.cache[at]
+ 
+     # -- the spill tier, one request at a time (``--spill-gib``; cuda/spill.py). The kept ``decode.Snapshot`` goes
+     # through ``spill.encode``; ``_spill_rows`` gives a snapshot whose rows still live in the caches views of them, and
+@@ -1447,7 +1494,7 @@
+             return "images"
+         if getattr(snap, "salt", None) is not None:  # OTS 0120: salted; the store keys by ids, which can't tell
+             return "salted"
+-        if snap.rows is None and self.live[:n] != list(snap.ids):
++        if snap.rows is None and not self._live_of().starts(snap):
+             return "no_rows"
+         if self.grid and n % self.grid:
+             return "off_grid"
+@@ -1473,14 +1520,34 @@
+         snap._spill_key = (snap.ids, key)
+         return key
+ 
++    def _live_of(self) -> IdsOf:
++        """``IdsOf`` the live caches' ids (``live``, a list replaced at every request, never changed in place), made
++        once a list: its array is converted once however many kept states are checked against it."""
++
++        got = getattr(self, "_live_ids", None)
++        if got is None or got.seq is not self.live:
++            got = self._live_ids = IdsOf(self.live)
++        return got
++
+     def _superseded(self, snap) -> bool:
+         """A longer kept snapshot of the same conversation, stored or writable itself, holds this one's tokens (never
+         a shared-prefix state's: other conversations resume from it, not from the longer one)."""
+ 
+         if getattr(snap, "shared", False):
+             return False
++        import numpy as np
++
+         n = len(snap.ids)
+-        return any(c is not snap and len(c.ids) > n and c.ids[:n] == snap.ids
++        mine = None
++
++        def holds(c) -> bool:                     # c.ids[:n] == snap.ids (lengths checked by the caller)
++            nonlocal mine
++            if n and c.ids[n - 1] != snap.ids[n - 1]:
++                return False
++            mine = kept_array(snap) if mine is None else mine
++            return bool(np.array_equal(kept_array(c)[:n], mine))
++
++        return any(c is not snap and len(c.ids) > n and holds(c)
+                    and (self.spill.has(c.ids, self._spill_key(c)) or self._unwritable(c) is None) for c in self.cache)
+ 
+     def _spill_snap(self, snap, leaving: bool = False, keep: frozenset = frozenset()) -> None:
+@@ -1613,11 +1680,15 @@
+         from .decode import row_bytes, save_rows, snapshot_bytes
+ 
+         drafter = self._kept_drafter()
+-        live = self.live
++        live = self._live_of()
+         order = list(self.cache)
++        # keep is the resume point's ids (a copy of its snapshot's list): that snapshot's array, when it is kept, is
++        # keep's (the compare below shares the list's int objects, so it is an identity walk)
++        twin = next((c for c in order if len(c.ids) == len(keep) and c.ids == keep), None)
++        keep_of = IdsOf(keep, kept_array(twin) if twin is not None else None)
+ 
+-        def resumes(c) -> bool:
+-            return len(c.ids) <= len(keep) and keep[:len(c.ids)] == c.ids
++        def resumes(c) -> bool:                      # keep[:len(c.ids)] == c.ids
++            return keep_of.starts(c)
+ 
+         alive = {id(c) for c in order}
+         saved: dict[int, int] = {}                   # a survivor's held bytes once its rows are saved
+@@ -1636,7 +1707,7 @@
+             n = len(snap.ids)
+             if id(snap) not in alive or snap.rows is not None or resumes(snap):
+                 continue
+-            if live[:n] != snap.ids:                  # its rows are already gone: nothing to resume from
++            if not live.starts(snap):                 # its rows are already gone: nothing to resume from
+                 forget(snap)
+                 continue
+             need = row_bytes(self.e, snap, drafter=drafter)
+@@ -1687,16 +1758,9 @@
+ 
+         if not self.shared:
+             return []
+-        import numpy as np
+-
+         cut = len(hit.ids) if hit is not None else 0
+-        known = []
+-        for c in self.cache:                  # a kept prompt's ids as an array, made once (ids never change)
+-            if getattr(c, "salt", None) != salt:
+-                continue
+-            if getattr(c, "ids_array", None) is None:
+-                c.ids_array = np.asarray(c.ids, dtype=np.int64)
+-            known.append(c.ids_array)
++        known = [kept_array(c) for c in self.cache   # a kept prompt's ids as an array, made once (ids never change)
++                 if getattr(c, "salt", None) == salt]
+         return shared_points(prompt, cut, grid_point(len(prompt), cut, self.grid), self.grid, self.shared, known,
+                              self.opener)
+ 
+@@ -1881,7 +1945,12 @@
+                 raise ValueError(f"the tower gave {rows.shape[0]} rows for {len(positions)} image positions")
+             feed = VisionFeed(self, positions, rows)
+             feed.encode_s = time.perf_counter() - t
+-        hit = self._resume(list(prompt), code, salt) if draft and feed is None else None
++        parr = None
++        if prompt_array is not None and len(prompt_array) == len(prompt):
++            import numpy as np
++
++            parr = np.asarray(prompt_array, dtype=np.int64)
++        hit = self._resume(list(prompt), code, salt, parr) if draft and feed is None else None
+         disk = None                                    # --spill-gib: a longer stored prefix on disk (every rank reads)
+         # one whose stored fields fit the request's drafters; never for a salted request (OTS 0120: keyed by ids alone)
+         if self.spill is not None and draft and feed is None and salt is None:

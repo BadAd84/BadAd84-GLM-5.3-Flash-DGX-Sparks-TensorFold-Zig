@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the GLM disk guard every 60s (the KV offload fills the volume while serving)
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=60
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

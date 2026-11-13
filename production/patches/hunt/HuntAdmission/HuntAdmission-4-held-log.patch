@@ -1,0 +1,44 @@
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py ../b/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:43:19.432615100 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:43:19.574724600 +0000
+@@ -3646,6 +3646,7 @@
+                 continue
+             if not self.decoder.fits(stream):
+                 self.held = item                     # waits, first in line, for room
++                self._why_held(stream, "no room (fits)")
+                 break
+             waiter = getattr(self.decoder, "prefix_wait", None)
+             if waiter is not None and not getattr(stream, "prefix_waited", False):
+@@ -3671,9 +3672,10 @@
+             try:
+                 self.decoder.admit(stream)
+                 self.staged.discard(id(stream))
+-            except NoRoom:
++            except NoRoom as exc:
+                 self.boxes.pop(id(stream))
+                 self.held = item
++                self._why_held(stream, f"NoRoom: {exc}")
+                 break
+             except Exception as exc:                 # noqa: BLE001  (this request fails, the others go on)
+                 self.staged.discard(id(stream))
+@@ -3683,6 +3685,20 @@
+                 done.append(stream)
+         return done
+ 
++    def _why_held(self, stream, why: str) -> None:
++        """Rank 0: a request held at the head of the queue (every later one waits behind it) is logged once, with why
++        and the pool's state then: what tells a placement hold from a fill-order wait (recipe issue #199)."""
++
++        if getattr(stream, "held_logged", False):
++            return
++        stream.held_logged = True
++        d = self.decoder
++        pool = getattr(d, "pool", None)
++        print(f"[tensorfold] request of {len(stream.prompt)} prompt tokens held first in line, {why}: "
++              f"{d.live()} streams in ({len(d.filling)} filling), {self.waiting.qsize()} queued behind it, "
++              f"pool {pool.free_rows() if pool is not None else '?'} of {pool.rows if pool is not None else '?'} "
++              f"tokens free, {len(getattr(d, 'kept', []))} kept prompts", flush=True)
++
+     def flush_spill(self, timeout: float = 60.0) -> bool:
+         """Any thread (a SIGTERM): the worker writes the kept prompts to the spill tier at its next iteration, whatever
+         its slots and queue hold (the queued item only wakes an idle worker)."""

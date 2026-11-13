@@ -1,0 +1,20 @@
+# BootLeft-3 (lane BootLeft, 2026-10-30): MultiDecoder._time_prompt_layers ran a 64-row prompt pass before its loop
+# whose first shape is always 64 rows (fill_rows is a multiple of 64) and whose 64-row warm-up is that same call: one
+# 64-row pass fewer. Every measured pass is still preceded by its own shape's warm-up (tested: no CUDA allocation and
+# no Triton compile/load in any measured pass, either tree). The slicing policy's table is measured as before.
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -1087,10 +1087,9 @@
+         samples = {}
+         prev = e.use(e.home)
+         try:
+-            # Warm kernels first; this never publishes a kept prompt or draft context.
+-            e.reset()
+-            for _ in prefill_chunk_steps(e, timing_tokens(self.w.cfg.vocab, 64), 0, 64, head=False):
+-                pass
++            # Each shape's own warm-up pass, then its measured pass; this never publishes a kept prompt or draft
++            # context. (BootLeft: no separate 64-row pass first: the first shape is always 64 rows - fill_rows is a
++            # multiple of 64 - whose own warm-up below is that same call.)
+             for rows in sorted({min(r, self.fill_rows) for r in (64, 256, 512, 1024)} | {self.fill_rows}):
+                 e.reset()
+                 for _ in prefill_chunk_steps(e, timing_tokens(self.w.cfg.vocab, rows), 0, rows, head=False):

@@ -1,0 +1,23 @@
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 08:18:13.406837300 +0000
++++ ../b/tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 08:18:13.521019300 +0000
+@@ -779,6 +779,7 @@
+ 
+     window = MAX_WINDOW                 # rows of a round's windows together (TF_GLM_MULTI_WINDOW; set by __init__)
+     kept_bytes_cap = 0                  # TF_GLM_KEPT_BYTES_GIB in bytes (0: off; set by __init__)
++    reply_slice = 0                     # TF_GLM_REPLY_PREFILL_SLICE_MS (0: reply jobs unsliced; set by __init__)
+ 
+     def __init__(self, engine, streams: int, *, verify=None, drafts=None, draft_graphs: bool | None = None,
+                  tune: MultiSettings | None = None, row_ms: Sequence[float] | None = None,
+--- tensorfold/families/glm5_next/cuda/fastboot.py	2026-10-30 08:18:13.451292400 +0000
++++ ../b/tensorfold/families/glm5_next/cuda/fastboot.py	2026-10-30 08:18:13.533217600 +0000
+@@ -125,7 +125,9 @@
+             "TF_GLM_EXL3_DEC", "TF_GLM_EXL3_FUSE", "TF_GLM_EXL3_XROW", "TF_GLM_EXL3_DEC_ORDER", "TF_GLM_EXL3_LOADS",
+             "TF_GLM_EXL3_SEQ", "TF_GLM_EXL3_PASS", "TF_GLM_EXL3_PROMPT", "TF_GLM_EXL3_ORDER", "TF_GLM_EXL3_ROWROT",
+             # qmm.matmul_swiglu's decode gate (HuntMatmulExperts-3) and qmm.cu's K-slice reduce rule: forward only
+-            "TF_GLM_SWIGLU_SUM", "TF_GLM_QMM_CLUSTERS")
++            "TF_GLM_SWIGLU_SUM", "TF_GLM_QMM_CLUSTERS",
++            # latent.seg_chunks_split (DecodeAttnLeftovers-3): the decode kernel's launch split, the same bits
++            "TF_GLM_SEG_CHUNKS_SPLIT")
+ 
+ 
+ def knobs() -> dict:

@@ -1,0 +1,64 @@
+# HuntHostRequest-8 without its TF_GLM_SSE_NODELAY part (HuntHostReply-4 sets TCP_NODELAY unconditionally)
+--- tensorfold/cuda/http.py	2026-10-30 00:51:02.071296500 +0000
++++ tensorfold/cuda/http.py	2026-10-30 00:51:02.072298100 +0000
+@@ -43,6 +43,40 @@
+ _SSE_KEEPALIVE_S = _keepalive_seconds()
+ 
+ 
++def _switch_interval() -> float | None:
++    """(OTS) ``TF_GLM_SWITCH_INTERVAL_US``: Python's thread switch interval for the serving process, in microseconds
++    (unset: Python's 5,000). A request's preparation holds the GIL in slices of this length while the engine loop
++    waits to take it back (lane HuntHostRequest H2: 500 us cut a stand-in round loop's p99 81 -> 44 ms beside a 671k
++    turn, and slowed that turn 16%); a policy to measure on the Sparks, off by default."""
++
++    raw = os.environ.get("TF_GLM_SWITCH_INTERVAL_US", "").strip()
++    if not raw:
++        return None
++    try:
++        us = int(raw)
++    except ValueError:
++        us = 0
++    if us <= 0:
++        raise ValueError(f"TF_GLM_SWITCH_INTERVAL_US={raw!r}: expected a positive whole number of microseconds")
++    return us / 1e6
++
++
++def _gc_freeze() -> bool:
++    """(OTS) ``TF_GLM_GC_FREEZE=1``: once loaded, the process's objects are collected once and then frozen
++    (``gc.freeze``), so a full collection later scans only what came after: on a workstation with ~4.2M tracked
++    objects one took 394 ms with the GIL held (every thread, the engine loop's included, waits), 0 ms after the freeze
++    (lane HuntHostRequest H13). Off by default: how often a full collection runs in the serve is not measured yet."""
++
++    raw = os.environ.get("TF_GLM_GC_FREEZE", "0").strip() or "0"
++    if raw not in ("0", "1"):
++        raise ValueError(f"TF_GLM_GC_FREEZE={raw!r}: expected 0 or 1")
++    return raw == "1"
++
++
++_GC_FREEZE = _gc_freeze()
++_SWITCH_INTERVAL_S = _switch_interval()
++
++
+ class _Keepalive:
+     """A streamed reply's writes, plus an SSE comment line (``: keepalive``) whenever nothing has been written for
+     ``seconds`` while ``with`` holds it (patch 0111). A request that waits for a lane or fills a long prompt sends
+@@ -328,6 +362,19 @@
+         raise KeyboardInterrupt
+ 
+     signal.signal(signal.SIGTERM, _terminate)
++    if _SWITCH_INTERVAL_S is not None:      # OTS: TF_GLM_SWITCH_INTERVAL_US
++        import sys
++
++        sys.setswitchinterval(_SWITCH_INTERVAL_S)
++        print(f"[tensorfold] thread switch interval {_SWITCH_INTERVAL_S * 1e6:.0f} us (TF_GLM_SWITCH_INTERVAL_US)",
++              flush=True)
++    if _GC_FREEZE:                          # OTS: TF_GLM_GC_FREEZE
++        import gc
++
++        gc.collect()
++        gc.freeze()
++        print(f"[tensorfold] {gc.get_freeze_count():,} objects frozen out of later collections (TF_GLM_GC_FREEZE)",
++              flush=True)
+     server = Server((host, port), make_handler(app))
+     try:
+         server.serve_forever()

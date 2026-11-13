@@ -1,0 +1,474 @@
+diff -ruN a/tensorfold/families/glm5_next/cuda/forward.py b/tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 02:24:13.218894000 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 02:39:01.897606600 +0000
+@@ -623,6 +623,62 @@
+     _shift_conv(st.conv[li:li + 1], b.kproj[:, rs], n)
+ 
+ 
++def kda_pieces(layer: LayerW, w: Weights, b: Buffers, pieces) -> None:
++    """``kda_rows`` for each (st, lo, n) of a multi-prompt chunk's pieces (distinct streams, disjoint rows; their
++    projections done), with the chains of several pieces in one launch (PrefillLeftovers: kda_chunked.chain_pieces,
++    TF_GLM_KDA_PIECES). Each piece gets kda_rows' bits and side effects: its chain at its position from its state
++    into b.kscratch.out[lo:lo + n], its parity flipped, its conv window shifted; a piece marked inside its rows (OTS
++    0121) runs as kda_rows' two calls, the state and conv window between them kept, its second call in a second
++    launch with the other marked pieces' (the first takes the conv window the first part shifted). Pieces are
++    independent (each reads and writes only its own stream's state and conv window), so running their chains
++    together, then their commits, changes no bit. Without the chunked kernel, under TF_GLM_KDA_PIECES=0, or for one
++    piece: kda_rows a piece."""
++
++    from . import kda_chunked
++
++    if not kda_mod.CHUNKED or len(pieces) < 2 or kda_chunked.pieces_mode() == "0":
++        for st, lo, n in pieces:
++            kda_rows(layer, w, st, b, lo, n)
++        return
++    first, second = [], []
++    for st, lo, n in pieces:
++        li = st.kda_index[layer.index]
++        m = st.keep_point - st.pos if st.keep_point else 0
++        if 0 < m < n:
++            first.append((st, li, lo, m, st.pos))
++            second.append((st, li, lo + m, n - m, st.keep_point))
++        else:
++            first.append((st, li, lo, n, st.pos))
++    _kda_launch(layer, w, b, first)
++    for st, li, *_ in second:                # the state between kda_rows' two calls: its conv window and point
++        st.kept_conv[li].copy_(st.conv[li])
++        st.kept_at[li] = st.keep_point
++    if second:
++        _kda_launch(layer, w, b, second)
++
++
++def _kda_launch(layer: LayerW, w: Weights, b: Buffers, parts) -> None:
++    """``_kda_part`` for each (st, li, lo, n, pos) of ``parts`` (distinct streams): the chains in the launches of
++    kda_chunked.chain_pieces, then each part's commit (parity flipped, conv window shifted by its rows)."""
++
++    from . import kda_chunked
++
++    if len(parts) == 1:
++        st, li, lo, n, pos = parts[0]
++        _kda_part(layer, w, st, b, li, lo, n, pos)
++        return
++    c, k = w.cfg, layer.kda
++    s = b.kscratch
++    with prof.timed("kda: recurrence"):
++        kda_chunked.chain_pieces(
++            [(b.kproj[0, lo:lo + n], b.ka[lo:lo + n], b.kg[lo:lo + n], st.conv[li], st.rec[st.cur[li], li],
++              s.out[lo:lo + n], st.rec[1 - st.cur[li], li], n, pos) for st, li, lo, n, pos in parts],
++            k.b_off, k.conv, k.a_log, k.dt_bias, k.norm, c.eps, c.lower)
++    for st, li, lo, n, pos in parts:
++        st.cur[li] = 1 - st.cur[li]
++        _shift_conv(st.conv[li:li + 1], b.kproj[:, lo:lo + n], n)
++
++
+ def kda_segments(layer: LayerW, w: Weights, b: Buffers, R: int, seg: torch.Tensor, slots: "Slots",
+                  proj: torch.Tensor, scratch, li: int) -> torch.Tensor:
+     """kda_block's decode path for a multi-stream window (``seg``: kda.segment_table, set): the projections on every
+diff -ruN a/tensorfold/families/glm5_next/cuda/kda_chunk.cpp b/tensorfold/families/glm5_next/cuda/kda_chunk.cpp
+--- tensorfold/families/glm5_next/cuda/kda_chunk.cpp	2026-10-30 02:24:14.510559000 +0000
++++ tensorfold/families/glm5_next/cuda/kda_chunk.cpp	2026-10-30 02:37:36.937871900 +0000
+@@ -5,6 +5,12 @@
+                     const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                     const at::Tensor&, double, double, int64_t, int64_t, at::Tensor&, at::Tensor&, bool);
+ int64_t kda_chunk_clusters();
++void kda_chunk_pieces_cuda(const std::vector<at::Tensor>&, int64_t, int64_t, const std::vector<at::Tensor>&, int64_t,
++                           const std::vector<at::Tensor>&, int64_t, const std::vector<at::Tensor>&, const at::Tensor&,
++                           const std::vector<at::Tensor>&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
++                           double, double, const std::vector<int64_t>&, const std::vector<int64_t>&,
++                           const std::vector<at::Tensor>&, const std::vector<at::Tensor>&, bool);
++int64_t kda_chunk_slots();
+ 
+ static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
+     TORCH_CHECK(x.is_cuda() && x.scalar_type() == t, name, ": expected a CUDA tensor of the right dtype");
+@@ -45,6 +51,60 @@
+                    rows, off, out, state_out, pipe);
+ }
+ 
++// PrefillLeftovers: several streams' pieces of one multi-prompt chunk in one launch (kda_chunk_pieces_cuda), each
++// piece checked as ``chain`` checks a chunk; the pieces share the layer's weights and the projection / gate strides,
++// and no piece's state, conv window or output may overlap another's (the CTAs of different pieces run at once).
++void chain_pieces(const std::vector<at::Tensor>& P, int64_t p_stride, int64_t b_off, const std::vector<at::Tensor>& A,
++                  int64_t a_stride, const std::vector<at::Tensor>& G, int64_t g_stride,
++                  const std::vector<at::Tensor>& cs, const at::Tensor& cw, const std::vector<at::Tensor>& state_in,
++                  const at::Tensor& a_log, const at::Tensor& dt_bias, const at::Tensor& norm_w, double eps,
++                  double lower, const std::vector<int64_t>& rows, const std::vector<int64_t>& off,
++                  const std::vector<at::Tensor>& out, const std::vector<at::Tensor>& state_out, bool pipe) {
++    const size_t n = P.size();
++    TORCH_CHECK(n >= 1 && n <= 8 && A.size() == n && G.size() == n && cs.size() == n && state_in.size() == n &&
++                rows.size() == n && off.size() == n && out.size() == n && state_out.size() == n,
++                "pieces: 1 to 8, every list one entry a piece");
++    check(cw, at::kBFloat16, "conv weight");
++    check(a_log, at::kFloat, "A_log");
++    check(dt_bias, at::kFloat, "dt_bias");
++    check(norm_w, at::kBFloat16, "norm");
++    TORCH_CHECK(cw.is_contiguous() && a_log.is_contiguous() && dt_bias.is_contiguous() && norm_w.is_contiguous(),
++                "the per-head weights must be contiguous");
++    const int64_t H = a_log.numel();
++    TORCH_CHECK(dt_bias.numel() == H * 128 && norm_w.numel() == 128, "dt_bias [H*128], norm [128]");
++    TORCH_CHECK(cw.size(0) == 3 * H * 128 && cw.size(1) == 4, "4-tap convolutions of 3 x H x 128 channels");
++    for (size_t i = 0; i < n; ++i) {
++        check(P[i], at::kBFloat16, "P");
++        check(A[i], at::kBFloat16, "A");
++        check(G[i], at::kBFloat16, "G");
++        check(cs[i], at::kBFloat16, "conv state");
++        check(state_in[i], at::kFloat, "state");
++        check(state_out[i], at::kFloat, "state out");
++        check(out[i], at::kBFloat16, "out");
++        TORCH_CHECK(P[i].stride(0) == p_stride && A[i].stride(0) == a_stride && G[i].stride(0) == g_stride &&
++                    P[i].stride(1) == 1 && A[i].stride(1) == 1 && G[i].stride(1) == 1,
++                    "pieces share the row strides, rows contiguous along channels");
++        TORCH_CHECK(cs[i].is_contiguous() && state_in[i].is_contiguous() && state_out[i].is_contiguous() &&
++                    out[i].is_contiguous(), "conv states, states and outs must be contiguous");
++        TORCH_CHECK(cs[i].size(0) == 3 && cs[i].size(1) == 3 * H * 128, "conv state [3, 3 H 128]");
++        TORCH_CHECK(state_in[i].numel() == H * 128 * 128 && state_out[i].numel() == H * 128 * 128,
++                    "states [H, 128, 128]");
++        TORCH_CHECK(rows[i] >= 1 && P[i].size(0) >= rows[i] && A[i].size(0) >= rows[i] && G[i].size(0) >= rows[i] &&
++                    out[i].size(0) >= rows[i], "rows");
++        TORCH_CHECK(off[i] >= 0 && off[i] < 32, "off");
++        TORCH_CHECK(P[i].device() == P[0].device(), "pieces on one device");
++        for (size_t j = 0; j < n; ++j) {
++            TORCH_CHECK(state_in[i].data_ptr() != state_out[j].data_ptr(), "a state out aliases a state in");
++            if (j != i)
++                TORCH_CHECK(state_out[i].data_ptr() != state_out[j].data_ptr() &&
++                            out[i].data_ptr() != out[j].data_ptr(), "pieces share a state or an output");
++        }
++    }
++    c10::cuda::CUDAGuard guard(P[0].device());
++    kda_chunk_pieces_cuda(P, p_stride, b_off, A, a_stride, G, g_stride, cs, cw, state_in, a_log, dt_bias, norm_w, eps,
++                          lower, rows, off, out, state_out, pipe);
++}
++
+ #ifdef KDA_PROF
+ void kda_chunk_prof(at::Tensor&);
+ void prof(at::Tensor out) { kda_chunk_prof(out); }
+@@ -53,6 +113,8 @@
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     m.def("chain", &chain);
+     m.def("clusters", &kda_chunk_clusters);
++    m.def("chain_pieces", &chain_pieces);
++    m.def("slots", &kda_chunk_slots);
+ #ifdef KDA_PROF
+     m.def("prof", &prof);
+ #endif
+diff -ruN a/tensorfold/families/glm5_next/cuda/kda_chunk.cu b/tensorfold/families/glm5_next/cuda/kda_chunk.cu
+--- tensorfold/families/glm5_next/cuda/kda_chunk.cu	2026-10-30 02:24:14.543092500 +0000
++++ tensorfold/families/glm5_next/cuda/kda_chunk.cu	2026-10-30 02:37:36.912277600 +0000
+@@ -36,6 +36,7 @@
+ #include <cuda_runtime.h>
+ #include <cooperative_groups.h>
+ #include <cstdint>
++#include <vector>
+ 
+ namespace cg = cooperative_groups;
+ 
+@@ -280,8 +281,13 @@
+ // Every arithmetic operation is the !PIPE kernel's own, on the same thread of the same warp with the same operands,
+ // so the outputs and the state are its bits; only where the steps run changes. 2 H CTAs instead of H: a GB10 runs
+ // TP=3's 22 heads on 44 of its 48 SMs where one CTA a head used 22.
++//
++// The body serves two entries: chunk_kernel (one prompt chunk: blockIdx.x a head) and chunk_pieces (PrefillLeftovers:
++// several streams' prompt pieces of one multi-prompt chunk in one grid, blockIdx.y a piece, each CTA its piece's rows,
++// conv window, entering state and outputs from the piece table; the same body on the same operands, so each piece
++// has the bits of its own launch). ``xbuf``: this launch's (piece's) slots, two a head.
+ template <bool PIPE>
+-__global__ void __launch_bounds__(NT, 1) chunk_kernel(
++__device__ __forceinline__ void chunk_body(
+         int H, const __nv_bfloat16* __restrict__ P, int p_stride, int b_off,
+         const __nv_bfloat16* __restrict__ A, int a_stride, const __nv_bfloat16* __restrict__ G, int g_stride,
+         const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+@@ -790,6 +796,44 @@
+                 make_float4(s[vv][i][0], s[vv][i][1], s[vv][i][2], s[vv][i][3]);
+ }
+ 
++template <bool PIPE>
++__global__ void __launch_bounds__(NT, 1) chunk_kernel(
++        int H, const __nv_bfloat16* __restrict__ P, int p_stride, int b_off,
++        const __nv_bfloat16* __restrict__ A, int a_stride, const __nv_bfloat16* __restrict__ G, int g_stride,
++        const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
++        const float* __restrict__ state_in, const float* __restrict__ a_log, const float* __restrict__ dt_bias,
++        const __nv_bfloat16* __restrict__ norm_w, float eps, float lower, int rows, int off,
++        __nv_bfloat16* __restrict__ out, float* __restrict__ state_out, uint4* __restrict__ xbuf) {
++    chunk_body<PIPE>(H, P, p_stride, b_off, A, a_stride, G, g_stride, cs, cw, state_in, a_log, dt_bias, norm_w, eps,
++                     lower, rows, off, out, state_out, xbuf);
++}
++
++// A multi-prompt chunk's pieces (PrefillLeftovers): what differs between them. Pieces of one launch share the
++// projection / gate strides (views of the prompt buffers) and the layer's weights.
++constexpr int MAXP = 8;                 // pieces a launch (multi-prompt chunks hold one a stream: --parallel <= 8)
++struct Piece {
++    const __nv_bfloat16* P;             // the piece's first projection row
++    const __nv_bfloat16* A;             // its decay gate rows
++    const __nv_bfloat16* G;             // its output gate rows
++    const __nv_bfloat16* cs;            // its stream's conv window [3, 3 H 128]
++    const float* state_in;              // its stream's entering state [H, 128, 128]
++    __nv_bfloat16* out;                 // its read-out rows
++    float* state_out;                   // its stream's state out
++    int rows, off;                      // its rows, its first row's offset into its 32-row sub-chunk
++};
++struct Pieces { Piece p[MAXP]; };
++
++template <bool PIPE>
++__global__ void __launch_bounds__(NT, 1) chunk_pieces(
++        int H, int p_stride, int b_off, int a_stride, int g_stride, const __nv_bfloat16* __restrict__ cw,
++        const float* __restrict__ a_log, const float* __restrict__ dt_bias, const __nv_bfloat16* __restrict__ norm_w,
++        float eps, float lower, uint4* __restrict__ xbuf, const __grid_constant__ Pieces t) {
++    const Piece& q = t.p[blockIdx.y];
++    chunk_body<PIPE>(H, q.P, p_stride, b_off, q.A, a_stride, q.G, g_stride, q.cs, cw, q.state_in, a_log, dt_bias,
++                     norm_w, eps, lower, q.rows, q.off, q.out, q.state_out,
++                     PIPE ? xbuf + (size_t)blockIdx.y * 2 * H * XW : nullptr);
++}
++
+ }  // namespace
+ 
+ #ifdef KDA_PROF
+@@ -863,6 +907,80 @@
+         ptr<__nv_bfloat16>(out), ptr<float>(state_out), reinterpret_cast<uint4*>(xbuf.data_ptr())));
+ }
+ 
++// PrefillLeftovers: a multi-prompt chunk's pieces in one grid, chunk_pieces<pipe> with the pieces along y (H CTAs a
++// piece, or 2 H as producer / consumer clusters); each piece's rows, conv window, states and outputs from the table,
++// so each gets the bits of its own kda_chunk_cuda call (the same body, operands and order). The caller (kda_chunked
++// .chain_pieces) picks the pieces and the form; ``pipe`` without clusters on this GPU takes one CTA a head.
++void kda_chunk_pieces_cuda(const std::vector<at::Tensor>& P, int64_t p_stride, int64_t b_off,
++                           const std::vector<at::Tensor>& A, int64_t a_stride, const std::vector<at::Tensor>& G,
++                           int64_t g_stride, const std::vector<at::Tensor>& cs, const at::Tensor& cw,
++                           const std::vector<at::Tensor>& state_in, const at::Tensor& a_log, const at::Tensor& dt_bias,
++                           const at::Tensor& norm_w, double eps, double lower, const std::vector<int64_t>& rows,
++                           const std::vector<int64_t>& off, const std::vector<at::Tensor>& out,
++                           const std::vector<at::Tensor>& state_out, bool pipe) {
++    auto stream = at::cuda::getCurrentCUDAStream();
++    const int H = (int)a_log.numel(), n = (int)P.size();
++    TORCH_CHECK(n >= 1 && n <= MAXP, "pieces: 1 to ", MAXP);
++    const int smem = (int)sizeof(Smem);
++    static int attr_device = -1, major = 0;
++    const int device = P[0].get_device();
++    if (attr_device != device) {
++        C10_CUDA_CHECK(cudaFuncSetAttribute(chunk_pieces<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++        C10_CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
++        if (major >= 9)
++            C10_CUDA_CHECK(cudaFuncSetAttribute(chunk_pieces<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++        attr_device = device;
++    }
++    Pieces t = {};
++    for (int i = 0; i < n; ++i)
++        t.p[i] = Piece{ptr<__nv_bfloat16>(P[i]), ptr<__nv_bfloat16>(A[i]), ptr<__nv_bfloat16>(G[i]),
++                       ptr<__nv_bfloat16>(cs[i]), ptr<float>(state_in[i]), ptr<__nv_bfloat16>(out[i]),
++                       ptr<float>(state_out[i]), (int)rows[i], (int)off[i]};
++    if (!pipe || major < 9) {
++        chunk_pieces<false><<<dim3(H, n), NT, smem, stream>>>(
++            H, (int)p_stride, (int)b_off, (int)a_stride, (int)g_stride, ptr<__nv_bfloat16>(cw), ptr<float>(a_log),
++            ptr<float>(dt_bias), ptr<__nv_bfloat16>(norm_w), (float)eps, (float)lower, nullptr, t);
++        C10_CUDA_KERNEL_LAUNCH_CHECK();
++        return;
++    }
++    // two slots a head a piece (66 KB each), kept for the process like kda_chunk_cuda's (one stream, one call at a
++    // time)
++    static at::Tensor xbuf;
++    const int64_t need = (int64_t)2 * H * n * XW * 16;
++    if (!xbuf.defined() || xbuf.numel() < need || xbuf.get_device() != device)
++        xbuf = at::empty({need}, P[0].options().dtype(at::kByte));
++    cudaLaunchConfig_t cfg = {};
++    cfg.gridDim = dim3(2 * H, n);
++    cfg.blockDim = dim3(NT);
++    cfg.dynamicSmemBytes = smem;
++    cfg.stream = stream;
++    cudaLaunchAttribute attr[1];
++    attr[0].id = cudaLaunchAttributeClusterDimension;
++    attr[0].val.clusterDim.x = 2;
++    attr[0].val.clusterDim.y = 1;
++    attr[0].val.clusterDim.z = 1;
++    cfg.attrs = attr;
++    cfg.numAttrs = 1;
++    C10_CUDA_CHECK(cudaLaunchKernelEx(
++        &cfg, chunk_pieces<true>, H, (int)p_stride, (int)b_off, (int)a_stride, (int)g_stride,
++        (const __nv_bfloat16*)ptr<__nv_bfloat16>(cw), (const float*)ptr<float>(a_log),
++        (const float*)ptr<float>(dt_bias), (const __nv_bfloat16*)ptr<__nv_bfloat16>(norm_w), (float)eps,
++        (float)lower, reinterpret_cast<uint4*>(xbuf.data_ptr()), t));
++}
++
++// The one-CTA-a-head CTAs this GPU runs at once (its SMs times chunk_pieces<false>'s blocks an SM): the piece
++// grid's wave width, which kda_chunked's launch plan reads.
++int64_t kda_chunk_slots() {
++    int device = 0;
++    C10_CUDA_CHECK(cudaGetDevice(&device));
++    const int smem = (int)sizeof(Smem);
++    C10_CUDA_CHECK(cudaFuncSetAttribute(chunk_pieces<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++    int sms = 0, per = 0;
++    C10_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
++    C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, chunk_pieces<false>, NT, smem));
++    return (int64_t)sms * per;
++}
++
+ // The most producer / consumer clusters this GPU holds at once (0 without clusters): the pipe serves H heads only
+ // when it is at least H.
+ int64_t kda_chunk_clusters() {
+diff -ruN a/tensorfold/families/glm5_next/cuda/kda_chunked.py b/tensorfold/families/glm5_next/cuda/kda_chunked.py
+--- tensorfold/families/glm5_next/cuda/kda_chunked.py	2026-10-30 02:24:14.558140100 +0000
++++ tensorfold/families/glm5_next/cuda/kda_chunked.py	2026-10-30 06:49:28.846602500 +0000
+@@ -224,6 +224,142 @@
+     return out[:rows]
+ 
+ 
++# -- several streams' pieces of a multi-prompt chunk (PrefillLeftovers) --------------------------------------------
++# A multi-prompt chunk (multi_prefill) used to launch chunk_kernel once a piece, H CTAs each, one after another: four
++# fork pieces of 39 rows run 4 x 22 CTAs in four launches on a GB10's 48 SMs. chain_pieces runs pieces in one grid
++# (kda_chunk.cu's chunk_pieces: H CTAs a piece, or 2 H as producer / consumer clusters), each CTA its own piece's
++# rows, conv window and state, so each piece has the bits of its own launch. Which pieces share a launch, and in which
++# form, is a speed choice from a model of the launches (``launch_plan``); every plan gives the same bits.
++#
++# The model, in units of one sub-chunk of one head on one SM (RTX 5070: 20.5 us one CTA a head, HuntPrefill-1): a
++# CTA of a piece of n sub-chunks costs n one CTA a head, 0.63 n + 1.5 as a pair (12.9 / 20.5 a sub-chunk; the
++# pipe's first sub-chunk runs on the producer alone and its last on the consumer alone); a grid's CTAs run in
++# waves over the slots the GPU holds at once (its SMs x blocks an SM; clusters for pairs), assigned in launch order,
++# longest pieces first; a launch costs LAUNCH more. The plan with the least modelled time wins: the longest pieces
++# alone (each as a pair when that wins and the GPU holds a cluster for every head), the rest in one grid. Measured on
++# the RTX 5070 (bench_kda_pieces.py): a 4,096-row chunk of 16 heads takes 2.646 ms one CTA a head and 1.624 as pairs
++# (0.614 of it; the model says 0.642); the plan beat one launch a piece in all 10 shapes measured (-2% to -45%).
++# Speed only: a GB10 run of the same bench recalibrates PIECE_PAIR and PIECE_LAUNCH.
++PIECE_PAIR = (0.63, 1.5)
++PIECE_LAUNCH = 0.25
++
++
++def pieces_mode(value: str | None = None) -> str:
++    """TF_GLM_KDA_PIECES: ``plan`` (default) runs a multi-prompt chunk's pieces by ``launch_plan``; ``grid``: every
++    piece in one grid of one CTA a head; ``0``: one launch a piece, as before (``forward.kda_rows`` each). The same
++    bits whichever is set."""
++    import os
++
++    value = (os.environ.get("TF_GLM_KDA_PIECES", "") if value is None else value).strip() or "plan"
++    if value not in ("plan", "grid", "0"):
++        raise ValueError(f"TF_GLM_KDA_PIECES: plan, grid or 0, not {value!r}")
++    return value
++
++
++def subchunks(rows: int, off: int) -> int:
++    """The 32-row sub-chunks a prompt piece of ``rows`` rows starting ``off`` rows into its sub-chunk runs."""
++    return (int(rows) + int(off) + CHUNK - 1) // CHUNK
++
++
++def _grid_cost(subs: list[int], H: int, slots: int, pair: bool) -> float:
++    """A grid's modelled time: its pieces' H CTAs each (longest piece first) in waves over ``slots``."""
++    import heapq
++
++    a, b = PIECE_PAIR
++    free = [0.0] * max(1, min(slots, H * len(subs)))
++    for n in sorted(subs, reverse=True):
++        t = a * n + b if pair else float(n)
++        for _ in range(H):
++            heapq.heapreplace(free, free[0] + t)
++    return max(free)
++
++
++@lru_cache(maxsize=256)
++def launch_plan(rows: tuple, offs: tuple, H: int, slots: int, clusters: int, pipe: bool,
++                mode: str = "plan") -> tuple:
++    """The launches of a multi-prompt chunk's pieces: ((pair, (piece indices, longest first)), ...). ``slots``: the
++    GPU's one-CTA-a-head CTAs at once (``slots()``); ``clusters``: its pairs at once; ``pipe``: pairs allowed
++    (``pipe_on()``). Speed only."""
++    subs = [subchunks(r, o) for r, o in zip(rows, offs)]
++    order = tuple(sorted(range(len(rows)), key=lambda i: (-subs[i], i)))
++    if mode == "grid":
++        return ((False, order),)
++
++    def alone(i: int) -> tuple[float, bool]:
++        one = _grid_cost([subs[i]], H, slots, False)
++        if pipe and clusters >= H:                   # kda_chunk_cuda's pair needs a cluster for every head
++            two = _grid_cost([subs[i]], H, clusters, True)
++            if two < one:
++                return two, True
++        return one, False
++
++    best = None
++    for k in range(len(order) + 1):
++        solo, rest = order[:k], order[k:]
++        cost, plan = 0.0, []
++        for i in solo:
++            t, pair = alone(i)
++            cost += t + PIECE_LAUNCH
++            plan.append((pair, (i,)))
++        if len(rest) == 1:
++            t, pair = alone(rest[0])
++            cost += t + PIECE_LAUNCH
++            plan.append((pair, rest))
++        elif rest:
++            t, pair = _grid_cost([subs[i] for i in rest], H, slots, False), False
++            if pipe and clusters > 0:
++                two = _grid_cost([subs[i] for i in rest], H, clusters, True)
++                if two < t:
++                    t, pair = two, True
++            cost += t + PIECE_LAUNCH
++            plan.append((pair, rest))
++        if best is None or cost < best[0] - 1e-9:
++            best = (cost, tuple(plan))
++    return best[1]
++
++
++@lru_cache(maxsize=1)
++def _GPU() -> tuple[int, int, bool]:
++    pipe = _PIPE()
++    return int(_ext().slots()), clusters() if pipe else 0, pipe
++
++
++def slots() -> int:
++    """The one-CTA-a-head CTAs this GPU runs at once (SMs x chunk_pieces' blocks an SM)."""
++    return int(_ext().slots())
++
++
++def chain_pieces(pieces, b_off: int, conv_w: torch.Tensor, a_log: torch.Tensor, dt_bias: torch.Tensor,
++                 norm_w: torch.Tensor, eps: float, lower: float, *, plan: tuple | None = None,
++                 mode: str | None = None) -> tuple:
++    """``chain`` over several streams' pieces of one multi-prompt chunk: ``pieces`` a sequence of (p, a, g,
++    conv_state, state_in, out, state_out, rows, pos), as ``chain`` takes them; each piece's out[:rows] and state_out
++    written with the bits of its own ``chain`` call. Launches by ``launch_plan`` (``plan``: given launches instead);
++    returns the plan run."""
++
++    H = a_log.numel()
++    rows = tuple(int(x[7]) for x in pieces)
++    offs = tuple(int(x[8]) % CHUNK for x in pieces)
++    if plan is None:
++        nslots, nclu, pipe = _GPU()
++        plan = launch_plan(rows, offs, H, nslots, nclu, pipe, mode or pieces_mode())
++    ext = _ext()
++    for pair, idx in plan:
++        if len(idx) == 1:
++            p, a, g, cs, s_in, out, s_out, n, _ = pieces[idx[0]]
++            ext.chain(p, p.stride(0), int(b_off), a, a.stride(0), g, g.stride(0), cs, conv_w, s_in, a_log, dt_bias,
++                      norm_w, float(eps), float(lower), rows[idx[0]], offs[idx[0]], out, s_out, bool(pair))
++            continue
++        sel = [pieces[i] for i in idx]
++        p0 = sel[0][0]
++        ext.chain_pieces([x[0] for x in sel], p0.stride(0), int(b_off), [x[1] for x in sel], sel[0][1].stride(0),
++                         [x[2] for x in sel], sel[0][2].stride(0), [x[3] for x in sel], conv_w,
++                         [x[4] for x in sel], a_log, dt_bias, norm_w, float(eps), float(lower),
++                         [rows[i] for i in idx], [offs[i] for i in idx], [x[5] for x in sel], [x[6] for x in sel],
++                         bool(pair))
++    return plan
++
++
+ @lru_cache(maxsize=1)
+ def _PIPE() -> bool:
+     return pipe_on()
+diff -ruN a/tensorfold/families/glm5_next/cuda/multi_prefill.py b/tensorfold/families/glm5_next/cuda/multi_prefill.py
+--- tensorfold/families/glm5_next/cuda/multi_prefill.py	2026-10-30 02:24:13.245848600 +0000
++++ tensorfold/families/glm5_next/cuda/multi_prefill.py	2026-10-30 02:39:07.388133400 +0000
+@@ -112,7 +112,7 @@
+ 
+     def __call__(self, layer, done: tuple[int, int] | None = None):
+         from . import prof
+-        from .forward import chunks_for, dsa_front, dsa_rows, kda_front, kda_rows, out_proj, undone
++        from .forward import chunks_for, dsa_front, dsa_rows, kda_front, kda_pieces, out_proj, undone
+         from . import qmm, shard
+ 
+         w, b, R = self.w, self.b, self.R
+@@ -122,8 +122,9 @@
+                 with prof.timed("kda: projections"):
+                     for lo, hi in undone(R, done):
+                         kda_front(layer, b, lo, hi)
+-                for p in self.pieces:
+-                    kda_rows(layer, w, p.st, b, p.lo, p.rows)
++                # each piece's recurrence on its own stream's state, several pieces a launch (forward.kda_pieces:
++                # each piece the bits of its own kda_rows call)
++                kda_pieces(layer, w, b, [(p.st, p.lo, p.rows) for p in self.pieces])
+                 with prof.timed("kda: out + all-gather"):
+                     return out_proj(w, b, b.kscratch.out[:R], k.o, None, R, site=(layer.index, "a"))
+         a, c = layer.dsa, w.cfg

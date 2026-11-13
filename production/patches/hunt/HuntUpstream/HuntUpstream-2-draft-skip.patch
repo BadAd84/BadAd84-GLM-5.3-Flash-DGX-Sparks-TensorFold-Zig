@@ -1,0 +1,138 @@
+# HuntUpstream-2: TF_GLM_DRAFT_SKIP, ported from MiaAI-Lab recipe PR #205's patches/0125-glm-prompt-draft-skip-partial16.patch
+# (mxfp0, Apache-2.0; the DRAFT_SKIP half only, not PARTIAL16, which needs the bf16-partials numerics trade). A prompt
+# chunk's DFlash2 taps are committed only within the ring's reach (2,176 rows) before a point the context is read at
+# (the lane's stops, its kept point, the prompt's end); the context end moves past the rest. Off by default
+# (TF_GLM_DRAFT_SKIP=1 turns it on); joins the ranks' startup comparison. Replies: unchanged by construction (drafts
+# never change a reply); drafter ring rows every point reads: equal to the full commit's (test_draft_skip.py).
+# Apply: cd work/hunt/tree/.. && patch -p0 < HuntUpstream-2-draft-skip.patch
+diff -r a/tensorfold/families/glm5_next/cuda/dflash2_multi.py b/tensorfold/families/glm5_next/cuda/dflash2_multi.py
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-30 00:01:26.427598100 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-30 00:01:26.429363300 +0000
+@@ -20,6 +20,7 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ import sys
+ from dataclasses import dataclass
+ from typing import Sequence
+@@ -128,6 +129,48 @@
+         return self.owner.propose([DraftRequest(self, pending, depth, sampling, confidence, beta, round_ms)])[0]
+ 
+ 
++# TF_GLM_DRAFT_SKIP=1 (MiaAI-Lab recipe PR #205's 0125, by mxfp0, Apache-2.0; ported onto the synced tree): a prompt's
++# taps go into DFlash2's context only within reach of the points its context is read at (the prompt's end, its kept
++# points); the rows before are never read. 0 (the default): every row, as before.
++DRAFT_SKIP = os.environ.get("TF_GLM_DRAFT_SKIP", "0") == "1"
++
++
++class WindowTaps:
++    """``ctx.add_taps`` for a prompt's chunks, committing only the rows within ``reach`` before one of ``points``: a
++    ring holds its last ``ring`` rows only and a block pass reads its window only, so what a later pass or kept state
++    reads is what a full commit leaves. The ranges start on the ``t_max`` steps a full commit takes from the chunk's
++    start and end at the chunk's end or a point (a chunk never runs past a stop, so a range ends where the full
++    commit's launch does: the same launches for those rows); the context's end moves past the rows left out."""
++
++    def __init__(self, ctx: DraftContext, points: Sequence[int]) -> None:
++        self.ctx, self.points = ctx, sorted(set(points))
++        self.reach = ctx.ring or ctx.window + ctx.block + 1
++        self.step = ctx.owner.t_max
++
++    def _skip_to(self, p: int) -> None:
++        if p > self.ctx.context_end:
++            self.ctx.context_end = p
++            self.ctx.pos_dev.fill_(p)
++
++    def add_taps(self, taps: torch.Tensor) -> None:
++        a = self.ctx.context_end
++        z = a + taps.shape[0]
++        spans: list[list[int]] = []
++        for p in self.points:
++            lo, hi = max(a, p - self.reach), min(z, p)
++            if lo >= hi:
++                continue
++            lo = a + (lo - a) // self.step * self.step
++            if spans and lo <= spans[-1][1]:
++                spans[-1][1] = max(spans[-1][1], hi)
++            else:
++                spans.append([lo, hi])
++        for lo, hi in spans:
++            self._skip_to(lo)
++            self.ctx.add_taps(taps[lo - a:hi - a])
++        self._skip_to(z)
++
++
+ @dataclass
+ class DraftRequest:
+     """One stream's draft for a round: ``Drafter.propose``'s arguments with the stream's context."""
+diff -r a/tensorfold/families/glm5_next/cuda/engine.py b/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:01:26.480330700 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:01:26.482344400 +0000
+@@ -880,8 +880,9 @@
+         # OTS 0104: the one-stream graphs' capture (``solo_graphs``), the same on every rank (their warm-up forwards
+         # all-gather)
+         self.solo = bool(graphs) and solo_graphs(parallel)
++        from .dflash2_multi import DRAFT_SKIP                 # TF_GLM_DRAFT_SKIP: every rank's DFlash2 rings alike
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+-                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo)] + \
++                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(DRAFT_SKIP)] + \
+             lay.owner_words(cfg.layers)                       # OTS 0105: TF_GLM_EXPERT_ROTATE
+         rows = self._gather_ints(mine + [spare >> 20])
+         odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+@@ -893,7 +894,7 @@
+                                "TF_GLM_MULTI_VERIFY, TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE / _WINDOW, "
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+-                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS): "
++                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_DRAFT_SKIP): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")
+diff -r a/tensorfold/families/glm5_next/cuda/multi.py b/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:01:26.455480500 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:01:26.458786600 +0000
+@@ -1663,6 +1663,19 @@
+         """The lane's slot's DFlash2 context."""
+         return self.drafts.contexts[lane.slot]
+ 
++    def _prompt_ctx(self, lane: Lane):
++        """The context a prompt chunk's taps go to: TF_GLM_DRAFT_SKIP's window of it (``dflash2_multi.WindowTaps``)
++        over the points the context is read at - the lane's stops (its shared-prefix points, its kept point when a
++        chunk stops there), its kept point (OTS 0121 keeps it inside a chunk: its window lies within the end's reach,
++        ``_inner_ok``, but naming it costs nothing) and the prompt's end - else the context itself."""
++        from . import dflash2_multi
++
++        ctx = self._ctx(lane)
++        if not dflash2_multi.DRAFT_SKIP or not isinstance(ctx, dflash2_multi.DraftContext):
++            return ctx
++        points = [*lane.stops, len(lane.s.prompt)] + ([lane.point] if lane.point is not None else [])
++        return dflash2_multi.WindowTaps(ctx, points)
++
+     def _inner_ok(self, lane: Lane, n: int) -> bool:
+         """OTS 0121 (TF_GLM_ONE_CHUNK_WARM): whether the lane's kept point B (``lane.point`` < n) is taken inside the
+         prompt chunk that fills past it rather than at a chunk stop. B lies on the prompt grid (16 to 128, a multiple
+@@ -2963,12 +2976,13 @@
+                 out, lane.head = lane.head, None
+             else:
+                 if layers is None:
+-                    out = prefill_chunk(e, prompt, start, stop - start, drafter=self._ctx(lane) if lane.dflash else None,
++                    out = prefill_chunk(e, prompt, start, stop - start,
++                                        drafter=self._prompt_ctx(lane) if lane.dflash else None,
+                                         feed=lane.feed, mtp=False, head=stop == n)
+                 else:
+                     complete, out = sliced_fill.advance(self.partial, *layers, len(self.w.layers),
+                         lambda: prefill_chunk_steps(e, prompt, start, stop - start,
+-                            drafter=self._ctx(lane) if lane.dflash else None, feed=lane.feed, head=stop == n),
++                            drafter=self._prompt_ctx(lane) if lane.dflash else None, feed=lane.feed, head=stop == n),
+                         before_finalize=self.partial.layer_event.record)
+                     if not complete:
+                         return None
+@@ -3027,7 +3041,7 @@
+                 raise RuntimeError(f"stream {lane.sid}: a prompt chunk {start} .. {stop} of {n}")
+             inner.append(self._mark(lane, start, stop))
+             pieces.append(multi_prefill.Piece(lane.st, list(lane.s.prompt[start:stop]),
+-                                              drafter=self._ctx(lane) if lane.dflash else None, head=stop == n))
++                                              drafter=self._prompt_ctx(lane) if lane.dflash else None, head=stop == n))
+         t = time.perf_counter()
+         if layers is None:
+             heads = multi_prefill.prefill_pieces(e, pieces)

@@ -1,0 +1,44 @@
+--- tensorfold/families/glm5_next/cuda/kept_reasoning.py
++++ tensorfold/families/glm5_next/cuda/kept_reasoning.py
+@@ -141,6 +141,10 @@
+         self.by_key: dict[str, int] = {}
+         self.size = self.next = 0
+         self.lock = threading.Lock()
++        # (OTS) this thread's last ``restore``: (its messages, their running hash). The request's reply is remembered
++        # on the thread that prepared it, after the messages its ``restore`` walked, so ``remember`` takes their
++        # conversation's hash from there instead of walking them again (16 ms at ~600k tokens, before [DONE])
++        self.walked = threading.local()
+ 
+     @classmethod
+     def from_env(cls) -> "KeptReasoning | None":
+@@ -155,7 +159,7 @@
+ 
+         if not calls or not isinstance(reasoning, str) or not reasoning.strip() or len(reasoning) > self.chars:
+             return
+-        keys = tuple(_keys(messages if isinstance(messages, list) else [], calls))
++        keys = tuple(self._keys(messages if isinstance(messages, list) else [], calls))
+         with self.lock:
+             n, self.next = self.next, self.next + 1
+             self.items[n] = (reasoning, keys)
+@@ -168,6 +172,15 @@
+                 for key in old_keys:
+                     if self.by_key.get(key) == old:
+                         del self.by_key[key]
++
++    def _keys(self, history: list[Any], calls: Any) -> list[str]:
++        """``_keys(history, calls)``: the running hash of ``history`` kept by this thread's ``restore`` of that very
++        list, else walked here."""
++
++        walked, self.walked.last = getattr(self.walked, "last", None), None
++        if walked is not None and walked[0] is history:
++            return _ids(calls) + [walked[1].key(calls)]
++        return _keys(history, calls)
+ 
+     def _find(self, keys: list[str]) -> str | None:
+         with self.lock:
+@@ -196,4 +209,5 @@
+                     out = out if out is not None else list(messages)
+                     out[i] = {**m, "reasoning_content": kept}
+             run.add(m)                       # the shape has no reasoning: the same before or after a restore
++        self.walked.last = (messages, run)
+         return messages if out is None else out

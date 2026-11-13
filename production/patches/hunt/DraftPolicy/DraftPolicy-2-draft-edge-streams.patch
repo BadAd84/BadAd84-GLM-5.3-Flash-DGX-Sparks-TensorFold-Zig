@@ -1,0 +1,170 @@
+# DraftPolicy-2 (lane DraftPolicy, 2026-11-01; HuntDrafter F10, after waves 6e / 6e3): TF_GLM_DRAFT_EDGE=E@N, the DFlash2
+# chain's selector edge weight E only in rounds where at least N streams decode, the recipe's 0.6 below; "E" alone
+# (DraftPolicy-1's form) is E@1, every round. Measured split (6e / 6e3, engine-side): a lower weight drafts fewer rows
+# at slightly fewer tokens a round, which wins where rows share a window (P4-P8) and loses fork texts 0-1 at 1-2
+# streams. Lane DraftPolicy's replay WITH copy drafts (it reproduces every live forks cell of every fnc boot) puts the
+# gate at 3: N = 2 loses the forks' P2 (rounds of 2 streams), N = 4 leaves the wave tails' 3-stream rounds (22% of
+# P4's agent stream-rounds) on 0.6. Unset: (0.6, 1), the same float in every round: picks, confidences and replies
+# bit-identical to the base. Any value: replies identical by construction (drafts are verified).
+# The stream count is the round's decoding lanes (multi.MultiDecoder._round: DraftRequest.streams = len(lanes), the
+# count TF_GLM_MULTI_DEPTH=scale uses); a solo drafter (P1, Drafter.propose) is one stream. Both ranks compare the gate
+# at startup; draft_dump records the weight its (one-stream) chain used.
+# Test: work/hunt/DraftPolicy/test_draft_edge2.py (CPU); mutants: mutants2.py.
+# Applies with `patch -p0` in the folder holding tensorfold/, at the end of stack/all6x.list.
+--- tensorfold/families/glm5_next/cuda/dflash2.py
++++ tensorfold/families/glm5_next/cuda/dflash2.py
+@@ -24,27 +24,43 @@
+ 
+ EDGE_ENV = "TF_GLM_DRAFT_EDGE"
+ EDGE_DEFAULT = 0.6
++EDGE_STREAMS_MOST = 8     # engine.PARALLEL_MOST: a round holds at most this many streams
+ 
+ 
+-def draft_edge(env: dict | None = None) -> float:
+-    """TF_GLM_DRAFT_EDGE: the selector's edge score weight in a chain pick (``EDGE``); unset or empty: 0.6, the
+-    recipe's. Lane DraftPolicy refit it on 24 real agent turns' TF_GLM_DRAFT_DUMP records (draft_sim, held out by
+-    turn): 0.2-0.4 against 0.6, +1-2% decode tok/s. Only the chain's picks and confidences change (drafts are
+-    verified: replies are the same). Every rank must read the same value (the engine's startup comparison)."""
++def draft_edge(env: dict | None = None) -> tuple[float, int]:
++    """TF_GLM_DRAFT_EDGE=E[@N]: the selector's edge score weight in a chain pick, E, in a round where at least N
++    streams decode (N 1 to 8; without @N, 1: every round), the recipe's 0.6 in rounds with fewer. Unset or empty:
++    (0.6, 1), every round 0.6. Lane DraftPolicy (REPORT.md) replayed real agent turns and the forks probe with copy
++    drafts: a lower weight drafts fewer rows at slightly fewer tokens a round, which pays where a row is dear (3+
++    streams sharing a window) and loses at 1-2 streams; 0.2@3 keeps 1-2 streams on 0.6. Only the chain's picks and
++    confidences change (drafts are verified: replies are the same). Every rank must read the same value (the engine's
++    startup comparison)."""
+ 
+     value = (os.environ if env is None else env).get(EDGE_ENV, "").strip()
+     if not value:
+-        return EDGE_DEFAULT
++        return EDGE_DEFAULT, 1
++    weight, at, streams = value.partition("@")
+     try:
+-        edge = float(value)
++        edge = float(weight)
+     except ValueError:
+         edge = math.nan
+-    if not (math.isfinite(edge) and 0.0 <= edge <= 4.0):
+-        raise ValueError(f"{EDGE_ENV}={value!r}: a weight from 0 to 4 (unset: {EDGE_DEFAULT})")
+-    return edge
++    n = (int(streams) if streams.strip().isdecimal() else 0) if at else 1
++    if not (math.isfinite(edge) and 0.0 <= edge <= 4.0) or not 1 <= n <= EDGE_STREAMS_MOST:
++        raise ValueError(f"{EDGE_ENV}={value!r}: a weight from 0 to 4, optionally @N for rounds of at least N "
++                         f"streams (N 1 to {EDGE_STREAMS_MOST}); unset: {EDGE_DEFAULT} in every round")
++    return edge, n
++
++
++EDGE, EDGE_STREAMS = draft_edge()   # the selector's edge score weight in a chain pick, from rounds of this many streams
++
++
++def edge_weight(streams: int = 1) -> float:
++    """The chain's edge weight in a round of ``streams`` decoding streams (TF_GLM_DRAFT_EDGE): ``EDGE`` from
++    ``EDGE_STREAMS`` streams on, the recipe's 0.6 below (the same float unset: picks bit-identical)."""
++
++    return EDGE if streams >= EDGE_STREAMS else EDGE_DEFAULT
+ 
+ 
+-EDGE = draft_edge()  # the selector's edge score weight in a chain pick
+ NOISE = 0.7       # the target's keyed noise weight when sampling
+ NO_LIMIT = 1e30
+ # the noise-aware stop rules' temperature B (fnc<N>:<p>, fcost<N>:noisy): draft_sim's NoisyPredictor beta, fitted by
+@@ -741,14 +757,15 @@
+ 
+     def chain(self, tokens: np.ndarray, values: np.ndarray, proj: np.ndarray, anchor: int, first: int,
+               sampling: Sampling | None, confidence: float = 0.0, *, beta: float = 0.0,
+-              round_ms: tuple[float, ...] | None = None, confs: list | None = None) -> list[int]:
++              round_ms: tuple[float, ...] | None = None, confs: list | None = None, streams: int = 1) -> list[int]:
+         """Choose candidates with selector edges and target keyed noise; stop below cumulative confidence, always
+         keeping the first draft. ``beta`` > 0: the confidences are noise-aware (``noisy_confidence``); with
+         ``round_ms`` (ms of a round of k drafts, k = 0..) the chain is walked whole and cut at ``best_depth`` of
+         them instead (``confidence`` unused). Only where the chain stops changes: the picks are the same. ``confs``
+         (a list): the chain is walked whole and each pick's confidence (noise-aware with ``beta``, else the
+         softmax share of its score) appended to it, for a caller that cuts the chains itself (``multi``'s joint
+-        allocation)."""
++        allocation). ``streams``: the streams decoding in this round (1: a solo drafter), which picks the edge
++        weight (``edge_weight``, TF_GLM_DRAFT_EDGE=E@N)."""
+ 
+         depth = tokens.shape[0]
+         sampled = sampling is not None and sampling.temperature > 0
+@@ -760,9 +777,10 @@
+         out: list[int] = []
+         conf: list[float] = []
+         prev, chain = anchor, 1.0
++        weight = edge_weight(streams)
+         for d in range(depth):
+             edge = self.succ[tokens[d]].astype(np.float64) @ (self.pred[prev].astype(np.float64) * proj[d])
+-            score = (values[d] + EDGE * edge) / temp
++            score = (values[d] + weight * edge) / temp
+             pick = score + NOISE * noise[d] if noise is not None else score
+             j = int(np.argmax(pick))
+             if confs is not None:
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py
+@@ -209,6 +209,7 @@
+     confidence: float = 0.0
+     beta: float = 0.0
+     round_ms: tuple[float, ...] | None = None
++    streams: int = 1          # the streams decoding in the round (TF_GLM_DRAFT_EDGE=E@N: ``dflash2.edge_weight``)
+ 
+ 
+ class MultiDrafter:
+@@ -607,7 +608,8 @@
+             first = r.ctx.context_end + 1
+             if r.beta > 0:
+                 out[i] = self.d.chain(tokens, values, proj, r.pending, first, r.sampling, r.confidence, beta=r.beta,
+-                                      round_ms=r.round_ms)
++                                      round_ms=r.round_ms, streams=r.streams)
+             else:
+-                out[i] = self.d.chain(tokens, values, proj, r.pending, first, r.sampling, r.confidence)
++                out[i] = self.d.chain(tokens, values, proj, r.pending, first, r.sampling, r.confidence,
++                                      streams=r.streams)
+         return out
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -3591,7 +3591,7 @@
+                 if tune.depth == "scale":
+                     conf = scaled_confidence(conf, len(lanes), tune.alpha)
+                 asks.append((len(drafts) - 1, DraftRequest(self._ctx(l), l.s.out[-1], l.depth, l.s.sampling,
+-                                                           conf, **l.policy.chain_rule)))
++                                                           conf, **l.policy.chain_rule, streams=len(lanes))))
+         if asks and tune.depth == "joint":
+             self._joint(lanes, drafts, asks)
+         elif asks:
+@@ -3749,7 +3749,7 @@
+         for (k, r), (tokens, values, proj) in zip(live, got):
+             confs: list[float] = []
+             drafts[k] = md.d.chain(tokens, values, proj, r.pending, r.ctx.context_end + 1, r.sampling, 0.0,
+-                                   beta=r.beta, confs=confs)
++                                   beta=r.beta, confs=confs, streams=r.streams)
+             reach.append(reach_of(confs))
+         asked = {k for k, _ in live}
+         fixed = sum(1 + (0 if k in asked else len(d)) for k, d in enumerate(drafts))
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1359,11 +1359,12 @@
+         self.drafter_graphs = bool(graphs) and solo_drafter_graphs(self.solo)
+         from .dflash2_multi import DRAFT_SKIP                 # TF_GLM_DRAFT_SKIP: every rank's DFlash2 rings alike
+         from .dflash2 import EDGE as DRAFT_EDGE               # TF_GLM_DRAFT_EDGE: every rank's chain picks alike
++        from .dflash2 import EDGE_STREAMS as DRAFT_EDGE_STREAMS   # ... and the stream count it starts at (E@N)
+         from .forward import prompt_overlap                   # PrefillLeftovers-3: TF_GLM_PROMPT_OVERLAP's blocks
+                                                               # (one all-gather each under the indexer shard)
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+                        indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(self.drafter_graphs),
+-                       int(DRAFT_SKIP), *_f64_ints(DRAFT_EDGE),
++                       int(DRAFT_SKIP), *_f64_ints(DRAFT_EDGE), int(DRAFT_EDGE_STREAMS),
+                        prompt_overlap(), int(self.msg_side)] + \
+             lay.owner_words(cfg.layers) + self.prx.code() + self.split.prompt_code()   # OTS 0105; TF_GLM_PRX*;
+                                                               # TF_GLM_PROMPT_MICROBATCH (MicrobatchPort)
+--- tensorfold/families/glm5_next/cuda/draft_dump.py
++++ tensorfold/families/glm5_next/cuda/draft_dump.py
+@@ -140,7 +140,9 @@
+     res = DecodeResult(out, time.perf_counter() - start, len(out) - 1, stages=stages)
+     if out_dir is not None:
+         info = dict(meta or {})
+-        info.update(version=VERSION, block=drafter.block, selector_top_k=drafter.top_k, edge=dflash2.EDGE,
++        # the edge weight the recorded chain (a solo drafter: one stream) used, and TF_GLM_DRAFT_EDGE's gate
++        info.update(version=VERSION, block=drafter.block, selector_top_k=drafter.top_k, edge=dflash2.edge_weight(1),
++                    edge_knob=dflash2.EDGE, edge_streams=dflash2.EDGE_STREAMS,
+                     noise=dflash2.NOISE, prod_most=PROD_MOST, prod_confidence=PROD_CONFIDENCE, stop_eos=bool(stop_eos),
+                     eos=[int(t) for t in w.cfg.eos], count=int(count), steps=len(out) - 1,
+                     seed=int(sampling.seed) if sampling is not None else 0,

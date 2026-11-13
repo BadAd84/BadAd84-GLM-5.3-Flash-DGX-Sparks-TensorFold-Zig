@@ -1,0 +1,13 @@
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -3501,7 +3501,9 @@
+                emit: Callable[[list[int]], bool | None], stop_eos: bool = True, *, vision: Any = None,
+                constraint: Any = None, background: bool = False, glm: dict | None = None) -> dict:
+         self._check_admission(background)
+-        box: queue.Queue = queue.Queue()
++        # the rounds' tokens to this thread: put and get(timeout) only, so the C queue (its put is the engine thread's,
++        # once a stream a round; queue.Queue's goes through a Python Condition)
++        box: queue.SimpleQueue = queue.SimpleQueue()
+         stream = Stream(list(prompt), max(1, count), sampling, draft=draft, stop_eos=stop_eos, vision=vision,
+                         constraint=constraint, background=background)
+         stream.glm = dict(glm or {})

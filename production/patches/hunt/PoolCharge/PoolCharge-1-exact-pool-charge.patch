@@ -1,0 +1,122 @@
+# PoolCharge-1 (lane PoolCharge, 2026-10-30): TF_GLM_POOL_CHARGE=exact. The --parallel pool's per-token charge (the
+# startup estimate's slope, 6,748 B at TF_GLM_MULTI_WINDOW=32) counts a prompt chunk's fp32 select scores
+# (geometry.mla_select_scores: 512 B a token) for every pool token; a chunk allocates them for its own stream
+# (sparse.pool_bucket of its position, bounded by the window, whose slots the estimate already charges). exact charges
+# what a pool token allocates (engine.pool_token_bytes: forward.Caches' latents and pooled keys, 6,204 B, plus the
+# batched window's SelectScratch scores, which span the pool: 32 B) and that SelectScratch's split scratch at the pool's
+# pools (16.2 MiB at window 32). Default estimate: the pool exactly as before (charge = the slope, nothing fixed).
+--- tensorfold/cuda/geometry.py
++++ tensorfold/cuda/geometry.py
+@@ -345,7 +345,7 @@
+     share = even_share(world) if share is None else share
+     heads, topk = share("heads", int(t["num_attention_heads"])), int(t.get("index_topk", 2048))
+     # the fp32 pool scores of at most MLA_SELECT_ROWS rows at once, the chosen pools and token lists of the chunk's
+-    select = min(prefill_rows, MLA_SELECT_ROWS) * 4 * ((capacity + 3) // 4) + prefill_rows * 16 * (topk + 3)
++    select = mla_select_scores(capacity, prefill_rows) + prefill_rows * 16 * (topk + 3)
+     if latent and onepass:
+         return select
+     if latent:
+@@ -354,6 +354,15 @@
+     return select + 128 * heads * (kd + 2) * 4 * ((topk + 515) // 512)
+ 
+ 
++def mla_select_scores(capacity: int, prefill_rows: int = PREFILL_ROWS) -> int:
++    """A prompt chunk's fp32 pool scores (``sparse._select_prompt`` and the sharded prefill: MLA_SELECT_ROWS rows
++    at once over ``sparse.pool_bucket``'s pools), charged here for every pool of ``capacity`` tokens. Allocated per
++    chunk and bounded by the chunk's stream (a prompt shorter than the window: at most 262,144 pools at 1,048,576
++    tokens), not by the pool the streams share (PoolCharge)."""
++
++    return min(prefill_rows, MLA_SELECT_ROWS) * 4 * ((capacity + 3) // 4)
++
++
+ DRAFT_WINDOW = 2048    # GLM DFlash2's attention window for a drafter without one (OTS 0114; the incoai drafter's own)
+ DRAFT_SHIPPED = ("embed_tokens.weight", "lm_head.weight")   # a drafter's copies of the target's tables (not loaded)
+ 
+--- tensorfold/families/glm5_next/cuda/sparse.py
++++ tensorfold/families/glm5_next/cuda/sparse.py
+@@ -1272,9 +1272,15 @@
+     return triton.next_power_of_2(triton.cdiv(np_, split_chunk(np_)))
+ 
+ 
++def split_scratch_numel(rows: int, np_: int) -> int:
++    """int32 values of select_split's scratch for rows of np_ scores (``split_scratch``; the engine charges the batched
++    window's at the pool's pools, PoolCharge)."""
++    return rows * (1024 + split_chunks(np_) * 257)
++
++
+ def split_scratch(rows: int, np_: int, device) -> torch.Tensor:
+     """select_split's int32 scratch for rows of np_ scores: totals [rows, 4, 256], then chunk histograms and counts."""
+-    return torch.empty((rows * (1024 + split_chunks(np_) * 257),), dtype=torch.int32, device=device)
++    return torch.empty((split_scratch_numel(rows, np_),), dtype=torch.int32, device=device)
+ 
+ 
+ def select_split(scores: torch.Tensor, k: int, *, scratch: torch.Tensor | None = None, rows=None,
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -278,6 +278,34 @@
+     return max(0, int(pinned) - min(int(r) for r in rooms))
+ 
+ 
++def pool_charge(value: str | None = None) -> str:
++    """TF_GLM_POOL_CHARGE (PoolCharge): what --parallel's pool charges a token past the window's slots. ``estimate``
++    (the default): the startup estimate's slope, which counts a prompt chunk's fp32 select scores
++    (``geometry.mla_select_scores``, 512 B a token) for every pool token, though a chunk allocates them for its own
++    stream (bounded by the window, whose slots the estimate already charges). ``exact``: the bytes a pool token
++    allocates (``pool_token_bytes``), and the batched window's split-selection scratch at the pool's pools."""
++
++    value = (os.environ.get("TF_GLM_POOL_CHARGE", "") if value is None else value).strip().lower() or "estimate"
++    if value not in ("estimate", "exact"):
++        raise ValueError(f"TF_GLM_POOL_CHARGE: estimate or exact, not {value!r}")
++    return value
++
++
++def pool_token_bytes(g, capacity: int, prefill_rows: int) -> int:
++    """PoolCharge: the bytes a pool token past ``capacity`` allocates, from the startup estimate's slope (``g``: the
++    engine's ``geometry``, built with ``prefill_rows`` prompt rows) less the prompt chunk's select scores
++    (``mla_select_scores``). What stays: the cache planes (``forward.Caches``: latents and pooled keys) and the batched
++    window's select scores (``geometry``'s ``per``: ``verify.BatchedVerify``'s ``SelectScratch`` spans the pool). Only
++    for the engine ``TF_GLM_POOL_CHARGE=exact`` admits: windows verified batched, with an index."""
++
++    from tensorfold.cuda.geometry import mla_select_scores
++
++    step = 65536
++    slope = g.bytes_at(capacity + step) - g.bytes_at(capacity)
++    slope -= mla_select_scores(capacity + step, prefill_rows) - mla_select_scores(capacity, prefill_rows)
++    return max(1, -(-slope // step))
++
++
+ def kept_state_bytes(t: dict, world: int = 2, rank: int = 0, draft: dict | None = None) -> int:
+     """The device bytes one kept --parallel state owns outside the pool on rank ``rank`` of ``world`` (``t``: the
+     target's text config; ``draft``: the DFlash2 drafter's config, None without one), from the shapes the code copies:
+@@ -1221,8 +1249,29 @@
+             if rank == 0 and why:
+                 print(f"[tensorfold] kept prompt states: {why}", flush=True)
+             states = self.entries * kept_state_bytes(text, world, rank, draft_cfg)
+-            pool_rows = (capacity + max(0, self.cache_bytes + display - states) // per_token) // ALIGN * ALIGN
+-            display_rows = pool_rows - (capacity + max(0, self.cache_bytes - states) // per_token) // ALIGN * ALIGN
++            # PoolCharge: TF_GLM_POOL_CHARGE=exact charges a pool token the bytes it allocates (``pool_token_bytes``) and
++            # the batched window's split-selection scratch at the pool's pools; the default, the estimate's slope
++            charge, fixed = per_token, 0
++            if pool_charge() == "exact":
++                from . import shard
++                from .sparse import POOL, split_scratch_numel
++
++                # what the exact charge counts holds for windows verified batched (no one-stream graphs: their
++                # sparse graphs score up to the pool's pools), with an index (BatchedVerify's SelectScratch spans the
++                # pool; a window within the dense limit has no pooled keys) and one unsharded pool
++                if self.solo or not long_context or shard.ON:
++                    raise ValueError("TF_GLM_POOL_CHARGE=exact counts the batched windows' allocations over one "
++                                     "unsharded pool with an index: not with the one-stream graphs (TF_GLM_SOLO_GRAPHS=1, "
++                                     "TF_GLM_MULTI_LONE=1, TF_GLM_MULTI_PROFILE, TF_GLM_MULTI_VERIFY=serial), "
++                                     "TF_GLM_KV_SHARD=1 or a window within the dense limit; leave it at estimate")
++                charge = pool_token_bytes(g, capacity, prompt_buffer_rows)
++                most = capacity + max(0, self.cache_bytes + display - states) // charge
++                fixed = 4 * split_scratch_numel(self.multi_window, -(-most // POOL))
++                if rank == 0:
++                    print(f"[tensorfold] pool charge exact (TF_GLM_POOL_CHARGE): {charge} B a token (the estimate's "
++                          f"{per_token}), {fixed / 2 ** 20:.1f} MiB of the batched window's split scratch", flush=True)
++            pool_rows = (capacity + max(0, self.cache_bytes + display - states - fixed) // charge) // ALIGN * ALIGN
++            display_rows = pool_rows - (capacity + max(0, self.cache_bytes - states - fixed) // charge) // ALIGN * ALIGN
+             # every rank holds the pool rank 0 decides placements in: a rank whose kept states are smaller (fewer KDA
+             # heads or DFlash2 KV heads) would otherwise allocate pool rows no placement ever reaches
+             agreed = self._gather_ints([pool_rows, display_rows])

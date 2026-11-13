@@ -1,0 +1,529 @@
+# MicrobatchPort-1b (rebased onto stack/prx-fixed: the final rows of base6 split between the halves; the
+# side wait inside prompt_shard_rows; PRX's zero-copy partials pass through HcSplit._post as before). MicrobatchPort-1: a row-split prompt chunk in two halves, one half's exchanges and glue under the other half's compute
+# (TF_GLM_PROMPT_MICROBATCH=1 with TF_GLM_HC_SPLIT=1; default off until measured on the GB10 triangle).
+#
+# - Why: the row split's exchanges (every rank's fp32 partials of the other ranks' rows at two sites a layer, then the
+#   glued rows) run on a side stream, but the main stream soon waits for them: the glue needs the partials, the next
+#   block the glued rows. At three ranks a 4,096-row chunk moves ~32 MiB a peer each way at each of 90 sites
+#   (HuntComms). Here half A = rows [0, h), half B = rows [h, R) (h a multiple of 192 at three ranks: 1,920 + 2,176
+#   for a 4,096-row chunk), each row-split by its own HcSplit over row views of the prompt buffers on the one side
+#   stream; per layer the main stream runs A's block, B's block, A's MoE, B's MoE, and after each a half's chain
+#   (partial exchange, glue on own rows, row swap: HcSplit.glue_side) is queued on the side stream, joined only before
+#   that half's next block.
+# - microbatch.py (new): cut, applies, view, Halves, layer_steps.
+# - hcsplit.py: SplitSettings.microbatch / micro_min (TF_GLM_PROMPT_MICROBATCH_MIN_ROWS, default 1,920) and
+#   prompt_code (the ranks' startup comparison; not in code(), which keys the spill tier: the bits are the same);
+#   HcSplit(stream=...), glue_side / join / drain, finish() draining a halved chunk's splits at a layer-sliced yield.
+# - forward.py: split_layer_steps hands a qualifying chunk to microbatch; OTS 0101's prompt indexer shard gets the
+#   half's side stream (_micro_side).
+# - indexer_shard.py: prompt_shard(side=...): its main-stream all-gather waits for the side stream and the side stream
+#   for it, so two collectives never run at once on a rank (as KV sharding's fetch already does).
+# - engine.py: micro_code in the startup comparison and its message.
+# - Not halved: multi-prompt chunks (multi_prefill), chunks off the 64-token grid, TF_GLM_KV_SHARD, TF_GLM_LATENT=0,
+#   halves under the minimum, and a chunk whose OTS 0121 kept point falls in half A or at the cut.
+#
+# Bits: bit-identical. Each half is a chunk of the 64-token grid; every row's arithmetic is chunk-invariant there
+# (chunkinv), both halves use the whole chunk's nch and head block, partial sums keep rank order (OTS 0105's rotation
+# included), B's KDA continues from A's state and B's attention reads A's caches of the layer. Test:
+# test_microbatch.py (3 emulated ranks as threads on one GPU, real Engine / prefill_chunk / compute_steps, real
+# kernels, synthetic TP=3 weights): every output and cache bit-identical to the unhalved split over 5 arms x 3 delay
+# profiles; 13 scripted mutants (mutants_microbatch.py).
+#
+# Ported from the GLM-5.3 recipe's tp4 patch 0104 (Mia's AI Lab, Apache-2.0); design credit drowzeys
+# (github.com/drowzeys/TensorFold, glm53-tp4-2026-10-05, compute_prompt_sp, TF_GLM53_PROMPT_OVERLAP). No code copied
+# from drowzeys.
+--- tensorfold/families/glm5_next/cuda/hcsplit.py
++++ tensorfold/families/glm5_next/cuda/hcsplit.py
+@@ -28,7 +28,11 @@
+ 
+ TF_GLM_HC_EXCHANGE: ``p2p`` (the default) swaps rows with ncclSend/ncclRecv; ``gather`` uses the NCCL all-gather
+ instead (whole halves, one piece: the partial halves out of place into the unused all-gather buffer, the bf16 rows in
+-place), the same bytes on the wire, for when NCCL's point-to-point path is slower or misbehaves on a fabric."""
++place), the same bytes on the wire, for when NCCL's point-to-point path is slower or misbehaves on a fabric.
++
++TF_GLM_PROMPT_MICROBATCH=1 (``microbatch``): a chunk runs as two halves, each row-split by its own HcSplit over row
++views of the prompt buffers, both on one side stream (``HcSplit(stream=...)``); a half's glue runs there too
++(``glue_side``), under the other half's compute, and the main stream ``join``s it before that half's next block."""
+ 
+ from __future__ import annotations
+ 
+@@ -88,10 +92,14 @@
+     min_rows: int = 64            # TF_GLM_HC_SPLIT_MIN_ROWS: shorter chunks (a prompt's tail) run unsplit
+     exchange: str = "p2p"         # TF_GLM_HC_EXCHANGE: p2p (ncclSend/ncclRecv) or gather (the all-gather)
+     fronts: bool = False          # TF_GLM_PREFILL_OVERLAP=2: the next block's front on own rows during the swaps
++    microbatch: bool = False      # TF_GLM_PROMPT_MICROBATCH=1: a chunk in two halves (``microbatch``)
++    micro_min: int = 1920         # TF_GLM_PROMPT_MICROBATCH_MIN_ROWS: halves of fewer rows run the chunk whole
+ 
+     def __post_init__(self) -> None:
+         if self.fronts and not self.overlap:
+             raise ValueError("the blocks' fronts run during the overlapped swaps: they need the overlap")
++        if self.microbatch and not self.split:
++            raise ValueError("TF_GLM_PROMPT_MICROBATCH=1 row-splits each half: it needs TF_GLM_HC_SPLIT=1")
+ 
+     @classmethod
+     def from_env(cls, env=None) -> "SplitSettings":
+@@ -108,7 +116,9 @@
+         if exchange not in EXCHANGES:
+             raise ValueError(f"TF_GLM_HC_EXCHANGE: {' or '.join(EXCHANGES)}, not {exchange!r}")
+         return cls(split, overlap, _int(env, "TF_GLM_OVERLAP_PIECES", 2, 1, 8),
+-                   _int(env, "TF_GLM_HC_SPLIT_MIN_ROWS", 64, 2, 16384), exchange, fronts=level == "2")
++                   _int(env, "TF_GLM_HC_SPLIT_MIN_ROWS", 64, 2, 16384), exchange, fronts=level == "2",
++                   microbatch=_flag(env, "TF_GLM_PROMPT_MICROBATCH"),
++                   micro_min=_int(env, "TF_GLM_PROMPT_MICROBATCH_MIN_ROWS", 1920, 64, 16384))
+ 
+     def piece_count(self) -> int:
+         return self.pieces if self.overlap and self.exchange == "p2p" else 1
+@@ -119,6 +129,12 @@
+         return [1, int(self.overlap) + int(self.fronts), self.piece_count(), self.min_rows,
+                 EXCHANGES.index(self.exchange)]
+ 
++    def prompt_code(self) -> list[int]:
++        """TF_GLM_PROMPT_MICROBATCH for the ranks' startup comparison (every rank must halve the same chunks: a lone
++        rank halving would pair its exchanges with the others' wrong ones). Not in ``code``, which keys the spill
++        tier's folders: halves leave the same bits, so the tier's kept states stay valid either way."""
++        return [self.micro_min if self.split and self.microbatch else 0]
++
+     def describe(self) -> str:
+         what = "rows split between the ranks"
+         what += ", exchanges by " + ("send/receive" if self.exchange == "p2p" else "all-gather")
+@@ -127,6 +143,9 @@
+             what += f" on a second stream{f' in {n} pieces' if n > 1 else ''}"
+             if self.fronts:
+                 what += ", the next block's front on own rows meanwhile"
++        if self.microbatch:
++            what += (f"; chunks whose halves reach {self.micro_min} rows in two halves, one's exchanges under the "
++                     "other's compute")
+         return f"prompt chunks' hyper-connections: {what} (chunks of {self.min_rows}+ rows)"
+ 
+ 
+@@ -142,7 +161,7 @@
+     of every rank's whole partial, glue on own rows (``glue.hc_post_ranks``), then the in-place all-gather of the
+     rows. Either way the partial sums are hc_post's, rank 0 first: the unsplit bits."""
+ 
+-    def __init__(self, w, b, settings: SplitSettings) -> None:
++    def __init__(self, w, b, settings: SplitSettings, stream=None) -> None:
+         world = int(getattr(w, "world", 2))
+         two = world == 2
+         p2p = settings.exchange == "p2p"
+@@ -169,11 +188,15 @@
+         self.got: list[torch.Tensor] = []
+         self.stream = None
+         self.fin: torch.Tensor | None = None        # the final rows' all-gather staging (``_fin``)
++        self.pending = False             # a glue_side queued on the side stream that the main stream has not joined
++        self.micro: list = []            # TF_GLM_PROMPT_MICROBATCH: the halves' splits of the chunk running now
+         if settings.overlap:
+             # TF_GLM_OVERLAP_PRIORITY: the side stream's priority, 0 (normal, the default) or -1 (high). Two Sparks, two
+-            # boots each: prefill the same, decode rounds after a high-priority prompt ~0.5-1% slower
++            # boots each: prefill the same, decode rounds after a high-priority prompt ~0.5-1% slower. ``stream``: one
++            # to share (TF_GLM_PROMPT_MICROBATCH: both halves' splits on the prompt buffers' one side stream)
+             high = os.environ.get("TF_GLM_OVERLAP_PRIORITY", "0").strip() == "-1"
+-            self.stream = torch.cuda.Stream(priority=-1 if high else 0)
++            self.stream = stream if stream is not None else torch.cuda.Stream(priority=-1 if high else 0)
++            self.ev_own = torch.cuda.Event()
+             n = settings.piece_count()
+             self.ev_fill = [torch.cuda.Event() for _ in range(n)]
+             self.ev_part = [torch.cuda.Event() for _ in range(n)]
+@@ -242,6 +265,21 @@
+                 self.prx.done(call)
+                 self.zcall[j] = None
+         self.active = False
++        self.pending = False
++        for half in self.micro:          # a halved chunk's splits (a layer-sliced yield): their side work joined, they
++            half.drain()                 # stay active for the chunk's next layers
++
++    def drain(self) -> None:
++        """The current stream waits for everything queued on the side stream; the split stays active."""
++        if self.stream is not None:
++            torch.cuda.current_stream().wait_stream(self.stream)
++        self.pending = False
++
++    def join(self) -> None:
++        """The current stream waits for this split's ``glue_side`` (nothing queued: nothing to wait for)."""
++        if self.pending:
++            torch.cuda.current_stream().wait_event(self.ev_done)
++            self.pending = False
+ 
+     def mine(self) -> int:
+         return self.rank * self.H
+@@ -355,6 +393,52 @@
+                 self.prx.done(call)
+                 self.zcall[j] = None
+ 
++    def glue_side(self, hc=None, norm=None, taps: tuple[int, ...] = (), final: bool = False, rot: int = 0,
++                  rows: tuple[int, ...] | None = None) -> None:
++        """``glue`` with its kernels on the side stream after the current stream's work so far (TF_GLM_PROMPT_
++        MICROBATCH: the half's glue under the other half's compute; ``join`` before reading what it wrote). The same
++        kernels on the same rows in the same order, after the partials' exchange (earlier on the side stream, so in
++        stream order), the final rows' all-gather (``rows``) there too. Without a side stream: ``glue`` in place."""
++
++        if self.stream is None:
++            self.glue(hc, norm, taps, final, rot=rot, rows=rows)
++            return
++        self.ev_own.record(torch.cuda.current_stream())
++        with torch.cuda.stream(self.stream):
++            self.stream.wait_event(self.ev_own)
++            self._glue_rows(hc, norm, taps, final, rot, rows)
++            self.ev_done.record(self.stream)
++        self.pending = True
++
++    def _glue_rows(self, hc, norm, taps: tuple[int, ...], final: bool, rot: int,
++                   rows: tuple[int, ...] | None) -> None:
++        """``glue``'s work on the current stream, piece by piece, its swaps in place (``glue_side``)."""
++
++        b, c = self.b, self.w.cfg
++        mine = self.mine()
++        whole = final and rows is None
++        outs = [b.taps[slot] for slot in taps] + ([b.hidden] if whole else []) + ([b.normed] if hc is not None else [])
++        fin = self._fin(len(rows)) if final and rows else None
++        for j, (off, n) in enumerate(self.pieces):
++            lo, hi = mine + off, mine + off + n
++            self._post(j, lo, hi, rot)
++            x = b.x[lo:hi]
++            for slot in taps:
++                glue.stream_mean(x, b.taps[slot][lo:hi])
++            if whole:
++                glue.stream_mean(x, b.hidden[lo:hi])
++            elif fin is not None:
++                for k, r in enumerate(rows):
++                    if lo <= r < hi:
++                        glue.stream_mean(b.x[r:r + 1], fin[self.rank, k:k + 1])
++            if hc is not None:
++                glue.hc_pre(x, hc.fn, hc.base, hc.scale, norm, b.normed[lo:hi], b.xs[lo:hi], b.post[lo:hi],
++                            b.comb[lo:hi], b.hcpart[lo:hi], c.eps, c.hc_eps, c.hc_iters, prompt=True)
++            if outs:
++                self._swap_rows(j, outs)
++        if fin is not None:
++            self._gather_final(rows, fin)
++
+     def glue(self, hc=None, norm=None, taps: tuple[int, ...] = (), final: bool = False,
+              front: Callable[[int, int], None] | None = None, rot: int = 0,
+              rows: tuple[int, ...] | None = None) -> None:
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -918,6 +918,13 @@
+     return getattr(sp, "stream", None) if sp is not None else None
+ 
+ 
++def _micro_side(b):
++    """A microbatched half's side stream (TF_GLM_PROMPT_MICROBATCH: the other half's chain may be on it), else None."""
++
++    sp = getattr(b, "split", None)
++    return sp.stream if sp is not None and getattr(sp, "half", False) else None
++
++
+ def _sharded_attend(a, w, lc, pos_dev, b, R, nch, host_pos, rs, qa, ol, scale, all_sparse, sparse_rows, tokens,
+                     counts, root: int = -1) -> None:
+     """``_sharded_rows`` after the token selection (``tokens`` / ``counts``: every row's, None without sparse rows),
+@@ -1047,7 +1054,7 @@
+                     # sparse._prompt_rank_pools), the pools all-gathered, then _tokens over every row - the same
+                     # bits as the _select_prompt above (per-row bits unchanged)
+                     tokens, counts = indexer_shard.prompt_shard(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
+-                                                                pk.shape[0] - 2, pos_dev, w.comm)
++                                                                pk.shape[0] - 2, pos_dev, w.comm, side=_micro_side(b))
+                 else:
+                     tokens, counts = sparse.select_tokens(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
+                                                           pk.shape[0] - 2, pos_dev, bucket=sparse_np)
+@@ -1276,8 +1283,13 @@
+     (``hcsplit``): the first hc_pre runs on every row as unsplit, each later one on this rank's rows, and b.normed,
+     the taps and b.hidden come back whole from the peer. The same bits as the unsplit loop and its final mean.
+     ``mixer``: the layers' KDA / DSA blocks as ``mixer(layer, done)`` instead of on ``st`` (a chunk of several
+-    streams' prompts, ``multi_prefill``)."""
++    streams' prompts, ``multi_prefill``). TF_GLM_PROMPT_MICROBATCH: the chunk in two halves (``microbatch``)."""
+ 
++    from . import microbatch
++
++    if microbatch.applies(w, st, b, mixer, host_pos, R):
++        yield from microbatch.layer_steps(w, st, b, R, nch, host_pos, need)
++        return
+     c = w.cfg
+     sp = b.split
+     layers = w.layers
+--- tensorfold/families/glm5_next/cuda/indexer_shard.py
++++ tensorfold/families/glm5_next/cuda/indexer_shard.py
+@@ -456,11 +456,13 @@
+     return got
+ 
+ 
+-def prompt_shard(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, comm, bucket: int | None = None):
++def prompt_shard(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, comm, bucket: int | None = None, side=None):
+     """select_tokens' prompt path (sparse.select_tokens -> _select_prompt) over the ranks: this rank scores and
+     selects its rows' share, one all-gather of the pieces' pools [R, 512] int32, then _tokens over all rows.
+     The same tokens and counts as the unsharded path (per-row bits unchanged). ``bucket`` ignored, as
+-    _select_prompt's is (it scores pool_count's columns)."""
++    _select_prompt's is (it scores pool_count's columns). ``side``: a stream whose collectives may be in flight
++    (TF_GLM_PROMPT_MICROBATCH: the other half's chain); the gather waits for it and it for the gather, so two
++    collectives never run at once (same bits: only the streams' order)."""
+     dev = qi.device
+     NP = sparse.pool_count(pos, R, np_max)
+     B = min(R, sparse.SELECT_ROWS)
+@@ -469,16 +471,17 @@
+     cand = torch.empty((B * 2 * cap,), dtype=torch.int32, device=dev)
+     tokens = torch.empty((R, TOKENS), dtype=torch.int32, device=dev)
+     counts = torch.empty((R,), dtype=torch.int32, device=dev)
+-    prompt_shard_rows(qi, wts, pk, pos, R, np_max, pos_dev, comm, 0, R, tokens, counts, buf, cand)
++    prompt_shard_rows(qi, wts, pk, pos, R, np_max, pos_dev, comm, 0, R, tokens, counts, buf, cand, side=side)
+     return tokens, counts
+ 
+ 
+ def prompt_shard_rows(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, comm, s0: int, s1: int, tokens, counts,
+-                      buf, cand) -> None:
++                      buf, cand, side=None) -> None:
+     """prompt_shard over rows s0 .. s1 of the R-row piece only, into tokens[s0:s1] / counts[s0:s1]: this rank scores
+     and selects its share of those rows (contiguous slices of ceil((s1 - s0) / world), with the piece's NP, so each
+     row's pools are its own), one all-gather of the rows' pools, then _tokens over them at their positions. Every
+-    rank must run the same blocks (PrefillLeftovers-3's TF_GLM_PROMPT_OVERLAP, agreed at start) in the same order."""
++    rank must run the same blocks (PrefillLeftovers-3's TF_GLM_PROMPT_OVERLAP, agreed at start) in the same order.
++    ``side``: as ``prompt_shard``'s (the gather and that stream's collectives one after the other)."""
+     n = s1 - s0
+     step = -(-n // comm.world)                                # every rank sends step rows (the last padded)
+     lo, hi = s0 + min(comm.rank * step, n), s0 + min((comm.rank + 1) * step, n)
+@@ -486,7 +489,11 @@
+     if hi - lo < step:                                        # the padded rows (never read after the gather)
+         mine[hi - lo:].zero_()
+     prefill_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand, out=mine[:hi - lo])
++    if side is not None:
++        torch.cuda.current_stream().wait_stream(side)
+     pools = _prompt_gather(comm, mine).view(comm.world, step, TOPK_POOLS).reshape(-1, TOPK_POOLS)[:n]
++    if side is not None:
++        side.wait_stream(torch.cuda.current_stream())
+     at = pos_dev if s0 == 0 else pos_dev + s0
+     sparse._tokens[(n,)](pools, at, tokens[s0:s1], counts[s0:s1], W=tokens.shape[1], K=TOPK_POOLS, PL=POOL,
+                          BLOCK=1024, num_warps=4)
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1068,7 +1068,8 @@
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+                        indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(DRAFT_SKIP),
+                        prompt_overlap()] + \
+-            lay.owner_words(cfg.layers) + self.prx.code()     # OTS 0105: TF_GLM_EXPERT_ROTATE; TF_GLM_PRX*
++            lay.owner_words(cfg.layers) + self.prx.code() + self.split.prompt_code()   # OTS 0105; TF_GLM_PRX*;
++                                                              # TF_GLM_PROMPT_MICROBATCH (MicrobatchPort)
+         rows = self._gather_ints(mine + [spare >> 20])
+         odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+         if odd:
+@@ -1080,7 +1081,7 @@
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+                                "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_DRAFT_SKIP, "
+-                               "TF_GLM_PROMPT_OVERLAP, TF_GLM_PRX*): "
++                               "TF_GLM_PROMPT_OVERLAP, TF_GLM_PRX*, TF_GLM_PROMPT_MICROBATCH*): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")
+--- /dev/null
++++ tensorfold/families/glm5_next/cuda/microbatch.py
+@@ -0,0 +1,214 @@
++"""TF_GLM_PROMPT_MICROBATCH=1: a row-split prompt chunk in two halves, one's exchanges under the other's compute.
++
++The row split (``hcsplit``) exchanges, at each of a layer's two sites, every rank's fp32 partials of the other ranks'
++rows, then glues its own rows and swaps the glued (normed) rows. With the overlap (TF_GLM_PREFILL_OVERLAP) the
++exchanges run on a side stream, but the main stream soon waits for them: the glue needs the partials, the next block
++the glued rows, and little else is left to compute. At three ranks a 4,096-row chunk moves ~32 MiB a peer each way
++at each of its 90 sites.
++
++Here a chunk of R rows at position p is two halves, A = rows [0, h) at p and B = rows [h, R) at p + h (``cut``: h
++about half, a multiple of 64, KDA's chunked grid, and of the world size, so A has no pad row; at three ranks a
++4,096-row chunk is 1,920 + 2,176 rows), each row-split by its own ``HcSplit`` over row views of the prompt buffers
++(``view``: the row-indexed tensors' rows, the KDA and latent scratch rows, its own region of the partial staging;
++the main stream's scratch shared), both on the buffers' one side stream. Per layer the main stream runs
++
++    A's KDA / DSA block, B's, A's MoE (or MLP), B's
++
++and as soon as a half's block has filled its partials, its chain (the partials' exchange, queued by the block's
++``partials``, then the glue on its own rows and the glued rows' swap, ``HcSplit.glue_side``) is queued on the side
++stream, so it runs while the main stream computes the other half: A's after-attention chain under B's attention,
++B's under A's MoE, A's layer-end chain under B's MoE, B's under A's next attention. The main stream waits for a
++half's chain (``HcSplit.join``) only right before that half's next block.
++
++Bits: half A is a chunk of h rows at p and half B one of R - h rows at p + h, layer by layer. A row's arithmetic does
++not depend on the chunking on the 64-token grid (scripts/glm53/v110/tests/kernels/chunkinv: the prompt matmuls and
++glue keep rows apart, partials are summed rank 0 first as before, a row's pools depend on its query and the keys at
++or before it, KDA's chunked recurrence runs from the state at the half's first row on its absolute 32-row
++sub-chunks), and both halves take the whole chunk's ``nch`` and head block for the dense attention, so every bit is
++the whole chunk's. The order keeps every dependency of two chunks run one after the other: B's KDA continues from
++A's state of the layer, B's attention reads A's latents, index keys and pooled keys of the layer (A's block came
++first on the main stream); nothing of A reads B. The side stream touches only a half's own rows and its own region
++of the partial staging. A half's KDA layers flip the state's parity once each (twice a layer for the chunk), which
++the engine keeps for either parity (its graphs are captured for both).
++
++OTS 0101 (TF_GLM_INDEXER_SHARD prefill): a half's DSA block all-gathers its rows' pools on the main stream while the
++other half's chain may be on the side stream; the gather waits for the side stream and the side stream for it
++(``indexer_shard.prompt_shard``'s ``side``), so two collectives never run at once, as KV sharding's fetch does. OTS
++0121 (a kept point inside the chunk): halves only when the point is not in half A (it then splits half B's
++recurrence as it split the chunk's, so the state at the point is the one left in the other parity).
++
++The glue's fronts (TF_GLM_PREFILL_OVERLAP=2) are not run during the halves' glue: the other half's compute covers the
++exchanges instead. Without a side stream (TF_GLM_PREFILL_OVERLAP=0) the chains run in place, in the same order: the
++same bits, no overlap. Layer-sliced prefill (``forward.compute_steps``) joins both halves' side work at each yield, as
++the unhalved split joins its side stream there.
++
++Halves of fewer than TF_GLM_PROMPT_MICROBATCH_MIN_ROWS rows (default 1,920: a 4,096-row chunk at two, three and four
++ranks) run the chunk whole: the routed experts decode each expert's weights once a call, so smaller calls cost more a
++row. Not for several streams' prompts in one chunk (``multi_prefill``), a chunk off the 64-token grid, nor without
++the latent cache or with TF_GLM_KV_SHARD.
++
++Ported from the GLM-5.3 recipe's tp4 patch 0104 (Mia's AI Lab, Apache-2.0) to our tree (OTS 0105's rotated MoE sums,
++OTS 0101's indexer shard, OTS 0121's kept points, the startup comparison outside the spill tier's key). Design credit:
++drowzeys (github.com/drowzeys/TensorFold, branch glm53-tp4-2026-10-05, ``compute_prompt_sp`` with
++TF_GLM53_PROMPT_OVERLAP) authored the two micro-batches whose exchange chains run on a communication stream under the
++other half's compute; no code of theirs."""
++
++from __future__ import annotations
++
++import copy
++import dataclasses
++import math
++from types import SimpleNamespace
++
++import torch
++
++from . import glue, latent, prof, shard, tp
++
++# the prompt buffers' row-indexed tensors (rows first): a half's view is rows [lo, lo + n) of each
++ROWS = ("ids", "hin", "x", "normed", "xs", "post", "comb", "hcpart", "ka", "kg", "xs_fa", "xs_ga", "kxs", "dp", "qr",
++        "xs_qr", "lat", "xs_lat", "q", "kn", "vn", "xs_ao", "ikr", "igr", "qi", "gu", "act", "xs_act", "mlog", "pick",
++        "wts", "ey", "sy", "part", "hidden", "fnormed", "fxs", "me", "mcat", "mxs", "mx")
++GRID = 64                 # KDA's chunked recurrence keeps prompt rows on a 64-row grid (absolute 32-row sub-chunks)
++
++
++def cut(R: int, world: int) -> int:
++    """Half A's rows of a chunk of R: about half, a multiple of 64 and of the world size."""
++
++    unit = GRID * world // math.gcd(GRID, world)
++    return max(unit, (R // 2) // unit * unit)
++
++
++def applies(w, st, b, mixer, host_pos, R: int) -> bool:
++    """Whether a row-split prompt chunk of R rows runs as two halves: TF_GLM_PROMPT_MICROBATCH, one stream's prompt on
++    ``st`` (no ``mixer``) from a position on the 64-token grid known on the host, the latent cache without the shard,
++    no kept point in half A, and both halves of at least the minimum rows (and of what the split takes)."""
++
++    sp = b.split
++    if not (sp is not None and sp.settings.microbatch and mixer is None and st is not None and host_pos is not None
++            and b.prefill and latent.ENABLED and not shard.ON and host_pos % GRID == 0):
++        return False
++    h = cut(R, sp.world)
++    least = max(sp.settings.micro_min, sp.settings.min_rows)
++    if h < least or R - h < least:
++        return False
++    point = int(getattr(st, "keep_point", 0) or 0)
++    return not (point and host_pos < point <= host_pos + h)
++
++
++def view(b, lo: int, n: int, world: int, gath_lo: int):
++    """The prompt buffers' rows [lo, lo + n) (pad rows past them included up to ``n``) as a Buffers-like object for a
++    half: every row-indexed tensor's rows, the half's own region of the partial staging from ``gath_lo``; the scratch
++    the main stream uses one call at a time (attention partials, the experts', the matmuls') shared."""
++
++    v = copy.copy(b)
++    v.__dict__.pop("micro_halves", None)
++    for name in ROWS:
++        t = getattr(b, name, None)
++        if isinstance(t, torch.Tensor):
++            setattr(v, name, t[lo:lo + n])
++    v._views = {}                        # moe_views of the half: the same flat scratch from its start (main stream)
++    if getattr(b, "kproj", None) is not None:
++        v.kproj = b.kproj[:, lo:lo + n]
++        k = b.kscratch
++        v.kscratch = SimpleNamespace(out=k.out[lo:lo + n], k=k.k[lo:lo + n], v=k.v[lo:lo + n], g=k.g[lo:lo + n],
++                                     b=k.b[lo:lo + n])
++    if b.lat_s is not None:
++        v.lat_s = copy.copy(b.lat_s)
++        v.lat_s.qa, v.lat_s.ol = b.lat_s.qa[lo:lo + n], b.lat_s.ol[lo:lo + n]
++    v.taps = [t[lo:lo + n] for t in b.taps]
++    d = b.part.shape[1]
++    v.gath = b.gath[gath_lo:gath_lo + world * n * d]
++    v.rows = v.alloc_rows = n
++    v.split = None
++    return v
++
++
++class Halves:
++    """A chunk's two halves: their buffer views and splits (kept on the buffers for chunks of one size)."""
++
++    def __init__(self, w, b, R: int) -> None:
++        from .hcsplit import HcSplit
++
++        sp = b.split
++        world = sp.world
++        h = cut(R, world)
++        nb = sp.padded(R - h)                 # B's rows with its pad rows (the chunk's last rows of the buffers)
++        if h + nb > b.alloc_rows:
++            raise ValueError(f"microbatch: halves of {h} and {nb} rows past the buffers' {b.alloc_rows}")
++        self.h, self.R = h, R
++        settings = dataclasses.replace(sp.settings, pieces=1, microbatch=False)
++        d = b.part.shape[1]
++        self.a = view(b, 0, h, world, 0)
++        self.b = view(b, h, nb, world, world * h * d)
++        for v in (self.a, self.b):
++            v.split = HcSplit(w, v, settings, stream=sp.stream)
++            v.split.half = True               # (``forward.dsa_rows``: the indexer shard's gather waits for the side)
++
++
++def _halves(w, b, R: int) -> Halves:
++    cache = b.__dict__.setdefault("micro_halves", {})
++    key = (R, id(b.split))
++    hv = cache.get(key)
++    if hv is None:
++        if len(cache) >= 4:                   # a few chunk sizes: a full chunk and a prompt's long tails
++            cache.pop(next(iter(cache)))
++        hv = cache[key] = Halves(w, b, R)
++    return hv
++
++
++def _state(st, at: int):
++    """``st`` from ``at`` rows on: the same caches, KDA states, parities and conv windows (shared objects), its
++    position ``at`` rows later."""
++
++    s = copy.copy(st)
++    s.pos = st.pos + at
++    s.pos_dev = st.pos_dev + at
++    return s
++
++
++def layer_steps(w, st, b, R: int, nch: int | None, host_pos: int, need: tuple[int, ...] | None = None):
++    """``forward.split_layer_steps`` for a chunk in two halves: every layer, yielding after each; the taps whole and
++    b.hidden's rows (``need``: only those, each by its half's owner, as the unhalved loop leaves them; None: every
++    row) at the end."""
++
++    from .forward import _ffn, _mixer
++
++    c = w.cfg
++    layers = w.layers
++    lay = tp.of(w)
++    hv = _halves(w, b, R)
++    halves = ((hv.a, st, hv.h, host_pos), (hv.b, _state(st, hv.h), R - hv.h, host_pos + hv.h))
++    # the final rows a half's glue gathers: its own of ``need``, in its rows (None: every row)
++    fins = (None, None) if need is None else (tuple(r for r in need if r < hv.h),
++                                             tuple(r - hv.h for r in need if r >= hv.h))
++    for half, _, n, _ in halves:
++        half.split.begin(n)
++    b.split.micro = [hv.a.split, hv.b.split]
++    try:
++        # the first hc_pre on every row, as unsplit (B's pad rows: zero streams, as its split's begin left them)
++        Rp = hv.h + hv.b.split.Rp
++        first, h0 = layers[0], layers[0].attn_hc
++        glue.hc_pre(b.x[:Rp], h0.fn, h0.base, h0.scale, first.in_norm, b.normed[:Rp], b.xs[:Rp], b.post[:Rp],
++                    b.comb[:Rp], b.hcpart[:Rp], c.eps, c.hc_eps, c.hc_iters, prompt=True)
++        for i, layer in enumerate(layers):
++            nxt = layers[i + 1] if i + 1 < len(layers) else None
++            for half, hs, n, pos in halves:
++                half.split.join()
++                # (the chunk's nch: every row's dense attention visits the chunks it does in the whole chunk)
++                _mixer(layer, w, hs, half, n, nch, pos, None)
++                with prof.timed("hc"):
++                    half.split.glue_side(layer.ffn_hc, layer.post_norm)
++            for (half, hs, n, pos), fin in zip(halves, fins):
++                half.split.join()
++                _ffn(layer, w, half, n)
++                with prof.timed("hc (layer end)"):
++                    half.split.glue_side(nxt.attn_hc if nxt is not None else None,
++                                         nxt.in_norm if nxt is not None else None,
++                                         taps=tuple(b.tap_at.get(layer.index, ())), final=nxt is None,
++                                         rot=lay.owner(layer.index), rows=fin if nxt is None else None)
++            yield layer.index
++    finally:
++        for half, _, _, _ in halves:
++            half.split.finish()
++        b.split.micro = []
++        b.split.finish()                      # compute_steps re-activated the chunk's split at each resume

@@ -1,0 +1,76 @@
+# MicrobatchPort-3b (rebased onto stack/prx-fixed + 1b: with PrefillLeftovers-3's TF_GLM_PROMPT_OVERLAP blocks, each
+# block's own share; indexer_shard.read_rows). MicrobatchPort-3: OTS 0101's sharded prompt selection reads only this rank's rows' index queries, so only those are
+# projected (always on where OTS 0101's TF_GLM_INDEXER_SHARD=prefill / all shards a prompt window; no knob: the same
+# bits, less work).
+#
+# - Why: forward.dsa_rows projected the index queries qi = indexer.qb(qr) (q_lora 1,536 -> 32 heads x 128) on every
+#   row of the window, then indexer_shard.prompt_shard scored only this rank's ceil(R / world) rows
+#   (sparse._prompt_rank_pools reads qi[lo:hi] alone) and all-gathered the pools. Two thirds of that projection, at
+#   every DSA layer of every chunk with sparse rows, was never read at three ranks.
+# - indexer_shard.prompt_rows(R, rank, world): the rows a rank scores, one owner of the fact; prompt_shard and
+#   dsa_rows both take it.
+# - forward.dsa_rows: the projection on prompt_rows' rows when the sharded selection runs, every row otherwise
+#   (select_tokens, decode windows, TF_GLM_KV_SHARD's own path untouched).
+#
+# Bits: bit-identical. The prompt matmul is row-independent (chunkinv: every row range gives the same bits), and the
+# rows not projected are not read. Applies on top of MicrobatchPort-1 (its side= argument sits in the same hunk).
+# Test: test_microbatch.py --qi-own (every arm: a rank projects index queries on its own rows only, and every output
+# bit-identical); mutants qi-rank0-rows (bits) and qi-all-rows (the mechanism check).
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -1039,12 +1039,16 @@
+             dense_attention(qa[:dense], lc, pos_dev, s, scale=scale, nch=min(nch or s.nch, s.nch), out=ol[:dense],
+                             hb=latent.head_block(R), starts=b.att_starts if b.prefill else None)
+     if sparse_rows:
+-        with prof.timed("dsa: select tokens"):
+-            mm(b, b.qr[rs], ix.qb, b.xs_qr[rs], b.qi[rs])
+         shard_sel = (indexer_shard.prefill_on() and b.prefill and sparse_np is None and w.comm is not None
+                      and R >= sparse.PROMPT_ROWS)
+         blocks = overlap_blocks(R) if (b.prefill and all_sparse and sparse_np is None and host_pos is not None
+                                        and latent.SPARSE_ONEPASS and R >= sparse.PROMPT_ROWS) else ()
++        with prof.timed("dsa: select tokens"):
++            # OTS 0101's sharded selection reads only this rank's rows' index queries of each block it gathers (the
++            # window, or PrefillLeftovers-3's blocks): only those are projected (row-independent matmul: the same
++            # bits on the rows read; ``indexer_shard.prompt_rows``)
++            for q0, q1 in (indexer_shard.read_rows(R, w.comm.rank, w.comm.world, blocks) if shard_sel else [(0, R)]):
++                mm(b, b.qr[lo + q0:lo + q1], ix.qb, b.xs_qr[lo + q0:lo + q1], b.qi[lo + q0:lo + q1])
+         if blocks:
+             _select_attend_blocks(w, b, rs, R, lc, pk, host_pos, pos_dev, qa, ol, scale, shard_sel, blocks)
+         else:
+--- tensorfold/families/glm5_next/cuda/indexer_shard.py
++++ tensorfold/families/glm5_next/cuda/indexer_shard.py
+@@ -456,6 +456,24 @@
+     return got
+ 
+ 
++def prompt_rows(n: int, rank: int, world: int) -> tuple[int, int]:
++    """The rows [lo, hi) of an n-row block of a prompt window whose pools ``rank`` scores (``prompt_shard_rows``:
++    ceil(n / world) a rank, the last short): the only rows of the block's index queries (qi) it reads."""
++    step = -(-n // world)
++    return min(rank * step, n), min((rank + 1) * step, n)
++
++
++def read_rows(R: int, rank: int, world: int, blocks=()) -> list[tuple[int, int]]:
++    """Every row range of an R-row window whose index queries ``rank`` reads: its rows of each block the selection
++    gathers (PrefillLeftovers-3's ``blocks``; () or None: the window as one), non-empty, in order."""
++    out = []
++    for s0, s1 in (blocks or ((0, R),)):
++        lo, hi = prompt_rows(s1 - s0, rank, world)
++        if hi > lo:
++            out.append((s0 + lo, s0 + hi))
++    return out
++
++
+ def prompt_shard(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, comm, bucket: int | None = None, side=None):
+     """select_tokens' prompt path (sparse.select_tokens -> _select_prompt) over the ranks: this rank scores and
+     selects its rows' share, one all-gather of the pieces' pools [R, 512] int32, then _tokens over all rows.
+@@ -484,7 +502,8 @@
+     ``side``: as ``prompt_shard``'s (the gather and that stream's collectives one after the other)."""
+     n = s1 - s0
+     step = -(-n // comm.world)                                # every rank sends step rows (the last padded)
+-    lo, hi = s0 + min(comm.rank * step, n), s0 + min((comm.rank + 1) * step, n)
++    lo, hi = prompt_rows(n, comm.rank, comm.world)
++    lo, hi = s0 + lo, s0 + hi
+     mine = torch.empty((step, TOPK_POOLS), dtype=torch.int32, device=qi.device)
+     if hi - lo < step:                                        # the padded rows (never read after the gather)
+         mine[hi - lo:].zero_()

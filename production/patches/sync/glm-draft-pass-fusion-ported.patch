@@ -1,0 +1,183 @@
+# Sync port of ots0108-glm-draft-pass-fusion.patch (production v110-ots124) onto the synced base, applied in production order after the
+# ports before it; re-based by patch(1) (0 hunk(s) at fuzz 2, every fuzzed hunk read: the change lands where
+# the original put it). The original's header (what, why, measurements, tests) is the reference: ots0108-glm-draft-pass-fusion.patch.
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/dflash2.py next/tensorfold/families/glm5_next/cuda/dflash2.py
+--- tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-29 19:06:28.717404100 +0000
+@@ -80,13 +80,22 @@
+ 
+ @triton.jit
+ def _prep_kernel(QKV, QN, KN, COS, SIN, QO, KO, VO, L, stride, eps,
+-                 H: tl.constexpr, HKV: tl.constexpr, HALF: tl.constexpr):
+-    """Normalize and rotate q and k in [q heads | k heads | v heads], copy v, and return [heads, rows, head_dim]."""
++                 H: tl.constexpr, HKV: tl.constexpr, HALF: tl.constexpr,
++                 IDX=None, kv_stride: int = 0, RING_OUT: tl.constexpr = False):
++    """Normalize and rotate q and k in [q heads | k heads | v heads], copy v, and return [heads, rows, head_dim];
++    RING_OUT: k and v of row ``row`` go to row IDX[row] of KO / VO [kv heads, kv_stride, head_dim] (the ring) instead
++    of row ``row`` of [kv heads, L, head_dim] temporaries (the same values, written where index_copy_ put them)."""
+ 
+     row = tl.program_id(0)
+     head = tl.program_id(1)
+     d = tl.arange(0, HALF)
+     D: tl.constexpr = 2 * HALF
++    if RING_OUT:
++        kvrow = tl.load(IDX + row)
++        kvl = kv_stride
++    else:
++        kvrow = row
++        kvl = L
+     src = QKV + row * stride + head * D
+     if head < H + HKV:
+         a = tl.load(src + d).to(tl.float32)
+@@ -107,11 +116,11 @@
+         if head < H:
+             dst = QO + (head * L + row) * D
+         else:
+-            dst = KO + ((head - H) * L + row) * D
++            dst = KO + ((head - H) * kvl + kvrow) * D
+         tl.store(dst + d, ra)
+         tl.store(dst + HALF + d, rb)
+     else:
+-        dst = VO + ((head - H - HKV) * L + row) * D
++        dst = VO + ((head - H - HKV) * kvl + kvrow) * D
+         tl.store(dst + d, tl.load(src + d))
+         tl.store(dst + HALF + d, tl.load(src + HALF + d))
+ 
+@@ -174,6 +183,26 @@
+     return out
+ 
+ 
++@triton.jit
++def _rank_sum_kernel(G, OUT, total, WORLD: tl.constexpr, BLOCK: tl.constexpr):
++    """out = bf16(((g[0] + g[1]) + g[2]) ...): the gathered fp32 partials added in rank order, one rounding (the
++    bits of ``acc = g[0].clone(); acc += g[1]; ...; acc.to(bf16)``, in one launch)."""
++
++    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++    ok = offs < total
++    acc = tl.load(G + offs, mask=ok, other=0.0)
++    for r in tl.static_range(1, WORLD):
++        acc = acc + tl.load(G + r * total + offs, mask=ok, other=0.0)
++    tl.store(OUT + offs, acc.to(tl.bfloat16), mask=ok)
++
++
++def _rank_sum(got: torch.Tensor, world: int, shape: tuple) -> torch.Tensor:
++    out = torch.empty(shape, dtype=torch.bfloat16, device=got.device)
++    total = out.numel()
++    _rank_sum_kernel[(triton.cdiv(total, 1024),)](got, out, total, WORLD=world, BLOCK=1024, num_warps=4)
++    return out
++
++
+ def _quantize4(w: torch.Tensor) -> qmm.Q4:
+     """bf16 (N, K) -> MLX-style affine 4-bit in groups of 64 along K, tiled: min / max ranges (``qmm.quantize4``) or,
+     with TF_GLM_DRAFT_QUANT=mse, least-squares clipped ones (``qmm.quantize4_mse``). Drafts only: replies keep."""
+@@ -362,14 +391,25 @@
+         phase = pos[:, None] * self.inv_freq[None, :]
+         return phase.cos().contiguous(), phase.sin().contiguous()
+ 
+-    def _prep(self, qkv: torch.Tensor, L: DraftLayer, cos: torch.Tensor, sin: torch.Tensor, heads: int):
++    def _prep(self, qkv: torch.Tensor, L: DraftLayer, cos: torch.Tensor, sin: torch.Tensor, heads: int,
++              ring: tuple | None = None):
++        """``ring`` = (kc, vc, idx): k and v written into those rings' rows ``idx`` (what ``index_copy_(1, idx, ..)``
++        of the returned k / v would do); the returned k / v are then the rings themselves."""
++
+         rows = qkv.shape[0]
+         hd = self.hd
+         q = torch.empty((heads, rows, hd), dtype=torch.bfloat16, device=self.dev) if heads else qkv
+-        k = torch.empty((self.kvh, rows, hd), dtype=torch.bfloat16, device=self.dev)
+-        v = torch.empty_like(k)
++        if ring is None:
++            k = torch.empty((self.kvh, rows, hd), dtype=torch.bfloat16, device=self.dev)
++            v = torch.empty_like(k)
++            _prep_kernel[(rows, heads + 2 * self.kvh)](qkv, L.q_norm, L.k_norm, cos, sin, q, k, v, rows,
++                                                       qkv.stride(0), self.eps, H=heads, HKV=self.kvh, HALF=hd // 2,
++                                                       IDX=qkv, kv_stride=0, RING_OUT=False, num_warps=1)
++            return q, k, v
++        k, v, idx = ring
+         _prep_kernel[(rows, heads + 2 * self.kvh)](qkv, L.q_norm, L.k_norm, cos, sin, q, k, v, rows, qkv.stride(0),
+-                                                   self.eps, H=heads, HKV=self.kvh, HALF=hd // 2, num_warps=1)
++                                                   self.eps, H=heads, HKV=self.kvh, HALF=hd // 2, IDX=idx,
++                                                   kv_stride=k.stride(0) // hd, RING_OUT=True, num_warps=1)
+         return q, k, v
+ 
+     def _norm(self, x: torch.Tensor, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+@@ -387,20 +427,15 @@
+             return part.to(torch.bfloat16)
+         got = torch.empty((self.world * part.numel(),), dtype=torch.float32, device=self.dev)
+         self.w.comm.all_gather(part.reshape(-1), got)
+-        g = got.view(self.world, *part.shape)
+-        acc = g[0].clone()
+-        for i in range(1, self.world):
+-            acc += g[i]
+-        return acc.to(torch.bfloat16)
++        return _rank_sum(got, self.world, tuple(part.shape))
+ 
+     def _layer(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+         L = self.layers[i]
+         rows = x.shape[0]
+         normed, xs = self._norm(x, L.in_norm)
+         dyn = _mm(normed, L.a_kp, xs)
+-        q, k, v = self._prep(_mm(_dconv(normed, dyn, L.a_base, 0, self.gs), L.qkv), L, cos, sin, self.heads)
+-        self.kc[i].index_copy_(1, idx, k)
+-        self.vc[i].index_copy_(1, idx, v)
++        q, _, _ = self._prep(_mm(_dconv(normed, dyn, L.a_base, 0, self.gs), L.qkv), L, cos, sin, self.heads,
++                             ring=(self.kc[i], self.vc[i], idx))
+         out = torch.empty((rows, self.heads * self.hd), dtype=torch.bfloat16, device=self.dev)
+         _dattn_kernel[(self.kvh,)](q, self.kc[i], self.vc[i], out, self.pos_dev, self.window, self.hd ** -0.5,
+                                    N=rows, G=self.heads // self.kvh, NH=self.heads, HD=self.hd, CAP=self.cap, BK=64,
+@@ -420,9 +455,7 @@
+         cos, sin = self._rotary(n)
+         idx = self._slots(n)
+         for i, L in enumerate(self.layers):
+-            _, k, v = self._prep(_mm(ctx, L.kv), L, cos, sin, 0)
+-            self.kc[i].index_copy_(1, idx, k)
+-            self.vc[i].index_copy_(1, idx, v)
++            self._prep(_mm(ctx, L.kv), L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
+         self.pos_dev += n
+ 
+     @torch.no_grad()
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/dflash2_multi.py next/tensorfold/families/glm5_next/cuda/dflash2_multi.py
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-29 19:06:28.726927800 +0000
+@@ -218,9 +218,8 @@
+         rows = x.shape[0]
+         normed, xs = d._norm(x, L.in_norm)
+         dyn = _mm(normed, L.a_kp, xs)
+-        q, k, v = d._prep(_mm(_dconv(normed, dyn, L.a_base, 0, d.gs, seg=n), L.qkv), L, cos, sin, d.heads)
+-        self.kc[i].index_copy_(1, idx, k)
+-        self.vc[i].index_copy_(1, idx, v)
++        q, _, _ = d._prep(_mm(_dconv(normed, dyn, L.a_base, 0, d.gs, seg=n), L.qkv), L, cos, sin, d.heads,
++                          ring=(self.kc[i], self.vc[i], idx))
+         out = torch.empty((rows, d.heads * d.hd), dtype=torch.bfloat16, device=self.dev)
+         _dattn_seg_kernel[(d.kvh, S)](q, self.kc[i], self.vc[i], out, pos, slot, d.window, d.hd ** -0.5, rows,
+                                       self.slot_rows, N=n, G=d.heads // d.kvh, NH=d.heads, HD=d.hd, CAP=self.cap,
+@@ -253,12 +252,14 @@
+         m, k = n - 1, d.top_k
+         h, hs = d._norm(x.view(S, n, d.D)[:, 1:].reshape(S * m, d.D), d.norm)
+         logits = _mm(h, w.draft_head if w.draft_head is not None else w.head, hs).float()
+-        packed = torch.empty((S * m, 2 * k), dtype=torch.float32, device=self.dev)
+-        for s in range(S):                  # torch.topk and cuBLAS may pick kernels by row count: one stream each
++        # one top-k over every stream's rows: torch's multi-block radix select (should_use_multiblock: 7..56
++        # slices of 51,648 columns take the same path) finds each slice's k-th value and gathers its set per slice,
++        # so each stream's set is the one its solo pass gets; the merge re-sorts by (value, id). cuBLAS may pick
++        # another kernel for more rows: the selector projection stays one stream at a time
++        vals, local = torch.topk(logits, k, dim=-1)
++        packed = torch.cat([vals, (local + w.vocab_offset).to(torch.int32).view(torch.float32)], dim=1)
++        for s in range(S):
+             rows = slice(s * m, (s + 1) * m)
+-            vals, local = torch.topk(logits[rows], k, dim=-1)
+-            gids = (local + w.vocab_offset).to(torch.int32)
+-            packed[rows] = torch.cat([vals, gids.view(torch.float32)], dim=1)
+             self.proj[rows].copy_(F.linear(h[rows], d.hproj).float())
+         size = d.gathered * S * m * 2 * k
+         if d.gathered > 1:
+@@ -275,9 +276,7 @@
+         ctx, _ = d._norm(_mm(self.tap_in[:T], d.fc), d.hidden_norm)
+         cos, sin = self._rotary(pos)
+         for i, L in enumerate(d.layers):
+-            _, k, v = d._prep(_mm(ctx, L.kv), L, cos, sin, 0)
+-            self.kc[i].index_copy_(1, idx, k)
+-            self.vc[i].index_copy_(1, idx, v)
++            d._prep(_mm(ctx, L.kv), L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
+         self.pos.index_copy_(0, self.t_meta[2 * Tm:2 * Tm + St], self.t_meta[2 * Tm + St:2 * Tm + 2 * St])
+ 
+     # -- graphs -------------------------------------------------------------------------------------------------

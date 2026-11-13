@@ -1,0 +1,76 @@
+diff -ruN tensorfold/families/glm5_next/cuda/engine.py ../b/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:43:18.703885200 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:43:18.841416400 +0000
+@@ -1732,8 +1732,8 @@
+         return stats
+ 
+     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
+-                 constraint=None, *, vision=None, background: bool = False) -> dict[str, Any]:
+-        """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal; ``vision``: an image prompt's prepared pictures (``GlmPrepared``); ``background``: under --parallel, after the other requests and yielding to them."""
++                 constraint=None, *, vision=None, background: bool = False, prompt_array=None) -> dict[str, Any]:
++        """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal; ``vision``: an image prompt's prepared pictures (``GlmPrepared``); ``background``: under --parallel, after the other requests and yielding to them; ``prompt_array``: the app's int64 array of exactly ``prompt``'s ids (under --parallel the scheduler's admission reads it instead of converting the prompt again, ``multi.stream_ids``)."""
+ 
+         if len(prompt) >= self.limit:
+             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
+@@ -1748,9 +1748,12 @@
+         if self.scheduler is not None:          # --parallel: the scheduler's worker runs it with the others
+             if vision is not None and self.vision is None:
+                 raise ValueError("image inputs require starting this server with --vision")
++            glm = {"code": code, "spec": spec, "salt": salt}
++            if prompt_array is not None and len(prompt_array) == len(prompt):
++                glm["ids"] = prompt_array
+             stats = self.scheduler.submit(list(prompt), max_tokens, sampling, bool(draft) and not self.serial_only,
+                                           on_tokens, stop_eos=stop_eos, vision=vision, constraint=constraint,
+-                                          background=background, glm={"code": code, "spec": spec, "salt": salt})
++                                          background=background, glm=glm)
+             stats.update(policy=spec, drafts=draft)
+             return stats
+         positions: list[int] = []
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py ../b/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:43:18.703885200 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:43:18.874062100 +0000
+@@ -390,15 +390,22 @@
+     """Rank 0: a waiting request's prompt ids as a list of ints and (``array``) as an int64 array, made once for the
+     prompt object it holds and kept on the stream (``ids_cache``): ``prefix_wait``, ``prestage`` and ``admit`` read the
+     same ids, and at 600k tokens each conversion is 10-20 ms of rank 0's host before the first token. A stream holding
+-    another prompt object (``_admitted`` copies it) makes them again; ``admit`` drops them once the stream is in."""
++    another prompt object (``_admitted`` gives it the ADMIT's list) makes them again; ``admit`` drops them once the
++    stream is in. ``GlmScheduler.submit`` makes them on the request's thread, before the request queues. The app's own int64 array of the prompt (``glm["ids"]``: ``GlmEngine.generate``'s ``prompt_array``, the prompt's
++    exact values, its list of Python ints beside it) is taken as it is when it has the prompt's length; else the ids
++    go through one int64 array (``np.fromiter``) and back to Python ints (``tolist``): the values ``int`` gives each
++    of them, in two thirds of the time of ``list(map(int, ...))`` and ``np.asarray`` of that list."""
+ 
+     c = getattr(s, "ids_cache", None)
+     if c is None or c[0] is not s.prompt:
+-        c = (s.prompt, list(map(int, s.prompt)), None)
+-    if array and c[2] is None:
+-        c = (c[0], c[1], np.asarray(c[1], dtype=np.int64))
++        given = (getattr(s, "glm", None) or {}).get("ids")
++        if given is not None and len(given) == len(s.prompt):
++            c = (s.prompt, s.prompt, np.asarray(given, dtype=np.int64))
++        else:
++            arr = np.fromiter(s.prompt, dtype=np.int64, count=len(s.prompt))
++            c = (s.prompt, arr.tolist(), arr)
+     s.ids_cache = c
+-    return c[1], c[2]
++    return c[1], (c[2] if array else None)
+ 
+ 
+ def cap_victim(kept: list):
+@@ -1512,7 +1519,7 @@
+         g, e = self.g, self.e
+         hit = self._kept_by_id(a["kid"]) if a["kid"] >= 0 else None
+         prompt = a["prompt"]
+-        s.prompt = list(prompt)
++        s.prompt = prompt if type(prompt) is list else list(prompt)   # (a list made for this ADMIT: nothing else writes it)
+         cut = len(hit.ids) if hit is not None else 0
+         # OTS 0124: the prompt's ids as an int64 array: rank 0's own, a follower's joined from its kept state's and the
+         # ADMIT's tail (``_resolve``, which checked that state's ids against rank 0's), or here a whole prompt's
+@@ -3505,6 +3512,7 @@
+         stream = Stream(list(prompt), max(1, count), sampling, draft=draft, stop_eos=stop_eos, vision=vision,
+                         constraint=constraint, background=background)
+         stream.glm = dict(glm or {})
++        stream_ids(stream)               # on this request's thread, before it queues: admission finds them made
+         # The caller polls; only the scheduler removes cancelled queued requests.
+         stop, disconnected, cancel_error = [False], [False], [None]
+         poll = getattr(emit, "cancelled", None)

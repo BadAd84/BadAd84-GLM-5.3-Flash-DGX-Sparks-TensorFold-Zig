@@ -1,0 +1,893 @@
+# PreparedWeights-1: prepared rank folders of the BUILT weights, and the stored startup estimate (TF_GLM_PREPARED_DIR;
+# default unset = today's path).
+# Upstream: jayleaton/glm53-tensorfold-spark patches/0140-glm-fast-boot.patch (Apache-2.0), as adapted by lanes
+# BootDeepseek / BootFable2 (scripts/glm53/v110/lanes/BootFable2/ots0105-glm-fastboot-prepared-folders.patch), ported
+# to the synced tree. Changes from ots0105: the knob TF_GLM_PREPARED_DIR; TF_GLM_EXPERT_ROTATE in the key; a whole-file
+# code hash of every module the build executes (shares.py, kernels/qmm.py, direct_read.py and the package __init__
+# added), gated by a trace and an environment recording in the test; the index and tokenizer hashed by content; weight
+# files by name, size and mtime; a self-checksummed manifest; fsynced data, manifest and directories; a per-rank flock
+# so the next write removes a killed writer's leftover; every chunk verified by default.
+# Rank 0's weights.load is 47.5-50.4 s of a boot (median 76 s, run-20261029-185803, "weights: 53.6 GB on the GPU"); a
+# folder reads back at the reader's 4.0-4.4 GB/s, measured on GB10 (lanes/BootFable2 fastboot_rt.py, full verify):
+# ~12-13 s. Disk: ~50-57 GiB per rank per key; KEEP = 2 keys per rank.
+# Startup estimate (lane BootGaps' finding): capacity.admit's checkpoint pass parses all 46 headers (112,727 tensors)
+# and runs GLM's transform on each: 1.4-1.5 s on the laptop, run on every rank before the load. GlmEngine passes admit an
+# ``estimate`` hook. fastboot.cached_estimate stores the pass's three integers under the weights key plus the vision flag
+# and the code of engine.py, capacity.py and geometry.py, and reads them back in ~17 ms (laptop). capacity.admit's new
+# ``estimate`` argument defaults to None (the pass as before) for every other family.
+# Files: tensorfold/families/glm5_next/cuda/fastboot.py, weights.py, engine.py (one keyword argument at the admit call),
+# tensorfold/cuda/capacity.py (the optional hook). Applies with patch -p0 from the directory holding tensorfold/, to
+# stack/all and to the plain synced tree. Tests: test_prepared_weights.py, test_estimate.py.
+--- tensorfold/families/glm5_next/cuda/fastboot.py
++++ tensorfold/families/glm5_next/cuda/fastboot.py
+@@ -1,17 +1,55 @@
+-"""The boot timeline: ``mark(phase)`` prints one ``[boot]`` line a phase on every rank with the seconds since the
+-launch, the phase's own seconds (since the previous mark) and the memory state, so a restart's phases stop being
+-inferred from the gaps between unrelated log lines (OTS: the first step of the boot-time work; the prepared rank
+-folders of built weights, jayleaton's 0140 adapted, extend this module in the next step).
++"""Fast restarts: the boot timeline, and prepared rank folders of the BUILT weights.
+ 
+-The launch time is TF_GLM_LAUNCH_T0 or TF_GLM_T0 (epoch seconds, set by a launcher) when given, else this module's
+-import. No torch at import.
++Boot timeline: ``mark(phase)`` prints one ``[boot]`` line a phase on every rank with the seconds since the launch, the
++phase's own seconds (since the previous mark) and the memory state, so a restart's phases stop being inferred from
++the gaps between unrelated log lines. The launch time is TF_GLM_LAUNCH_T0 or TF_GLM_T0 (epoch seconds, set by a
++launcher) when given, else this module's import.
++
++Prepared folders (TF_GLM_PREPARED_DIR; jayleaton/glm53-tensorfold-spark 0140, Apache-2.0, as adapted by lanes
++BootDeepseek and BootFable2, ported to the synced tree): rank 0's ``weights.load`` takes 47.5-50.4 s of a boot whose
++median is 76 s (the run-20261029 boot logs: "weights: 53.6 GB on the GPU (48.5s)"). It is not disk-bound: it splits
++this rank's share out of every checkpoint tensor, EXL3-unpacks the routed experts, MSE-quantizes the dense matrices
++to 4 bits and stacks and uploads each layer, the same bits every time. This module stores what the loader BUILT (every
++tensor's storage bytes, dtype, shape, stride and offset, and the objects around them) in one folder a rank::
++
++    $TF_GLM_PREPARED_DIR/<model>/<key hash>/rank<R>/{manifest.json,data.bin}
++
++and the next start reads it back with no conversion at all. The key covers everything that decides a built byte:
++the checkpoint (every weight file's name, size and mtime; config.json, tokenizer.json and the index by content), the
++rank, the tensor-parallel world, the MTP flag, the build knobs (``KNOBS``), torch's and numpy's versions, the device
++type and the source of every module the build runs (``WEIGHT_CODE``, whole files). A folder whose key differs, whose
++manifest fails its own checksum, whose data file has the wrong size or whose chunks fail their SHA-256 is never
++served: the checkpoint path runs instead (fail-safe, never fail-open).
++
++Written only when TF_GLM_PREPARED_WRITE=1 on a start that had to build (or offline: ``python -m <this module>
++prepare``), into a sibling temporary folder renamed into place after the data and the manifest are on disk, under a
++per-rank lock; a killed or failed write leaves no folder at the key's path, and the next write removes the leftover.
++
++Reader: 64 MiB chunks, several threads, O_DIRECT where the file system takes it (the page cache is the GPU's memory
++on GB10), pinned double buffers and async device copies on a stream per thread. TF_GLM_PREPARED_VERIFY=full (the
++default) checks every chunk's SHA-256, ``sample`` every 16th and the last, ``off`` none.
++
++No torch at import: the key, manifest and folder logic run in host-only tests.
+ """
+ 
+ from __future__ import annotations
+ 
++import hashlib
++import importlib
++import json
+ import os
++import shutil
++import sys
++import threading
+ import time
+ from pathlib import Path
++from typing import Any, Callable
++
++FORMAT = 2                       # the folder format (manifest layout, encoding): a change misses every old folder
++CHUNK = 64 << 20                 # reader / checksum chunk (bytes); every chunk offset is a multiple of it
++ALIGN = 4096                     # storage offsets and the file size (O_DIRECT)
++SAMPLE_EVERY = 16                # TF_GLM_PREPARED_VERIFY=sample: every 16th chunk (and the last); full is the default
++KEEP = 2                         # key folders kept a rank and model (each ~50 GiB at TP=3)
+ 
+ _IMPORT_T = time.time()
+ _last = [None]
+@@ -61,3 +99,739 @@
+     print(f"[boot] {who}+{now - boot_t0():.1f}s {phase}{': ' + detail if detail else ''} ({now - prev:.1f}s){mem}",
+           flush=True)
+     return now - prev
++
++
++# -- keys -----------------------------------------------------------------------------------------------------------
++def digest(obj: Any) -> str:
++    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()
++
++
++PKG = __name__.rsplit(".", 1)[0]          # tensorfold.families.glm5_next.cuda
++# Every module whose code runs while ``weights.load_checkpoint`` builds the tree, whole files (a change anywhere in
++# them misses the folder rather than serving stale weights). The test traces the build and fails on a tensorfold
++# file it executes that is not listed here.
++WEIGHT_CODE = (f"{PKG}", f"{PKG}.weights", f"{PKG}.split", f"{PKG}.tp", f"{PKG}.qmm", f"{PKG}.exl3_mm",
++               f"{PKG}.latent", f"{PKG}.fastboot", "tensorfold.cuda.experts", "tensorfold.cuda.kernels.qmm",
++               "tensorfold.cuda.direct_read", "tensorfold.cuda.shares")
++# The environment the build reads that decides built bytes (each joins the key). The test records every variable read
++# at import and during the build, and scans the WEIGHT_CODE sources' string literals: each TF_GLM_* / TENSORFOLD_*
++# name must be in KNOBS or RUN_TIME.
++KNOBS = ("TF_GLM_DENSE", "TF_GLM_KVB", "TF_GLM_LATENT", "TF_GLM_DRAFT_QUANT", "TF_GLM_ASSISTANT_ENDS",
++         "TF_GLM_EXPERT_ROTATE")
++# Named in the builder modules but read only by kernels at run time, never by the build (those read at import are
++# built with other values in the test, every tensor compared): a sweep of them keeps the folder.
++RUN_TIME = ("TF_GLM_SEQ_ROWS", "TF_GLM_LATENT_MMA", "TF_GLM_SPARSE_ONEPASS", "TF_GLM_LATENT_STAGES",
++            "TF_GLM_ONEPASS_CUDA", "TF_GLM_SEG_CHUNKS_CUDA", "TF_GLM_Q4_TILE", "TF_GLM_EXL3_PF", "TF_GLM_EXL3_NFIRST",
++            "TF_GLM_EXL3_DEC", "TF_GLM_EXL3_FUSE", "TF_GLM_EXL3_XROW", "TF_GLM_EXL3_DEC_ORDER", "TF_GLM_EXL3_LOADS",
++            "TF_GLM_EXL3_SEQ", "TF_GLM_EXL3_PASS", "TF_GLM_EXL3_PROMPT", "TF_GLM_EXL3_ORDER", "TF_GLM_EXL3_ROWROT",
++            # qmm.matmul_swiglu's decode gate (HuntMatmulExperts-3) and qmm.cu's K-slice reduce rule: forward only
++            "TF_GLM_SWIGLU_SUM", "TF_GLM_QMM_CLUSTERS")
++
++
++def knobs() -> dict:
++    return {k: os.environ.get(k) for k in KNOBS}
++
++
++def source_digest(modules=WEIGHT_CODE) -> str:
++    """SHA-256 over the source files of ``modules`` (found, not imported: the engine module's imports are heavy)."""
++
++    import importlib.util
++
++    h = hashlib.sha256()
++    for name in modules:
++        spec = importlib.util.find_spec(name)
++        if spec is None or not spec.origin or not Path(spec.origin).is_file():
++            raise ImportError(f"no source file for {name}")
++        h.update(name.encode() + b"\0" + Path(spec.origin).read_bytes() + b"\0")
++    return h.hexdigest()
++
++
++def model_name(model_dir: str | Path) -> str:
++    """``<org>--<name>-<revision>`` for a Hugging Face snapshot (models--org--name/snapshots/<rev>), else the folder's
++    name: the folder level the key folders of one checkpoint share (``prune``)."""
++
++    parts = Path(str(model_dir)).parts
++    if len(parts) >= 3 and parts[-2] == "snapshots" and parts[-3].startswith("models--"):
++        return f"{parts[-3][len('models--'):]}-{parts[-1][:12]}"
++    p = Path(str(model_dir))
++    return (p.resolve().name if p.exists() else p.name) or "model"
++
++
++IDENT_FILES = ("config.json", "tokenizer.json", "model.safetensors.index.json")
++
++
++def files_ident(model_dir: str | Path) -> list:
++    """The checkpoint's weight files (name, size, mtime: a changed or replaced file is a new key; their 164 GB are not
++    hashed every boot) and the small files ``load`` reads, by content (config.json, tokenizer.json for
++    ``Config.eos``, the index for which file holds a tensor)."""
++
++    d = Path(model_dir)
++    files = []
++    for f in sorted(d.glob("*.safetensors")):
++        st = f.stat()
++        files.append([f.name, st.st_size, st.st_mtime_ns])
++    sums = {}
++    for name in IDENT_FILES:
++        p = d / name
++        sums[name] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
++    return [files, sums]
++
++
++def _versions(device: str) -> dict:
++    import numpy
++    import torch
++
++    return {"torch": torch.__version__, "numpy": numpy.__version__, "device": str(torch.device(device).type)}
++
++
++def weights_key(model_dir: str | Path, rank: int, world: int, mtp: bool, *, device: str = "cuda") -> dict:
++    """The key a rank's built weight tree is stored under: everything that can change a built byte."""
++
++    return {"format": FORMAT, "what": "weights", "model": model_name(model_dir), "files": files_ident(model_dir),
++            "rank": int(rank), "world": int(world), "mtp": bool(mtp), "knobs": knobs(), "code": source_digest(),
++            **_versions(device)}
++
++
++# The startup estimate's transform chain (``GlmEngine.__init__`` builds it from ``geometry.split_weights`` and the
++# ``qmm`` / ``without_mtp`` wrappers) and the pass over the checkpoint headers (``capacity.estimate_weights``): their
++# code joins the weights key's (whose knobs, rank, world and MTP flag are the transform's other inputs).
++ESTIMATE_CODE = (f"{PKG}.engine", "tensorfold.cuda.capacity", "tensorfold.cuda.geometry")
++
++
++def estimate_key(model_dir: str | Path, rank: int, world: int, mtp: bool, vision: bool) -> dict:
++    """The key of a rank's startup weight estimate: the weights key, the vision tower's bf16 bytes (rank 0 with
++    vision) and the estimate's own code."""
++
++    return {**weights_key(model_dir, rank, world, mtp), "what": "estimate", "vision": bool(vision),
++            "estimate_code": source_digest(ESTIMATE_CODE)}
++
++
++def cached_estimate(key_of: Callable[[], dict], compute: Callable[[], Any]) -> Any:
++    """``compute()``'s startup weight estimate (``capacity.Weights``: three integers), read from
++    ``<root>/<model>/estimates/<key hash>.json`` when it exists for ``key_of()``, else computed (the pass parses
++    every checkpoint header: ~1.6 s at 112,727 tensors) and written there with TF_GLM_PREPARED_WRITE=1. Without
++    TF_GLM_PREPARED_DIR: ``compute()`` alone. A file that fails its checksum or does not match the key is ignored."""
++
++    root = prepared_root()
++    if root is None:
++        return compute()
++    key = key_of()
++    path = Path(root) / key["model"] / "estimates" / f"{digest(key)[:16]}.json"
++    try:
++        got = json.loads(path.read_text())
++        body = got["body"]
++        if got.get("sha256") == _manifest_sum(body) and body.get("key_hash") == digest(key):
++            from tensorfold.cuda.capacity import Weights
++
++            return Weights(**{k: int(v) for k, v in body["weights"].items()})
++        why = "key or checksum differs"
++    except FileNotFoundError:
++        why = "none"
++    except (OSError, ValueError, KeyError, TypeError) as exc:
++        why = f"unreadable ({type(exc).__name__})"
++    print(f"[tensorfold] startup estimate: no stored one ({why}): computing it", flush=True)
++    out = compute()
++    if write_enabled():
++        import dataclasses
++
++        body = {"key": key, "key_hash": digest(key), "weights": dataclasses.asdict(out)}
++        tmp = path.parent / f".{path.name}.tmp-{os.getpid()}"
++        try:
++            path.parent.mkdir(parents=True, exist_ok=True)
++            with open(tmp, "w") as f:
++                f.write(json.dumps({"sha256": _manifest_sum(body), "body": body}))
++                f.flush()
++                os.fsync(f.fileno())
++            os.replace(tmp, path)
++        except OSError as exc:  # serving does not depend on it
++            tmp.unlink(missing_ok=True)
++            print(f"[tensorfold] startup estimate: not stored ({exc})", file=sys.stderr, flush=True)
++    return out
++
++
++# -- where ----------------------------------------------------------------------------------------------------------
++def prepared_root() -> Path | None:
++    """TF_GLM_PREPARED_DIR: the prepared folders' root (unset / empty / 0 / off: never read or written)."""
++
++    v = os.environ.get("TF_GLM_PREPARED_DIR", "").strip()
++    if v.lower() in ("", "0", "off", "no", "false"):
++        return None
++    return Path(v)
++
++
++def write_enabled() -> bool:
++    v = os.environ.get("TF_GLM_PREPARED_WRITE", "0").strip().lower()
++    if v not in ("0", "1", "", "off", "on", "no", "yes", "false", "true"):
++        raise ValueError(f"TF_GLM_PREPARED_WRITE={v!r}: 0 or 1")
++    return v in ("1", "on", "yes", "true")
++
++
++def folder(root: Path, key: dict) -> Path:
++    return Path(root) / key["model"] / digest(key)[:16] / f"rank{key['rank']}"
++
++
++def _manifest_sum(body: dict) -> str:
++    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
++
++
++def manifest(d: Path) -> dict:
++    """``d``'s manifest body, its own checksum checked (a damaged manifest raises)."""
++
++    m = json.loads((Path(d) / "manifest.json").read_text())
++    body = m.get("body")
++    if not isinstance(body, dict) or m.get("sha256") != _manifest_sum(body):
++        raise ValueError("manifest checksum mismatch")
++    return body
++
++
++def valid(d: Path, key: dict) -> tuple:
++    """(ok, why): ``d`` holds a folder written for exactly ``key``, its manifest intact and its data file of the
++    recorded size (the chunks' checksums: ``read``)."""
++
++    d = Path(d)
++    if not (d / "manifest.json").is_file():
++        return False, "no folder"
++    try:
++        m = manifest(d)
++    except (OSError, ValueError) as exc:
++        return False, f"unreadable manifest ({exc})"
++    if m.get("format") != FORMAT:
++        return False, f"format {m.get('format')} != {FORMAT}"
++    if m.get("key_hash") != digest(key):
++        stored = m.get("key") or {}
++        diff = sorted(k for k in set(key) | set(stored) if digest(key.get(k)) != digest(stored.get(k)))
++        return False, f"key differs ({', '.join(diff) or 'hash'})"
++    data = d / "data.bin"
++    if not data.is_file() or data.stat().st_size != m.get("file_size"):
++        return False, "data file missing or of the wrong size"
++    return True, "ok"
++
++
++# -- flatten / rebuild ----------------------------------------------------------------------------------------------
++# non-dataclass tensorfold objects the weight tree holds (latent's absorb wrappers): rebuilt via __new__ + setattr
++PLAIN_CLASSES = (f"{PKG}.latent:AbsorbW", f"{PKG}.latent:AbsorbQ4", f"{PKG}.latent:AbsorbF8")
++
++
++class _Flat:
++    def __init__(self) -> None:
++        self.storages: list = []            # (storage, nbytes, device type) in first-use order
++        self.keep: list = []                # host copies of numpy arrays (alive until written)
++        self.index: dict = {}
++
++    def storage(self, t) -> int:
++        st = t.untyped_storage()
++        k = (t.device.type, t.device.index, st.data_ptr(), st.nbytes())
++        if k not in self.index:
++            self.index[k] = len(self.storages)
++            self.storages.append((st, st.nbytes(), t.device.type))
++        return self.index[k]
++
++    def enc(self, x: Any) -> Any:
++        import dataclasses
++
++        import numpy as np
++        import torch
++
++        if x is None or isinstance(x, (bool, int, float, str)):
++            return {"P": x}
++        if isinstance(x, torch.Tensor):
++            return {"T": self.storage(x), "dtype": str(x.dtype).removeprefix("torch."), "shape": list(x.shape),
++                    "stride": list(x.stride()), "off": int(x.storage_offset()), "dev": x.device.type}
++        if isinstance(x, np.ndarray):
++            t = torch.from_numpy(np.ascontiguousarray(x))
++            self.keep.append(t)
++            return {"N": self.storage(t), "dtype": str(x.dtype), "shape": list(x.shape)}
++        if isinstance(x, torch.device):
++            return {"dev": str(x)}
++        if isinstance(x, torch.dtype):
++            return {"dtype": str(x).removeprefix("torch.")}
++        if isinstance(x, list):
++            return {"L": [self.enc(v) for v in x]}
++        if isinstance(x, tuple):
++            return {"U": [self.enc(v) for v in x]}
++        if isinstance(x, dict):
++            if not all(isinstance(k, str) for k in x):
++                raise TypeError("dict keys must be str")
++            return {"D": [[k, self.enc(v)] for k, v in x.items()]}
++        cls = type(x)
++        name = f"{cls.__module__}:{cls.__qualname__}"
++        if (dataclasses.is_dataclass(x) and cls.__module__.startswith("tensorfold.")) or name in PLAIN_CLASSES:
++            if hasattr(cls, "__slots__") and not hasattr(x, "__dict__"):
++                raise TypeError(f"{name}: slotted objects are not stored")
++            return {"O": name, "f": {k: self.enc(v) for k, v in vars(x).items()}}
++        raise TypeError(f"cannot store a {cls.__module__}.{cls.__qualname__} in a prepared folder")
++
++
++def _find_class(path: str):
++    mod, _, qual = path.partition(":")
++    if not mod.startswith("tensorfold."):
++        raise ValueError(f"refusing to build {path}")
++    obj: Any = importlib.import_module(mod)
++    for part in qual.split("."):
++        obj = getattr(obj, part)
++    return obj
++
++
++def _dec(x: dict, bufs: list) -> Any:
++    import numpy as np
++    import torch
++
++    if "P" in x:
++        return x["P"]
++    if "T" in x:
++        buf = bufs[x["T"]]
++        t = torch.empty(0, dtype=getattr(torch, x["dtype"]), device=buf.device)
++        t.set_(buf.untyped_storage(), x["off"], x["shape"], x["stride"])
++        return t
++    if "N" in x:
++        return bufs[x["N"]].numpy().view(np.dtype(x["dtype"])).reshape(x["shape"])
++    if "dev" in x:
++        return torch.device(x["dev"])
++    if "dtype" in x:
++        return getattr(torch, x["dtype"])
++    if "L" in x:
++        return [_dec(v, bufs) for v in x["L"]]
++    if "U" in x:
++        return tuple(_dec(v, bufs) for v in x["U"])
++    if "D" in x:
++        return {k: _dec(v, bufs) for k, v in x["D"]}
++    if "O" in x:
++        cls = _find_class(x["O"])
++        obj = cls.__new__(cls)
++        for k, v in x["f"].items():
++            object.__setattr__(obj, k, _dec(v, bufs))
++        return obj
++    raise ValueError(f"bad node {list(x)[:3]}")
++
++
++# -- write ----------------------------------------------------------------------------------------------------------
++def _fsync_dir(d: Path) -> None:
++    try:
++        fd = os.open(d, os.O_RDONLY)
++    except OSError:                                       # (Windows: directories cannot be opened)
++        return
++    try:
++        os.fsync(fd)
++    except OSError:
++        pass
++    finally:
++        os.close(fd)
++
++
++class _Lock:
++    """An exclusive, non-blocking lock beside a rank's folder (released by the kernel when the holder dies), so two
++    writers of one rank never share a temporary folder and a leftover one is known dead."""
++
++    def __init__(self, path: Path) -> None:
++        self.path, self.fd = path, None
++
++    def __enter__(self) -> bool:
++        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
++        try:
++            import fcntl
++
++            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except ImportError:                               # (no flock: one writer is assumed)
++            pass
++        except OSError:
++            os.close(self.fd)
++            self.fd = None
++            return False
++        return True
++
++    def __exit__(self, *exc) -> None:
++        if self.fd is not None:
++            os.close(self.fd)                             # closing the descriptor releases the flock
++
++
++def _tmp_glob(d: Path) -> str:
++    return f".{d.name}.tmp-*"
++
++
++def save(obj: Any, d: Path, key: dict) -> dict | None:
++    """``obj``'s tensors (storage bytes) and structure into ``d``: written into a sibling temporary folder, the data
++    and manifest synced, then renamed into place. None when another process holds the rank's write lock."""
++
++    import torch
++
++    flat = _Flat()
++    tree = flat.enc(obj)
++    d = Path(d)
++    d.parent.mkdir(parents=True, exist_ok=True)
++    with _Lock(d.parent / f".{d.name}.lock") as held:
++        if not held:
++            print(f"[tensorfold] prepared folder {d}: another process is writing it; not written", flush=True)
++            return None
++        for leftover in d.parent.glob(_tmp_glob(d)):      # a killed writer's (it held the lock we hold now)
++            shutil.rmtree(leftover, ignore_errors=True)
++        tmp = d.parent / f".{d.name}.tmp-{os.getpid()}"
++        tmp.mkdir()
++        storages, offset = [], 0
++        for _, nbytes, dev in flat.storages:
++            storages.append({"offset": offset, "nbytes": nbytes, "dev": dev})
++            offset += -(-nbytes // ALIGN) * ALIGN
++        size = offset
++        sums: list = []
++        pinned = torch.cuda.is_available()
++        stage = torch.empty(CHUNK, dtype=torch.uint8, pin_memory=pinned)
++        stage_np = stage.numpy()
++        t0 = time.perf_counter()
++        h = hashlib.sha256()
++        filled = 0                   # bytes of the current checksum chunk hashed so far
++
++        def hashed(mv) -> None:
++            nonlocal h, filled
++            pos = 0
++            while pos < len(mv):
++                n = min(len(mv) - pos, CHUNK - filled)
++                h.update(mv[pos:pos + n])
++                filled += n
++                pos += n
++                if filled == CHUNK:
++                    sums.append(h.hexdigest())
++                    h, filled = hashlib.sha256(), 0
++
++        zeros = bytes(ALIGN)
++        with open(tmp / "data.bin", "wb", buffering=0) as f:
++            fd = f.fileno()
++            since_sync = 0
++            for (st, nbytes, _), info in zip(flat.storages, storages):
++                src = torch.empty(0, dtype=torch.uint8, device=st.device)
++                src.set_(st, 0, (nbytes,), (1,))
++                pos = 0
++                while pos < nbytes:
++                    n = min(CHUNK, nbytes - pos)
++                    stage[:n].copy_(src[pos:pos + n])
++                    mv = memoryview(stage_np)[:n]
++                    f.write(mv)
++                    hashed(mv)
++                    pos += n
++                    since_sync += n
++                    if since_sync >= 1 << 30:             # keep the page cache (GPU memory on GB10) small
++                        os.fsync(fd)
++                        if hasattr(os, "posix_fadvise"):
++                            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
++                        since_sync = 0
++                pad = -nbytes % ALIGN
++                if pad:
++                    f.write(zeros[:pad])
++                    hashed(memoryview(zeros)[:pad])
++            os.fsync(fd)
++            if hasattr(os, "posix_fadvise"):
++                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
++        if filled:
++            sums.append(h.hexdigest())
++        del stage, stage_np
++        if pinned:
++            _release_pinned()
++        body = {"format": FORMAT, "key": key, "key_hash": digest(key), "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
++                "file_size": size, "chunk": CHUNK, "chunk_sha256": sums, "storages": storages, "tree": tree}
++        with open(tmp / "manifest.json", "w") as f:
++            f.write(json.dumps({"sha256": _manifest_sum(body), "body": body}, separators=(",", ":")))
++            f.flush()
++            os.fsync(f.fileno())
++        _fsync_dir(tmp)
++        shutil.rmtree(d, ignore_errors=True)               # an older folder of this key (``prepare --force``)
++        os.replace(tmp, d)
++        _fsync_dir(d.parent)
++    dt = time.perf_counter() - t0
++    print(f"[tensorfold] prepared folder written: {d} ({size / 1e9:.1f} GB in {dt:.1f}s, "
++          f"{size / 1e9 / max(dt, 1e-9):.1f} GB/s)", flush=True)
++    return body
++
++
++# -- read -----------------------------------------------------------------------------------------------------------
++def _release_pinned() -> None:
++    """Hand the staging buffers' pinned memory back (torch's host allocator keeps freed pinned blocks cached; on
++    GB10 that is GPU memory for the life of the server)."""
++
++    import torch
++
++    try:
++        torch._C._host_emptyCache()
++    except (AttributeError, RuntimeError):
++        pass
++
++
++def _plan(storages: list, size: int) -> list:
++    """Per chunk k (file bytes [k CHUNK, (k + 1) CHUNK)): (storage, byte offset in it, offset in the chunk, bytes)."""
++
++    plan: list = [[] for _ in range(-(-size // CHUNK))]
++    for i, s in enumerate(storages):
++        a, n = int(s["offset"]), int(s["nbytes"])
++        pos = 0
++        while pos < n:
++            k, within = divmod(a + pos, CHUNK)
++            m = min(n - pos, CHUNK - within)
++            plan[k].append((i, pos, within, m))
++            pos += m
++    return plan
++
++
++def verify_mode() -> str:
++    v = os.environ.get("TF_GLM_PREPARED_VERIFY", "full").strip().lower() or "full"
++    if v not in ("full", "sample", "off"):
++        raise ValueError(f"TF_GLM_PREPARED_VERIFY={v!r}: full, sample or off")
++    return v
++
++
++def _checked(k: int, n_chunks: int, mode: str) -> bool:
++    return mode == "full" or (mode == "sample" and (k % SAMPLE_EVERY == 0 or k == n_chunks - 1))
++
++
++def _open(path: Path) -> tuple:
++    """(fd, direct): O_DIRECT when the file system takes it, else buffered (pages dropped after each chunk)."""
++
++    if hasattr(os, "O_DIRECT") and os.environ.get("TF_GLM_PREPARED_DIRECT", "1").strip() != "0":
++        try:
++            return os.open(path, os.O_RDONLY | os.O_DIRECT), True
++        except OSError:
++            pass
++    return os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)), False
++
++
++def read(d: Path, device: str = "cuda", threads: int | None = None) -> tuple:
++    """The object ``save`` stored in ``d``, its tensors on ``device`` (CPU-stored ones stay on the CPU), and stats:
++    bytes, seconds, GB/s, whether O_DIRECT was used, chunks verified."""
++
++    import torch
++
++    d = Path(d)
++    m = manifest(d)
++    storages, size = m["storages"], int(m["file_size"])
++    if int(m.get("chunk", 0)) != CHUNK:
++        raise ValueError(f"{d}: chunk {m.get('chunk')} != {CHUNK}")
++    plan = _plan(storages, size)
++    sums = m["chunk_sha256"]
++    mode = verify_mode()
++    dev = torch.device(device)
++    cuda = dev.type == "cuda"
++    t0 = time.perf_counter()
++    bufs = [torch.empty(s["nbytes"], dtype=torch.uint8, device=(dev if s["dev"] != "cpu" else "cpu"))
++            for s in storages]
++    n_threads = max(1, int(threads or os.environ.get("TF_GLM_PREPARED_THREADS", "") or 8))
++    n_threads = min(n_threads, max(1, len(plan)))
++    nxt = [0]
++    lock = threading.Lock()
++    errors: list = []
++    verified = [0]
++    direct_used = [True]
++
++    def worker() -> None:
++        try:
++            stream = torch.cuda.Stream(device=dev) if cuda else None
++            if cuda:        # pinned (cudaHostAlloc: page aligned), so the device copies are async DMA
++                stage = [torch.empty(CHUNK, dtype=torch.uint8, pin_memory=True) for _ in range(2)]
++            else:           # anonymous maps: page aligned for O_DIRECT
++                import mmap as _mm
++
++                maps = [_mm.mmap(-1, CHUNK) for _ in range(2)]
++                stage = [torch.frombuffer(mp, dtype=torch.uint8) for mp in maps]
++            fd, direct = _open(d / "data.bin")
++            if direct and any(b.data_ptr() % ALIGN for b in stage):
++                os.close(fd)
++                fd, direct = os.open(d / "data.bin", os.O_RDONLY), False
++            if not direct:
++                direct_used[0] = False
++            events: list = [None, None]
++            which = 0
++            try:
++                while True:
++                    with lock:
++                        k = nxt[0]
++                        nxt[0] += 1
++                    if k >= len(plan) or errors:
++                        break
++                    if events[which] is not None:
++                        events[which].synchronize()          # the buffer's last copies are done
++                    buf = stage[which]
++                    mv = memoryview(buf.numpy())
++                    off = k * CHUNK
++                    want = min(CHUNK, size - off)
++                    got = 0
++                    while got < want:
++                        r = os.preadv(fd, [mv[got:want]], off + got)
++                        if r <= 0:
++                            raise OSError(f"{d / 'data.bin'}: short read at {off + got}")
++                        got += r
++                    if not direct and hasattr(os, "posix_fadvise"):
++                        os.posix_fadvise(fd, off, want, os.POSIX_FADV_DONTNEED)
++                    if _checked(k, len(plan), mode):
++                        if hashlib.sha256(mv[:want]).hexdigest() != sums[k]:
++                            raise ValueError(f"{d / 'data.bin'}: chunk {k} checksum mismatch")
++                        with lock:
++                            verified[0] += 1
++                    if cuda:
++                        with torch.cuda.stream(stream):
++                            for i, a, s, n in plan[k]:
++                                bufs[i][a:a + n].copy_(buf[s:s + n], non_blocking=True)
++                            ev = torch.cuda.Event()
++                            ev.record(stream)
++                        events[which] = ev
++                        which ^= 1
++                    else:
++                        for i, a, s, n in plan[k]:
++                            bufs[i][a:a + n].copy_(buf[s:s + n])
++                for ev in events:
++                    if ev is not None:
++                        ev.synchronize()
++            finally:
++                os.close(fd)
++        except BaseException as exc:  # noqa: BLE001 - reported by the caller
++            errors.append(exc)
++
++    pool = [threading.Thread(target=worker, name=f"tf-prepared-{i}", daemon=True) for i in range(n_threads)]
++    for t in pool:
++        t.start()
++    for t in pool:
++        t.join()
++    if cuda:
++        torch.cuda.synchronize(dev)
++        _release_pinned()
++    if errors:
++        raise errors[0]
++    obj = _dec(m["tree"], bufs)
++    dt = time.perf_counter() - t0
++    return obj, {"bytes": size, "seconds": dt, "gbps": size / 1e9 / max(dt, 1e-9), "direct": direct_used[0],
++                 "verified": verified[0], "chunks": len(plan), "threads": n_threads}
++
++
++def prune(d: Path, keep: int = KEEP) -> None:
++    """Remove this rank's older key folders of the same model beyond the ``keep`` newest (~50 GiB each at TP=3)."""
++
++    d = Path(d)
++    model, rank = d.parent.parent, d.name
++    olds = sorted((p for p in model.glob(f"*/{rank}") if p != d and (p / "manifest.json").exists()),
++                  key=lambda p: (p / "manifest.json").stat().st_mtime, reverse=True)
++    for p in olds[max(keep - 1, 0):]:
++        shutil.rmtree(p, ignore_errors=True)
++        print(f"[tensorfold] removed an older prepared folder: {p}", flush=True)
++
++
++def cached_tree(what: str, key_of: Callable[[], dict], build: Callable[[], Any], device: str = "cuda") -> Any:
++    """``build()``'s result, read from the prepared folder for ``key_of()`` when there is a valid one; otherwise
++    built, and written there when TF_GLM_PREPARED_WRITE=1. Any failure to read builds; a failure to write is logged.
++    Without TF_GLM_PREPARED_DIR: ``build()`` alone (the key is never computed)."""
++
++    root = prepared_root()
++    if root is None:
++        return build()
++    key = key_of()
++    d = folder(root, key)
++    ok, why = valid(d, key)
++    if ok:
++        try:
++            obj, st = read(d, device)
++            print(f"[tensorfold] {what}: prepared folder {d}, {st['bytes'] / 1e9:.1f} GB in {st['seconds']:.1f}s "
++                  f"({st['gbps']:.1f} GB/s, {st['threads']} threads, {'O_DIRECT' if st['direct'] else 'buffered'}, "
++                  f"{st['verified']}/{st['chunks']} chunks verified)", flush=True)
++            return obj
++        except Exception as exc:  # noqa: BLE001 - any failure: build as without a folder
++            why = f"unusable ({type(exc).__name__}: {exc})"
++            import torch
++
++            if torch.cuda.is_available():
++                torch.cuda.empty_cache()
++    write = write_enabled()
++    print(f"[tensorfold] {what}: no usable prepared folder at {d} ({why}): building from the checkpoint"
++          + ("; will write it" if write else ""), flush=True)
++    obj = build()
++    if write:
++        try:
++            if save(obj, d, key) is not None:
++                prune(d)
++        except Exception as exc:  # noqa: BLE001 - serving does not depend on the folder
++            for leftover in d.parent.glob(_tmp_glob(d)):  # a partial write is not kept
++                shutil.rmtree(leftover, ignore_errors=True)
++            print(f"[tensorfold] {what}: could not write the prepared folder {d} ({type(exc).__name__}: {exc})",
++                  file=sys.stderr, flush=True)
++    return obj
++
++
++# -- prepare ---------------------------------------------------------------------------------------------------------
++def prepare(model_dir: Path, rank: int, world: int, root: Path, mtp: bool, force: bool = False) -> int:
++    """Write this rank's weights folder on this machine's GPU (the serve stopped). ``mtp`` must equal the serve's
++    ``GlmEngine.mtp_on`` (False under --parallel > 1) and the environment the serve's (TF_GLM_* knobs), or the
++    serve's key differs and it builds."""
++
++    import torch
++
++    os.environ["TF_GLM_PREPARED_DIR"] = str(root)
++    os.environ["TF_GLM_PREPARED_WRITE"] = "1"
++    set_rank(rank)
++    from . import weights
++
++    d = folder(root, weights_key(model_dir, rank, world, mtp))
++    if force:
++        shutil.rmtree(d, ignore_errors=True)
++    print(f"[tensorfold] prepare rank {rank} of {world}: {model_dir} (mtp {mtp}) -> {d}", flush=True)
++    mark("prepare start")
++    w = weights.load(model_dir, rank=rank, world=world, mtp=mtp)
++    mark("weights", f"{w.nbytes() / 1e9:.1f} GB")
++    torch.cuda.synchronize()
++    return 0 if valid(d, weights_key(model_dir, rank, world, mtp))[0] else 1
++
++
++def main(argv: list | None = None) -> int:
++    import argparse
++
++    p = argparse.ArgumentParser(prog="python -m " + __name__, description=__doc__,
++                                formatter_class=argparse.RawDescriptionHelpFormatter)
++    sub = p.add_subparsers(dest="cmd", required=True)
++    pp = sub.add_parser("prepare", help="write this rank's prepared weights folder (runs the load on this GPU)")
++    pp.add_argument("model_dir", type=Path)
++    pp.add_argument("--rank", type=int, required=True)
++    pp.add_argument("--world", type=int, default=3)
++    pp.add_argument("--root", type=Path, default=None, help="default: TF_GLM_PREPARED_DIR")
++    pp.add_argument("--no-mtp", action="store_true", help="the serve runs --parallel > 1: GlmEngine.mtp_on is False")
++    pp.add_argument("--force", action="store_true", help="rewrite even when a valid folder exists")
++    pv = sub.add_parser("verify", help="check a prepared folder's manifest and every chunk's checksum (no GPU)")
++    pv.add_argument("folder", type=Path)
++    ps = sub.add_parser("status", help="list prepared folders under a root")
++    ps.add_argument("root", type=Path, nargs="?")
++    args = p.parse_args(argv)
++    if args.cmd == "prepare":
++        root = args.root or prepared_root()
++        if root is None:
++            raise SystemExit("give --root or set TF_GLM_PREPARED_DIR")
++        return prepare(args.model_dir, args.rank, args.world, root, not args.no_mtp, args.force)
++    if args.cmd == "verify":
++        m = manifest(args.folder)
++        size = int(m["file_size"])
++        if (args.folder / "data.bin").stat().st_size != size:
++            print(f"{args.folder}: data.bin is not {size} bytes", flush=True)
++            return 1
++        bad = 0
++        fd, _ = _open(args.folder / "data.bin")
++        try:
++            import mmap as _mm
++
++            buf = _mm.mmap(-1, CHUNK)
++            for k, want_sum in enumerate(m["chunk_sha256"]):
++                n = min(CHUNK, size - k * CHUNK)
++                got = os.preadv(fd, [memoryview(buf)[:n]], k * CHUNK)
++                if got != n or hashlib.sha256(memoryview(buf)[:n]).hexdigest() != want_sum:
++                    bad += 1
++                    print(f"chunk {k}: mismatch", flush=True)
++        finally:
++            os.close(fd)
++        print(f"{args.folder}: {len(m['chunk_sha256'])} chunks, {bad} bad", flush=True)
++        return 1 if bad else 0
++    root = args.root or prepared_root()
++    if root is None or not Path(root).is_dir():
++        print("no prepared root")
++        return 1
++    for man in sorted(Path(root).glob("*/*/rank*/manifest.json")):
++        try:
++            m = manifest(man.parent)
++        except (OSError, ValueError) as exc:
++            print(f"{man.parent}  damaged ({exc})")
++            continue
++        k = m["key"]
++        print(f"{man.parent}  {m['file_size'] / 1e9:.1f} GB  {m['created']}  {k.get('what')} rank {k.get('rank')} "
++              f"world {k.get('world')} mtp {k.get('mtp')}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+--- tensorfold/families/glm5_next/cuda/weights.py
++++ tensorfold/families/glm5_next/cuda/weights.py
+@@ -282,7 +282,22 @@
+ 
+ def load(model_dir: str | Path, *, rank: int, world: int = 2, device: str = "cuda", mtp: bool = True) -> Weights:
+     """Rank ``rank`` of ``world`` from a checkpoint or rank folder (``tp.Layout``'s shares), MTP included unless
+-    ``mtp`` is False, with its rows of the head."""
++    ``mtp`` is False, with its rows of the head.
++
++    With TF_GLM_PREPARED_DIR set, the tree exactly as ``load_checkpoint`` builds it comes from this rank's prepared
++    folder when one exists for this key (``fastboot.cached_tree``: the built tensors' storage bytes, nothing re-split
++    or re-quantized), else it is built, and stored there for the next start with TF_GLM_PREPARED_WRITE=1."""
++
++    from . import fastboot
++
++    return fastboot.cached_tree("weights", lambda: fastboot.weights_key(model_dir, rank, world, mtp, device=device),
++                                lambda: load_checkpoint(model_dir, rank=rank, world=world, device=device, mtp=mtp),
++                                device)
++
++
++def load_checkpoint(model_dir: str | Path, *, rank: int, world: int = 2, device: str = "cuda",
++                    mtp: bool = True) -> Weights:
++    """``load`` from the checkpoint itself (the path every start takes without a prepared folder)."""
+ 
+     from .split import RankReader
+     from .tp import Layout
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -898,7 +898,11 @@
+                                    geometry,
+                                    weights_estimate, rank=rank, world=world, gather=self._gather_ints,
+                                    draft_dir=drafter, draft_weights=lambda d: dflash2_weights(d, world, draft_fraction(d, rank, world)),
+-                                   draft_geometry=draft_geometry)
++                                   draft_geometry=draft_geometry,
++                                   # TF_GLM_PREPARED_DIR: the checkpoint pass's result stored under its key (fastboot)
++                                   estimate=lambda compute: fastboot.cached_estimate(
++                                       lambda: fastboot.estimate_key(model_dir, rank, world, self.mtp_on, vision),
++                                       compute))
+         self.limit = self.capacity_plan["context_window"]
+         capacity = self.capacity_plan["cache_slots"]
+         long_context = self.limit > cfg.dense_limit
+--- tensorfold/cuda/capacity.py
++++ tensorfold/cuda/capacity.py
+@@ -313,8 +313,10 @@
+           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
+           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
+           draft_transform: Callable | None = None,
+-          draft_weights: Callable[[Path], Weights] | None = None) -> dict:
+-    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
++          draft_weights: Callable[[Path], Weights] | None = None,
++          estimate: Callable[[Callable[[], Weights]], Weights] | None = None) -> dict:
++    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform.
++    ``estimate``: given the checkpoint pass (a callable), returns its ``Weights`` (a family's stored copy of it)."""
+ 
+     from tensorfold.cuda import build
+ 
+@@ -325,7 +327,11 @@
+     try:
+         text = config(model_dir)
+         geometry = geometry(text) if callable(geometry) else geometry
+-        weights = estimate_weights(model_dir, transform, rank=rank, files=files)
++
++        def checkpoint_pass() -> Weights:
++            return estimate_weights(model_dir, transform, rank=rank, files=files)
++
++        weights = checkpoint_pass() if estimate is None else estimate(checkpoint_pass)
+         if extra_files:                      # files outside the index, same layout (Nemotron's MTP head, EXL3 tables)
+             more = estimate_weights(model_dir, transform, files=list(extra_files))
+             weights = Weights(weights.resident + more.resident, max(weights.staging, more.staging),

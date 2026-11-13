@@ -1,0 +1,19 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1809,11 +1809,13 @@
+                 self.e.st.mark(0)
+         prefill_s = time.perf_counter() - t0
+         if inner:                                 # the state the last chunk left at the point (its KDA split there)
+-            from .multi import draft_window
++            from .decode import _ring_window
+ 
+             snap = take_snapshot(self.e, prompt[:point], None, mtp=False, inner=True)
+-            if drafter is not None:              # its DFlash2 window, still in the ring (``_one_chunk``)
+-                snap.drafter_end, snap.drafter_rows = point, draft_window(drafter, point)
++            if drafter is not None:              # DFlash2's fields as ``take_snapshot`` leaves them at a chunk stop:
++                snap.drafter_end = point         # its end, and a ring's window rows (still in it, ``_one_chunk``); a
++                if getattr(drafter, "ring", 0):  # flat context keeps its rows in place and the state no copy
++                    snap.drafter_rows = _ring_window(drafter, point)
+             snap.shared = False
+             at, pid = point, prefix_pid(prompt, at, point, pid)
+             snap.pid = pid

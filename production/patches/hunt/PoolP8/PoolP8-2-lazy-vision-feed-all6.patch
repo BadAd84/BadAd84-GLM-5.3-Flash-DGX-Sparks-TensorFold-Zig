@@ -1,0 +1,192 @@
+# PoolP8-2 (lane PoolP8, 2026-10-30): a request whose pictures have more feature rows than startup set aside for the
+# tower (engine.vision_rows_reserved: 16,384 + the workspace past its base / 8 KiB) gets a LazyVisionFeed: before
+# each of its prompt chunks is decided or sent, rank 0 encodes the pictures the chunk reads (multi._encode_ahead)
+# and drops the ones the prefill is past, so at most one chunk's pictures are held instead of every row before
+# the ADMIT. Same rows (the tower encodes each picture on its own), ids, replies. A tower failure fails that request
+# alone, as the eager path does at admission: its client gets the tower's error, FINISH frees its slot and rows,
+# the states its own prefill kept are evicted (not one it resumed from); image prompts are never in a shared chunk.
+# With it TENSORFOLD_VISION_WORKSPACE_MIB=768 serves the 102,400-token picture budget without the 1,440 MiB
+# reservation, so the P8 pool is production's.
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -79,6 +79,23 @@
+     if not value.isdecimal() or int(value) > 16384:
+         raise ValueError(f"TENSORFOLD_VISION_WORKSPACE_MIB: 0 to 16,384 MiB, not {value!r}")
+     return int(value) * 2**20
++
++
++VISION_BASE_ROWS = 16384              # feature rows the base workspace holds (TensorFold's request picture budget)
++
++
++def vision_rows_reserved(row_bytes: int, workspace: int | None = None) -> int:
++    """PoolP8: the feature rows of ``row_bytes`` each (the hidden size in bf16: 8 KiB) a request's pictures may hold
++    at once within what startup set aside for the tower (``vision_workspace``): the 16,384 its base was sized for
++    (TensorFold's own request picture budget, 128 MiB of it), plus one for every ``row_bytes`` set aside past the base
++    (the recipe's scripts/config.sh reserves them for a request picture budget past 16,384). A request past this
++    count has its pictures encoded as its prefill reaches them (``LazyVisionFeed``), not all before its ADMIT."""
++
++    from tensorfold.vision.glm import GlmVisionLimits
++
++    base = VISION_WORKSPACE * max(4096, GlmVisionLimits.from_env().image_tokens) // 4096
++    workspace = vision_workspace() if workspace is None else int(workspace)
++    return VISION_BASE_ROWS + max(0, workspace - base) // int(row_bytes)
+ 
+ 
+ GRIDS = (16, 32, 64, 128)             # TF_GLM_PROMPT_GRID's values besides 0 (off)
+@@ -2258,9 +2275,82 @@
+         if lo == hi:
+             return None
+         n = hi - lo
+-        mine = (self.rows[lo:hi].contiguous() if self.rows is not None else
+-                torch.zeros((n, self.width), dtype=torch.bfloat16, device="cuda"))
++        mine = self._mine(lo, hi)
+         both = torch.empty((self.engine.world * n, self.width), dtype=torch.bfloat16, device="cuda")
+         self.engine.comm.all_gather(mine, both)
+         index = torch.tensor([p - start for p in self.positions[lo:hi]], dtype=torch.int64, device="cuda")
+         return index, both[:n]
++
++    def _mine(self, lo: int, hi: int):
++        """This rank's rows lo .. hi of the feed: rank 0's features, zeros on the others."""
++
++        torch = self.engine.torch
++        return (self.rows[lo:hi].contiguous() if self.rows is not None else
++                torch.zeros((hi - lo, self.width), dtype=torch.bfloat16, device="cuda"))
++
++
++class LazyVisionFeed(VisionFeed):
++    """PoolP8, rank 0: a feed whose pictures the tower encodes as the prefill reaches them, for a request with more
++    feature rows than startup set aside (``vision_rows_reserved``). Before a chunk is sent to the other ranks the
++    decoder encodes the items it will read a row of (``prepare``: a failure fails this request alone, nothing of the
++    chunk sent yet) and drops the items whose rows all lie before it, so at most the items one chunk spans are held.
++    The tower encodes every item on its own, in passes of that item's frames only (``GlmVisionTower.features``), so an
++    item's rows are the same bits whichever other items share its call: the rows, ids and replies of the eager feed."""
++
++    def __init__(self, engine: GlmEngine, positions: list[int], prepared) -> None:
++        super().__init__(engine, positions, None)
++        if sum(prepared.item_rows) != len(positions):
++            raise ValueError(f"{sum(prepared.item_rows)} feature rows in the items for {len(positions)} positions")
++        self.prepared = prepared
++        self.ends: list[int] = []             # feed row past each item's last
++        for rows in prepared.item_rows:
++            self.ends.append((self.ends[-1] if self.ends else 0) + int(rows))
++        self.held: dict[int, Any] = {}        # item -> its rows, on the device
++        self.peak_rows = 0                    # the most feature rows held at once (tests, logs)
++        self.kid0 = 0                         # the decoder's next kept-state id at admission (its own states: >= this)
++
++    def prepare(self, start: int, count: int) -> None:
++        """The items prompt rows start .. start + count read, encoded now (``chunk`` then only slices them)."""
++
++        import bisect
++
++        lo = bisect.bisect_left(self.positions, start)
++        hi = bisect.bisect_left(self.positions, start + count)
++        if lo < hi:
++            self._ensure(lo, hi)
++
++    def _ensure(self, lo: int, hi: int) -> tuple[int, int]:
++        """Feed rows lo .. hi's items held (encoded if not), the ones before them dropped -> (first, last) item."""
++
++        import bisect
++        import time
++        from dataclasses import replace
++
++        first = bisect.bisect_right(self.ends, lo)         # the item holding row lo
++        last = bisect.bisect_left(self.ends, hi)           # the item holding row hi - 1
++        for k in [k for k in self.held if k < first]:     # the prefill is past every row of these
++            del self.held[k]
++        missing = [k for k in range(first, last + 1) if k not in self.held]
++        if missing:
++            t = time.perf_counter()
++            a, b = missing[0], missing[-1] + 1             # (a run: items are only ever dropped from the front)
++            p = self.prepared
++            part = replace(p, items=p.items[a:b], positions=[], item_rows=p.item_rows[a:b], item_keys=p.item_keys[a:b])
++            rows = self.engine.vision.features(part)
++            if rows.shape[0] != self.ends[b - 1] - self.ends[a] + int(p.item_rows[a]):
++                raise ValueError(f"the tower gave {rows.shape[0]} rows for items {a}..{b - 1}")
++            at = 0
++            for k in range(a, b):
++                n = int(p.item_rows[k])
++                self.held[k] = rows[at:at + n]
++                at += n
++            self.encode_s += time.perf_counter() - t
++        self.peak_rows = max(self.peak_rows, sum(int(self.prepared.item_rows[k]) for k in self.held))
++        return first, last
++
++    def _mine(self, lo: int, hi: int):
++        torch = self.engine.torch
++        first, last = self._ensure(lo, hi)
++        starts = [self.ends[k] - int(self.prepared.item_rows[k]) for k in range(first, last + 1)]
++        parts = [self.held[k][max(lo, s) - s:min(hi, self.ends[k]) - s] for k, s in zip(range(first, last + 1), starts)]
++        return (parts[0] if len(parts) == 1 else torch.cat(parts)).contiguous()
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -1563,9 +1563,11 @@
+ 
+     def _encode(self, prepared, cut: int):
+         """Rank 0: the tower's rows of the pictures a prompt resumed at ``cut`` still fills (those whose rows end past
+-        it), as a VisionFeed; None when the kept state already holds them all."""
+-
+-        from .engine import VisionFeed
++        it), as a VisionFeed; None when the kept state already holds them all. PoolP8: past the rows startup set aside
++        for the tower (``vision_rows_reserved``) a LazyVisionFeed instead, whose pictures are encoded chunk by chunk
++        (the same rows) before each chunk is sent (``_encode_ahead``: a tower failure there fails this request alone)."""
++
++        from .engine import LazyVisionFeed, VisionFeed, vision_rows_reserved
+ 
+         first, end = 0, 0
+         if cut and getattr(prepared, "item_rows", None):
+@@ -1580,6 +1582,12 @@
+         positions = [int(p) for p in prepared.positions]
+         if not positions:
+             return None
++        rows_in = list(getattr(prepared, "item_rows", None) or [])
++        if sum(rows_in) == len(positions) and len(positions) > vision_rows_reserved(2 * self.g.w.cfg.hidden):
++            # PoolP8: more feature rows than startup set aside for the tower: encoded as the prefill reaches them
++            feed = LazyVisionFeed(self.g, positions, prepared)
++            feed.kid0 = self.next_kid                      # (the states its prefill keeps: kid0 and up)
++            return feed
+         t = time.perf_counter()
+         torch.cuda.empty_cache()
+         rows = self.g.vision.features(prepared)
+@@ -3087,6 +3095,9 @@
+         lane = self._fill_turn()
+         if self.partial is not None and lane is not None:
+             return self._part_iteration()
++        failed = self._encode_ahead(lane) if lane is not None else None
++        if failed is not None:
++            return failed
+         group = self._group(lane) if lane is not None and self.group else None
+         busy = any(l.decoding and not l.s.done and not l.paused for l in self.lanes.values())
+         if lane is not None and (busy or self._sliced_job(lane)) and self.fill_budget and lane.head is None:
+@@ -3155,6 +3166,31 @@
+             prof.mark("message")
+         self._round(active, lone=lone, short=short)
+         return [l.s for l in active if l.s.done]
++
++    def _encode_ahead(self, lane: Lane) -> list[Stream] | None:
++        """PoolP8, rank 0, before anything about the lane's next prompt chunk is decided or sent (a FILL, a FILLPART,
++        an MFILL: image prompts are never grouped, ``_group``): a lazy image prompt's pictures for that chunk (the rows
++        ``_stop`` gives it, as the fill paths below do), encoded now. A tower failure fails this request alone, as at
++        its admission: its error to its client (``finish`` then FINISHes it on every rank, freeing its slot and rows),
++        the states its own prefill kept (kid >= its feed's ``kid0``; not a state it resumed from) evicted; every other
++        stream goes on untouched. None: nothing failed."""
++
++        from .engine import LazyVisionFeed
++
++        feed = lane.feed
++        if not isinstance(feed, LazyVisionFeed) or lane.head is not None:
++            return None
++        start = lane.st.pos
++        try:
++            feed.prepare(start, self._stop(lane) - start)
++        except Exception as exc:                 # noqa: BLE001  (this request fails, the others go on)
++            for c in [c for c in lane.extent.kept if c.kid >= feed.kid0]:
++                self._evict(c)
++            feed.held.clear()
++            lane.s.error = exc
++            lane.s.done = True
++            return [lane.s]
++        return None
+ 
+     def _part_iteration(self) -> list[Stream]:
+         pending = self.partial

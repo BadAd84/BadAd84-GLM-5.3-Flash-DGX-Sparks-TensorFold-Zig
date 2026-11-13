@@ -1,0 +1,24 @@
+diff -r base/tensorfold/families/glm5_next/cuda/latent.py p3/tensorfold/families/glm5_next/cuda/latent.py
+--- tensorfold/families/glm5_next/cuda/latent.py	2026-10-29 23:40:06.555078800 +0000
++++ tensorfold/families/glm5_next/cuda/latent.py	2026-10-30 00:43:24.119246700 +0000
+@@ -381,11 +381,18 @@
+         _expand_v4[(H, a.v_dim // BN)](o_lat, a.wvw, a.wvs, a.wvb, out, R, H=H, DV=a.v_dim, LW=a.lw, BN=BN,
+                                         num_warps=4)
+         return out
+-    BN = 16
+-    _expand_v[(H, a.v_dim // BN)](o_lat, a.wv, out, R, H=H, DV=a.v_dim, LW=a.lw, BN=BN, num_warps=4)
++    BN, warps = EXPAND_LAUNCH
++    _expand_v[(H, a.v_dim // BN)](o_lat, a.wv, out, R, H=H, DV=a.v_dim, LW=a.lw, BN=BN, num_warps=warps)
+     return out
+ 
+ 
++# HuntDecodeAttn: the bf16 decode expand's (value columns a program, warps). Speed only: each output's sum over the
++# latent is the same tree at BN 8 / 16 / 32 and 2 / 4 / 8 warps (every bf16 bit equal over 80 windows of normal and
++# 1e-30 .. 3e4 data, R 1-32, 21 / 22 heads: test_expand_launch.py); (8, 2): twice the programs of half the size,
++# -18 to -19% a call at 16-32 rows on the workstation's RTX 5070, the same at 4-8 rows (was (16, 4))
++EXPAND_LAUNCH = (8, 2)
++
++
+ # ------------------------------------------------------------------------------------------------ caches ---
+ 
+ @triton.jit

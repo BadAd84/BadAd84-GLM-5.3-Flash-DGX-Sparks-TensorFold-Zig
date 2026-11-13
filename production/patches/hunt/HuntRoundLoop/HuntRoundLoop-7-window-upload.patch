@@ -1,0 +1,225 @@
+diff -ruN tensorfold/families/glm5_next/cuda/verify.py tensorfold/families/glm5_next/cuda/verify.py
+--- tensorfold/families/glm5_next/cuda/verify.py
++++ tensorfold/families/glm5_next/cuda/verify.py
+@@ -83,7 +83,7 @@
+         from . import kda as kda_mod
+         from . import latent
+         from .forward import Buffers
+-        from .segments import SegRows, SelectScratch, seg_count
++        from .segments import SelectScratch, seg_count
+ 
+         if not latent.ENABLED:
+             raise ValueError("batched verify windows need the latent cache (TF_GLM_LATENT=1)")
+@@ -96,7 +96,6 @@
+             self.b.set_taps(tuple(taps), c.hidden)
+         self.taps = bool(taps)
+         self.segs = seg_count(e.slots.count) if segs is None else int(segs)
+-        self.seg_rows = SegRows(rows, dev, max_segs=self.segs, ring=e.caches.ring if e.caches.rings else None)
+         self.sel = SelectScratch(rows, e.caches.rows, dev) if e.caches.index is not None else None
+         from . import indexer_shard
+ 
+@@ -118,10 +117,7 @@
+         self.dsa_index = {l.index: i for i, l in enumerate(l for l in w.layers if l.kind == "dsa")}
+         self.proj = torch.zeros((n, rows, width), dtype=torch.bfloat16, device=dev)
+         self.scratch = kda_mod.KDAScratchSet(n, rows, LL, dev) if n else None
+-        self.kseg = torch.zeros((self.segs, kda_mod.SEG_COLS), dtype=torch.int32, device=dev)
+-        self.kseg_host = torch.zeros((self.segs, kda_mod.SEG_COLS), dtype=torch.int32,
+-                                     pin_memory=torch.cuda.is_available())
+-        self.staged = torch.cuda.Event() if torch.cuda.is_available() else None
++        self._uploads(dev, e.caches.ring if e.caches.rings else None)
+         self.segments: list[Segment] = []
+         self.R = 0
+         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+@@ -194,12 +190,61 @@
+         self.e.slots.conv[0].zero_()
+         return out
+ 
++    def _uploads(self, dev, ring) -> None:
++        """One pinned host buffer and one device buffer for a window's three uploads, back to back: the token ids
++        (``b.ids``), the KDA segment table (``kseg``) and the DSA segment tables (``seg_rows``), guarded by one event
++        (``staged``): ``forward`` writes all three and copies them in ONE H2D (``_upload``); ``_stage``,
++        ``SegRows.set`` and ``_write_table`` still copy their own part (capture, timings, the commit's table). Made
++        before any capture, so the graphs read these addresses."""
++
++        from . import kda as kda_mod
++        from .segments import SegRows
++
++        b, R, S = self.b, self.rows_max, self.segs
++        nk, ns = S * kda_mod.SEG_COLS, 10 * R + 4 * S
++        k0 = -(-R // 16) * 16                            # each part from a 64-byte boundary, as its own tensor would
++        s0 = k0 + -(-nk // 16) * 16
++        pin = torch.cuda.is_available() and torch.device(dev).type == "cuda"
++        self.up_host = torch.zeros((s0 + ns,), dtype=torch.int32, pin_memory=pin)
++        self.up_dev = torch.zeros((s0 + ns,), dtype=torch.int32, device=dev)
++        self.staged = torch.cuda.Event() if pin else None
++        b.ids_host, b.ids = self.up_host[:R], self.up_dev[:R]
++        if self.staged is not None:
++            b.staged = self.staged
++        self.kseg_host = self.up_host[k0:k0 + nk].view(S, kda_mod.SEG_COLS)
++        self.kseg = self.up_dev[k0:k0 + nk].view(S, kda_mod.SEG_COLS)
++        self.seg_rows = SegRows(R, dev, max_segs=S, ring=ring, host=self.up_host[s0:], dev=self.up_dev[s0:],
++                                staged=self.staged)
++
++    def _table_rows(self, segments: Sequence[Segment], keeps: Sequence[int] | None = None) -> list[tuple]:
++        """The KDA segment table's rows (row0, rows, slot, parity, conv slot, keep): unused segments get 0 rows."""
++
++        return [(len(s.tokens), s.st.slot, s.st.cur[0] if s.st.cur else 0, s.st.slot,
++                 len(s.tokens) if keeps is None else keeps[k]) for k, s in enumerate(segments)]
++
+     def _tables(self, segments: Sequence[Segment], keeps: Sequence[int] | None = None) -> None:
+-        """The KDA segment table (row0, rows, slot, parity, conv slot, keep) into the device copy, in place (a captured
+-        graph reads the same tensor); unused segments have 0 rows."""
++        """The KDA segment table into the device copy, in place (a captured graph reads the same tensor)."""
++
++        self._write_table(self._table_rows(segments, keeps))
+ 
+-        self._write_table([(len(s.tokens), s.st.slot, s.st.cur[0] if s.st.cur else 0, s.st.slot,
+-                            len(s.tokens) if keeps is None else keeps[k]) for k, s in enumerate(segments)])
++    def _upload(self, tokens: list[int], spans: list[tuple], sparse_from: int | None, table: list[tuple]) -> None:
++        """``forward``'s token ids, DSA segment tables (``SegRows.fill``) and KDA segment table into the pinned buffer
++        once its last copy has left, then ONE copy of the three (``_uploads``)."""
++
++        from . import kda as kda_mod
++
++        R = len(tokens)
++        if R > self.b.rows:
++            raise ValueError(f"a window of {R} rows, the batched buffers hold {self.b.rows}")
++        t, _ = self.seg_rows.fill(spans, sparse_from=sparse_from)
++        if self.staged is not None:
++            self.staged.synchronize()
++        self.b.ids_host[:R].numpy()[:] = tokens
++        self.seg_rows.adopt(t, R, spans)
++        kda_mod.segment_table(table, "cpu", out=self.kseg_host)
++        self.up_dev.copy_(self.up_host, non_blocking=True)
++        if self.staged is not None:
++            self.staged.record()
+ 
+     def _span(self, st, pos: int, n: int) -> tuple:
+         """SegRows' segment of ``n`` rows of ``st`` from ``pos``: its extent's base, and its slot's ring base."""
+@@ -243,9 +288,7 @@
+             spans.append(self._span(seg.st, seg.st.pos, len(seg.tokens)))
+         tokens = [t for seg in segments for t in seg.tokens]
+         R = len(tokens)
+-        self._stage(tokens)
+-        self.seg_rows.set(spans, sparse_from=SPARSE_FROM if index else None)
+-        self._tables(segments)
++        self._upload(tokens, spans, SPARSE_FROM if index else None, self._table_rows(segments))
+         self.segments, self.R = list(segments), R
+         # the window's choice (the same on every rank: from its segments' rows and positions alone)
+         sharded = self.decode_shard and indexer_shard.decode_window(spans, w.world)
+diff -ruN tensorfold/families/glm5_next/cuda/segments.py tensorfold/families/glm5_next/cuda/segments.py
+--- tensorfold/families/glm5_next/cuda/segments.py
++++ tensorfold/families/glm5_next/cuda/segments.py
+@@ -11,6 +11,7 @@
+ 
+ from typing import Sequence
+ 
++import numpy as np
+ import torch
+ 
+ from .sparse import POOL, SPARSE_FROM, TOKENS, split_scratch
+@@ -47,7 +48,11 @@
+ 
+     NO_RING = 2 ** 31 - 1      # the kernels' ring size without rings (positions stay below it: base + pos)
+ 
+-    def __init__(self, rows: int, device, max_segs: int = SEGS_DEFAULT, ring: int | None = None) -> None:
++    def __init__(self, rows: int, device, max_segs: int = SEGS_DEFAULT, ring: int | None = None, *,
++                 host: torch.Tensor | None = None, dev: torch.Tensor | None = None, staged=None) -> None:
++        """``host`` / ``dev`` / ``staged``: the pinned host table, the device table and the event guarding the host
++        table, when a caller packs them with its own uploads (``verify.BatchedVerify``: one copy a window); else made
++        here."""
+         if ring is not None and ring < 4:
+             raise ValueError(f"an index ring of {ring} rows")
+         if not 1 <= max_segs <= MAX_SEGS:
+@@ -57,8 +62,11 @@
+         self.ring_rows = ring if ring is not None else self.NO_RING
+         n = 10 * rows + 4 * max_segs
+         pin = torch.cuda.is_available() and torch.device(device).type == "cuda"
+-        self.host = torch.zeros((n,), dtype=torch.int32, pin_memory=pin)
+-        self.dev = torch.zeros((n,), dtype=torch.int32, device=device)
++        if (host is None) != (dev is None) or any(t is not None and (t.numel() != n or t.dtype != torch.int32)
++                                                  for t in (host, dev)):
++            raise ValueError(f"segment tables take both a host and a device int32 buffer of {n} values, or neither")
++        self.host = host if host is not None else torch.zeros((n,), dtype=torch.int32, pin_memory=pin)
++        self.dev = dev if dev is not None else torch.zeros((n,), dtype=torch.int32, device=device)
+         self.pos, self.base, self.seg, self.sparse, self.ibase = (self.dev[i * rows:(i + 1) * rows] for i in range(5))
+         o = 5 * rows
+         self.seg_start, self.seg_rows, self.seg_pbase, self.seg_pools = (
+@@ -70,7 +78,7 @@
+         o2 = 5 * rows + 4 * max_segs
+         self.lbase, self.own, self.sparse_eff, self.wpos, self.orank = (self.dev[o2 + i * rows:o2 + (i + 1) * rows]
+                                                                         for i in range(5))
+-        self.staged = torch.cuda.Event() if pin else None
++        self.staged = staged if host is not None else torch.cuda.Event() if pin else None
+         self.R = 0
+         self.segments: list[tuple[int, int, int]] = []
+ 
+@@ -85,7 +93,7 @@
+         if R > self.rows:
+             raise ValueError(f"a window of {R} rows, the tables hold {self.rows}")
+         rows, S = self.rows, self.max_segs
+-        t = torch.zeros((10 * rows + 4 * S,), dtype=torch.int32).numpy()
++        t = np.zeros((10 * rows + 4 * S,), dtype=np.int32)
+         from . import shard
+ 
+         sharded = shard.ON and shard.HALF > 0
+@@ -105,19 +113,19 @@
+                 ibase = seg[3]
+                 if n + 3 > self.ring:
+                     raise ValueError(f"segment {s}: {n} rows and the 3 before them past a ring of {self.ring}")
+-            for i in range(n):
+-                q = pos + i
+-                t[r + i] = q
+-                t[rows + r + i] = base
+-                t[2 * rows + r + i] = s
+-                t[3 * rows + r + i] = int(sparse_from is not None and q >= sparse_from)
+-                t[4 * rows + r + i] = ibase
+-                own = not sharded or shard.owns(base)
+-                t[o2 + r + i] = (shard.local(base) if own else shard.HALF) if sharded else base
+-                t[o2 + rows + r + i] = int(own)
+-                t[o2 + 2 * rows + r + i] = t[3 * rows + r + i] if own else 1
+-                t[o2 + 3 * rows + r + i] = q if own else r + i
+-                t[o2 + 4 * rows + r + i] = shard.owner(base) if sharded else 0
++            q = np.arange(pos, pos + n, dtype=np.int64)              # the segment's rows, as slices of each table
++            sparse = (q >= sparse_from).astype(np.int32) if sparse_from is not None else 0
++            own = not sharded or shard.owns(base)
++            t[r:r + n] = q
++            t[rows + r:rows + r + n] = base
++            t[2 * rows + r:2 * rows + r + n] = s
++            t[3 * rows + r:3 * rows + r + n] = sparse
++            t[4 * rows + r:4 * rows + r + n] = ibase
++            t[o2 + r:o2 + r + n] = (shard.local(base) if own else shard.HALF) if sharded else base
++            t[o2 + rows + r:o2 + rows + r + n] = int(own)
++            t[o2 + 2 * rows + r:o2 + 2 * rows + r + n] = sparse if own else 1
++            t[o2 + 3 * rows + r:o2 + 3 * rows + r + n] = q if own else np.arange(r, r + n)
++            t[o2 + 4 * rows + r:o2 + 4 * rows + r + n] = shard.owner(base) if sharded else 0
+             last = pos + n - 1
+             o = 5 * rows
+             t[o + s] = r
+@@ -127,6 +135,13 @@
+             r += n
+         return t, R
+ 
++    def adopt(self, t, R: int, segments: Sequence[tuple[int, ...]]) -> None:
++        """``fill``'s tables into the host table, without the upload (a caller that packs it with its own copies holds
++        ``staged``, synchronised, and copies after)."""
++
++        self.host.numpy()[:] = t
++        self.R, self.segments = R, list(segments)
++
+     def set(self, segments: Sequence[tuple[int, ...]], *, sparse_from: int | None = SPARSE_FROM) -> int:
+         """Stage ``segments`` [(base, pos, rows[, ring_base])] into the device tables (a pinned copy, ordered on the current
+         stream like forward.stage's token ids); returns the window's rows."""
+@@ -134,11 +149,10 @@
+         t, R = self.fill(segments, sparse_from=sparse_from)
+         if self.staged is not None:
+             self.staged.synchronize()          # the previous copy has left the pinned buffer
+-        self.host.numpy()[:] = t
++        self.adopt(t, R, segments)
+         self.dev.copy_(self.host, non_blocking=True)
+         if self.staged is not None:
+             self.staged.record()
+-        self.R, self.segments = R, list(segments)
+         return R
+ 
+     def any_sparse(self) -> bool:

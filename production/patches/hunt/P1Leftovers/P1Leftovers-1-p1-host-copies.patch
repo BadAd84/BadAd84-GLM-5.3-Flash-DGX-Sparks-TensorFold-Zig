@@ -1,0 +1,337 @@
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -611,7 +611,9 @@
+         begin = len(resume.ids)
+         if e.grid and begin % e.grid:
+             raise ValueError(f"a resumed prefill starts on the {e.grid}-row grid, not at {begin}")
+-        if (begin >= len(prompt) and not replay) or list(prompt[:begin]) != resume.ids:
++        # (a list's slice is its own new list: no second copy of it, ~2-5 ms at 671k ids)
++        lead = prompt[:begin] if isinstance(prompt, list) else list(prompt[:begin])
++        if (begin >= len(prompt) and not replay) or lead != resume.ids:
+             raise ValueError("a resumed prefill needs a snapshot of a strict prefix of the prompt (or of the whole "
+                              "prompt with its head's logits row)")
+         if (use_mtp and resume.mtp_len < 0) or (drafter is not None and resume.drafter_end != begin):
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -587,14 +587,43 @@
+     return arr
+ 
+ 
++def kept_from(snap, arr) -> None:
++    """--parallel 1: a snapshot just kept takes ``arr`` as its ``kept_array``: ``arr`` holds exactly its ids (the
++    request's own int64 array of its prompt, cut to the snapshot's length; nothing writes either), so the next turn's
++    walk compares against it instead of converting a list of every id (~13-31 ms at 671k, every warm turn, every rank).
++    None (no array at hand): made from the list when first needed, as before."""
++
++    if arr is not None:
++        snap.ids_array, snap._array_of = arr, snap.ids
++
++
++def copy_context(prompt: list[int], ids, first: int):
++    """--parallel 1: the copy drafts' context, ``prompt`` and the pending token ``first`` (``CopyDrafts`` reads it into
++    int32 with ``np.asarray``): with the prompt's int64 array ``ids`` at hand, that array and the token, when every id
++    fits int32 (the same values, cast where a list of every id was converted: ~13-31 ms at 671k); else the list, which
++    converts (or refuses an id past int32) as before."""
++
++    if ids is not None:
++        import numpy as np
++
++        ctx = np.empty(len(ids) + 1, dtype=np.int64)
++        ctx[:-1] = ids
++        ctx[-1] = first
++        if int(ctx.min()) >= -(1 << 31) and int(ctx.max()) < (1 << 31):
++            return ctx
++    return [*prompt, first]
++
++
++
+ class IdsOf:
+     """--parallel 1: ``seq[:len(snap.ids)] == snap.ids`` for one id list ``seq`` against many kept snapshots, the
+-    list's int64 array (``arr``: one known to hold exactly its ids) made once and only if a snapshot passes the length
+-    and last-id checks (``kept_array`` on the other side): a request's walk of the kept states no longer copies and
+-    compares a list slice of every kept turn of its conversation (~5 ms each at 600k ids, 32 of them a turn)."""
++    list's int64 array (``arr``: one known to hold exactly its ids; ``make``: a function giving one, cheaper than
++    converting the list) made once and only if a snapshot passes the length and last-id checks (``kept_array`` on
++    the other side): a request's walk of the kept states no longer copies and compares a list slice of every kept turn
++    of its conversation (~5 ms each at 600k ids, 32 of them a turn)."""
+ 
+-    def __init__(self, seq, arr=None) -> None:
+-        self.seq, self.arr = seq, arr
++    def __init__(self, seq, arr=None, make=None) -> None:
++        self.seq, self.arr, self.make = seq, arr, make
+ 
+     def starts(self, snap) -> bool:
+         n, ids = len(snap.ids), snap.ids
+@@ -607,9 +636,47 @@
+         import numpy as np
+ 
+         if self.arr is None:
+-            self.arr = np.asarray(self.seq, dtype=np.int64)
++            self.arr = self.make() if self.make is not None else np.asarray(self.seq, dtype=np.int64)
+         return bool(np.array_equal(self.arr[:n], kept_array(snap)))
+ 
++    def prefixes(self, states) -> set[int]:
++        """``{id(c) for c in states if self.starts(c)}``, worked out longest first: a state no longer than ``at``, the
++        longest of them found so far (itself one of ``seq``'s prefixes), is a prefix of ``seq`` exactly when it is one
++        of ``at``'s, so it is compared with ``at`` alone, and the answer stays with it (``_prefix``: its own array, a
++        weak reference to the one it was compared with, the answer) while both are the arrays they were: arrays are
++        never written (``kept_array``), so the same two give the same answer, and a dropped state's is not held. A
++        warm turn's walk then compares its conversation's newest pair of kept turns, where it compared every kept
++        turn with the prompt (~0.3 ms each at 671k ids, 32 a turn, every rank)."""
++
++        import weakref
++
++        import numpy as np
++
++        found: set[int] = set()
++        at_ids, at_arr = self.seq, None           # ``seq`` to start (its array only once a state needs it)
++        for c in sorted(states, key=lambda c: -len(c.ids)):
++            ids = c.ids
++            n = len(ids)
++            if n > len(at_ids) or (n and at_ids[n - 1] != ids[n - 1]):
++                continue
++            mine = kept_array(c)
++            if at_arr is None:
++                if self.arr is None:
++                    self.arr = self.make() if self.make is not None else np.asarray(self.seq, dtype=np.int64)
++                at_arr = self.arr
++            memo = getattr(c, "_prefix", None)
++            if mine is at_arr:                    # (keep's own snapshot: its array is keep's)
++                same = True
++            elif memo is not None and memo[0] is mine and memo[1]() is at_arr:
++                same = memo[2]
++            else:
++                same = bool(np.array_equal(at_arr[:n], mine))
++                c._prefix = (mine, weakref.ref(at_arr), same)
++            if same:
++                found.add(id(c))
++                at_ids, at_arr = ids, mine
++        return found
++
+ 
+ MTP_DEFAULT = "1"                     # TF_GLM_MTP when unset: the MTP head stays beside DFlash2 (auto, 0: left out)
+ 
+@@ -1815,13 +1882,19 @@
+         drafter = self._kept_drafter()
+         live = self._live_of()
+         order = list(self.cache)
+-        # keep is the resume point's ids (a copy of its snapshot's list): that snapshot's array, when it is kept, is
+-        # keep's (the compare below shares the list's int objects, so it is an identity walk)
+-        twin = next((c for c in order if len(c.ids) == len(keep) and c.ids == keep), None)
++        # keep is the resume point's ids (its snapshot's own list, ``_run_once``; read only here): that snapshot's
++        # array, when it is kept, is keep's. Found by identity first (no walk of the list); else the first kept state
++        # of equal ids (any such state's array holds the same values: the decisions below are the same either way)
++        twin = next((c for c in order if c.ids is keep), None)
++        if twin is None:
++            twin = next((c for c in order if len(c.ids) == len(keep) and c.ids == keep), None)
+         keep_of = IdsOf(keep, kept_array(twin) if twin is not None else None)
++        # the states the walk below asks about every request (their rows still the live caches'), worked out at once
++        # (``IdsOf.prefixes``); one with saved rows only when the budget asks, then alone as before
++        prefix = keep_of.prefixes([c for c in order if c.rows is None])
+ 
+         def resumes(c) -> bool:                      # keep[:len(c.ids)] == c.ids
+-            return keep_of.starts(c)
++            return id(c) in prefix if c.rows is None else keep_of.starts(c)
+ 
+         alive = {id(c) for c in order}
+         saved: dict[int, int] = {}                   # a survivor's held bytes once its rows are saved
+@@ -1887,7 +1960,8 @@
+ 
+     def _shared(self, prompt: list[int], hit, salt: str | None = None) -> list[int]:
+         """Rank 0: the shared-prefix points a drafted text request keeps (``shared_points``), sent to rank 1; from the
+-        kept prompts of its own ``cache_salt`` only (OTS 0120)."""
++        kept prompts of its own ``cache_salt`` only (OTS 0120). ``prompt``: its ids, a list or their int64 array (read
++        as it is: a list is converted, ~13-31 ms at 671k ids)."""
+ 
+         if not self.shared:
+             return []
+@@ -1904,20 +1978,23 @@
+ 
+     def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
+              code: list[int], hit, draft: bool, constraint=None, feed=None, shared=(),
+-             salt: str | None = None) -> dict[str, Any]:
++             salt: str | None = None, ids=None) -> dict[str, Any]:
+         """``shared``: rank 0's shared-prefix points (``_shared``), which both ranks keep states at; ``salt``: the
+-        request's ``cache_salt`` its kept states carry (OTS 0120; rank 0's own, "" on rank 1 for a salted one)."""
++        request's ``cache_salt`` its kept states carry (OTS 0120; rank 0's own, "" on rank 1 for a salted one).
++        ``prompt``: a list this engine owns (rank 0's copy of the app's, a follower's own): nothing writes it, and
++        ``live`` is it until the reply joins. ``ids``: its int64 array (nothing writes it either; the kept states take
++        views of it, ``kept_from``), or None."""
+ 
+         self.e.constraint, self.e.window = constraint, None       # both ranks walk and mask the same rows
+         try:
+             return self._run_once(prompt, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, feed, shared,
+-                                  salt)
++                                  salt, ids=ids)
+         finally:
+             self.e.constraint = self.e.window = self.e.vote = None
+ 
+     def _run_once(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool,
+                   on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool,
+-                  feed=None, shared=(), salt: str | None = None) -> dict[str, Any]:
++                  feed=None, shared=(), salt: str | None = None, ids=None) -> dict[str, Any]:
+         from .decode import (DepthPolicy, StopVote, dflash_decode, mtp_decode, prefill, serial_decode, take_snapshot,
+                              whole)
+         from .drafter_choice import DrafterChoice, auto_decode
+@@ -1929,12 +2006,15 @@
+         from .decode import load_rows
+ 
+         cut = len(hit.ids) if hit is not None else 0
+-        self._take_over(list(hit.ids) if hit is not None else [])
++        # (the resume point's own list: ``_take_over`` only reads it, and finds its snapshot by identity)
++        self._take_over(hit.ids if hit is not None else [])
+         if hit is not None and hit.rows is not None:
+             load_rows(self.e, hit, drafter=self._kept_drafter())
+             hit.rows, hit.nbytes = None, 0            # live again
+         # an image prompt's rows are not its token ids' rows: nothing resumes from them, and they are not kept
+-        self.live = list(prompt) if feed is None else []
++        # (the list itself, not a copy: nothing writes it, and ``live`` is replaced, never changed in place)
++        self.live, held = (prompt, ids) if feed is None else ([], None)
++        self._live_ids = IdsOf(self.live, held)
+         # a drafted text prompt keeps its state at ``point``: its end, or with TF_GLM_PROMPT_GRID the last grid
+         # multiple in it. Short of the end, the prompt prefills to the point as a prompt of that length would (no
+         # first token), keeps that state, and resumes from it as a later request would: so any prompt extending
+@@ -1956,13 +2036,14 @@
+         # each kept state's identity (``prefix_pid``), from the resume point's on by the new rows alone
+         at, pid = (cut, snap_pid(hit)) if hit is not None and feed is None else (0, (0, 0))
+         for stop in stops:
+-            head = list(prompt[:stop])
++            head = prompt[:stop]                                  # (a list of its own: take_snapshot copies it)
+             prefill(self.e, head, sampling, mtp=use_mtp, drafter=drafter, resume=resume, sample=False)
+             resume = take_snapshot(self.e, head, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
+                                    drafter=drafter)
+             resume.shared = stop != point                         # (a shared-prefix point; --spill-gib writes it)
+             at, pid = stop, prefix_pid(prompt, at, stop, pid)
+             resume.pid = pid
++            kept_from(resume, ids[:stop] if ids is not None else None)
+             kept.append(resume)
+         # a replay of a kept prompt (``decode.whole``: its state and head's logits row) prefills nothing and keeps
+         # nothing new; a prompt's own end state keeps the head's row it sampled from, for a later replay
+@@ -1988,12 +2069,14 @@
+             snap.shared = False
+             at, pid = point, prefix_pid(prompt, at, point, pid)
+             snap.pid = pid
++            kept_from(snap, ids[:point] if ids is not None else None)
+             kept.append(snap)
+         if end:
+             snap = take_snapshot(self.e, prompt, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
+                                  drafter=drafter)
+             snap.head, self.e.head = self.e.head, None
+             snap.pid = prefix_pid(prompt, at, len(prompt), pid)
++            kept_from(snap, ids)
+             kept.append(snap)
+         if self.shared and draft and feed is None and hit is not None:     # what it resumed from is used again
+             self.cache = [c for c in self.cache if c is not hit] + [hit]
+@@ -2015,7 +2098,7 @@
+         policy = decode_policy(code, self.costs)
+         copies = None
+         if policy is not None and self.copy is not None:     # prompt and pending token, alike on both ranks
+-            copies = self.copy.drafts(list(prompt) + [first])
++            copies = self.copy.drafts(copy_context(prompt, ids, first))
+         if policy is None:
+             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens)
+         elif self.dump is not None and drafter is not None:      # serial's reply, the drafter's view recorded
+@@ -2047,7 +2130,13 @@
+                              on_tokens=on_tokens, copies=copies)
+         # the caches now hold prompt and reply; only prompts are snapshotted, since a later prompt prefills the reply again
+         if feed is None:
+-            self.live = list(prompt) + res.tokens[:self.e.st.pos - len(prompt)]
++            reply = res.tokens[:self.e.st.pos - len(prompt)]
++            self.live = prompt + reply                    # (one copy: ``prompt`` is a list)
++            if ids is not None:                           # its array only when a walk needs it, from ids (no list read)
++                import numpy as np
++
++                self._live_ids = IdsOf(self.live, make=lambda: np.concatenate(
++                    (ids, np.asarray(reply, dtype=np.int64))))
+         stats.update(decode_s=res.seconds, rounds=res.rounds, min_rows=1 + min(res.depths, default=0),
+                      tokens_per_round=round((len(res.tokens) - 1) / max(res.rounds, 1), 3),
+                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
+@@ -2111,24 +2200,34 @@
+                 raise ValueError(f"the tower gave {rows.shape[0]} rows for {len(positions)} image positions")
+             feed = VisionFeed(self, positions, rows)
+             feed.encode_s = time.perf_counter() - t
++        # the engine's own copy of the prompt (the app's list may live on past the request; nothing here writes this
++        # one): every step below reads it, ``_run`` keeps it as ``live``, where each step made a copy of its own before
++        own = list(prompt)
+         parr = None
+         if prompt_array is not None and len(prompt_array) == len(prompt):
+             import numpy as np
+ 
+             parr = np.asarray(prompt_array, dtype=np.int64)
+-        hit = self._resume(list(prompt), code, salt, parr) if draft and feed is None else None
++        hit = self._resume(own, code, salt, parr) if draft and feed is None else None
++        if parr is None and hit is not None and hit.ids:
++            import numpy as np
++
++            # (no app array: the token-id route) the prompt's array from the resume point's, which ``_resume`` compared
++            # against (``kept_array``: made by then), and the ids past it, where shared_points, the copy drafts and the
++            # next turn's walk each converted every id of the list
++            parr = np.concatenate((kept_array(hit), np.asarray(own[len(hit.ids):], dtype=np.int64)))
+         disk = None                                    # --spill-gib: a longer stored prefix on disk (every rank reads)
+         # one whose stored fields fit the request's drafters; never for a salted request (OTS 0120: keyed by ids alone)
+         if self.spill is not None and draft and feed is None and salt is None:
+-            disk = self.spill.find(list(prompt), grid=self.grid, usable=lambda e: self._fit(
++            disk = self.spill.find(own if parr is None else parr, grid=self.grid, usable=lambda e: self._fit(
+                 e.n, e.fields.get("drafter_end", -1), e.fields.get("mtp_len", -1), code))
+             if disk is not None and hit is not None and len(hit.ids) >= disk.n:
+                 disk = None
+         if disk is not None:
+             import types
+ 
+-            hit = types.SimpleNamespace(ids=list(prompt[:disk.n]))
+-        shared = self._shared(list(prompt), hit, salt) if draft and feed is None else []
++            hit = types.SimpleNamespace(ids=own[:disk.n])
++        shared = self._shared(own if parr is None else parr, hit, salt) if draft and feed is None else []
+         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
+         cached = -disk.n if disk is not None else len(hit.ids) if hit is not None else 0
+         header = [max_tokens, int(stop_eos), int(draft), cached,
+@@ -2150,17 +2249,17 @@
+ 
+         self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
+         self._share(header)
+-        self._share(list(prompt[cached:]) if pid is not None else list(prompt))
++        self._share(own[cached:] if pid is not None else own)      # (``send`` only reads it)
+         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
+             self._share(pack(constraint))
+         if positions:
+             self._share(positions)
+         if disk is not None:
+-            hit = self._spill_load(list(prompt[:disk.n]), code)
++            hit = self._spill_load(own[:disk.n], code)
+         if self.spill is not None:                     # pending copies of the live caches end before they change
+             self._spill_wait()
+-        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint, feed,
+-                          shared, salt)
++        stats = self._run(own, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint, feed,
++                          shared, salt, ids=parr)
+         stats.update(policy=spec, drafts=draft)
+         if hasattr(self.comm, "check"):                  # a RoCE wait that timed out inside a graph surfaces here
+             self.comm.check()
+@@ -2204,7 +2303,7 @@
+         seed = (s_top << 62) | (s_hi << 31) | s_lo
+         sampling = (Sampling(seed, temperature, top_k, _ints_f64(p_lo, p_hi), _ints_f64(m_lo, m_hi))
+                     if temperature > 0 else None)
+-        hit = None
++        hit, ids = None, None
+         if cached < 0:                              # rank 0 resumes from a prefix stored on disk: read ours too
+             hit = self._spill_load(list(prompt[:-cached]), code)
+         elif cached:
+@@ -2215,11 +2314,16 @@
+             if hit is None:
+                 raise RuntimeError(f"rank {self.rank} has no snapshot of the {cached} tokens rank 0 resumes from")
+             if pid is not None:
+-                prompt = hit.ids + prompt             # rank 0's prompt: the kept state's ids, then the ids past them
++                import numpy as np
++
++                # rank 0's prompt: the kept state's ids, then the ids past them (a new list, this rank's own); its
++                # int64 array the same way, from the state's (``kept_array``: made when it was kept)
++                ids = np.concatenate((kept_array(hit), np.asarray(prompt, dtype=np.int64)))
++                prompt = hit.ids + prompt
+         if self.spill is not None:
+             self._spill_wait()
+         self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
+-                  constraint, feed, shared, "" if salted else None)
++                  constraint, feed, shared, "" if salted else None, ids=ids)
+         if hasattr(self.comm, "check"):
+             self.comm.check()
+ 

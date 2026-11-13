@@ -1,0 +1,243 @@
+--- tensorfold/cuda/chat_template.py	2026-10-30 07:33:54.740995400 +0000
++++ tensorfold/cuda/chat_template.py	2026-10-30 07:33:54.747663100 +0000
+@@ -34,6 +34,7 @@
+         env.globals["raise_exception"] = raise_exception
+         env.globals["strftime_now"] = lambda fmt: datetime.now().strftime(fmt)
+         self.template = env.from_string(source)
++        self.source = source          # OTS: what the template was compiled from (a family may key reuse of its output)
+         self.efforts = effort_levels(source)          # the reasoning efforts it names (the Mac reads the same ones)
+         self.specials = {k: (v.get("content") if isinstance(v, dict) else v)
+                          for k, v in cfg.items() if k in ("bos_token", "eos_token", "pad_token", "unk_token")}
+--- tensorfold/families/glm5_next/cuda/app.py	2026-10-30 07:33:54.739989800 +0000
++++ tensorfold/families/glm5_next/cuda/app.py	2026-10-30 07:33:54.744000800 +0000
+@@ -11,6 +11,7 @@
+ from tensorfold.cuda.server import App, PreparedRequest, RequestError
+ from tensorfold.server.errors import CONTEXT_LIMIT
+ from tensorfold.families.glm5_next.cuda.kept_reasoning import KeptReasoning
++from tensorfold.families.glm5_next.cuda.prefix_render import PrefixRender
+ from tensorfold.families.glm5_next.prompts import agent_history, effort_tail_enabled, effort_to_tail, thinking_off
+ 
+ 
+@@ -77,7 +78,8 @@
+     if source.count(_NO_MEDIA) != 1:
+         raise ValueError("--vision: this checkpoint's chat template has no media branch TensorFold knows how to "
+                          "extend (GLM-5.3 Flash's chat_template.jinja)")
+-    inner.template = inner.template.environment.from_string(source.replace(_NO_MEDIA, _MEDIA))
++    inner.source = source.replace(_NO_MEDIA, _MEDIA)
++    inner.template = inner.template.environment.from_string(inner.source)
+ 
+ 
+ class GlmApp(App):
+@@ -94,6 +96,8 @@
+         clear = os.environ.get("TF_GLM_CLEAR_THINKING", "0").strip() or "0"
+         if clear not in ("0", "1"):
+             raise ValueError(f"TF_GLM_CLEAR_THINKING={clear!r}: expected 0 or 1")
++        # OTS: an agent's next turn renders only its new messages (prefix_render; TF_GLM_RENDER_CACHE=0 turns it off)
++        self.template.template = PrefixRender.make(self.template.template, getattr(self.template, "source", None))
+         effort_tail_enabled()       # a typo fails at load, not at the first request
+         self.template = ThinkingOffTemplate(self.template, KeptReasoning.from_env(), clear_thinking=clear == "1")
+         self.literal = LiteralTokens.from_env(self.tok)     # patch 0116: added-token text in a request stays text
+--- tensorfold/families/glm5_next/cuda/prefix_render.py	1970-01-01 00:00:00.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/prefix_render.py	2026-10-30 07:33:54.742996400 +0000
+@@ -0,0 +1,201 @@
++"""The rendered text of a conversation's unchanged history, reused (OTS): an agent's next turn renders only its new
++messages.
++
++An agent sends its whole history again every turn, and the chat template rendered all of it again: ~25-40 ms of
++Jinja at 400-670k tokens on rank 0's HTTP thread, with the GIL held in 5 ms slices (every decoding stream's round
++waits for it meanwhile). GLM-5.3-Flash's template writes each message from that message alone, with two exceptions:
++a tool result is written with the run of tool results it starts (``<|observation|>``, sorted by the calls of the
++assistant message before the run), and an assistant step's reasoning depends on where the last user message is
++unless ``clear_thinking`` is defined and false (it always is on the GLM server: ``ThinkingOffTemplate`` passes it).
++So with ``clear_thinking`` false, the text of ``messages`` is
++
++    header + S(messages[:c]) + S(messages[c:]) + generation prompt
++
++for any cut ``c`` where ``messages[c]`` is not a tool result (or ``c == len(messages)``): the header is the tools and
++the effort line, written before the first message whatever the messages are, and ``S(m)`` the text the message loop
++writes for ``m`` rendered alone (``render(messages=m)`` minus the header and the generation prompt). A kept render
++knows ``S`` of its messages and of the cuts it was made at; a request whose messages agree with a kept one's up to a
++known cut (compared strictly: types, key order and float signs included, as the template's output depends on them)
++renders only the messages from the cut and joins the kept text before it.
++
++Only for the template sources this holds for (``KNOWN``: GLM-5.3-Flash's ``chat_template.jinja``, and the same with
++``--vision``'s media markers); any other source renders in full. A render whose parts do not frame as expected falls
++back to the full render. ``TF_GLM_RENDER_CACHE``: renders kept (default 8, about one a conversation in flight; 0 turns
++this off). scripts/glm53/v110/tests/host: test_prefix_render.py.
++"""
++from __future__ import annotations
++
++import hashlib
++import os
++import sys
++import threading
++from typing import Any
++
++# sha256 of the template sources the decomposition above was checked for (the checkpoint's chat_template.jinja, and the
++# same after app.media_template's swap of its media reminder)
++KNOWN = frozenset({
++    "41cff9af7b3a86c96751b107a8444f245fbda0bd5320b636a5bb1f7f4ba1a5c3",     # chat_template.jinja
++    "bc0e036b737c81bb09d93242a2287539c143b988d8b6f631d42ad2f72eb4a2ea",     # with --vision's media markers
++})
++MAX_CUTS = 64           # cuts kept a render (the newest; one a turn of its conversation)
++
++
++def _env_entries() -> int:
++    raw = os.environ.get("TF_GLM_RENDER_CACHE", "").strip()
++    if not raw:
++        return 8
++    try:
++        value = int(raw)
++    except ValueError:
++        raise ValueError(f"TF_GLM_RENDER_CACHE={raw!r}: expected a whole number") from None
++    if value < 0:
++        raise ValueError(f"TF_GLM_RENDER_CACHE={raw!r}: expected 0 or more")
++    return value
++
++
++def digest(source: str) -> str:
++    return hashlib.sha256(source.encode("utf-8")).hexdigest()
++
++
++def same(a: Any, b: Any) -> bool:
++    """``a`` and ``b`` render alike wherever a template reads them: equal values of the same types (``1`` is not
++    ``True`` or ``1.0``, ``0.0`` is not ``-0.0``), mappings with the same keys in the same order. Anything but JSON's
++    types (dict, list, tuple, str, int, float, bool, None) is never the same."""
++
++    if a is b:
++        return True
++    t = type(a)
++    if t is not type(b):
++        return False
++    if t is str or t is int or t is bool:
++        return a == b
++    if t is dict:
++        if len(a) != len(b):
++            return False
++        for (ka, va), (kb, vb) in zip(a.items(), b.items()):
++            if type(ka) is not type(kb) or ka != kb:
++                return False
++            if va is vb:
++                continue
++            tv = type(va)
++            if tv is not type(vb):
++                return False
++            if tv is str:
++                if va != vb:
++                    return False
++            elif not same(va, vb):
++                return False
++        return True
++    if t is list or t is tuple:
++        if len(a) != len(b):
++            return False
++        for x, y in zip(a, b):
++            if x is not y and not same(x, y):
++                return False
++        return True
++    if t is float:
++        return a.hex() == b.hex()          # -0.0 and 0.0 are written differently; NaN is NaN
++    return False
++
++
++class _Kept:
++    __slots__ = ("context", "messages", "text", "cuts", "head", "tail")
++
++    def __init__(self, context, messages, text, cuts, head, tail):
++        self.context = context      # the render's other variables (tools, clear_thinking, effort ...)
++        self.messages = messages    # the messages rendered (a list of their own)
++        self.text = text            # the render: header + S(messages), then the generation prompt if it asked for one
++        self.cuts = cuts            # [(c, len(header + S(messages[:c])))], rising; the last c is len(messages)
++        self.head = head            # the header (a render of no messages without the generation prompt)
++        self.tail = tail            # the generation prompt
++
++
++class PrefixRender:
++    """A Jinja template's ``render(**variables)``, reusing kept renders' text of the messages a request repeats."""
++
++    def __init__(self, template: Any, entries: int = 8) -> None:
++        self.template = template
++        self.environment = template.environment
++        self.entries = int(entries)
++        self.kept: list[_Kept] = []         # most recent first
++        self.lock = threading.Lock()
++
++    @classmethod
++    def make(cls, template: Any, source: str | None) -> Any:
++        """``template`` wrapped, or ``template`` itself (TF_GLM_RENDER_CACHE=0, or a source not in ``KNOWN``)."""
++
++        entries = _env_entries()
++        if not entries:
++            return template
++        if source is None or digest(source) not in KNOWN:
++            print("[tensorfold] prompt render: this chat template is rendered in full each request (not a template "
++                  "the history's text is known to be reusable for)", file=sys.stderr, flush=True)
++            return template
++        return cls(template, entries)
++
++    def render(self, *args: Any, **variables: Any) -> str:
++        messages = variables.get("messages")
++        context = {k: v for k, v in variables.items() if k not in ("messages", "add_generation_prompt")}
++        if (args or not isinstance(messages, list) or "clear_thinking" not in context
++                or context["clear_thinking"]):
++            return self.template.render(*args, **variables)
++        gen = variables.get("add_generation_prompt")
++        try:
++            hit = self._render(messages, context, gen)
++        except Exception:  # noqa: BLE001 - the full render below decides (and raises what it raises)
++            hit = None
++        return hit if hit is not None else self.template.render(**variables)
++
++    def _render(self, messages: list, context: dict, gen: Any) -> str | None:
++        messages = list(messages)
++        with self.lock:
++            kept = list(self.kept)
++        best, cut, offset = None, 0, 0
++        n = len(messages)
++        for e in kept:
++            if e.cuts[-1][0] <= cut or not same(e.context, context):
++                continue                    # nothing past the best cut found so far, or another render's variables
++            k, limit = 0, min(n, e.cuts[-1][0])
++            old = e.messages
++            while k < limit and same(old[k], messages[k]):
++                k += 1
++            for c, off in reversed(e.cuts):
++                if c > k or c <= cut:
++                    continue
++                if c == n or (type(messages[c]) is dict and messages[c].get("role") != "tool"):
++                    best, cut, offset = e, c, off
++                    break
++        made = None
++        if best is None:
++            head = self.template.render(**context, messages=[], add_generation_prompt=False)
++            gen_tail = self.template.render(**context, messages=[], add_generation_prompt=True)
++            if not gen_tail.startswith(head):
++                return None
++            tail = gen_tail[len(head):]
++            result = self.template.render(**context, messages=messages, add_generation_prompt=gen)
++            end = len(result) - len(tail) if gen else len(result)
++            if not result.startswith(head) or (gen and not result.endswith(tail)):
++                return None
++            made = _Kept(context, messages, result, [(n, end)], head, tail)
++        elif cut == n:                      # the messages of a kept render's known cut: nothing new to render
++            result = "%.*s%s" % (offset, best.text, best.tail if gen else "")
++        else:
++            head, tail = best.head, best.tail
++            part = self.template.render(**context, messages=messages[cut:], add_generation_prompt=gen)
++            end = len(part) - len(tail) if gen else len(part)
++            if not part.startswith(head) or (gen and not part.endswith(tail)) or end < len(head):
++                return None
++            # one copy: the kept text up to the cut, then the new messages' text (the header left out)
++            result = "%.*s%s" % (offset, best.text, part[len(head):])
++            cuts = [x for x in best.cuts if x[0] <= cut]
++            cuts.append((n, offset + end - len(head)))
++            made = _Kept(context, messages, result, cuts[-MAX_CUTS:], head, tail)
++        with self.lock:
++            # the render it came from goes when this one repeats all of its messages (the next turn of its
++            # conversation); one it shares less with stays beside it, as recent. A request repeating a kept render's
++            # cut (a retry, an earlier turn again) adds none: that render holds it
++            spent = made is not None and best is not None and cut == len(best.messages)
++            rest = [e for e in self.kept if e is not best or (made is not None and not spent)]
++            self.kept = [made or best] + rest
++            del self.kept[self.entries:]
++        return result

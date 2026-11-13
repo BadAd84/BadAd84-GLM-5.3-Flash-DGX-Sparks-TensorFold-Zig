@@ -1,0 +1,346 @@
+--- tensorfold/families/glm5_next/cuda/latent.py
++++ tensorfold/families/glm5_next/cuda/latent.py
+@@ -915,6 +915,18 @@
+ 
+ 
+ SEG_CHUNKS_CTAS = 0      # patch 0108: CTAs of the CUDA chunk pass (0: one a work item, R x chunks); speed only
++
++
++def seg_chunks_halves(R: int) -> int:
++    """TF_GLM_SEG_CHUNKS_SPLIT (default 0, DecodeAttnLeftovers F6; speed only, the same bits): windows of at most this
++    many rows run seg_chunks.cu with each work item (row, chunk) as two CTAs, each the item's QK and softmax and the
++    P.V of half its latent columns (2 returned), so few rows fill more SMs (one CTA an SM: 16 rows' 64 full chunks
++    are 1.33 waves of work in 2 on a GB10); 0, never (1). Read at each launch (so at graph capture). For the GB10
++    A/B (recipe R5b)."""
++    split = int(__import__("os").environ.get("TF_GLM_SEG_CHUNKS_SPLIT", "0") or 0)
++    return 2 if R <= split else 1
++
++
+ _SEG_CHUNKS_EXT = None
+ _SEG_CHUNKS_FAILED = None  # why seg_chunks.cu is not used (then _seg_chunks serves)
+ 
+@@ -933,7 +945,7 @@
+             if not sparse.triton_matches_ptx():
+                 raise RuntimeError(f"Triton {triton.__version__}: the kernel reproduces Triton "
+                                    f"{sparse.TRITON_PTX}'s PTX")
+-            _SEG_CHUNKS_EXT = load(name="tensorfold_glm_segchunks_hda1",     # HuntDecodeAttn: empty chunks unstored
++            _SEG_CHUNKS_EXT = load(name="tensorfold_glm_segchunks_dal3",     # DecodeAttnLeftovers: work units
+                                    sources=[str(Path(__file__).parent / "seg_chunks.cu")],
+                                    extra_cuda_cflags=["-O3"], verbose=False)
+         except Exception as exc:
+@@ -968,9 +980,15 @@
+            and counts.dtype == torch.int32 and qa.is_contiguous() and tokens.is_contiguous() and seg_chunks_cuda()
+            else None)
+     if ext is not None:
+-        # patch 0108: the same partials (either head tile: 16- and 32-head tiles give the same bits)
+-        ext.seg_chunks(qa, cache, rs, rows.pos, rows.base, rows.sparse, tokens.view(-1, W), counts, s.po, s.pm, s.pl,
+-                       nch, scale, SEG_CHUNKS_CTAS)                         # (the dummy list as [1, 1])
++        # patch 0108: the same partials (either head tile: 16- and 32-head tiles give the same bits); F6: and with
++        # either split of an item's work (seg_chunks_halves)
++        halves = seg_chunks_halves(R)
++        if halves == 1:
++            ext.seg_chunks(qa, cache, rs, rows.pos, rows.base, rows.sparse, tokens.view(-1, W), counts, s.po, s.pm,
++                           s.pl, nch, scale, SEG_CHUNKS_CTAS)                 # (the dummy list as [1, 1])
++        else:
++            ext.seg_chunks_halves(qa, cache, rs, rows.pos, rows.base, rows.sparse, tokens.view(-1, W), counts, s.po,
++                                  s.pm, s.pl, nch, scale, SEG_CHUNKS_CTAS, halves)
+     else:
+         _seg_chunks[(R, triton.cdiv(H, hb), nch)](qa, vals, scl, rows.pos, rows.base, rows.sparse, tokens, counts,
+                                                   s.po[:n * LW], s.pm[:n], s.pl[:n], R, W=W, H=H, LW=LW, CH=CHUNK,
+--- tensorfold/families/glm5_next/cuda/seg_chunks.cu
++++ tensorfold/families/glm5_next/cuda/seg_chunks.cu
+@@ -31,6 +31,12 @@
+ // behind, 4 producer warps gathering and converting two tiles ahead into three bf16 key-tile buffers; here a CTA takes
+ // work items (row, chunk) i = blockIdx.x, + gridDim.x, ... in Triton's chunk-major order and runs all their key tiles
+ // as one stream, the buffers, barriers and the producers' prefetch carrying on across items.
++// DecodeAttnLeftovers (F6): with HV = 2 halves an item, an item is two CTA work units (its half 0 and 1, adjacent in
++// the unit order, so both read its keys from L2 together), each running the item's whole QK and online softmax (the
++// same instructions on the same keys: the same p, alpha, m and l in both) and the P.V of one half of the latent
++// columns (latent m16 tiles 16 h .. 16 h + 15); every o element is still one mma chain over the item's key tiles in
++// order, made by one CTA, so every partial keeps its bits; both store m and l (equal bits). A window of few rows then fills
++// more SMs (the kernel holds one CTA an SM: 16 rows' 64 full items run 1.33 waves of work in 2).
+ #include <ATen/cuda/CUDAContext.h>
+ #include <c10/cuda/CUDAGuard.h>
+ #include <cuda_bf16.h>
+@@ -45,9 +51,10 @@
+ // PV warp v's share of the 32 latent m16 tiles (6 mma a tile each). A warp's scheduler is warp & 3; the QK warps
+ // (64 mma a tile, latency-bound score chains: ncu put 15% of their time in math-pipe stalls) sit on schedulers 0-2, so
+ // PV 0-2 take 6 tiles there and PV 3 / 4 (warps 3 and 7, both on scheduler 3) 7 each: 100 / 100 / 100 / 84 mma a
+-// tile a scheduler, where four PV warps of 8 tiles gave 112 / 112 / 112 / 48
+-__device__ __forceinline__ constexpr int pv_tiles(int v) { return v < 3 ? 6 : 7; }
+-constexpr int PV_MAX = 7;                            // the most tiles a PV warp takes
++// tile a scheduler, where four PV warps of 8 tiles gave 112 / 112 / 112 / 48. With halves (HV 2: 16 tiles a CTA)
++// 2 / 2 / 2 / 5 / 5: 76 / 76 / 76 / 60 mma a tile a scheduler.
++__device__ __forceinline__ constexpr int pv_tiles(int v, int hv) { return hv == 1 ? (v < 3 ? 6 : 7) : (v < 3 ? 2 : 5); }
++__host__ __device__ constexpr int pv_max(int hv) { return hv == 1 ? 7 : 5; }   // the most tiles a PV warp takes
+ constexpr int NT = (NV + NQ + NPW) * 32;
+ constexpr int CH = LW * 2 / 16;                      // 16-byte chunks of a bf16 latent row (64)
+ constexpr int BAR_FULL = 1, BAR_EMPTY = 4, BAR_PREADY = 7, BAR_PFREE = 8;
+@@ -145,9 +152,10 @@
+ };
+ 
+ // The window: R rows, each a dense row (keys base + 0 .. base + pos) or a sparse one (keys base + its first cnt
+-// selected tokens, list order); work item i = chunk i / R of row i % R (Triton's program order, chunk-major), its keys
+-// CHUNK c .. c + CHUNK - 1 of the row's list. A CTA takes items blockIdx.x, + gridDim.x, ... and runs their key tiles
+-// as one stream (the tile buffers, barriers and the producers' prefetch run on across items).
++// selected tokens, list order); work item j = chunk j / R of row j % R (Triton's program order, chunk-major), its keys
++// CHUNK c .. c + CHUNK - 1 of the row's list, is work unit j (HV 1) or units 2 j and 2 j + 1 (HV 2, its halves); items
++// counts the units. A CTA takes units blockIdx.x, + gridDim.x, ... and runs their key tiles as one stream (the tile
++// buffers, barriers and the producers' prefetch run on across units).
+ struct Win {
+     const int32_t* __restrict__ POS;
+     const int32_t* __restrict__ BASE;
+@@ -157,11 +165,12 @@
+     int W, R, items, step;
+ };
+ 
+-struct Cur {        // an item and one of its tiles
+-    int i, t, nt, r, c, nk, b;
++struct Cur {        // a work unit (an item, or with halves one half of one) and one of its tiles
++    int i, t, nt, r, c, nk, b, hf;
+     bool sp;
+ };
+ 
++template <int HV>
+ __device__ __forceinline__ void cur_item(const Win& w, Cur& u, int i) {
+     u.i = i;
+     u.t = 0;
+@@ -169,8 +178,10 @@
+         u.nt = 0;
+         return;
+     }
+-    u.r = i % w.R;
+-    u.c = i / w.R;
++    const int item = i / HV;                                 // units 2 j, 2 j + 1: item j's halves (HV 2)
++    u.hf = i % HV;
++    u.r = item % w.R;
++    u.c = item / w.R;
+     const int sp = w.SPR[u.r], pos = w.POS[u.r], b = w.BASE[u.r];
+     u.sp = sp != 0;
+     const int cnt = u.sp ? w.CNT[u.r] : 0;                  // Triton's masked load (CNT: 1 entry without sparse rows)
+@@ -181,14 +192,16 @@
+ }
+ 
+ // the CTA's first tile / the next one (past the last: u.i >= items)
++template <int HV>
+ __device__ __forceinline__ void cur_skip(const Win& w, Cur& u) {
+-    while (u.i < w.items && u.nt == 0) cur_item(w, u, u.i + w.step);
+-}
++    while (u.i < w.items && u.nt == 0) cur_item<HV>(w, u, u.i + w.step);
++}
++template <int HV>
+ __device__ __forceinline__ void cur_next(const Win& w, Cur& u) {
+     if (u.i >= w.items) return;
+     if (++u.t < u.nt) return;
+-    cur_item(w, u, u.i + w.step);
+-    cur_skip(w, u);
++    cur_item<HV>(w, u, u.i + w.step);
++    cur_skip<HV>(w, u);
+ }
+ 
+ // the tile's keys as row tokens (-1 past the chunk's last) and their base: the token loads stay in flight until
+@@ -249,6 +262,7 @@
+     }
+ }
+ 
++template <int HV>
+ __global__ void __launch_bounds__(NT, 1) seg_chunks_kernel(const __nv_bfloat16* __restrict__ QA,
+                                                            const uint8_t* __restrict__ LC, int RS, Win w,
+                                                            float* __restrict__ PO, float* __restrict__ PM,
+@@ -260,7 +274,7 @@
+     {
+         Cur u;
+         for (int i = blockIdx.x; i < w.items; i += w.step) {
+-            cur_item(w, u, i);
++            cur_item<HV>(w, u, i);
+             ntot += u.nt;
+         }
+     }
+@@ -272,18 +286,18 @@
+         Raw A, B;
+         int ia[8], ib[8], ba, bb;
+         Cur uc;                                           // the tile ia's ids are for (two ahead of A's)
+-        cur_item(w, uc, blockIdx.x);
+-        cur_skip(w, uc);
++        cur_item<HV>(w, uc, blockIdx.x);
++        cur_skip<HV>(w, uc);
+         Cur ud = uc;                                      // ib's
+-        cur_next(w, ud);
++        cur_next<HV>(w, ud);
+         ids_load(w, uc, pw, ia, ba);
+         ids_load(w, ud, pw, ib, bb);
+         raw_load(LC, RS, ia, ba, lane, A);
+         raw_load(LC, RS, ib, bb, lane, B);
+-        cur_next(w, uc);
+-        cur_next(w, uc);
+-        cur_next(w, ud);
+-        cur_next(w, ud);
++        cur_next<HV>(w, uc);
++        cur_next<HV>(w, uc);
++        cur_next<HV>(w, ud);
++        cur_next<HV>(w, ud);
+         ids_load(w, uc, pw, ia, ba);
+         ids_load(w, ud, pw, ib, bb);
+         int b = 0;
+@@ -294,8 +308,8 @@
+             b = b + 1 == NB ? 0 : b + 1;
+             if (t + 2 < ntot) {
+                 raw_load(LC, RS, ia, ba, lane, A);
+-                cur_next(w, uc);
+-                cur_next(w, uc);
++                cur_next<HV>(w, uc);
++                cur_next<HV>(w, uc);
+                 ids_load(w, uc, pw, ia, ba);
+             }
+             if (t + 1 >= ntot) break;
+@@ -305,8 +319,8 @@
+             b = b + 1 == NB ? 0 : b + 1;
+             if (t + 3 < ntot) {
+                 raw_load(LC, RS, ib, bb, lane, B);
+-                cur_next(w, ud);
+-                cur_next(w, ud);
++                cur_next<HV>(w, ud);
++                cur_next<HV>(w, ud);
+                 ids_load(w, ud, pw, ib, bb);
+             }
+         }
+@@ -345,7 +359,7 @@
+         int b = 0, T = 0;                                 // the tile buffer, the CTA's tile count so far
+         Cur u;
+         for (int i = blockIdx.x; i < w.items; i += w.step) {
+-            cur_item(w, u, i);
++            cur_item<HV>(w, u, i);
+             const int pb = (u.c * w.R + u.r) * H;         // the item's partials
+             if (u.nt == 0) continue;                      // an empty chunk: nothing stored (the merge skips it)
+             const int ntile = u.nt, nk = u.nk;
+@@ -458,7 +472,7 @@
+                     for (int e = 0; e < 4; ++e) acc[i2][e] = accn[i2][e];
+                 b = bn;
+             }
+-            if (g == 0)
++            if (g == 0)                                   // (with halves both store the item's m and l: equal bits)
+ #pragma unroll
+                 for (int e = 0; e < 2; ++e)
+                     if (8 * j + 2 * t4 + e < H) {
+@@ -472,18 +486,20 @@
+         return;
+     }
+ 
+-    // ------------------------------------------------- PV warps: latent rows 16 tb .. 16 (tb + nt) - 1 (nt m16 tiles)
++    // ---------------------------- PV warps: latent rows 16 tu .. 16 (tu + nt) - 1 (nt m16 tiles; tu = tb + 16 half)
++    constexpr int PV_MAX = pv_max(HV);
+     const int v = warp < 4 ? warp : 4;
+-    const int nt = pv_tiles(v);
++    const int nt = pv_tiles(v, HV);
+     int tb = 0;
+ #pragma unroll
+-    for (int k = 0; k < NV - 1; ++k) tb += k < v ? pv_tiles(k) : 0;
++    for (int k = 0; k < NV - 1; ++k) tb += k < v ? pv_tiles(k, HV) : 0;
+     const unsigned psb = (unsigned)__cvta_generic_to_shared(S.ps);
+     const int vk = (lane & 7) + 8 * (lane >> 4), vc = (lane >> 3) & 1;
+     int b = 0, T = 0;
+     Cur u;
+     for (int it = blockIdx.x; it < w.items; it += w.step) {
+-        cur_item(w, u, it);
++        cur_item<HV>(w, u, it);
++        const int tu = tb + u.hf * (32 / HV);             // the unit's first m16 tile of this warp's
+         float* po = PO + (size_t)((u.c * w.R + u.r) * H) * LW;
+         float o[PV_MAX][3][4];
+ #pragma unroll
+@@ -523,8 +539,8 @@
+             uint32_t a[2][2][4];                          // K^T A fragments, two m16 tiles in flight
+ #define LOADV(slot, i)                                                                                    \
+     {                                                                                                     \
+-        ldsm_x4_t(a[slot][0], ktb + 16 * (vk * CH + swz(vk, 2 * (tb + (i)) + vc)));                       \
+-        ldsm_x4_t(a[slot][1], ktb + 16 * ((16 + vk) * CH + swz(16 + vk, 2 * (tb + (i)) + vc)));           \
++        ldsm_x4_t(a[slot][0], ktb + 16 * (vk * CH + swz(vk, 2 * (tu + (i)) + vc)));                       \
++        ldsm_x4_t(a[slot][1], ktb + 16 * ((16 + vk) * CH + swz(16 + vk, 2 * (tu + (i)) + vc)));           \
+     }
+             LOADV(0, 0)
+ #pragma unroll
+@@ -551,11 +567,25 @@
+                     for (int nh = 0; nh < 3; ++nh)
+ #pragma unroll
+                         for (int e = 0; e < 4; ++e) {
+-                            // the tile's latent place 16 (tb + i) + g + 8 (e >> 1) holds latent column kw4(place)
+-                            const int h = 8 * nh + 2 * t4 + (e & 1), lat = kw4(16 * (tb + i) + g + 8 * (e >> 1));
++                            // the tile's latent place 16 (tu + i) + g + 8 (e >> 1) holds latent column kw4(place)
++                            const int h = 8 * nh + 2 * t4 + (e & 1), lat = kw4(16 * (tu + i) + g + 8 * (e >> 1));
+                             if (h < H) po[(size_t)h * LW + lat] = o[i][nh][e];
+                         }
+     }
++}
++
++template <int HV>
++void launch(int grid, const Win& w, const at::Tensor& QA, const at::Tensor& LC, int64_t RS, at::Tensor& PO,
++            at::Tensor& PM, at::Tensor& PL, int64_t H, double scale) {
++    static bool attr = false;
++    if (!attr) {
++        C10_CUDA_CHECK(cudaFuncSetAttribute(seg_chunks_kernel<HV>, cudaFuncAttributeMaxDynamicSharedMemorySize,
++                                            (int)sizeof(Smem)));
++        attr = true;
++    }
++    seg_chunks_kernel<HV><<<grid, NT, sizeof(Smem), at::cuda::getCurrentCUDAStream()>>>(
++        reinterpret_cast<const __nv_bfloat16*>(QA.data_ptr()), reinterpret_cast<const uint8_t*>(LC.data_ptr()),
++        (int)RS, w, PO.data_ptr<float>(), PM.data_ptr<float>(), PL.data_ptr<float>(), (int)H, (float)scale);
+ }
+ 
+ }  // namespace
+@@ -563,10 +593,12 @@
+ // latent.seg_attention's chunk pass on an FP8 cache: QA [R, H, 512] bf16 (16 < H <= 24), LC the arena's rows (512
+ // e4m3 codes, then the row's fp32 scale; RS bytes apart), POS / BASE / SPR [R] int32 (segments.SegRows), TOK [R, W]
+ // int32 selected tokens (sparse rows' first CNT[r] read), PO / PM / PL the chunk partials of nch chunks
+-// [nch, R, H, (512)] fp32, as _seg_chunks stores them; ctas: CTAs (0: one an item, R * nch).
+-void seg_chunks(const at::Tensor& QA, const at::Tensor& LC, int64_t RS, const at::Tensor& POS, const at::Tensor& BASE,
+-                const at::Tensor& SPR, const at::Tensor& TOK, const at::Tensor& CNT, at::Tensor PO, at::Tensor PM,
+-                at::Tensor PL, int64_t nch, double scale, int64_t ctas) {
++// [nch, R, H, (512)] fp32, as _seg_chunks stores them; ctas: CTAs (0: one a work unit, R * nch * halves); halves
++// (1 or 2, speed only: the same bits): CTA work units an item (row, chunk), 2 splitting its P.V's latent columns.
++void seg_chunks_halves(const at::Tensor& QA, const at::Tensor& LC, int64_t RS, const at::Tensor& POS,
++                       const at::Tensor& BASE, const at::Tensor& SPR, const at::Tensor& TOK, const at::Tensor& CNT,
++                       at::Tensor PO, at::Tensor PM, at::Tensor PL, int64_t nch, double scale, int64_t ctas,
++                       int64_t halves) {
+     TORCH_CHECK(QA.is_cuda() && QA.scalar_type() == at::kBFloat16 && LC.element_size() == 1 &&
+                 POS.scalar_type() == at::kInt && BASE.scalar_type() == at::kInt && SPR.scalar_type() == at::kInt &&
+                 TOK.scalar_type() == at::kInt && CNT.scalar_type() == at::kInt &&
+@@ -579,22 +611,26 @@
+                 PM.numel() >= nch * R * H && PL.numel() >= nch * R * H && nch >= 1, "seg chunks: shapes");
+     TORCH_CHECK(RS % 16 == 0 && RS >= LW + 4, "seg chunks: an FP8 cache of 16-byte aligned rows");
+     TORCH_CHECK(LC.numel() / RS < (int64_t(1) << 31), "seg chunks: arena rows past int32");
++    TORCH_CHECK(halves == 1 || halves == 2, "seg chunks: 1 or 2 halves an item");
+     if (R == 0) return;
+     const c10::cuda::CUDAGuard guard(QA.device());
+-    static bool attr = false;
+-    if (!attr) {
+-        C10_CUDA_CHECK(cudaFuncSetAttribute(seg_chunks_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+-                                            (int)sizeof(Smem)));
+-        attr = true;
+-    }
+-    const int items = (int)(R * nch);
+-    const int grid = ctas > 0 && ctas < items ? (int)ctas : items;
+-    Win w{POS.data_ptr<int32_t>(), BASE.data_ptr<int32_t>(), SPR.data_ptr<int32_t>(), TOK.data_ptr<int32_t>(),
+-          CNT.data_ptr<int32_t>(), (int)TOK.size(1), (int)R, items, grid};
+-    seg_chunks_kernel<<<grid, NT, sizeof(Smem), at::cuda::getCurrentCUDAStream()>>>(
+-        reinterpret_cast<const __nv_bfloat16*>(QA.data_ptr()), reinterpret_cast<const uint8_t*>(LC.data_ptr()),
+-        (int)RS, w, PO.data_ptr<float>(), PM.data_ptr<float>(), PL.data_ptr<float>(), (int)H, (float)scale);
++    const int units = (int)(R * nch * halves);
++    const int grid = ctas > 0 && ctas < units ? (int)ctas : units;
++    const Win w{POS.data_ptr<int32_t>(), BASE.data_ptr<int32_t>(), SPR.data_ptr<int32_t>(), TOK.data_ptr<int32_t>(),
++                CNT.data_ptr<int32_t>(), (int)TOK.size(1), (int)R, units, grid};
++    if (halves == 2) launch<2>(grid, w, QA, LC, RS, PO, PM, PL, H, scale);
++    else launch<1>(grid, w, QA, LC, RS, PO, PM, PL, H, scale);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
+-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("seg_chunks", &seg_chunks); }
++// the chunk pass with one CTA work unit an item (seg_chunks_halves' halves 1)
++void seg_chunks(const at::Tensor& QA, const at::Tensor& LC, int64_t RS, const at::Tensor& POS, const at::Tensor& BASE,
++                const at::Tensor& SPR, const at::Tensor& TOK, const at::Tensor& CNT, at::Tensor PO, at::Tensor PM,
++                at::Tensor PL, int64_t nch, double scale, int64_t ctas) {
++    seg_chunks_halves(QA, LC, RS, POS, BASE, SPR, TOK, CNT, PO, PM, PL, nch, scale, ctas, 1);
++}
++
++PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++    m.def("seg_chunks", &seg_chunks);
++    m.def("seg_chunks_halves", &seg_chunks_halves);
++}

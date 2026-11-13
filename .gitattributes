@@ -1,0 +1,3 @@
+# A byte-exact record: every file is stored and checked out exactly as committed (LF), so the sha256 lists in
+# production/patches/SERIES and production/build/*.sha256 hold on any platform.
+* -text

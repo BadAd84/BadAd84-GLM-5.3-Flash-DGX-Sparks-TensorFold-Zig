@@ -1,0 +1,18 @@
+[Unit]
+Description=GLM serve watchdog (system copy; survives the user manager being OOM-killed)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=adam
+ExecStart=/home/adam/.local/bin/glm-watchdog.sh
+Restart=always
+RestartSec=10
+# The kernel OOM-killed this unit's user copy at oom_score_adj 200. Keep the system copy at the lowest
+# kill preference so it outlives the very pressure it exists to fix.
+OOMScoreAdjust=-900
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

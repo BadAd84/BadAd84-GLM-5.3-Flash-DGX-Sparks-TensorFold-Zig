@@ -1,0 +1,234 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1160,16 +1160,23 @@
+                   f"; DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
+         self.vision = None                   # rank 0's image tower (``tensorfold.vision.glm.GlmVision``), --vision
+         if vision:
+-            from tensorfold.vision.glm import GlmVision
++            from tensorfold.vision.glm import GlmVision, vision_lazy
+ 
+-            self.vision = GlmVision(model_dir, torch.device("cuda", 0), allow_urls=vision_urls)
+-            self.vision.warm()
+-            torch.cuda.empty_cache()
++            # TF_GLM_VISION_LAZY=1: the tower loads at the first picture's encode (rank 0's engine thread, before any
++            # rank is told of the request) and is released after TF_GLM_VISION_KEEP_S idle seconds; the startup
++            # estimate above still counts it, so a picture at peak load fits as it does when it is resident
++            lazy = vision_lazy()
++            self.vision = GlmVision(model_dir, torch.device("cuda", 0), allow_urls=vision_urls, lazy=lazy)
++            if not lazy:
++                self.vision.warm()
++                torch.cuda.empty_cache()
+             lim = self.vision.limits
+             print(f"[tensorfold] vision: image and video input, a {self.vision.weight_bytes / 2**30:.2f} GiB tower "
+                   f"with {workspace / 2**30:.2f} GiB of workspace; at most {lim.image_tokens} tokens a picture, "
+                   f"{lim.video_tokens} a clip ({lim.video_frames} frames at {lim.fps:g} a second)"
+-                  f"{'; https URLs allowed' if vision_urls else ''}", flush=True)
++                  f"{'; https URLs allowed' if vision_urls else ''}"
++                  + (f"; the tower loads at the first picture and is released after {self.vision.keep_s:g} s without "
++                     f"one (TF_GLM_VISION_LAZY)" if lazy else ""), flush=True)
+             fastboot.mark("vision tower")
+         self.eos = tuple(w.cfg.eos)
+         self.model_dir = Path(model_dir)
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -66,6 +66,9 @@
+ # an idle rank's wait for its next request while the spill tier's kept writes still wait for the ring: this long at a
+ # time, pumping between (``MultiDecoder._idle_pump``; the engine's doorbell wait on the followers)
+ IDLE_POLL_S = 0.005
++# OTS lazy-vision: TF_GLM_VISION_LAZY=1 (read once; ``vision.glm.vision_lazy`` refuses bad values at the engine's
++# start) adds the tower's release to the scheduler's idle wait and to each busy iteration; 0 or unset: neither runs
++VISION_LAZY = os.environ.get("TF_GLM_VISION_LAZY", "").strip() == "1"
+ 
+ 
+ def boot_restore() -> tuple[bool, float, float]:
+@@ -3982,10 +3985,18 @@
+                 for s in self.decoder.drop():
+                     self._reply(s, "error", exc)
+ 
++    def _release_vision(self) -> float | None:
++        """OTS lazy-vision: a tower loaded on demand (TF_GLM_VISION_LAZY) is released here, between iterations, once
++        TF_GLM_VISION_KEEP_S passed without an encode; the seconds until that is due (None: nothing to release)."""
++
++        vision = getattr(self.decoder.g, "vision", None)
++        return vision.release_idle() if vision is not None else None
++
+     def _idle_get(self):
+         """An idle worker's wait for its next request. While the spill tier's kept writes still wait for the ring
+         (nothing pumps between requests otherwise), it waits IDLE_POLL_S at a time and pumps between (``_idle_pump``):
+-        the replies of the last streams went out already, and a request arriving meanwhile is admitted at once."""
++        the replies of the last streams went out already, and a request arriving meanwhile is admitted at once. With
++        VISION_LAZY the final wait is ``_lazy_get`` instead, which releases a lazy tower once its keep time passes."""
+ 
+         pump = getattr(self.decoder, "_idle_pump", None)
+         while pump is not None and pump():
+@@ -3993,8 +4004,22 @@
+                 return self.waiting.get(timeout=IDLE_POLL_S)
+             except queue.Empty:
+                 continue
++        if VISION_LAZY:
++            return self._lazy_get()
+         return self.waiting.get()
+ 
++    def _lazy_get(self):
++        """VISION_LAZY's idle wait: the next request, the tower released while waiting once its keep time passes."""
++
++        while True:
++            due = self._release_vision()
++            if due is None:
++                return self.waiting.get()
++            try:
++                return self.waiting.get(timeout=due + 0.01)
++            except queue.Empty:
++                continue
++
+     def _boot_restore(self) -> None:
+         """TF_GLM_SPILL_BOOT_RESTORE: while nothing else runs or waits, the next stored state of ``boot_plan`` read back
+         into the pool, one at a time, as a request's read (``boot_read``; ``loading`` with no request), so each agent's
+@@ -4046,6 +4071,8 @@
+         if reading and not self.decoder.live():
+             time.sleep(0.002)                    # only reads in flight: poll them
+         first = self._idle_get() if idle else None                  # idle: wait for a request
++        if VISION_LAZY and not idle:
++            self._release_vision()
+         until = time.monotonic() + self.gather_s if idle and self.gather_s > 0 else None
+         done = self._admit(first, until)
+         try:
+--- tensorfold/vision/glm.py
++++ tensorfold/vision/glm.py
+@@ -78,6 +78,28 @@
+ PICTURE_UNCAPPED = 8 * 1024 * 1024        # a decode with less room than this was squeezed; not worth remembering
+ 
+ 
++# OTS lazy-vision: TF_GLM_VISION_LAZY=1 leaves the tower's 1.05 GiB of bf16 weights on disk until the first picture or
++# clip needs them (rank 0's engine thread loads them at that encode, before any rank is told of the request), and
++# releases them once TF_GLM_VISION_KEEP_S seconds (default 600) pass without an encode. The rows are the same bits:
++# the same tensors, loaded by the same code. 0 (default): loaded and warmed at start, as before.
++def vision_lazy() -> bool:
++    raw = os.environ.get("TF_GLM_VISION_LAZY", "").strip() or "0"
++    if raw not in ("0", "1"):
++        raise ValueError(f"TF_GLM_VISION_LAZY: 0 or 1, not {raw!r}")
++    return raw == "1"
++
++
++def vision_keep_s() -> float:
++    raw = os.environ.get("TF_GLM_VISION_KEEP_S", "").strip() or "600"
++    try:
++        s = float(raw)
++    except ValueError:
++        s = -1.0
++    if not 0 <= s < float("inf"):
++        raise ValueError(f"TF_GLM_VISION_KEEP_S: seconds from 0, not {raw!r}")
++    return s
++
++
+ @dataclass(frozen=True, slots=True)
+ class GlmVisionLimits:
+     """Token caps: the checkpoint allows 8,000 tokens a picture and 240,000 a clip; these keep a request's
+@@ -318,6 +340,28 @@
+ 
+ 
+ # -- the tower --------------------------------------------------------------------------------------------------
++def visual_layout(model_dir: Path) -> list[tuple[Path, int, int, int]]:
++    """The tower's tensors as the safetensors headers place them, no data read: (file, byte offset, bytes, elements)
++    each. What a lazy tower reports at start (its bf16 bytes) and what a read-ahead touches."""
++
++    import struct
++
++    index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
++    names = sorted(n for n in index if n.startswith("model.visual."))
++    if not names:
++        raise ValueError("this checkpoint has no vision tower (model.visual.*)")
++    out = []
++    for file in sorted({index[n] for n in names}):
++        with open(model_dir / file, "rb") as f:
++            size = struct.unpack("<Q", f.read(8))[0]
++            header = json.loads(f.read(size))
++        for n in names:
++            if index[n] == file:
++                begin, end = header[n]["data_offsets"]
++                out.append((model_dir / file, 8 + size + begin, end - begin, math.prod(header[n]["shape"])))
++    return out
++
++
+ class GlmVisionTower:
+     """``Glm5NextVisionModel`` in plain torch on bf16 weights; one image or frame pair attends within itself."""
+ 
+@@ -492,7 +536,7 @@
+     tool_media = True       # tool results' pictures and clips, rendered inside their <tool_response> (issue #28)
+ 
+     def __init__(self, model_dir: Path, device, *, allow_urls: bool = False,
+-                 limits: GlmVisionLimits | None = None) -> None:
++                 limits: GlmVisionLimits | None = None, lazy: bool = False) -> None:
+         from tokenizers import Tokenizer
+ 
+         cfg = json.loads((model_dir / "config.json").read_text())
+@@ -502,8 +546,14 @@
+         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+         if self.tok.token_to_id(IMAGE) != self.image_token:
+             raise ValueError("the tokenizer's <|image|> id does not match config.json's image_token_id")
+-        self.tower = GlmVisionTower(model_dir, device)
+-        self.weight_bytes = self.tower.weight_bytes
++        self.model_dir, self.device = Path(model_dir), device
++        # lazy (TF_GLM_VISION_LAZY=1): no tower until ``features`` needs one; ``release_idle`` drops it again
++        self.lazy, self.keep_s = bool(lazy), vision_keep_s()
++        self.tower = None if self.lazy else GlmVisionTower(self.model_dir, device)
++        self.weight_bytes = (self.tower.weight_bytes if self.tower is not None
++                             else sum(n * 2 for *_, n in visual_layout(self.model_dir)))     # bf16, as loaded
++        self.loads = 0                      # on-demand loads so far (lazy)
++        self.last_use = 0.0                 # time.monotonic() at the end of the last encode
+         self._pictures = OrderedDict()      # (bytes, detail, tokens, min_tokens) -> FittedPicture, LRU by bytes
+         self._canvases = OrderedDict()      # the last few fitted canvases, oldest first (by the record itself)
+ 
+@@ -760,16 +810,49 @@
+         return pairs * (x.shape[-2] // 28) * (x.shape[-1] // 28)
+ 
+     def features(self, prepared: GlmPrepared):
+-        """The tower's rows for a prompt's items, fitting a remembered picture only if the tower needs its pixels."""
++        """The tower's rows for a prompt's items, fitting a remembered picture only if the tower needs its pixels.
++        Rank 0's engine thread (the only caller): a lazy tower loads here, at the encode, before any rank is told."""
+ 
+         items = [(kind, x.canvas if x.canvas is not None else self._canvas(x)) if isinstance(x, FittedPicture)
+                  else (kind, x) for kind, x in prepared.items]
+-        return self.tower.features(items)
++        try:
++            return self._loaded().features(items)
++        finally:
++            self.last_use = time.monotonic()
++
++    def _loaded(self) -> GlmVisionTower:
++        """The tower, loaded now if it is not (a failure leaves none: the request fails, the next one tries again)."""
++
++        if self.tower is None:
++            t = time.perf_counter()
++            self.tower = GlmVisionTower(self.model_dir, self.device)
++            self.loads += 1
++            print(f"[tensorfold] vision: the tower loaded on demand in {time.perf_counter() - t:.2f} s "
++                  f"({self.tower.weight_bytes / 2**30:.2f} GiB, load {self.loads}; TF_GLM_VISION_LAZY)", flush=True)
++        return self.tower
++
++    def release_idle(self, now: float | None = None) -> float | None:
++        """Lazy: drop a tower nothing has encoded with for ``keep_s`` seconds and give its memory back. Returns the
++        seconds until that is due, None when there is nothing to drop. Rank 0's engine thread only, between
++        iterations (the tower is never mid-encode there)."""
++
++        if not self.lazy or self.tower is None:
++            return None
++        idle = (time.monotonic() if now is None else now) - self.last_use
++        if idle < self.keep_s:
++            return self.keep_s - idle
++        import torch
++
++        self.tower = None
++        torch.cuda.empty_cache()
++        print(f"[tensorfold] vision: the tower released after {idle:.0f} s without a picture (TF_GLM_VISION_KEEP_S "
++              f"{self.keep_s:g})", flush=True)
++        return None
+ 
+     def warm(self) -> None:
+         """Run a small picture through the tower once, so its kernels are loaded before the first request."""
+ 
+         import torch
+ 
+-        self.tower.features([("image", torch.zeros((3, 56, 56), dtype=torch.uint8))])
++        self._loaded().features([("image", torch.zeros((3, 56, 56), dtype=torch.uint8))])
+         torch.cuda.synchronize()

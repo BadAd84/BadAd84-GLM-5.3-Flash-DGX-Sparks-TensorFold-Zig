@@ -1,0 +1,13 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -675,6 +675,10 @@
+         fastboot.set_rank(rank)
+         fastboot.mark("start: container, imports, CLI")
+         torch.cuda.set_device(0)
++        if int(parallel) > 1:
++            # concurrent streams scratch of many sizes comes and goes; growable segments, not a new
++            # segment a size (qwen3_5 sets the same: without it reserved fragments under real traffic)
++            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+         self.torch = torch
+         self.rank, self.world = rank, world
+         self._msg = None            # OTS msg-gather: the message gather (``MsgGather``), built on the first message

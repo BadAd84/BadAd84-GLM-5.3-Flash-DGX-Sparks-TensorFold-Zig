@@ -1,0 +1,78 @@
+diff -ruN tensorfold/families/glm5_next/cuda/engine.py ../b/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:43:18.418691900 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:43:18.561636600 +0000
+@@ -156,18 +156,41 @@
+     return int(value)
+ 
+ 
++COMMON_BLOCK = 4096                    # common_prefix compares this many ids first, then twice as many each step
++
++
+ def common_prefix(a, b) -> int:
+-    """How many leading tokens two id sequences (lists or int64 arrays) share."""
++    """How many leading tokens two id sequences (lists or int64 arrays) share. Compared in blocks that double from
++    ``COMMON_BLOCK`` and stops at the first block holding a difference: two conversations that share a system block
++    cost that block, not their whole length (the answer is the first difference either way)."""
+ 
+     import numpy as np
+ 
+     n = min(len(a), len(b))
+-    if n == 0:
+-        return 0
+-    x = np.asarray(a[:n], dtype=np.int64)
+-    y = np.asarray(b[:n], dtype=np.int64)
+-    diff = np.flatnonzero(x != y)
+-    return int(diff[0]) if len(diff) else n
++    at, step = 0, COMMON_BLOCK
++    while at < n:
++        end = min(n, at + step)
++        diff = np.flatnonzero(np.asarray(a[at:end], dtype=np.int64) != np.asarray(b[at:end], dtype=np.int64))
++        if len(diff):
++            return at + int(diff[0])
++        at, step = end, step * 2
++    return n
++
++
++def first_index(arr, value: int) -> int:
++    """The first position of ``value`` in the int64 array ``arr`` (-1: none), searched in blocks as ``common_prefix``."""
++
++    import numpy as np
++
++    n = len(arr)
++    at, step = 0, COMMON_BLOCK
++    while at < n:
++        end = min(n, at + step)
++        hit = np.flatnonzero(arr[at:end] == value)
++        if len(hit):
++            return at + int(hit[0])
++        at, step = end, step * 2
++    return -1
+ 
+ 
+ def shared_points(prompt: list[int], cut: int, point: int | None, grid: int, least: int, known,
+@@ -183,12 +206,20 @@
+     import numpy as np
+ 
+     arr = np.asarray(prompt, dtype=np.int64)
+-    # only a sequence longer than cut + least can share enough (known may hold int64 arrays of the ids)
+-    wanted = [max((common_prefix(arr, ids) for ids in known if len(ids) >= cut + least), default=0)]
++    # only a sequence longer than cut + least can share enough (known may hold int64 arrays of the ids). The longest
++    # shared prefix so far, ``best``: a sequence shares more only when it agrees at position ``best`` too, so one id
++    # rules out every other conversation behind the same system block (the same maximum as comparing each whole)
++    best = 0
++    for ids in known:
++        k = len(ids)
++        if k < cut + least or k <= best or len(arr) <= best or (best and arr[best] != ids[best]):
++            continue
++        best = max(best, common_prefix(arr, ids))
++    wanted = [best]
+     if opener is not None:
+-        at = np.flatnonzero(arr == opener)
+-        if len(at):
+-            wanted.append(int(at[0]))
++        at = first_index(arr, opener)
++        if at >= 0:
++            wanted.append(at)
+     out: list[int] = []
+     for p in sorted(p // grid * grid if grid else p for p in wanted):
+         if p - (out[-1] if out else cut) >= least and p < point:

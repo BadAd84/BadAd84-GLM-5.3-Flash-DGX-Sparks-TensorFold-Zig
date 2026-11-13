@@ -1,0 +1,175 @@
+# HuntSpill-3-idle-pump.patch (lane HuntSpill, 2026-10-30; the synced tree with every patch in sync/ORDER applied).
+# When the last stream finished, rank 0's MultiDecoder.finish and every follower's IDLE op staged every waiting block
+# of the spill tier's kept writes through the write ring in one call (BlockStore.stage_all), which waits for the writer
+# to free ring slots, up to 10 s; GlmScheduler._iteration sends the finished streams' replies AFTER finish, so the last
+# reply's end (an agent's tool call) and the next request's admission waited for the writer: ~(blocks still waiting -
+# 21 ring slots) x ~19 ms (the writer's measured rate at TP=3: 67 blocks in 1.26-1.32 s idle, pr124-readfix-tp3), e.g.
+# ~5 s after a cold 772k prompt with a short reply. Now an idle rank pumps between short waits for its next request
+# (IDLE_POLL_S, 5 ms): rank 0 in GlmScheduler._idle_get (after the replies went out), a follower in its doorbell wait
+# (GlmEngine._await_bell(work)); a request arriving is admitted at once and the rounds pump as before. stage_all goes.
+# The same blocks, bytes and files; no reply bit is touched (pumping reads rows that are final).
+# Measured on the CPU rig (2-slot ring, writer slowed to 25 ms a block, a 30-block state waiting): finish 1,017 ms ->
+# 0 ms; a request arriving while blocks wait is taken 0.3 ms after it arrives; the doorbell wait returns at the bell.
+# Test: test_idle_pump.py <tree> [--ref <pre-patch tree>] (CPU torch, Linux): the checks above, plus every file on
+# disk byte-identical to the pre-patch tree's (34 files); the pre-patch tree FAILS (finish waits ~1 s; no idle pump).
+diff -ruN tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
+--- tensorfold/cuda/spill_blocks.py	2026-10-29 23:44:08.458799100 +0000
++++ tensorfold/cuda/spill_blocks.py	2026-10-30 00:04:58.525164000 +0000
+@@ -23,7 +23,8 @@
+ Writes go through a bounded ring of pinned host slots: when a state is kept only its small state, and the block its
+ end cuts (a pooled-key row there is still filling), are copied to the host; its other rows stay in the pool until
+ written. Between rounds the engine calls ``pump`` (a few blocks a call, one gather and one copy each), the writer
+-thread writes each slot, then frees it; at idle ``drain`` writes the rest. Rows about to be freed or overwritten while
++thread writes each slot, then frees it; an idle engine pumps between short waits for its next request, and a shutdown
++``drain`` writes the rest. Rows about to be freed or overwritten while
+ still waiting are copied to the host at once (``release``). Reads run on a reader thread (blocks read ahead into
+ pinned slots on several threads, each checked against its CRC-32); the engine copies the blocks read into the pool
+ between rounds (``step``), so other streams keep decoding and no CUDA work is issued off the engine's thread (a reader
+@@ -960,16 +961,6 @@
+             self.pending.pop(0)
+             self.jobs.put(("point", job, None, None))
+         self.stats["pump_s"] += time.perf_counter() - t0
+-
+-    def stage_all(self, timeout: float = 10.0) -> None:
+-        """Every waiting block through the ring now (an engine about to idle: nothing pumps meanwhile), for at most
+-        ``timeout`` seconds (slots come back as the writer writes); what is left goes at the next pumps."""
+-
+-        end = time.monotonic() + timeout
+-        while self.pending and time.monotonic() < end:
+-            self.pump(None)
+-            if self.pending:
+-                time.sleep(0.001)
+ 
+     def drain(self, timeout: float | None = None) -> bool:
+         """Every waiting state to the writer and on disk, and the json rewrites queued before (``_mark_shared``) too
+diff -ruN tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 23:44:08.568657500 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:04:39.307638800 +0000
+@@ -1221,19 +1221,28 @@
+             for r in range(1, getattr(self, "world", 2)):
+                 store.set(bell_key(r, self._bell), b"1")
+ 
+-    def _await_bell(self) -> None:
++    def _await_bell(self, work=None) -> None:
++        """A follower's wait for rank 0's next request. ``work()`` (``MultiDecoder._idle_pump``): what this rank does
++        meanwhile, True while it has more: the wait then goes IDLE_POLL_S at a time, ``work`` between."""
++
++        from .multi import IDLE_POLL_S
++
+         store = self._store()
+-        if store is None:
++        if store is None:                     # (no doorbell: the work first, as long as the IDLE op's staging took)
++            end = time.monotonic() + 10.0
++            while work is not None and work() and time.monotonic() < end:
++                time.sleep(0.001)
+             return
+         from datetime import timedelta
+ 
+         key = bell_key(getattr(self, "rank", 1), getattr(self, "_bell", 0) + 1)
+         while True:
++            busy = work is not None and work()
+             try:
+-                store.wait([key], timedelta(hours=1))
++                store.wait([key], timedelta(seconds=IDLE_POLL_S) if busy else timedelta(hours=1))
+                 break
+-            except Exception as e:            # an idle hour: wait again (a lost rank 0 is a connection error instead)
+-                if "timeout" not in str(e).lower():
++            except Exception as e:            # an idle hour, or a short wait while working: wait again (a lost rank 0
++                if "timeout" not in str(e).lower():          # is a connection error instead)
+                     raise
+         store.delete_key(key)
+         self._bell = getattr(self, "_bell", 0) + 1
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 23:44:08.593576600 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:04:17.581665400 +0000
+@@ -63,6 +63,9 @@
+        FLUSH: "FLUSH", LOADED: "LOADED", HAS: "HAS", LOADPART: "LOADPART", UNTWIN: "UNTWIN", XMOVE: "XMOVE"}
+ # TF_GLM_SPILL_LOAD_MS (default 40): the most a step of the reads in flight copies between two rounds (rank 0's time)
+ LOAD_MS_DEFAULT = 40.0
++# an idle rank's wait for its next request while the spill tier's kept writes still wait for the ring: this long at a
++# time, pumping between (``MultiDecoder._idle_pump``; the engine's doorbell wait on the followers)
++IDLE_POLL_S = 0.005
+ 
+ 
+ def watchdog_seconds(value: str | None = None) -> float:
+@@ -2055,6 +2058,21 @@
+             except Exception as exc:                 # noqa: BLE001
+                 print(f"[tensorfold] spill rank {self.rank}: pump failed: {exc!r}", flush=True)
+ 
++    def _idle_pump(self) -> bool:
++        """Every rank, idle (no stream; between the doorbell's or the queue's short waits): the waiting writes' next
++        blocks through the ring, as many as its free slots take. True while blocks still wait to be staged. Before,
++        the IDLE op staged them all in one call that waited for the writer to free slots (up to 10 s), and rank 0's
++        last replies and the next request's admission waited with it (~19 ms a block on GB10 at TP=3)."""
++
++        if self.disk is None or not self.disk.pending:
++            return False
++        try:
++            self.disk.pump(None)
++        except Exception as exc:                 # noqa: BLE001  (never the engine's failure)
++            print(f"[tensorfold] spill rank {self.rank}: pump failed: {exc!r}", flush=True)
++            return False
++        return bool(self.disk.pending)
++
+     # reads: rank 0 sends LOAD when a request's prompt extends a stored prompt longer than any kept one; both ranks
+     # add an extent for it and start their reads (other streams keep decoding meanwhile); when rank 0's read is done
+     # it sends LOADED and both agree, in one all-gather, that every read worked: the extent then holds a kept prompt
+@@ -3271,8 +3289,8 @@
+             self._emit(IDLE, [])
+             self._flush()
+             self.idle = True
+-            if self.disk is not None:          # nothing pumps while idle: every waiting block through the ring now
+-                self.disk.stage_all()
++            # (the spill tier's waiting writes go on through the ring while idle: ``GlmScheduler._idle_get``, after
++            # these streams' replies, never before them)
+         _unwatch(self.watchdog)
+         self.iteration_since = None
+ 
+@@ -3353,7 +3371,7 @@
+ 
+         while True:
+             if self.idle:
+-                self.g._await_bell()
++                self.g._await_bell(self._idle_pump if self.disk is not None else None)
+                 self.idle = False
+             _watch(self.watchdog, f"rank {self.rank} message")   # busy: rank 0's next message is due within a round
+             self.apply(unseal(self.g._share(None), self.received, self.rank))
+@@ -3455,8 +3473,7 @@
+                 if self.lanes:
+                     raise RuntimeError(f"rank 1 holds {len(self.lanes)} streams rank 0 has finished")
+                 self.idle = True
+-                if self.disk is not None:      # nothing pumps while idle: every waiting block through the ring now
+-                    self.disk.stage_all()
++                # (its waiting writes go on through the ring between the doorbell's short waits: ``follow``)
+             else:
+                 raise RuntimeError(f"rank 1: unknown op {op}")
+ 
+@@ -3734,6 +3751,19 @@
+                 for s in self.decoder.drop():
+                     self._reply(s, "error", exc)
+ 
++    def _idle_get(self):
++        """An idle worker's wait for its next request. While the spill tier's kept writes still wait for the ring
++        (nothing pumps between requests otherwise), it waits IDLE_POLL_S at a time and pumps between (``_idle_pump``):
++        the replies of the last streams went out already, and a request arriving meanwhile is admitted at once."""
++
++        pump = getattr(self.decoder, "_idle_pump", None)
++        while pump is not None and pump():
++            try:
++                return self.waiting.get(timeout=IDLE_POLL_S)
++            except queue.Empty:
++                continue
++        return self.waiting.get()
++
+     def _iteration(self) -> None:
+         self._cancel_waiting()
+         self._yield()
+@@ -3741,7 +3771,7 @@
+         idle = not self.decoder.live() and self.held is None and not reading
+         if reading and not self.decoder.live():
+             time.sleep(0.002)                    # only reads in flight: poll them
+-        first = self.waiting.get() if idle else None                # idle: wait for a request
++        first = self._idle_get() if idle else None                  # idle: wait for a request
+         until = time.monotonic() + self.gather_s if idle and self.gather_s > 0 else None
+         done = self._admit(first, until)
+         try:

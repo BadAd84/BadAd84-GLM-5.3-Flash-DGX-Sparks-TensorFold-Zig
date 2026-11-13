@@ -1,0 +1,197 @@
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -2,6 +2,8 @@
+ 
+ from __future__ import annotations
+ 
++import itertools
++import os
+ import time
+ from dataclasses import dataclass, field
+ from typing import Sequence
+@@ -494,6 +496,101 @@
+         c.index_copy_(1, idx, r)
+ 
+ 
++# OTS (--parallel 1, TF_GLM_ROW_LINEAGE): which write left each row of the live attention caches (the latents or keys
++# and values, a token a row, and the indexer's pooled keys, four tokens a row), so a saved state's rows the caches
++# still hold from that same write are not copied back. A write is one prefill (its resume point on: the prompt's rows,
++# then its decode's) or a load of saved rows; each gets a tag no other write has. A lineage is ``((start, tag), ...)``
++# over the rows from 0 on (None: unknown, nothing matches it). Two lineages that agree on rows [0, f) name the same
++# writes there, and a row nothing wrote since holds the bytes its write left: the caches' and a saved copy's rows are
++# then equal bit for bit. A pooled-key row holds what the last write of any of its four tokens left (a write runs
++# from its start to the end), so it is equal when its four tokens' writes are; the row past a state's end (``n // 4``
++# with tokens from n on) is always copied.
++# The same in the other direction: ``save_rows`` copies no token or pooled-key row out at once. It takes the memory and
++# leaves the rows in the caches; the next write (a prefill, a load) first copies out the saved states' rows it is about
++# to change (``_flush``), from its start on, and only those. A state another request resumes from the same write never
++# copies its shared rows out at all; one the spill tier writes is completed first (``complete_rows``). The memory a
++# saved state takes, and so every keep and drop decision, is the same as before.
++# Off (TF_GLM_ROW_LINEAGE=0): every row is copied, out and back, at once, as before.
++ROW_LINEAGE = os.environ.get("TF_GLM_ROW_LINEAGE", "1").strip() != "0"
++_WRITES = itertools.count(1)
++
++
++def _kinds(st) -> tuple[int, int]:
++    """``_row_views``' order: its first ``tokens`` views hold token rows, the next ones up to ``pools`` pooled keys."""
++    tokens = len(st.kc) + sum(vc is not None for vc in st.vc)
++    return tokens, tokens + len((st.index or [])[:len(st.kc)])
++
++
++def _fill(st, snap, wt: int, wq: int) -> None:
++    """A saved state whose token rows [0, p) and pooled-key rows [0, q) are still the caches' (``snap._pend``: p, q and
++    the id of the rows list they belong to; an id, so a dropped state's rows are freed at once): its copies of token
++    rows [wt, p) and pooled-key rows [wq, q) taken now."""
++    pend, rows = snap._pend, snap.rows
++    p, q = pend[0], pend[1]
++    tokens, pools = _kinds(st)
++    views = _row_views(st, len(snap.ids), 0)
++    for k in range(pools):
++        lo, hi = (wt, p) if k < tokens else (wq, q)
++        if lo < hi:
++            rows[k][lo:hi].copy_(views[k][lo:hi])
++    pend[0], pend[1] = min(p, wt), min(q, wq)
++
++
++def _flush(st, wt: int, wq: int) -> None:
++    """A write of token rows from wt on and pooled-key rows from wq on is about to begin: every saved state still
++    leaving rows there in the caches copies them out first."""
++    keep = []
++    for ref in getattr(st, "row_pending", ()):
++        snap = ref()
++        pend = getattr(snap, "_pend", None) if snap is not None else None
++        if pend is None or id(snap.rows) != pend[2]:      # dropped, or live again
++            continue
++        _fill(st, snap, wt, wq)
++        if pend[0] or pend[1]:
++            keep.append(ref)
++    st.row_pending = keep
++
++
++def complete_rows(e: Engine, snap: Snapshot) -> None:
++    """A saved state's rows it still leaves in the caches copied out now (before the spill tier reads its copies)."""
++    pend = getattr(snap, "_pend", None)
++    if pend is not None and id(snap.rows) == pend[2]:
++        _fill(e.st, snap, 0, 0)
++
++
++def _cut(lineage, n: int):
++    """``lineage`` over rows [0, n) only (None stays None)."""
++    return None if lineage is None else tuple(s for s in lineage if s[0] < n)
++
++
++def _lineage_to(st, n: int):
++    """The live caches' lineage over rows [0, n): what a copy of a state of n tokens taken now holds."""
++    return _cut(getattr(st, "row_lineage", None), n)
++
++
++def rows_written(st, start: int) -> None:
++    """A write of ``st``'s rows from ``start`` to the end begins (a prefill from its resume point, and the decode
++    after it): the saved states' rows there copied out first (``_flush``); a new tag there, the rows before it as they
++    were (unknown ones as a new tag too: they match nothing)."""
++    _flush(st, start, start // 4)
++    head = _cut(getattr(st, "row_lineage", None), start) if start else ()
++    if head is None:
++        head = ((0, next(_WRITES)),)
++    st.row_lineage = head + ((start, next(_WRITES)),)
++
++
++def _first_unlike(a, b, n: int) -> int:
++    """The first row below n where lineages ``a`` and ``b`` (both cut to n) name different writes (n: none)."""
++    if a is None or b is None:
++        return 0
++    for x, y in zip(a, b):
++        if x != y:
++            return min(x[0], y[0])
++    if len(a) == len(b):
++        return n
++    return (a if len(a) > len(b) else b)[min(len(a), len(b))][0]
++
++
+ def _row_views(st, n: int, m: int) -> list[torch.Tensor]:
+     """Views of the attention rows a snapshot of n tokens (m in the MTP head) depends on: latents or keys and values,
+     and the indexer's pooled keys (its per-token keys and gates live in rings: the snapshot's ``tail``)."""
+@@ -530,9 +627,20 @@
+ 
+ def save_rows(e: Engine, snap: Snapshot, drafter=None) -> None:
+     """Copy a snapshot's attention rows out of the live caches before another conversation overwrites them; DFlash2's
+-    context goes with them only given ``drafter`` (TF_GLM_SHARED_PREFIX), otherwise the snapshot no longer fits it."""
++    context goes with them only given ``drafter`` (TF_GLM_SHARED_PREFIX), otherwise the snapshot no longer fits it.
++    With ``ROW_LINEAGE``, the token and pooled-key rows are copied out by the writes that change them (``_flush``)."""
+     views = _saved_views(e, snap, drafter)
+-    snap.rows = [v.clone() for v in views]
++    if ROW_LINEAGE:
++        import weakref
++
++        st = e.st
++        pools = _kinds(st)[1]
++        snap.rows = [torch.empty_like(v) if k < pools else v.clone() for k, v in enumerate(views)]
++        snap._lineage = _lineage_to(st, len(snap.ids))     # (what these copies hold: the caches' rows now)
++        snap._pend = [len(snap.ids), len(snap.ids) // 4 + 1, id(snap.rows)]
++        st.row_pending = [r for r in getattr(st, "row_pending", ()) if r() is not None] + [weakref.ref(snap)]
++    else:
++        snap.rows = [v.clone() for v in views]
+     snap.nbytes = sum(r.numel() * r.element_size() for r in snap.rows)
+     if drafter is None or snap.drafter_end != len(snap.ids):
+         snap.drafter_end = -1
+@@ -554,12 +662,34 @@
+ 
+ 
+ def load_rows(e: Engine, snap: Snapshot, drafter=None) -> None:
+-    """Put a saved snapshot's attention rows (and DFlash2's, when it saved them: the same ``drafter``) back."""
++    """Put a saved snapshot's attention rows (and DFlash2's, when it saved them: the same ``drafter``) back: only the
++    rows the live caches do not hold from the same write (``ROW_LINEAGE``): the token rows from the first row their
++    lineages differ at, the pooled keys from its pool, and of those only the ones it copied out (the rest it left in
++    the caches, which no write has changed since); the MTP head's and DFlash2's rows whole."""
+     views = _saved_views(e, snap, drafter)
+     if len(views) != len(snap.rows):
+         raise ValueError("a saved snapshot's rows do not match the caches they go back to")
+-    for dst, src in zip(views, snap.rows):
+-        dst.copy_(src)
++    if not ROW_LINEAGE:
++        for dst, src in zip(views, snap.rows):
++            dst.copy_(src)
++        return
++    st, n = e.st, len(snap.ids)
++    mine = getattr(snap, "_lineage", None)
++    same = _first_unlike(_lineage_to(st, n), mine, n)
++    pend = getattr(snap, "_pend", None)
++    p, q = (pend[0], pend[1]) if pend is not None and id(snap.rows) == pend[2] else (0, 0)
++    wt, wq = max(same, p), max(same // 4, q)
++    tokens, pools = _kinds(st)
++    _flush(st, wt, wq)                                   # (the other saved states' rows this load changes, out first)
++    st.row_lineage = None                                # (rows changing: unknown until every copy is done)
++    for k, (dst, src) in enumerate(zip(views, snap.rows)):
++        lo = wt if k < tokens else wq if k < pools else 0
++        if lo:
++            dst[lo:].copy_(src[lo:])
++        else:
++            dst.copy_(src)
++    # rows [0, n) are the snapshot's now; past n, a new tag (its pool row n // 4 came from the snapshot)
++    st.row_lineage = (mine if mine is not None else ((0, next(_WRITES)),)) + ((n, next(_WRITES)),)
+ 
+ 
+ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
+@@ -624,6 +754,8 @@
+         elif use_mtp:
+             k = resume.pending.shape[0]
+             _absorb_rows(e, resume.pending, list(prompt[begin - k + 1:begin + 1]))
++    if ROW_LINEAGE:
++        rows_written(st, begin)                          # (OTS, TF_GLM_ROW_LINEAGE: this prompt's rows and its reply's)
+     last = None
+     if replay:
+         last = resume.head.clone()                       # a grammar's mask below writes into the rows it samples
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1698,6 +1698,11 @@
+                 st.unwritten[why] = st.unwritten.get(why, 0) + 1
+             return
+         viewed = False
++        pend = getattr(snap, "_pend", None)       # (OTS, TF_GLM_ROW_LINEAGE: saved rows still in the caches copied out)
++        if pend is not None and (pend[0] or pend[1]) and pend[2] == id(snap.rows):
++            from .decode import complete_rows
++
++            complete_rows(self.e, snap)
+         try:
+             job = self.spill.save(snap.ids, snap, (), skip=self._SPILL_SKIP, materialize=self._spill_rows,
+                                   head=getattr(snap, "head", None) is not None, keep=keep, key=self._spill_key(snap))

@@ -1,0 +1,26 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1858,7 +1858,9 @@
+             glm = {"code": code, "spec": spec, "salt": salt}
+             if prompt_array is not None and len(prompt_array) == len(prompt):
+                 glm["ids"] = prompt_array
+-            stats = self.scheduler.submit(list(prompt), max_tokens, sampling, bool(draft) and not self.serial_only,
++            # (OTS) the request's own list as it is (the scheduler's Stream never writes it; a copy is ~5 ms at 650k)
++            stats = self.scheduler.submit(prompt if type(prompt) is list else list(prompt), max_tokens, sampling,
++                                          bool(draft) and not self.serial_only,
+                                           on_tokens, stop_eos=stop_eos, vision=vision, constraint=constraint,
+                                           background=background, glm=glm)
+             stats.update(policy=spec, drafts=draft)
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -3733,7 +3733,9 @@
+         # the rounds' tokens to this thread: put and get(timeout) only, so the C queue (its put is the engine thread's,
+         # once a stream a round; queue.Queue's goes through a Python Condition)
+         box: queue.SimpleQueue = queue.SimpleQueue()
+-        stream = Stream(list(prompt), max(1, count), sampling, draft=draft, stop_eos=stop_eos, vision=vision,
++        # (OTS) a list is taken as it is: no code writes a stream's prompt in place (``_admitted`` replaces it)
++        stream = Stream(prompt if type(prompt) is list else list(prompt), max(1, count), sampling, draft=draft,
++                        stop_eos=stop_eos, vision=vision,
+                         constraint=constraint, background=background)
+         stream.glm = dict(glm or {})
+         stream_ids(stream)               # on this request's thread, before it queues: admission finds them made

@@ -1,0 +1,172 @@
+diff -r base/tensorfold/families/glm5_next/cuda/latent.py new/tensorfold/families/glm5_next/cuda/latent.py
+--- tensorfold/families/glm5_next/cuda/latent.py	2026-10-29 23:40:06.555078800 +0000
++++ tensorfold/families/glm5_next/cuda/latent.py	2026-10-29 23:51:44.052969700 +0000
+@@ -602,22 +602,36 @@
+ 
+ 
+ @triton.jit
+-def _merge(PO, PM, PL, OUT, CNT, R, H: tl.constexpr, LW: tl.constexpr, NCH: tl.constexpr, SPARSE: tl.constexpr):
+-    """Program (row, head): the row's chunk partials in chunk order -> OUT[r, h] bf16. Sparse: rows with CNT 0 skip."""
++def _merge(PO, PM, PL, OUT, CNT, R, POS, SPR, H: tl.constexpr, LW: tl.constexpr, NCH: tl.constexpr,
++           SPARSE: tl.constexpr, BOUND: tl.constexpr, CH: tl.constexpr):
++    """Program (row, head): the row's chunk partials in chunk order -> OUT[r, h] bf16. Sparse: rows with CNT 0 skip.
++    BOUND (a segmented window: POS, SPR its SegRows tables, CNT its counts): a chunk past the row's keys (c * CH >= n,
++    n = CNT[r] for a sparse row, POS[r] + 1 for a dense one) is not read - the chunk pass stores nothing there - and
++    merges as the partial it used to store (o 0, m -inf, l 0): the same arithmetic on the same values, the same bits."""
+     r = tl.program_id(0)
+     h = tl.program_id(1)
+     if SPARSE:
+         if tl.load(CNT + r) == 0:
+             return
++    n = 0
++    if BOUND:
++        sp = tl.load(SPR + r) != 0
++        n = tl.where(sp, tl.load(CNT + r, mask=sp, other=0), tl.load(POS + r) + 1)
+     k = tl.arange(0, LW)
+     m = float("-inf")
+     l = 0.0
+     o = tl.zeros((LW,), tl.float32)
+     for c in range(NCH):
+         base = (c * R + r) * H + h
+-        cm = tl.load(PM + base)
+-        cl = tl.load(PL + base)
+-        co = tl.load(PO + base * LW + k)
++        if BOUND:
++            has = c * CH < n
++            cm = tl.load(PM + base, mask=has, other=float("-inf"))
++            cl = tl.load(PL + base, mask=has, other=0.0)
++            co = tl.load(PO + base * LW + k, mask=has & (k < LW), other=0.0)
++        else:
++            cm = tl.load(PM + base)
++            cl = tl.load(PL + base)
++            co = tl.load(PO + base * LW + k)
+         active = cl > 0.0
+         next_m = tl.where(active, tl.maximum(m, cm), m)
+         a = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - next_m)), 1.0)
+@@ -675,7 +689,8 @@
+     _dense_chunks[(R, triton.cdiv(H, hb), nch)](qa, vals, scl, pos, s.po[:n * LW], s.pm[:n], s.pl[:n], R, H=H, LW=LW,
+                                                 CH=CHUNK, SCALE=scale, HBT=hb, KTT=KT, RS=rs, FP8=fp8, num_warps=8,
+                                                 num_stages=chunk_stages())
+-    _merge[(R, H)](s.po, s.pm, s.pl, out, s.dummy, R, H=H, LW=LW, NCH=nch, SPARSE=False, num_warps=4)
++    _merge[(R, H)](s.po, s.pm, s.pl, out, s.dummy, R, s.dummy, s.dummy, H=H, LW=LW, NCH=nch, SPARSE=False,
++                   BOUND=False, CH=CHUNK, num_warps=4)
+     return out
+ 
+ 
+@@ -694,7 +709,8 @@
+     _sparse_chunks[(R, triton.cdiv(H, hb), nch)](qa, vals, scl, tokens, counts, po, pm, pl, R, W=W, H=H, LW=LW,
+                                                  CH=CHUNK, SCALE=scale, HBT=hb, KTT=KT, RS=rs, FP8=fp8, num_warps=8,
+                                                  num_stages=chunk_stages())
+-    _merge[(R, H)](po, pm, pl, out, counts, R, H=H, LW=LW, NCH=nch, SPARSE=True, num_warps=4)
++    _merge[(R, H)](po, pm, pl, out, counts, R, counts, counts, H=H, LW=LW, NCH=nch, SPARSE=True, BOUND=False,
++                   CH=CHUNK, num_warps=4)
+ 
+ 
+ # prompt chunks' sparse attention in one pass (TF_GLM_SPARSE_ONEPASS=0: the chunk programs and their merge). Fixed
+@@ -824,7 +840,8 @@
+                 RS: tl.constexpr, FP8: tl.constexpr):
+     """Program (row, head block, chunk): _dense_chunks for a dense row (keys base + 0 .. base + pos[r], its own
+     limit), _sparse_chunks for a sparse one (keys base + its selected tokens, list order): the same tiles, masks and
+-    _tile math either way, so a row's partials are those of its single-stream kernel."""
++    _tile math either way, so a row's partials are those of its single-stream kernel. A chunk past the row's keys
++    stores nothing (seg_attention's merge does not read it: _merge BOUND)."""
+     r = tl.program_id(0)
+     hb = tl.program_id(1)
+     c = tl.program_id(2)
+@@ -846,10 +863,10 @@
+             tok = tl.where(sp, tok, idx.to(tl.int64))
+             kv, ks = _lat_get(LC, LS, B + tok, ok, k, LW, RS, FP8)
+             m, l, o = _tile(q, kv, ks, m, l, o, ok, SCALE, FP8)
+-    base = (c * R + r) * H + hh
+-    tl.store(PO + base[:, None] * LW + k[None, :], o, mask=hok[:, None])
+-    tl.store(PM + base, m, mask=hok)
+-    tl.store(PL + base, l, mask=hok)
++        base = (c * R + r) * H + hh
++        tl.store(PO + base[:, None] * LW + k[None, :], o, mask=hok[:, None])
++        tl.store(PM + base, m, mask=hok)
++        tl.store(PL + base, l, mask=hok)
+ 
+ 
+ def seg_chunks() -> int:
+@@ -909,7 +926,7 @@
+             if not sparse.triton_matches_ptx():
+                 raise RuntimeError(f"Triton {triton.__version__}: the kernel reproduces Triton "
+                                    f"{sparse.TRITON_PTX}'s PTX")
+-            _SEG_CHUNKS_EXT = load(name="tensorfold_glm_segchunks_v1",
++            _SEG_CHUNKS_EXT = load(name="tensorfold_glm_segchunks_hda1",     # HuntDecodeAttn: empty chunks unstored
+                                    sources=[str(Path(__file__).parent / "seg_chunks.cu")],
+                                    extra_cuda_cflags=["-O3"], verbose=False)
+         except Exception as exc:
+@@ -952,5 +969,7 @@
+                                                   s.po[:n * LW], s.pm[:n], s.pl[:n], R, W=W, H=H, LW=LW, CH=CHUNK,
+                                                   SCALE=scale, HBT=hb, KTT=KT, RS=rs, FP8=fp8, num_warps=8,
+                                                   num_stages=chunk_stages())
+-    _merge[(R, H)](s.po, s.pm, s.pl, out, s.dummy, R, H=H, LW=LW, NCH=nch, SPARSE=False, num_warps=4)
++    # a chunk past a row's keys is neither stored by the chunk pass nor read by the merge (BOUND: the same bits)
++    _merge[(R, H)](s.po, s.pm, s.pl, out, counts, R, rows.pos, rows.sparse, H=H, LW=LW, NCH=nch, SPARSE=False,
++                   BOUND=True, CH=CHUNK, num_warps=4)
+     return out
+diff -r base/tensorfold/families/glm5_next/cuda/seg_chunks.cu new/tensorfold/families/glm5_next/cuda/seg_chunks.cu
+--- tensorfold/families/glm5_next/cuda/seg_chunks.cu	2026-10-29 23:40:06.562593500 +0000
++++ tensorfold/families/glm5_next/cuda/seg_chunks.cu	2026-10-29 23:51:33.595694800 +0000
+@@ -22,7 +22,8 @@
+ //   - l = fma(l, alpha, sum_k p), the sum in the layout's tree: a lane's keys 2 u, 2 u + 1, then the lanes ^ 2, then
+ //     ^ 1 over a warp's 8 keys, then the four 8-key partials (s0 + s2) + (s1 + s3);
+ //   - PO / PM / PL [chunk, row, head] = o, m, l for heads below H; a chunk past the row's keys (Triton's c * CH >= n)
+-//     o 0, m -inf, l 0.
++//     stores nothing, as _seg_chunks (HuntDecodeAttn): seg_attention's _merge (BOUND) reads none of it and merges it
++//     as o 0, m -inf, l 0, the partial both kernels used to store there.
+ // Triton's tiles past the chunk's keys (its loop always runs CH / KT tiles) are skipped: every key of such a tile is
+ // masked, so tile_m = -inf, alpha = 1, p = 0, and o * 1 + 0 . keys, l * 1 + 0 change no bit of what the chunk's last
+ // key tile left (finite o and l are never -0 after an mma / fma from +0; a NaN stays the canonical NaN it already is).
+@@ -346,16 +347,7 @@
+         for (int i = blockIdx.x; i < w.items; i += w.step) {
+             cur_item(w, u, i);
+             const int pb = (u.c * w.R + u.r) * H;         // the item's partials
+-            if (u.nt == 0) {                              // an empty chunk: m -inf, l 0 (Triton's stores)
+-                if (g == 0)
+-#pragma unroll
+-                    for (int e = 0; e < 2; ++e)
+-                        if (8 * j + 2 * t4 + e < H) {
+-                            PM[pb + 8 * j + 2 * t4 + e] = -INFINITY;
+-                            PL[pb + 8 * j + 2 * t4 + e] = 0.0f;
+-                        }
+-                continue;
+-            }
++            if (u.nt == 0) continue;                      // an empty chunk: nothing stored (the merge skips it)
+             const int ntile = u.nt, nk = u.nk;
+ #pragma unroll
+             for (int s = 0; s < 32; ++s) {                // step s = 2 b + h: k 32 b + 4 t + 2 h (+ 1), + 16
+@@ -549,18 +541,20 @@
+             if (T + NB < ntot) bar_arrive(BAR_EMPTY + b, N_EMPTY);
+             b = b + 1 == NB ? 0 : b + 1;
+         }
+-        // the item's partial o (unnormalized, fp32), heads below H; an empty chunk's zeros (Triton's stores)
+-#pragma unroll
+-        for (int i = 0; i < PV_MAX; ++i)
+-            if (i < nt)
+-#pragma unroll
+-                for (int nh = 0; nh < 3; ++nh)
+-#pragma unroll
+-                    for (int e = 0; e < 4; ++e) {
+-                        // the tile's latent place 16 (tb + i) + g + 8 (e >> 1) holds latent column kw4(place)
+-                        const int h = 8 * nh + 2 * t4 + (e & 1), lat = kw4(16 * (tb + i) + g + 8 * (e >> 1));
+-                        if (h < H) po[(size_t)h * LW + lat] = o[i][nh][e];
+-                    }
++        // the item's partial o (unnormalized, fp32), heads below H; an empty chunk stores nothing (the merge, BOUND,
++        // reads no chunk past a row's keys)
++        if (u.nt > 0)
++#pragma unroll
++            for (int i = 0; i < PV_MAX; ++i)
++                if (i < nt)
++#pragma unroll
++                    for (int nh = 0; nh < 3; ++nh)
++#pragma unroll
++                        for (int e = 0; e < 4; ++e) {
++                            // the tile's latent place 16 (tb + i) + g + 8 (e >> 1) holds latent column kw4(place)
++                            const int h = 8 * nh + 2 * t4 + (e & 1), lat = kw4(16 * (tb + i) + g + 8 * (e >> 1));
++                            if (h < H) po[(size_t)h * LW + lat] = o[i][nh][e];
++                        }
+     }
+ }
+ 

@@ -1,0 +1,330 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1517,6 +1517,11 @@
+                 if self.multi.row_ms is not None:
+                     print("[tensorfold] --parallel batched window ms by rows: " +
+                           " ".join(f"{i + 1}:{ms:.1f}" for i, ms in enumerate(self.multi.row_ms)), flush=True)
++        from . import kernel_warm
++
++        if kernel_warm.enabled():                       # WarmAll: every rank, no collective; each request-path
++            kernel_warm.warm_kernels(self)              # Triton kernel variant loaded now, not in a first token
++            fastboot.mark("kernel warm")
+         fastboot.mark("serving")
+         if hasattr(self.comm, "settle"):                # startup is over: RoCE gathers go without a barrier first
+             self.comm.settle()
+--- tensorfold/families/glm5_next/cuda/glue.py
++++ tensorfold/families/glm5_next/cuda/glue.py
+@@ -497,19 +497,36 @@
+     return next((bm for bm in ROUTER_BLOCKS if m <= bm), ROUTER_BLOCKS[-1])
+ 
+ 
++def int_class(v: int) -> int:
++    """Triton's specialisation of an int kernel argument (not do_not_specialize): 1 for the value 1, 16 for a
++    multiple of 16, else 0. Each class is its own kernel variant (loaded at its first launch); the one owner of
++    this rule for the start-up warms (``class_rows``)."""
++
++    return 1 if v == 1 else 16 if v % 16 == 0 else 0
++
++
++def class_rows(rules, most: int) -> list[int]:
++    """The smallest row count of every distinct (``int_class``, rule(rows) for each rule) in 1 .. most: one count a
++    variant for kernels whose specialisation depends on a row count only through those (WarmAll; the rules are
++    the launches' own functions, e.g. ``router_block``, ``latent.head_block``)."""
++
++    seen, rows = set(), []
++    for m in range(1, int(most) + 1):
++        sig = (int_class(m),) + tuple(rule(m) for rule in rules)
++        if sig not in seen:
++            seen.add(sig)
++            rows.append(m)
++    return rows
++
++
+ def router_warm_rows() -> list[int]:
+     """Row counts that launch every variant of the router kernels a window can need (P1ShortTTFT). A variant is
+-    one row block (``router_block``) and Triton's own specialisation of the row count M (1, a multiple of 16, or
+-    other: the other int arguments, D and the totals, are multiples of 16 at every call): per block its smallest
+-    count and its largest (a multiple of 16), and 2 (the first block's other). Each variant's first launch loads
+-    it (a Triton cache read and a module load, a few ms); a prompt chunk that is the first of its variant pays that
+-    in its first token."""
++    one row block (``router_block``) and Triton's own class of the row count M (``int_class``; D and the totals
++    are multiples of 16 at every call): ``class_rows`` of the block rule up to the largest block (counts past it
++    take that block, whose classes the counts up to it hold). Each variant's first launch loads it (a Triton cache
++    read and a module load, a few ms); a prompt chunk that is the first of its variant pays that in its first token."""
+ 
+-    rows, lo = [2], 1
+-    for bm in ROUTER_BLOCKS:
+-        rows += [lo, bm]
+-        lo = bm + 1
+-    return sorted(set(rows))
++    return class_rows((router_block,), ROUTER_BLOCKS[-1])
+ 
+ 
+ def router(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+--- tensorfold/families/glm5_next/cuda/sparse.py
++++ tensorfold/families/glm5_next/cuda/sparse.py
+@@ -232,6 +232,12 @@
+ ROW_SCORE_G = 128
+ 
+ 
++def row_score_programs(np_: int) -> int:
++    """_scores_rows' programs a row (its G constexpr) for rows of np_ scores: ``select_tokens``'; and
++    ``kernel_warm``'s variant signature."""
++    return min(ROW_SCORE_G, triton.cdiv(np_, 64))
++
++
+ def _top_pools(scores: torch.Tensor, k: int) -> torch.Tensor:
+     """Reference top-k: each row's k best pools, ties to the lower pool, ascending, as a stable descending sort keeps them (unique int64 keys)."""
+     bits = (scores + 0.0).view(torch.int32)                              # + 0.0: -0 becomes +0, as the sort ties them
+@@ -314,13 +320,19 @@
+     if R < SPLIT_ROWS and NP >= SPLIT_FROM:     # decode rows at long context: each row across chunk programs
+         return select_split(scores, k, pos=pos)
+     # one program a row (speed only): decode rows past 1,024 scores 4,096 a step, prompt chunks' rows 1,024
+-    block, warps = (4096, 8) if R < SPLIT_ROWS and NP > 1024 else (1024, 4)
++    block, warps = select_rows_launch(R, NP)
+     out = torch.empty((R, k), dtype=torch.int64, device=scores.device)
+     _select_rows[(R,)](scores, out, NP, scores if pos is None else pos, K=k, BLOCK=block, VIS=pos is not None,
+                        num_warps=warps)
+     return out
+ 
+ 
++def select_rows_launch(R: int, NP: int) -> tuple[int, int]:
++    """_select_rows' (BLOCK, warps) for R rows of NP scores in ``top_pools`` (speed only): decode rows past 1,024
++    scores 4,096 a step, prompt chunks' rows 1,024; and ``kernel_warm``'s variant signature."""
++    return (4096, 8) if R < SPLIT_ROWS and NP > 1024 else (1024, 4)
++
++
+ # Patch 0101: prompt rows' selection from one pass over the scores instead of _select_rows' five. A row's
+ # candidates are every pool whose key is at or above a floor (an upper set of the row's order), compacted in pool
+ # order; with between K and CAP of them, the K best of the row are the K best of the candidates and every tie at
+@@ -420,6 +432,12 @@
+     return next((cap, target) for most, cap, target in PROMPT_TILES if np_ <= most)
+ 
+ 
++def prompt_block(R: int) -> int:
++    """_select_floor's scores a step (its BLOCK) for blocks of R rows in ``prompt_pools`` (speed only); and
++    ``kernel_warm``'s variant signature."""
++    return 4096 if R <= 32 else 1024
++
++
+ def prompt_pools(scores: torch.Tensor, k: int, scratch: torch.Tensor | None = None,
+                  out: torch.Tensor | None = None) -> torch.Tensor:
+     """top_pools' pools for prompt rows (no visible bounds), by _select_floor: one program a row, 4,096 scores a
+@@ -440,7 +458,7 @@
+     elif out.dtype not in (torch.int32, torch.int64) or out.shape != (R, k) or not out.is_contiguous():
+         raise ValueError(f"prompt_pools: out must be a contiguous [{R}, {k}] int32 or int64 tensor")
+     _select_floor[(R,)](scores, out, scratch, NP, K=k, CAP=cap, NS=PROMPT_SECTORS, TARGET=target,
+-                        BLOCK=4096 if R <= 32 else 1024, num_warps=8)
++                        BLOCK=prompt_block(R), num_warps=8)
+     return out
+ 
+ 
+@@ -502,7 +520,7 @@
+     H = wts.shape[1]
+     D = qi.shape[1] // H
+     wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5 exactly as before
+-    grid = min(ROW_SCORE_G, triton.cdiv(np_max, 64))
++    grid = row_score_programs(np_max)
+     pkv, pks, rs, fp8 = kv8.parts(pk)
+     _scores_rows[(R, grid)](qi, wts, wts.stride(0), pkv, pks, scores, np_max, pos_dev, pos_dev, pos_dev, R, np_max,
+                             D ** -0.5, wscale, H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, G=grid,
+--- /dev/null
++++ tensorfold/families/glm5_next/cuda/kernel_warm.py
+@@ -0,0 +1,197 @@
++"""The start-up kernel warm (WarmAll): every Triton kernel variant a request's eager launches can need is loaded at
++start, on every rank, so no request pays one inside its first token.
++
++A Triton kernel is one compiled variant per specialisation: every constexpr (row blocks chosen by row count, tiles
++chosen by score count, the dense merge's chunk count), each int argument's class (``glue.int_class``: 1, a multiple
++of 16, other) and each pointer's 16-byte alignment (a stream slot's position ``Slots.pos_dev[k]`` is 4k bytes into its
++table; a dense pass block's ``pos_dev + starts`` element i is 4i; a piece's KDA projection rows from row lo). A variant
++is loaded the first time it is launched in the process (a Triton cache read, or a compile when the cache misses, and
++a module load: ~2-4 ms each in a short request's first token on the workstation), and the request that launches it
++first waits for that on every rank. The boot's own launches (calibration's 64-row chunk, the CUDA graph captures of
++the decode windows, the router warm) load the variants they use; the rest were met by requests (WarmAll's probe: 35
++after the boot at --parallel 1, 56 at 4): a 1- or 2-row prompt (hc, absorb, expand, conv shift, the dense pass and
++merge), a prompt of 65-127 rows, each 512-token chunk count of the dense merge, the first sparse prompt (the
++selection, its tiers by score count, the one-pass attention), the first warm turn of under 8 rows at each score count
++(``select_tokens``' decode selection: its programs a row and split chunks), and under --parallel a stream slot but 0
++and 4 (the misaligned position) and a multi-prompt chunk's pieces.
++
++``warm_kernels`` launches each eager request-path kernel family through its own function (the call the request path
++makes) once per specialisation the serve can reach:
++  * rows: ``glue.class_rows`` of the launches' row rules (``row_rules``) up to the prompt buffers' rows;
++  * score counts: every pool count a stream's selection can take (``score_counts``), one per distinct output of the
++    score-count rules (``prompt_np_rules``, ``np_rules``);
++  * the dense merge's chunk counts 1 .. the scratch's; head blocks 16 and 32; the position pointer aligned, and
++    misaligned where a request can pass it so (always for the dense pass; under --parallel for every family).
++Every write goes to scratch (the prompt buffers' rows, which every prompt chunk writes before reading, or tensors made
++here and dropped); the weights, caches, kept states, pool, positions, rings, conv windows and drafter are not
++touched; no collective. The device positions read are this module's own zeros, so each launch reads at most its own
++few rows. TF_GLM_KERNEL_WARM=0: not run (the old start)."""
++
++import os
++
++import torch
++
++from . import forward, glue, latent, pool, sparse
++
++
++def row_rules():
++    """The row rules of the warmed launches (functions of a launch's row count that pick a constexpr or a path;
++    read at the call, so they are the owners' current ones), with glue.int_class: two counts with the same outputs
++    launch the same variants of every family below. ``latent.head_block``: the dense pass's head blocks (each
++    block's rows run with its chunk's); ``latent.row_block``: a 4-bit checkpoint's absorb; ``sparse.prompt_block``:
++    the prompt selection's step; PROMPT_ROWS: the decode selection under it (``select_tokens``)."""
++
++    return (latent.head_block, latent.row_block, sparse.prompt_block, lambda R: R >= sparse.PROMPT_ROWS)
++
++
++def np_rules(R: int):
++    """The score-count rules of the decode selection over R rows (``select_tokens`` under PROMPT_ROWS: functions
++    of the pool count NP that pick a constexpr or a path), with glue.int_class."""
++
++    return (sparse.row_score_programs, lambda NP: sparse.select_rows_launch(R, NP),
++            lambda NP: R < sparse.SPLIT_ROWS and NP >= sparse.SPLIT_FROM, sparse.split_chunk, sparse.split_chunks)
++
++
++def prompt_np_rules():
++    """The score-count rules of a prompt block's selection (``sparse.select_prompt_rows``), with glue.int_class."""
++
++    return (sparse.prompt_tile,)
++
++
++def enabled(env=None) -> bool:
++    """TF_GLM_KERNEL_WARM (default 1): ``warm_kernels`` runs at start; 0: the start without it."""
++
++    env = os.environ if env is None else env
++    return env.get("TF_GLM_KERNEL_WARM", "1").strip() != "0"
++
++
++def score_counts(np_max: int, streams: int) -> list[int]:
++    """Every pool count a stream's selection scores, up to ``np_max`` (the engine's pooled keys): ``sparse.pool_count``
++    gives a multiple of 1,024 (``sparse.pool_bucket``'s powers of two from 1,024 are among them), both capped at the
++    stream's pools: at --parallel 1 the one stream's own (``np_max``); under --parallel each stream's extent (a
++    multiple of ``pool.ALIGN`` tokens), so every such multiple from 1,024 pools is one."""
++
++    out = set(range(1024, np_max + 1, 1024))
++    if streams > 1:
++        ext = pool.ALIGN // sparse.POOL
++        out.update(n for n in range(ext, np_max + 1, ext) if n >= 1024)
++    else:
++        out.add(np_max)
++    return sorted(n for n in out if n >= 1024)
++
++
++def _position(NP: int, R: int) -> int:
++    """A host position for R rows whose visible pools are NP: ``pool_count`` and ``pool_bucket`` with NP as the
++    stream's pools both give NP."""
++
++    return sparse.POOL * NP - R - sparse.POOL
++
++
++def _distinct(values, rules) -> list[int]:
++    """The first of ``values`` with each distinct (int_class, rule outputs)."""
++
++    seen, out = set(), []
++    for v in values:
++        sig = (glue.int_class(v),) + tuple(rule(v) for rule in rules)
++        if sig not in seen:
++            seen.add(sig)
++            out.append(v)
++    return out
++
++
++@torch.no_grad()
++def warm_kernels(engine) -> int:
++    """At start, every rank: the eager request-path kernel variants (the module docstring). ``engine``: the
++    ``GlmEngine`` (its ``decode.Engine`` ``e``: weights, prompt buffers, the home stream's caches and slots).
++    Returns the launches made (0 when off)."""
++
++    if not enabled():
++        return 0
++    e = engine.e
++    w, b, st = e.w, e.pbuf, e.st
++    c = w.cfg
++    dev = b.x.device
++    streams = int(e.slots.pos_dev.shape[0])
++    rows = glue.class_rows(row_rules(), b.rows)
++    zeros = torch.zeros((8,), dtype=torch.int32, device=dev)
++    aligned, misaligned = zeros[0:1], zeros[1:2]          # a stream slot's / a dense block's position views
++    poss = (aligned, misaligned) if streams > 1 else (aligned,)
++    big = max(rows)
++    n = 0
++    first = w.layers[0]
++    h = first.attn_hc
++    for R in rows:                                         # the hyper-connection glue (prompt rows)
++        glue.hc_pre(b.x[:R], h.fn, h.base, h.scale, first.in_norm, b.normed[:R], b.xs[:R], b.post[:R], b.comb[:R],
++                    b.hcpart[:R], c.eps, c.hc_eps, c.hc_iters, prompt=True)
++        n += 1
++    if getattr(b, "kproj", None) is not None and getattr(st, "conv", None) is not None:
++        conv = torch.empty((1,) + tuple(st.conv.shape[1:]), dtype=st.conv.dtype, device=dev)
++        for R in rows:                                     # KDA's conv window shift (a piece's rows from row lo)
++            for lo in (0, 1):
++                if lo + R <= b.kproj.shape[1]:
++                    forward._shift_conv(conv, b.kproj[:, lo:lo + R], R)
++                    n += 1
++    dsa = next((l for l in w.layers if l.dsa is not None), None)
++    if dsa is None or getattr(b, "lat_s", None) is None or not st.kc:
++        return n
++    a, s = dsa.dsa, b.lat_s
++    di = 0
++    lc = st.kc[di]
++    scale = c.qk_dim ** -0.5
++    nch = s.nch
++    lat = torch.empty((max(big, nch * latent.CHUNK), lc.shape[1]), dtype=lc.dtype, device=dev)
++    tok = torch.zeros((big, sparse.TOKENS), dtype=torch.int32, device=dev)
++    cnt = torch.zeros((big,), dtype=torch.int32, device=dev)
++    for R in rows:
++        for pos in poss:
++            latent.latent_write(b.lat[:R], lat, pos)
++            n += 1
++        latent.absorb_q(b.q[:R], a.absorb, s.qa[:R], prompt=latent.PROMPT_MMA)
++        latent.expand_v(s.ol[:R], a.absorb, b.vn[:R], prompt=latent.PROMPT_MMA)
++        latent.sparse_onepass(s.qa[:R], lat, tok[:R], cnt[:R], s.ol[:R], scale)
++        n += 3
++    heads = sorted({latent.head_block(R) for R in rows})
++    for R in rows:                                         # the dense pass: each block's rows, head block, position
++        if R > s.part_rows:
++            continue
++        for hb in heads:
++            for pos in (aligned, misaligned):
++                latent.attention(s.qa[:R], lat, pos, s, scale=scale, nch=1, out=s.ol[:R], hb=hb)
++                n += 1
++    for k in range(2, nch + 1):                            # ... and its merge's chunk counts
++        for R in _distinct(rows, ()):
++            if R <= s.part_rows:
++                latent.attention(s.qa[:R], lat, aligned, s, scale=scale, nch=k, out=s.ol[:R], hb=latent.HB)
++                n += 1
++    index = st.index[di] if getattr(st, "index", None) else None
++    if index is None or index[2] is None:
++        return n
++    ik, ig, pk = index
++    ix = a.index
++    if ik is not None and ix is not None:                  # the indexer's key ring and pooled keys
++        iks, igs = torch.empty_like(ik), torch.empty_like(ig)
++        pks = torch.empty((big // sparse.POOL + 4,) + tuple(pk.shape[1:]), dtype=pk.dtype, device=dev)
++        for R in rows:
++            for pos in poss:
++                sparse.index_update(b.ikr[:R, :c.index_dim], b.igr[:R], ix.ln_w, ix.ln_b, ix.ape, iks, igs, pks, pos)
++                n += 1
++    np_max = pk.shape[0] - 2                               # the home stream's pooled keys (under --parallel: the pool's)
++    if streams > 1:                                        # ... a stream's extent at most its context's
++        np_max = min(np_max, pool.align_up(int(engine.limit)) // sparse.POOL)
++    nps = score_counts(np_max, streams)
++    qi, wts = b.qi, b.ikr[:, c.index_dim:]
++    buf = torch.empty((big * nps[-1],), dtype=torch.float32, device=dev) if nps else None
++    cand = torch.empty((big * 2 * max(t[1] for t in sparse.PROMPT_TILES),), dtype=torch.int32, device=dev)
++    for R in rows:                                         # the selection: a prompt block of R rows ...
++        for NP in _distinct(nps, prompt_np_rules()):
++            for pos in poss:
++                sparse.select_prompt_rows(qi[:R], wts[:R], pk, _position(NP, R), R, NP, pos, 0, R, tok[:R], cnt[:R],
++                                          buf, cand)
++                n += 1
++        if R >= sparse.PROMPT_ROWS:                        # ... decode rows (select_tokens' path under PROMPT_ROWS;
++            continue                                       # at or above it the prompt path just warmed)
++        for NP in _distinct(nps, np_rules(R)):
++            for pos in poss:
++                sparse.select_tokens(qi[:R], wts[:R], pk, _position(NP, R), R, NP, pos)
++                n += 1
++    return n

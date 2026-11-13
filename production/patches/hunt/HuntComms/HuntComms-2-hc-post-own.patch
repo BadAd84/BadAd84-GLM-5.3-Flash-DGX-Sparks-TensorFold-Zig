@@ -1,0 +1,109 @@
+--- tensorfold/families/glm5_next/cuda/glue.py
++++ tensorfold/families/glm5_next/cuda/glue.py
+@@ -225,21 +225,27 @@
+ 
+ 
+ @triton.jit
+-def _hc_post(X, XOUT, G, POST, COMB, RS, D: tl.constexpr, S: tl.constexpr, WORLD: tl.constexpr,
+-             BLOCK: tl.constexpr, ROT: tl.constexpr = 0):
++def _hc_post(X, XOUT, G, POST, COMB, RS, OWN, D: tl.constexpr, S: tl.constexpr, WORLD: tl.constexpr,
++             BLOCK: tl.constexpr, ROT: tl.constexpr = 0, OWN_RANK: tl.constexpr = -1):
+     """Round rank-ordered partials to bf16 before combining the branch with residual streams in fixed order and rounding the output.
+     ROT (OTS 0105): the sum starts at rank ROT's partial and goes on in rank order modulo WORLD (a rotated MoE layer's
+-    first expert share; 0: rank 0 first, upstream's loads and adds)."""
++    first expert share; 0: rank 0 first, upstream's loads and adds). OWN_RANK >= 0: that rank's partial is read from
++    OWN [R, D] instead of its slot of G (HcSplit's own rows where the fill wrote them); the adds are the same."""
+ 
+     r = tl.program_id(0)
+     cb = tl.program_id(1)
+     d = cb * BLOCK + tl.arange(0, BLOCK)
+-    if ROT == 0:
++    if ROT == OWN_RANK:
++        acc = tl.load(OWN + r * D + d)
++    elif ROT == 0:
+         acc = tl.load(G + r * D + d)
+     else:
+         acc = tl.load(G + ROT * RS + r * D + d)
+     for k in tl.static_range(1, WORLD):
+-        acc = acc + tl.load(G + ((ROT + k) % WORLD) * RS + r * D + d)
++        if (ROT + k) % WORLD == OWN_RANK:
++            acc = acc + tl.load(OWN + r * D + d)
++        else:
++            acc = acc + tl.load(G + ((ROT + k) % WORLD) * RS + r * D + d)
+     branch = acc.to(tl.bfloat16).to(tl.float32)
+     x0 = tl.load(X + r * (S * D) + d).to(tl.float32)
+     x1 = tl.load(X + r * (S * D) + D + d).to(tl.float32)
+@@ -264,8 +270,26 @@
+     world, rows, d = gathered.shape
+     s = x.shape[1] // d
+     block = min(1024, d)
+-    _hc_post[(rows, d // block)](x, xout, gathered, post, comb, rows * d, D=d, S=s, WORLD=world, BLOCK=block,
+-                                 ROT=_rot(rot, world), num_warps=4)
++    _hc_post[(rows, d // block)](x, xout, gathered, post, comb, rows * d, gathered, D=d, S=s, WORLD=world,
++                                 BLOCK=block, ROT=_rot(rot, world), num_warps=4)
++
++
++def hc_post_own(x: torch.Tensor, xout: torch.Tensor, gathered: torch.Tensor, own: torch.Tensor, rank: int,
++                post: torch.Tensor, comb: torch.Tensor, rot: int = 0) -> None:
++    """``hc_post`` of [world, R, D] partials whose rank ``rank`` slot is not read: that rank's partial comes from
++    ``own`` [R, D] (contiguous fp32; HcSplit past two ranks: this rank's rows where its fill wrote them, instead of a
++    copy into the staging block). The same adds in the same order, so every bit is hc_post's with gathered[rank] =
++    own."""
++
++    world, rows, d = gathered.shape
++    if own.shape != (rows, d) or own.dtype != torch.float32 or not own.is_contiguous() or gathered.dtype != own.dtype:
++        raise ValueError("hc_post_own: a contiguous fp32 partial [R, D] beside fp32 [world, R, D]")
++    if not rows:
++        return
++    s = x.shape[1] // d
++    block = min(1024, d)
++    _hc_post[(rows, d // block)](x, xout, gathered, post, comb, rows * d, own, D=d, S=s, WORLD=world, BLOCK=block,
++                                 ROT=_rot(rot, world), OWN_RANK=_rot(rank, world), num_warps=4)
+ 
+ 
+ def _rot(rot: int, world: int) -> int:
+@@ -290,7 +314,7 @@
+     s = x.shape[1] // d
+     block = min(1024, d)
+     rs = (g1.data_ptr() - g0.data_ptr()) // g0.element_size()
+-    _hc_post[(rows, d // block)](x, xout, g0, post, comb, rs, D=d, S=s, WORLD=2, BLOCK=block, num_warps=4)
++    _hc_post[(rows, d // block)](x, xout, g0, post, comb, rs, g0, D=d, S=s, WORLD=2, BLOCK=block, num_warps=4)
+ 
+ 
+ def hc_post_ranks(x: torch.Tensor, xout: torch.Tensor, first: torch.Tensor, stride: int, world: int,
+@@ -306,8 +330,8 @@
+         return
+     s = x.shape[1] // d
+     block = min(1024, d)
+-    _hc_post[(rows, d // block)](x, xout, first, post, comb, int(stride), D=d, S=s, WORLD=int(world), BLOCK=block,
+-                                 ROT=_rot(rot, int(world)), num_warps=4)
++    _hc_post[(rows, d // block)](x, xout, first, post, comb, int(stride), first, D=d, S=s, WORLD=int(world),
++                                 BLOCK=block, ROT=_rot(rot, int(world)), num_warps=4)
+ 
+ 
+ @triton.jit
+--- tensorfold/families/glm5_next/cuda/hcsplit.py
++++ tensorfold/families/glm5_next/cuda/hcsplit.py
+@@ -134,8 +134,9 @@
+ 
+     Past two ranks (``world`` N): rank r owns rows [r H, r H + H), H = ceil(R / N) (pad rows zero, never read).
+     p2p: each rank sends every peer its partial of that peer's rows and receives each peer's partial of its own rows
+-    into a [N, n, D] staging block a piece (its own partial copied into its slot), summed rank 0 first by hc_post
+-    (``exchange_all``: one NCCL group, every pair a send and a receive, so it needs every pair connected); its glued
++    into a [N, n, D] staging block a piece (its own slot unused: hc_post reads this rank's partial where its fill wrote
++    it, ``glue.hc_post_own``), summed rank 0 first by hc_post (``exchange_all``: one NCCL group, every pair a send and
++    a receive, so it needs every pair connected); its glued
+     rows go to every peer the same way. gather (for fabrics without every pair, e.g. a ring): the unsplit all-gather
+     of every rank's whole partial, glue on own rows (``glue.hc_post_ranks``), then the in-place all-gather of the
+     rows. Either way the partial sums are hc_post's, rank 0 first: the unsplit bits."""
+@@ -329,9 +330,7 @@
+             glue.hc_post_ranks(x, x, whole[0, lo:hi], self.Rp * whole.shape[2], self.world, b.post[lo:hi],
+                                b.comb[lo:hi], rot)
+         else:
+-            block = self.got[j]
+-            block[self.rank].copy_(own)
+-            glue.hc_post(x, x, block, b.post[lo:hi], b.comb[lo:hi], rot)
++            glue.hc_post_own(x, x, self.got[j], own, self.rank, b.post[lo:hi], b.comb[lo:hi], rot)
+ 
+     def glue(self, hc=None, norm=None, taps: tuple[int, ...] = (), final: bool = False,
+              front: Callable[[int, int], None] | None = None, rot: int = 0) -> None:

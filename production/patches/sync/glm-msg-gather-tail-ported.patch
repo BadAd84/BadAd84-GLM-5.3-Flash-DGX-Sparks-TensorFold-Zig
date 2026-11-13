@@ -1,0 +1,101 @@
+# Sync port of ots0111-glm-msg-gather-tail.patch (production v110-ots124) onto the synced base, applied in production order after the
+# ports before it; re-based by patch(1) (1 hunk(s) at fuzz 2, every fuzzed hunk read: the change lands where
+# the original put it). The original's header (what, why, measurements, tests) is the reference: ots0111-glm-msg-gather-tail.patch.
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/engine.py next/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 19:06:08.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 19:06:39.433894200 +0000
+@@ -504,12 +504,14 @@
+     its length in slot 0 and every rank runs the second gather of the values; that decision reads the GATHERED slot 0
+     alone (rank 0's own block, its own length), so every rank issues the same collectives whatever the buffer holds.
+ 
+-    ``pre`` queues the next message's gather at a decode round's end, behind the round's DFlash2 pass: a follower's
+-    half is constant zeros and goes out then, so the gather starts on the GPU when the pass ends with no host in
+-    between (the sample gather's arrival, not the message's two host hops). Rank 0 fills its half at the message
+-    (``send``), its values known only then; that enqueue still lands before the pass ends while the host reaches the
+-    message in time. The staging buffer is pinned and reused under an event (``MultiDecoder._send``'s rule), so no
+-    copy is a pageable upload and no copy reads a buffer the host has rewritten."""
++    ``pre`` queues the next message's gather on a follower once a message is applied (``MultiDecoder.follow``):
++    behind the round's prelaunched DFlash2 pass and behind the tier pump that follows the round, on every message
++    kind. A follower's half is constant zeros and goes out then, so the gather starts on the GPU when the follower's
++    queued work ends with no host in between (the sample gather's arrival, not the message's two host hops), and no
++    follower work queues behind a gather that waits for rank 0. Rank 0 fills its half at the message (``send``), its
++    values known only then; that enqueue still lands before the pass ends while the host reaches the message in time.
++    The staging buffer is pinned and reused under an event (``MultiDecoder._send``'s rule), so no copy is a pageable
++    upload and no copy reads a buffer the host has rewritten."""
+ 
+     ints = 1024                     # the fixed gather's ints a rank: 4 KiB, one RoCE one-shot (TF_ROCE_MAX_KB)
+ 
+@@ -554,17 +556,18 @@
+         return self.big[:n], self.allv[:self.world * n]
+ 
+     def pre(self) -> None:
+-        """Both ranks at a decode round's end (``MultiDecoder._round``): the next message's fixed gather is queued
+-        behind the round's DFlash2 pass now, so it starts on the GPU when the pass ends with no host in between. A
+-        follower enqueues its half here (its block is constant zeros); rank 0's half goes with the message, its
+-        values known only then (``send``). Two rounds without a message between would queue two gathers against rank
+-        0's one, so that fails here rather than hanging the ranks later."""
++        """A follower, once a message is applied (``MultiDecoder.follow``): the next message's fixed gather is queued
++        behind everything the message queued (its round's DFlash2 pass, the tier's pump), so it starts on the GPU
++        when that work ends with no host in between. A follower enqueues its half here (its block is constant zeros);
++        rank 0's half goes with the message, its values known only then (``send``), and its call here is a no-op.
++        Two messages applied with no ``take`` between cannot happen (``take`` is how a message arrives), so a second
++        queue fails here rather than hanging the ranks later."""
+ 
+         if self.rank == 0:
+-            return
++            raise RuntimeError("pre() is a follower's: rank 0's half of the message goes with send()")
+         if self.pending:
+-            raise RuntimeError("two decode rounds queued their messages with none taken between: the ranks would "
+-                               "issue different collectives")
++            raise RuntimeError("two messages were applied with none taken between: the ranks would issue different "
++                               "collectives")
+         self.comm.all_gather(*self._fixed())
+         self.pending = True
+ 
+@@ -1240,8 +1243,8 @@
+         self._messages().send(values, echo=False)
+ 
+     def _share_pre(self) -> None:
+-        """Both ranks at a decode round's end (``MultiDecoder._round``): the next message's gather is queued behind
+-        the round's DFlash2 pass (``MsgGather.pre``), so it starts on the GPU when the pass ends."""
++        """A follower after each applied message (``MultiDecoder.follow``): the next message's gather is queued
++        behind the message's work (``MsgGather.pre``), so it starts on the GPU when that work ends."""
+ 
+         self._messages().pre()
+ 
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/multi.py next/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 19:06:08.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 19:06:39.462938500 +0000
+@@ -3145,7 +3145,6 @@
+                               max(0, s.count - len(s.out)))
+         if not short and PRELAUNCH and self.drafts is not None:
+             self._prelaunch(lanes)
+-            self.g._share_pre()              # OTS msg-gather: the next message's gather queued behind the pass
+         if prof is not None:
+             prof.mark("emit")
+             prof.end(len(lanes), sum(len(g.tokens) for g in segments), sum(keeps),
+@@ -3309,7 +3308,10 @@
+     # -- rank 1 --------------------------------------------------------------------------------------------------------------
+     @torch.no_grad()
+     def follow(self, once: bool = False) -> None:
+-        """Rank 1: apply rank 0's messages forever (``once``: one message)."""
++        """Rank 1: apply rank 0's messages forever (``once``: one message). OTS msg-gather: after each message's
++        ops (and the tier's pump) this rank queues its half of the NEXT message's fixed gather (``GlmEngine._share_pre``),
++        at the point the pre-fix path enqueued its gather, minus the host hops: the gather sits behind every piece of
++        device work the message queued, so nothing of this rank's waits behind a gather that waits for rank 0."""
+ 
+         while True:
+             if self.idle:
+@@ -3320,8 +3322,10 @@
+             self.received = (self.received + 1) % SEAL_MOD
+             self._pump()
+             _unwatch(self.watchdog)
+-            if once:
+-                return
++            if not self.idle:                # OTS msg-gather (MsgGatherFable2): the next message's gather queued now,
++                self.g._share_pre()          # behind everything this message queued (its round's pass, the tier's
++            if once:                         # pump), on every message kind; never across the doorbell (a RoCE wait
++                return                       # would time out there)
+ 
+     def apply(self, msg: Sequence[int]) -> None:
+         """Rank 1: one iteration's ops, in order."""

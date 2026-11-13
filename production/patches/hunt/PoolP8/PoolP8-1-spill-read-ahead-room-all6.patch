@@ -1,0 +1,36 @@
+# PoolP8-1 (lane PoolP8, 2026-10-30): the spill tier's read-ahead (spill_blocks.pin_read_ahead, pinned after the
+# ranks agreed the pool's share) comes out of the room every rank's budget still holds past its estimate and that
+# share first (gathered: the smallest), the pool only the rest (engine.read_ahead_charge). Before, it came out of
+# the pool at every --parallel level, also where the pool sat at TF_GLM_CACHE_GIB with GiBs of room above the
+# reserve: -14,336 tokens at PARALLEL 2-6 (wave 4). Unchanged where the budget sizes the pool (room 0: P8).
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -250,6 +250,15 @@
+         note = (f"{n}, not the {configured} asked: they would take more than three quarters of the {budget / 2 ** 30:.1f} "
+                 f"GiB the pool shares ({state >> 20} MiB each reserved at start)")
+     return n, note
++
++
++def read_ahead_charge(pinned: int, rooms: list[int]) -> int:
++    """PoolP8: the bytes of the spill tier's read-ahead (``pinned``, pinned once the ranks agreed the pool's share) the
++    pool pays for: what the smallest of the ranks' ``rooms`` (each rank's budget past its estimate and that share: the
++    memory above the reserve nothing holds, where the tier's preallocated buffers come from) does not hold. A pool at
++    TF_GLM_CACHE_GIB leaves that room and pays nothing; a pool the budget sizes leaves none and pays all, as before."""
++
++    return max(0, int(pinned) - min(int(r) for r in rooms))
+ 
+ 
+ def kept_state_bytes(t: dict, world: int = 2, rank: int = 0, draft: dict | None = None) -> int:
+@@ -1112,7 +1121,11 @@
+             if self.spill_cfg is not None:       # the spill tier's read-ahead, pinned now: the pool gets what it leaves
+                 from tensorfold.cuda.spill_blocks import pin_read_ahead
+ 
+-                self.cache_bytes = max(0, self.cache_bytes - pin_read_ahead(per_token * ALIGN))
++                pinned = pin_read_ahead(per_token * ALIGN)
++                # PoolP8: what every rank's budget still holds past its estimate and the agreed pool (above the reserve,
++                # where spill.preallocate's buffers came from) takes the pinned bytes first, the pool only the rest
++                rooms = [r[0] for r in self._gather_ints([max(0, plan["budget_bytes"] - plan["total_bytes_estimate"])])]
++                self.cache_bytes = max(0, self.cache_bytes - read_ahead_charge(pinned, rooms))
+             # TF_GLM_DISPLAY_KV_MIB: the display reservation's bytes too, which free memory never counted
+             display = display_kv.credit()
+             # one kept state's fixed cost outside the pool, the largest of any rank's: every rank derives the same count

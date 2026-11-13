@@ -1,0 +1,27 @@
+diff -ruN -x '*.orig' -x __pycache__ p4/src/tensorfold/families/glm5_next/cuda/engine.py p5/src/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 12:42:05.942343451 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 12:43:50.296573768 +0000
+@@ -712,9 +712,12 @@
+         self.agreed = mine[:1] + mine[2:]     # the spill tier's folders are keyed on these (not the window's slots)
+         from .multi import ONE_CHUNK, PRELAUNCH               # TF_GLM_DRAFT_PRELAUNCH: every rank alike;
+                                                               # TF_GLM_ONE_CHUNK_WARM: a FILL's stop, alike too
++        from . import indexer_shard                           # OTS 0112: TF_GLM_INDEXER_SHARD, every rank alike
++                                                              # (a lone rank sharding would hang the others' gathers)
+ 
+         # checked alike, not in the spill tier's key (``agreed``; the shard's is in its store's signature, multi.py)
+-        mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK)]
++        mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
++                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE)]   # OTS 0112: the shard's mode too
+         rows = self._gather_ints(mine + [spare >> 20])
+         odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+         if odd:
+@@ -724,7 +727,8 @@
+                                "TF_GLM_DRAFT_QUANT, TF_GLM_SHARED_PREFIX, TF_GLM_DRAFT_RING, TF_GLM_MTP, --parallel, "
+                                "TF_GLM_MULTI_VERIFY, TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE / _WINDOW, "
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+-                               "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM): "
++                               "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
++                               "TF_GLM_INDEXER_SHARD): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")

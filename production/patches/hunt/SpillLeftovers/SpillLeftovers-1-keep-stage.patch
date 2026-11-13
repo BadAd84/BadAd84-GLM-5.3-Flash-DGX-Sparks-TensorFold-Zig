@@ -1,0 +1,265 @@
+--- tensorfold/cuda/spill_blocks.py
++++ tensorfold/cuda/spill_blocks.py
+@@ -350,15 +350,29 @@
+         pass
+ 
+ 
++class _Assembled:
++    """A file's bytes already laid out the way ``_put`` lays them for O_DIRECT (a staged small state's ``.st``,
++    ``BlockStore._lay_small``): ``buf`` (4 KiB-aligned, a 4 KiB multiple long) holds them in its first ``total``
++    bytes, zeros after."""
++
++    __slots__ = ("buf", "total")
++
++    def __init__(self, buf: np.ndarray, total: int) -> None:
++        self.buf, self.total = buf, int(total)
++
++
+ def _put(path: str, data, owner, direct: bool = False) -> int:
+-    """``data`` (bytes, or a list of pieces written in order) to ``path`` through a temporary name, fsynced, renamed;
+-    its CRC-32. ``direct``: through one 4 KiB-aligned buffer with O_DIRECT (where the file system takes it), so the
+-    page cache, which on a unified-memory GPU is the GPU's memory, keeps no copy; else written and its pages dropped
+-    after the fsync. A failed write (a full disk) leaves no temporary file."""
++    """``data`` (bytes, a list of pieces written in order, or an ``_Assembled`` buffer) to ``path`` through a
++    temporary name, fsynced, renamed; its CRC-32. ``direct``: through one 4 KiB-aligned buffer with O_DIRECT (where the
++    file system takes it; an ``_Assembled`` one is that buffer already), so the page cache, which on a unified-memory
++    GPU is the GPU's memory, keeps no copy; else written and its pages dropped after the fsync. A failed write (a full
++    disk) leaves no temporary file."""
+ 
+     tmp = os.path.join(os.path.dirname(path), "." + os.path.basename(path))
+-    parts = [m.cast("B") if m.format != "B" or m.ndim != 1 else m
+-             for m in (data if isinstance(data, list) else [memoryview(data)])]
++    laid = data if isinstance(data, _Assembled) else None
++    parts = [memoryview(laid.buf)[:laid.total]] if laid is not None else [
++        m.cast("B") if m.format != "B" or m.ndim != 1 else m
++        for m in (data if isinstance(data, list) else [memoryview(data)])]
+     total = sum(len(m) for m in parts)
+     crc = 0
+     try:
+@@ -370,13 +384,16 @@
+                 if exc.errno != errno.EINVAL:
+                     raise
+         try:
+-            if fd >= 0:                                     # one aligned buffer, written whole, then cut to size
++            if fd >= 0 and laid is not None:                # laid out already: written as it is
++                buf = laid.buf
++            elif fd >= 0:                                   # one aligned buffer, written whole, then cut to size
+                 buf = _aligned_buffer(total)
+                 at = 0
+                 for m in parts:
+                     buf[at:at + len(m)] = np.frombuffer(m, dtype=np.uint8)
+                     at += len(m)
+                 buf[at:] = 0
++            if fd >= 0:
+                 crc = zlib.crc32(memoryview(buf)[:total])
+                 out = memoryview(buf)
+                 while len(out):
+@@ -608,9 +625,9 @@
+ 
+     def __init__(self, point: Point, new: list, small: tuple, size: int, where, ids_bytes: bytes) -> None:
+         self.point, self.new, self.size, self.where = point, new, size, where
+-        self.small = small                                  # (items, layer): its tensors on the host
++        self.small = small          # (items, layer) with its tensors on the host, or the future of its laid-out .st
+         self.ids_bytes = ids_bytes
+-        self.cut: list[str] = []                           # its tail block, copied to the host at keep (``persist``)
++        self.cut: list[str] = []                           # its tail block, copied off the device at keep (``persist``)
+         self.next = 0
+         self.failed: BaseException | None = None
+         self.done = threading.Event()
+@@ -712,6 +729,9 @@
+             "written_small_bytes", "disk_lookups", "disk_hits", "has_refused", "release_dropped", "carried",
+             "carry_refused")}
+         self.stats.update(write_s=0.0, load_s=0.0, keep_s=0.0, pump_s=0.0, load_small_s=0.0)
++        # a keep's small state and cut block through the write ring (``_stage_small``, ``_stage_rows``), or to fresh
++        # host memory when the ring had too few free slots (``small_host``)
++        self.stats.update(small_staged=0, small_host=0, cut_staged=0)
+         self.unwritten_by: dict[str, int] = {}
+         self.restore_ms: list[float] = []
+         self.direct = bool(getattr(cfg, "direct", True)) and hasattr(os, "O_DIRECT")
+@@ -1095,6 +1115,8 @@
+                 self.slot_events.append(ev)
+         for i in range(len(self.slots)):
+             self.free_slots.put(i)
++        # a staged small state's ``.st`` laid out off the engine loop (``_lay_small``), its slots then given back
++        self._smaller = ThreadPoolExecutor(1, thread_name_prefix=f"spill-small-{self.rank}")
+ 
+     # -- write ---------------------------------------------------------------------------------------------------------
+     def wants(self, n: int) -> bool:
+@@ -1160,7 +1182,6 @@
+         with self.lock:
+             new = [(s, e, h) for s, e, h in hashes if h not in self.have and h not in self.inflight]
+         items, layer = _sp.encode(obj, skip=skip)
+-        items = [(k, _host(t)) for k, t in items]          # (serialized on the writer thread)
+         small_n = sum(t.numel() * t.element_size() for _, t in items) + 4096
+         size = sum(self._span(extent.base, s, e) for s, e, _ in new)
+         need = size + small_n + 8 * n * (2 if tokens is not None else 1)
+@@ -1183,28 +1204,145 @@
+             if short > 0 or self.stored() + self.backlog + need > self.cap:
+                 self.stats["no_space"] += 1
+                 return "no_space"
++        # the small state: through free write-ring slots (copies on this stream, no wait; the ``.st`` laid out on a
++        # helper thread), else copied to fresh host memory now as before (``_host``: ~10-16 ms of the engine loop at
++        # ~64 MB, before the turn's first token). The same bytes either way
++        staged = self._stage_small(items)
++        if staged is None:
++            items = [(k, _host(t)) for k, t in items]      # (serialized on the writer thread)
+         # the block the state's end cuts (a tail): its last pooled-key row is still filling, and the stream goes on
+-        # writing it in place, so its rows are copied to the host now, as they are at the keep (at most one block)
+-        cut = [(h, _host(torch.cat(self._parts(extent, s, e)))) for s, e, h in new[-1:] if e - s < self.block]
++        # writing it in place, so its rows are copied off the device now, as they are at the keep (at most one block):
++        # into a free write-ring slot as ``pump`` stages a block (no wait), else to the host
++        try:
++            cut = [(h, self._stage_rows(extent, s, e)) for s, e, h in new[-1:] if e - s < self.block]
++        except BaseException:
++            for slot in [] if staged is None else staged[0]:
++                self.free_slots.put(slot)
++            raise
+         with self.lock:
+             if self.backlog + size > BACKLOG:
+                 self.stats["backlog_skipped"] += 1
++                back = [] if staged is None else staged[0]
++                back += [d[0] for _, d in cut if isinstance(d, tuple)]
++                for slot in back:                           # (copies may still be queued into them: anything staged
++                    self.free_slots.put(slot)               # there next is queued after them on this stream)
+                 return "backlog"
+             self.backlog += size
+-            self.host_bytes += sum(t.numel() * t.element_size() for _, t in cut)   # (at most a block a state)
++            self.host_bytes += sum(d.numel() * d.element_size() for _, d in cut if not isinstance(d, tuple))
+             self.inflight.add(key)
+             self.inflight.update(h for _, _, h in new)
+             ids_bytes = ids.tobytes() + (b"" if tokens is None else tokens.tobytes())
+-            job = Job(pt, new[:len(new) - len(cut)], (items, layer), size, extent, ids_bytes)
++            small = (items, layer) if staged is None else self._smaller.submit(self._lay_small, items, layer, *staged)
++            job = Job(pt, new[:len(new) - len(cut)], small, size, extent, ids_bytes)
+             job.cut = [h for h, _ in cut]
+             self.waiting[key] = job
+             self._ref(pt.blocks, 1)
+         for h, data in cut:                                 # (written before the blocks the pumps stage)
+-            self.jobs.put(("rows", job, h, data))
++            self.jobs.put(("block" if isinstance(data, tuple) else "rows", job, h, data))
+         self.pending.append(job)
++        self.stats["small_host" if staged is None else "small_staged"] += 1
+         self.stats["keep_s"] += time.perf_counter() - t0
+         return "queued"
+ 
++    def _take_slots(self, need: int) -> list[int] | None:
++        """The engine: ``need`` free write-ring slots at once, or None (and none taken)."""
++
++        got: list[int] = []
++        while len(got) < need:
++            try:
++                got.append(self.free_slots.get_nowait())
++            except queue.Empty:
++                for slot in got:
++                    self.free_slots.put(slot)
++                return None
++        return got
++
++    def _stage_small(self, items: list):
++        """The engine (``persist``): a small state's tensors' bytes, in its file's order (``_small_parts``), into free
++        write-ring slots: copies on the current stream into pinned memory, the event of the last slot recorded after
++        them (made at start, ``ring``), nothing waited for. (slots, pieces, event) for ``_lay_small``, or None when the
++        ring has too few free slots now (never more than half of it: the pumps go on)."""
++
++        self.ring()
++        per = self.slots[0].numel()
++        nbytes = sum(t.numel() * t.element_size() for _, t in items)
++        need = max(1, -(-nbytes // per))
++        if need > len(self.slots) // 2:
++            return None
++        got = self._take_slots(need)
++        if got is None:
++            return None
++        pieces: list[tuple[int, int, int]] = []              # (slot, offset, bytes) in file order
++        k = off = 0
++        try:
++            for _, t in items:
++                if not t.numel():
++                    continue
++                flat = t.contiguous().view(-1).view(torch.uint8)
++                a, n = 0, flat.numel()
++                while a < n:
++                    if off == per:
++                        k, off = k + 1, 0
++                    m = min(n - a, per - off)
++                    self.slots[got[k]][off:off + m].copy_(flat[a:a + m], non_blocking=True)
++                    pieces.append((got[k], off, m))
++                    off, a = off + m, a + m
++            ev = self.slot_events[got[-1]] if self.slot_events else None
++            if ev is not None:
++                ev.record()
++        except BaseException:
++            for slot in got:                                # (anything staged there next is queued after these)
++                self.free_slots.put(slot)
++            raise
++        return got, pieces, ev
++
++    def _lay_small(self, items: list, layer: dict, got: list[int], pieces: list, ev) -> _Assembled:
++        """The small-state helper thread: once the copies ``_stage_small`` queued ended, the ``.st`` file's bytes laid
++        out as ``_put`` writes them (``_small_parts``'s header and tensors, padded with zeros to 4 KiB), the slots given
++        back. ``items``' tensors are read for their dtype and shape only."""
++
++        try:
++            if ev is not None:
++                ev.synchronize()
++            header, _ = _sp._header(items, {"format": FORMAT, "layer": json.dumps(layer)})
++            total = len(header) + sum(m for _, _, m in pieces)
++            buf = _aligned_buffer(total)
++            buf[:len(header)] = np.frombuffer(header, dtype=np.uint8)
++            at = len(header)
++            for slot, off, m in pieces:
++                buf[at:at + m] = self.slots[slot][off:off + m].numpy()
++                at += m
++            buf[at:] = 0
++            return _Assembled(buf, total)
++        finally:
++            for slot in got:
++                self.free_slots.put(slot)
++
++    def _stage_rows(self, where, s: int, e: int):
++        """The engine: tokens [s, e) of the extent at ``where`` off the device now. Into a free write-ring slot as
++        ``pump`` stages a block (one gather into the device slot, one copy to pinned memory on the current stream, the
++        slot's event after): (slot, bytes, event), the writer's "block" item; else (no slot free) copied to fresh host
++        memory (``_host``), its "rows" item."""
++
++        self.ring()
++        got = self._take_slots(1)
++        if got is None:
++            return _host(torch.cat(self._parts(where, s, e)))
++        slot = got[0]
++        try:
++            parts = self._parts(where, s, e)
++            nb = sum(t.numel() for t in parts)
++            torch.cat(parts, out=self.dev_slot[:nb])
++            self.slots[slot][:nb].copy_(self.dev_slot[:nb], non_blocking=True)
++            ev = self.slot_events[slot] if self.slot_events else None
++            if ev is not None:
++                ev.record()
++        except BaseException:
++            self.free_slots.put(slot)
++            raise
++        self.stats["cut_staged"] += 1
++        return slot, nb, ev
++
+     def _present(self, base: int) -> list:
+         """The planes holding the rows of the extent at ``base`` on this rank: every plane, but one sharded over the
+         ranks (``shard``: TF_GLM_KV_SHARD's latent planes) only on the rank whose half the extent is in."""
+@@ -1492,12 +1630,15 @@
+                 shared = pt.shared                          # (kept again as shared after this: rewritten below)
+             _fsync_dir(self.blocks_dir)                     # the blocks' renames before the point naming them
+             ids_crc = _put(self._point_path(pt.key, ".ids"), job.ids_bytes, self.owner)
+-            parts = _small_parts(*job.small)
+-            pt.small_crc = _put(self._point_path(pt.key, ".st"), parts, self.owner, direct=self.small_direct)
++            # (a staged small state: its ``.st`` laid out by the helper, ``_lay_small``; else its host tensors)
++            small = job.small
++            small = small.result() if isinstance(small, concurrent.futures.Future) else _small_parts(*small)
++            small_len = small.total if isinstance(small, _Assembled) else sum(len(m) for m in small)
++            pt.small_crc = _put(self._point_path(pt.key, ".st"), small, self.owner, direct=self.small_direct)
+             _fsync_dir(self.points_dir)
+             meta = {"format": FORMAT, "key": pt.key, "n": pt.n, "lineage": pt.lineage, "blocks": pt.blocks,
+                     "crcs": pt.crcs, "digests": [d.hex() for d in pt.digests], "ids_crc": ids_crc,
+-                    "small_crc": pt.small_crc, "small_bytes": sum(len(m) for m in parts) + len(job.ids_bytes),
++                    "small_crc": pt.small_crc, "small_bytes": small_len + len(job.ids_bytes),
+                     "shared": shared, "head": pt.head, "fields": pt.fields}
+             pt.chain = _chain(pt.ids, self.block)
+             _put(self._point_path(pt.key, ".json"), json.dumps(meta).encode(), self.owner)

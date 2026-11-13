@@ -1,0 +1,47 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -646,18 +646,24 @@
+     return pid
+ 
+ 
++def has_array(snap) -> bool:
++    """Whether ``kept_array(snap)`` is at hand, not made: the state holds an array made from (or given for) the ids
++    list it holds now (``_array_of``: id lists are replaced, never changed in place)."""
++
++    return getattr(snap, "ids_array", None) is not None and getattr(snap, "_array_of", None) is snap.ids
++
++
+ def kept_array(snap):
+     """--parallel 1: a kept snapshot's ids as an int64 array (``ids_array``), made once for the ids list it holds: id
+     lists are replaced, never changed in place, so ``_array_of`` (the list it was made from; ``spill.encode`` leaves
+-    ``_`` fields out) tells a stale one."""
++    ``_`` fields out) tells a stale one (``has_array``)."""
+ 
+-    arr = getattr(snap, "ids_array", None)
+-    if arr is None or getattr(snap, "_array_of", None) is not snap.ids:
++    if not has_array(snap):
+         import numpy as np
+ 
+-        arr = snap.ids_array = np.asarray(snap.ids, dtype=np.int64)
++        snap.ids_array = np.asarray(snap.ids, dtype=np.int64)
+         snap._array_of = snap.ids
+-    return arr
++    return snap.ids_array
+ 
+ 
+ def kept_from(snap, arr) -> None:
+@@ -706,6 +712,14 @@
+             return True
+         if self.seq[n - 1] != ids[n - 1]:
+             return False
++        if self.arr is None and not has_array(snap):
++            # neither side has an array yet (P1ShortTTFT): the two lists compared as they are (the compare before
++            # MEG-1, never slower than it). The case it is for: on a follower (no prompt array) a
++            # cold prompt's kept state against ``live`` written by that same request, two lists of the same int
++            # objects, where the compare is a pointer walk (~0.1 ms at 40k ids) and converting both lists cost
++            # ~1.2 ms in the next request's first token (laptop CPU). A state with an array (kept with the request's
++            # own, ``kept_from``, or compared before) keeps the array compare
++            return self.seq[:n] == ids
+         import numpy as np
+ 
+         if self.arr is None:

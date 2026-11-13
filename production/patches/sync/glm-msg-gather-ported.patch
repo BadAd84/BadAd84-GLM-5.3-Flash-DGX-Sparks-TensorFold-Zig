@@ -1,0 +1,244 @@
+# Sync port of ots0102-glm-msg-gather.patch (production v110-ots124) onto the synced base, applied in production order after the
+# ports before it; re-based by patch(1) (0 hunk(s) at fuzz 2, every fuzzed hunk read: the change lands where
+# the original put it). The original's header (what, why, measurements, tests) is the reference: ots0102-glm-msg-gather.patch.
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/engine.py next/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 19:06:08.274007800 +0000
+@@ -494,6 +494,120 @@
+     return f"tf_glm_request_{n}" if rank == 1 else f"tf_glm_request_r{rank}_{n}"
+ 
+ 
++class MsgGather:
++    """OTS msg-gather: rank 0's int message as ONE fixed-size all-gather, enqueued before the host needs it.
++
++    The length is in slot 0 and the values follow it, so a message that fits (every round's plan, a FINISH) gathers
++    ``ints`` ints a rank once: no second rendezvous, and no pageable ``torch.tensor(..., device="cuda")`` upload in
++    the middle (a pageable copy is a cudaStreamSynchronize, so the old path waited out the prelaunched DFlash2 pass
++    on every rank before its gather could even be enqueued). A message past the buffer (an ADMIT's prompt ids) puts
++    its length in slot 0 and every rank runs the second gather of the values; that decision reads the GATHERED slot 0
++    alone (rank 0's own block, its own length), so every rank issues the same collectives whatever the buffer holds.
++
++    ``pre`` queues the next message's gather at a decode round's end, behind the round's DFlash2 pass: a follower's
++    half is constant zeros and goes out then, so the gather starts on the GPU when the pass ends with no host in
++    between (the sample gather's arrival, not the message's two host hops). Rank 0 fills its half at the message
++    (``send``), its values known only then; that enqueue still lands before the pass ends while the host reaches the
++    message in time. The staging buffer is pinned and reused under an event (``MultiDecoder._send``'s rule), so no
++    copy is a pageable upload and no copy reads a buffer the host has rewritten."""
++
++    ints = 1024                     # the fixed gather's ints a rank: 4 KiB, one RoCE one-shot (TF_ROCE_MAX_KB)
++
++    def __init__(self, comm, rank: int, world: int, torch) -> None:
++        self.comm, self.rank, self.world, self.torch = comm, rank, world, torch
++        self.host = self.mine = self.got = self.big = self.allv = self.ready = None
++        self.pending = False        # a follower: ``pre`` queued the fixed gather and ``take`` has not run since
++
++    def _fixed(self):
++        """The fixed gather's buffers (every rank): mine [ints], got [world * ints], each allocated once."""
++
++        if self.mine is None:
++            self.mine = self.torch.zeros((self.ints,), dtype=self.torch.int32, device="cuda")
++            self.got = self.torch.zeros((self.world * self.ints,), dtype=self.torch.int32, device="cuda")
++        return self.mine, self.got
++
++    def _staging(self, n: int):
++        """Rank 0's pinned staging of at least max(ints, n + 1) ints: grown in steps, reused only once its copies
++        have left (``ready``)."""
++
++        torch = self.torch
++        want = max(self.ints, n + 1)
++        if self.host is None or self.host.numel() < want:
++            if self.ready is not None:
++                self.ready.synchronize()              # the last message's copies have left the staging buffer
++            size = max(want, 2 * self.ints, 2 * (self.host.numel() if self.host is not None else 0))
++            self.host = torch.zeros((size,), dtype=torch.int32, pin_memory=True)
++            self.ready = torch.cuda.Event()
++        elif self.ready is not None:
++            self.ready.synchronize()                  # the last message's copies have left the staging buffer
++        return self.host
++
++    def _values(self, n: int):
++        """The second gather's buffers (a message past the fixed buffer): n ints sent, world * n gathered, grown in
++        steps; a follower sends the zeros its own block is never read as."""
++
++        torch = self.torch
++        if self.big is None or self.big.numel() < n:
++            size = max(n, 2 * self.ints, 2 * (self.big.numel() if self.big is not None else 0))
++            self.big = torch.zeros((size,), dtype=torch.int32, device="cuda")
++            self.allv = torch.empty((self.world * size,), dtype=torch.int32, device="cuda")
++        return self.big[:n], self.allv[:self.world * n]
++
++    def pre(self) -> None:
++        """Both ranks at a decode round's end (``MultiDecoder._round``): the next message's fixed gather is queued
++        behind the round's DFlash2 pass now, so it starts on the GPU when the pass ends with no host in between. A
++        follower enqueues its half here (its block is constant zeros); rank 0's half goes with the message, its
++        values known only then (``send``). Two rounds without a message between would queue two gathers against rank
++        0's one, so that fails here rather than hanging the ranks later."""
++
++        if self.rank == 0:
++            return
++        if self.pending:
++            raise RuntimeError("two decode rounds queued their messages with none taken between: the ranks would "
++                               "issue different collectives")
++        self.comm.all_gather(*self._fixed())
++        self.pending = True
++
++    def send(self, values: list[int], echo: bool = True) -> list[int] | None:
++        """Rank 0's message out: one fixed gather, and the values' gather only past the buffer. Nothing is read back
++        (``echo`` False, TF_GLM_MULTI_ASYNC's ``_send``, only drops the return): rank 0 owns its message, so its host
++        never waits for the GPU here, and this rank's own length decides the second gather - it is the gathered slot 0
++        (the gather's rank-0 block is this buffer), so every rank issues the same collectives. What is returned is
++        this rank's own values, the block every other rank reads out of the gather."""
++
++        values = [int(v) for v in values]
++        n = len(values)
++        host = self._staging(n)
++        host[0] = n
++        if n:
++            host[1:1 + n].numpy()[:] = values
++        mine, got = self._fixed()
++        mine.copy_(host[:self.ints], non_blocking=True)
++        self.comm.all_gather(mine, got)
++        if n > self.ints - 1:
++            send, recv = self._values(n)
++            send.copy_(host[1:1 + n], non_blocking=True)
++            self.comm.all_gather(send, recv)
++        if self.ready is not None:
++            self.ready.record()                       # every copy from the staging buffer is enqueued
++        return list(values) if echo else None
++
++    def take(self) -> list[int]:
++        """The follower's message (rank 0's values): the fixed gather's block when the message fits, else the
++        values' gather, the two decided from the gathered slot 0 so every rank issues the same collectives."""
++
++        mine, got = self._fixed()
++        if not self.pending:
++            self.comm.all_gather(mine, got)           # no pre() since the last message: queue it now
++        self.pending = False
++        row = got[:self.ints].tolist()                # one readback: the gathered length and the values
++        count = row[0]
++        if count <= self.ints - 1:
++            return [int(v) for v in row[1:1 + count]]
++        self.comm.all_gather(*self._values(count))
++        return [int(v) for v in self.allv[:count].tolist()]
++
++
+ class GlmEngine:
+     """GLM-5.3-Flash on ``world`` ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
+ 
+@@ -560,6 +674,7 @@
+         torch.cuda.set_device(0)
+         self.torch = torch
+         self.rank, self.world = rank, world
++        self._msg = None            # OTS msg-gather: the message gather (``MsgGather``), built on the first message
+         parallel = int(parallel)
+         if not 1 <= parallel <= PARALLEL_MOST:
+             raise ValueError(f"--parallel: 1 to {PARALLEL_MOST} requests at once for GLM-5.3-Flash, not {parallel}")
+@@ -1111,18 +1226,31 @@
+         self._bell = getattr(self, "_bell", 0) + 1
+ 
+     def _share(self, values: list[int] | None) -> list[int]:
+-        """Rank 0's int list on every rank (a length, then the values, through the all-gather)."""
++        """Rank 0's int list on every rank (a length, then the values, through the all-gather). OTS msg-gather: one
++        fixed-size gather when the message fits, the values' gather only past it (``MsgGather``); rank 0 sends and
++        returns its own list without a readback."""
+ 
+-        torch = self.torch
+-        n = torch.tensor([len(values) if self.rank == 0 else 0], dtype=torch.int32, device="cuda")
+-        got = torch.empty((self.world,), dtype=torch.int32, device="cuda")
+-        self.comm.all_gather(n, got)
+-        count = int(got[0].item())
+-        buf = (torch.tensor(values, dtype=torch.int32, device="cuda") if self.rank == 0
+-               else torch.zeros((count,), dtype=torch.int32, device="cuda"))
+-        allv = torch.empty((self.world * count,), dtype=torch.int32, device="cuda")
+-        self.comm.all_gather(buf, allv)
+-        return [int(v) for v in allv[:count].tolist()]
++        m = self._messages()
++        return m.send(values) if self.rank == 0 else m.take()
++
++    def _share_nowait(self, values: list[int]) -> None:
++        """Rank 0 (TF_GLM_MULTI_ASYNC, ``MultiDecoder._send``): ``_share``'s collectives, the message not returned
++        (rank 0 reads nothing back on either path)."""
++
++        self._messages().send(values, echo=False)
++
++    def _share_pre(self) -> None:
++        """Both ranks at a decode round's end (``MultiDecoder._round``): the next message's gather is queued behind
++        the round's DFlash2 pass (``MsgGather.pre``), so it starts on the GPU when the pass ends."""
++
++        self._messages().pre()
++
++    def _messages(self):
++        """This engine's message gather, built once."""
++
++        if self._msg is None:
++            self._msg = MsgGather(self.comm, self.rank, self.world, self.torch)
++        return self._msg
+ 
+     def _effective(self, code: list[int]) -> list[int]:
+         """Resolve auto and MTP policies to the available heads, using EXL3_AUTO for EXL3 with DFlash2 and DFlash2 when MTP is absent."""
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/multi.py next/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 19:06:08.303807900 +0000
+@@ -777,7 +777,6 @@
+         # is in the two-rank settings comparison, so both run it or neither)
+         if self.tune.profile and isinstance(self.verify, BatchedVerify) and self.verify.graphs and self.lone_rows:
+             self._compare_paths()
+-        self.msg = None                                  # TF_GLM_MULTI_ASYNC: rank 0's pinned message staging
+         self.watchdog = watchdog_seconds()               # stack dumps of a stalled iteration (TF_GLM_MULTI_WATCHDOG_S)
+         watchdog_exits()                                  # TF_GLM_MULTI_WATCHDOG_EXIT read now: a typo fails at start
+         self.iteration_since = None                       # when rank 0's current iteration began (/health)
+@@ -918,40 +917,13 @@
+             self.g._share(msg)
+ 
+     def _send(self, values: list[int]) -> None:
+-        """Rank 0, TF_GLM_MULTI_ASYNC: ``GlmEngine._share``'s two all-gathers (the length, then the values) without
+-        reading anything back: the values go through a pinned staging buffer (reused once its last copy has left),
+-        so the host does not wait for the GPU. Rank 1 receives them with its ``_share`` as ever. Each gather sends a
+-        device buffer of its own from its start, as rank 1's ``_share`` does: a transport may choose by the buffer's
+-        address (TF_GLM_COMM=roce did), and a view past an allocation's start once split the ranks' choices."""
++        """Rank 0, TF_GLM_MULTI_ASYNC: ``GlmEngine._share``'s collectives, the message not returned (rank 0 reads
++        nothing back on either path): the values go through a pinned staging buffer (reused once its last copy has
++        left), so the host does not wait for the GPU. Rank 1 receives them with its ``_share`` as ever. OTS
++        msg-gather: the same fixed-size gather ``_share`` runs (``GlmEngine._share_nowait``), so the two ranks pair
++        one gather a message whatever its length."""
+ 
+-        n = len(values)
+-        dev = self.w.device
+-        if self.msg is None or self.msg[0].numel() < n + 1:
+-            if self.msg is not None and self.msg[3] is not None:
+-                self.msg[3].synchronize()
+-            size = max(4096, 2 * (n + 1))
+-            pinned = torch.cuda.is_available()
+-            self.msg = (torch.zeros((size,), dtype=torch.int32, pin_memory=pinned),
+-                        torch.zeros((1,), dtype=torch.int32, device=dev),
+-                        torch.zeros((size,), dtype=torch.int32, device=dev),
+-                        torch.cuda.Event() if pinned else None)
+-        host, length, vals, ready = self.msg
+-        if ready is not None:
+-            ready.synchronize()                          # the last message's copies have left the staging buffer
+-        host[0] = n
+-        if n:
+-            host[1:1 + n].numpy()[:] = values
+-        length.copy_(host[:1], non_blocking=True)
+-        if n:
+-            vals[:n].copy_(host[1:1 + n], non_blocking=True)
+-        if ready is not None:
+-            ready.record()
+-        comm = self.g.comm
+-        world = self.g.world
+-        got = torch.empty((world,), dtype=torch.int32, device=dev)
+-        comm.all_gather(length, got)
+-        allv = torch.empty((world * n,), dtype=torch.int32, device=dev)
+-        comm.all_gather(vals[:n], allv)
++        self.g._share_nowait(values)
+ 
+     def _time_rows(self, reps: int = 5) -> list[float]:
+         """TF_GLM_MULTI_DEPTH=joint: the batched window's ms for 1 .. its rows (its graphs, fastest of
+@@ -3173,6 +3145,7 @@
+                               max(0, s.count - len(s.out)))
+         if not short and PRELAUNCH and self.drafts is not None:
+             self._prelaunch(lanes)
++            self.g._share_pre()              # OTS msg-gather: the next message's gather queued behind the pass
+         if prof is not None:
+             prof.mark("emit")
+             prof.end(len(lanes), sum(len(g.tokens) for g in segments), sum(keeps),

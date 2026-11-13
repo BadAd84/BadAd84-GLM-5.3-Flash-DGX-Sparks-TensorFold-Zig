@@ -1,0 +1,92 @@
+# HuntMatmulExperts-4 (new, bit-identical): a MoE layer's router K-slice sum (_router_sum) folded into the top-k
+# (glue._topk_sum: each row's logits summed over the 8 slices in slice order, then _topk line for line), so routing
+# is _router_part + one kernel instead of three kernels, and the fp32 logits never round-trip through memory (b.mlog
+# is read by nothing else). 42 launches a verify window and prompt chunk less. Bits: test_route_sum.py (sm_120): picks
+# and weights equal the stock pair at rows 1-33, 48, 64, 100, 2,048, 4,096, ties included (zero rows: lowest ids),
+# the logits buffer left unwritten; TF_GLM_ROUTE_SUM=0 runs the stock pair. Laptop (RTX 5070, CUDA graph, 8 router
+# copies, interleaved medians): -0.55 to -1.0 us a layer (-9 to -13%) at 1-32 rows. GB10 estimate ~1 us a MoE layer =
+# ~40 us a window (0.04-0.15%), unmeasured.
+diff -r tensorfold.orig/families/glm5_next/cuda/forward.py tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold.orig/families/glm5_next/cuda/forward.py	2026-10-30 00:16:54.943993700 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 00:16:54.958000200 +0000
+@@ -993,8 +993,8 @@
+     c = w.cfg
+     m = layer.moe
+     with prof.timed("moe: route"):
+-        glue.router(b.normed[:R], m.router, b.mlog[:R])
+-        glue.select(b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts, c.routed_scale, c.norm_topk)
++        glue.route_select(b.normed[:R], m.router, b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts,
++                          c.routed_scale, c.norm_topk)
+         grouped.route(b.pick[:R], b.plan, b.plan.tile)   # the plan keeps its pass (TF_GLM_EXL3_PASS)
+     if m.shared is not None:
+         # EXL3: the routed slots through the trellis kernels, the shared expert (last slot) through BF16 matmuls
+diff -r tensorfold.orig/families/glm5_next/cuda/glue.py tensorfold/families/glm5_next/cuda/glue.py
+--- tensorfold.orig/families/glm5_next/cuda/glue.py	2026-10-30 00:16:54.939760500 +0000
++++ tensorfold/families/glm5_next/cuda/glue.py	2026-10-30 00:16:54.939760500 +0000
+@@ -491,6 +491,66 @@
+ 
+ 
+ @triton.jit
++def _topk_sum(PART, total, BIAS, PICK, WTS, scale, NE: tl.constexpr, TOPK: tl.constexpr, SLOTS: tl.constexpr,
++              BLOCK: tl.constexpr, SLOTP: tl.constexpr, NORM: tl.constexpr, KS: tl.constexpr):
++    """``_topk`` on the router's KS K-slice partials PART [KS, rows, NE]: a row's logits summed in slice order
++    (``_router_sum``'s adds), then _topk line for line. The same picks and weights as _router_sum + _topk, one launch and
++    the logits' round trip less a MoE layer (HuntMatmulExperts-4)."""
++
++    r = tl.program_id(0)
++    ar = tl.arange(0, BLOCK)
++    ak = tl.arange(0, SLOTP)
++    ok = ar < NE
++    lg = tl.load(PART + r * NE + ar, mask=ok, other=0.0)
++    for s in tl.static_range(1, KS):
++        lg = lg + tl.load(PART + s * total + r * NE + ar, mask=ok, other=0.0)
++    score = 1.0 / (1.0 + tl.exp(-lg))
++    choice = tl.where(ok, score + tl.load(BIAS + ar, mask=ok, other=0.0), float("-inf"))
++    picks = tl.zeros((SLOTP,), dtype=tl.int32)
++    wts = tl.zeros((SLOTP,), dtype=tl.float32)
++    total_w = 0.0
++    for k in tl.static_range(TOPK):
++        mx = tl.max(choice, axis=0)
++        idx = tl.min(tl.where(choice == mx, ar, BLOCK), axis=0)
++        sk = tl.sum(tl.where(ar == idx, score, 0.0), axis=0)
++        picks = tl.where(ak == k, idx, picks)
++        wts = tl.where(ak == k, sk, wts)
++        total_w += sk
++        choice = tl.where(ar == idx, float("-inf"), choice)
++    if NORM:
++        wts = wts / (total_w + 1e-20)
++    wts = wts * scale
++    picks = tl.where(ak == TOPK, NE, picks)
++    wts = tl.where(ak == TOPK, 1.0, wts)
++    tl.store(PICK + r * SLOTS + ak, picks, mask=ak < SLOTS)
++    tl.store(WTS + r * SLOTS + ak, wts, mask=ak < SLOTS)
++
++
++# TF_GLM_ROUTE_SUM=0: the router's slice sum and the top-k as two kernels (the same picks and weights either way)
++ROUTE_SUM = __import__("os").environ.get("TF_GLM_ROUTE_SUM", "1") != "0"
++
++
++def route_select(x: torch.Tensor, w: torch.Tensor, logits: torch.Tensor, bias: torch.Tensor, pick: torch.Tensor,
++                 wts: torch.Tensor, top_k: int, experts: int, scale: float, norm: bool) -> None:
++    """``router`` then ``select``; on router's K-slice path the top-k sums the slices itself (``logits`` unwritten)."""
++
++    m, d = x.shape
++    ne = w.shape[0]
++    if not ROUTE_SUM or ROUTER_KS <= 1 or d % (ROUTER_KS * 64) or ne != experts:
++        router(x, w, logits)
++        select(logits, bias, pick, wts, top_k, experts, scale, norm)
++        return
++    bm = 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128
++    part = torch.empty((ROUTER_KS, m, ne), dtype=torch.float32, device=x.device)
++    _router_part[(triton.cdiv(m, bm), triton.cdiv(ne, 32), ROUTER_KS)](x, w, part, m, x.stride(0), D=d, NE=ne, BM=bm,
++                                                                        BLOCK_E=32, BK=64, KS=ROUTER_KS, num_warps=4,
++                                                                        num_stages=3)
++    _topk_sum[(m,)](part, m * ne, bias, pick, wts, float(scale), NE=experts, TOPK=top_k, SLOTS=top_k + 1,
++                    BLOCK=triton.next_power_of_2(experts + 1), SLOTP=triton.next_power_of_2(top_k + 1), NORM=norm,
++                    KS=ROUTER_KS, num_warps=4)
++
++
++@triton.jit
+ def _combine(Y, WTS, OUT, D: tl.constexpr, SLOTS: tl.constexpr, BLOCK: tl.constexpr):
+     """A rank's fp32 MoE share: w_k y_k summed in slot order, shared expert last with weight 1; y is bf16 in prefill."""
+ 

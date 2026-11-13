@@ -1,0 +1,53 @@
+# HuntSpill-1-resume-ids.patch (lane HuntSpill, 2026-10-30; the synced tree with every patch in sync/ORDER applied).
+# A state read back from the spill tier went through Python lists of its 772k ids on the way to the first token:
+# prestage's h.ids = [int(t) for t in pt.ids] (read only by its "the same stored prompt is on its way" check),
+# _finish_load's [int(t) for t in ...] for snap.ids (and the keyed ids), then at the ADMIT kept_ids(snap)
+# (rank 0's _resume -> known_key, every follower's _resolve -> kept_hash) converted snap.ids back with np.asarray.
+# Now the check compares the request's int64 array with the point's (np.array_equal), snap.ids = arr.tolist(), and the
+# restored state carries the point's int64 arrays as _ids (and key_array, with pictures), as _keep's states carry a
+# view of their stream's. The same ids, keys, hashes and decisions; nothing changes on disk.
+# Measured on the workstation at 771,584 ids (bench_hostparts.py, micro_resume_conv.py; min of interleaved runs):
+# [int(t) for t in arr] 48 ms (Windows) / 35 ms (WSL) -> arr.tolist() 13 / 16 ms; np.asarray(list) 15 / 9 ms -> 0.
+# Rank 0's critical path of a 772k restart-resume (3.5 s measured 2026-10-29): ~63 ms (WSL) to ~98 ms (Windows) less
+# on this CPU (~2-3%); bench_resume_ids.py (all four statements, the waiting check included): 118 -> 23 ms (WSL, min).
+# Test: test_resume_ids.py <tree> (CPU torch, Linux): a restart round trip through prestage and _finish_load, the
+# rows, ids, keyed ids, kept_ids / known_key / kept_hash equal; no Python iteration of the point's ids and no list
+# conversion (the pre-patch tree: 2 iterations and 1 conversion, FAIL).
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 23:44:08.593576600 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 23:46:06.179265300 +0000
+@@ -2081,7 +2081,7 @@
+         if self._need(len(prompt)) > self.pool.rows:
+             return None
+         for h in self.loads.values():            # the same stored prompt on its way already: wait for that read
+-            if len(prompt) >= h.n and prompt[:h.n] == h.ids:
++            if len(prompt) >= h.n and np.array_equal(karr[:h.n], h.ids):
+                 return h
+         hit = self._resume(prompt, karr=karr)
+         self.disk.stats["disk_lookups"] += 1
+@@ -2112,7 +2112,7 @@
+         self._emit(LOAD, [hi, lo, n, base, size, lid])
+         self._flush()
+         h = self._start_load(hi, lo, n, base, size, lid)
+-        h.ids = [int(t) for t in pt.ids]
++        h.ids = pt.ids                           # (its int64 array: the check above compares arrays, no list made)
+         return h
+ 
+     def _start_load(self, hi: int, lo: int, n: int, base: int, size: int, lid: int):
+@@ -2236,10 +2236,14 @@
+         snap.tail = [(sl.to(dev), r.to(dev)) for sl, r in (snap.tail or [])] or None
+         snap.head = snap.head.to(dev) if snap.head is not None else None
+         snap.drafter_rows = [r.to(dev) for r in snap.drafter_rows] if snap.drafter_rows is not None else None
+-        ids = [int(t) for t in (pt.tokens if pt.tokens is not None else pt.ids)]
+-        keyed = [int(t) for t in pt.ids] if pt.tokens is not None else None
++        arr = pt.tokens if pt.tokens is not None else pt.ids
++        ids = arr.tolist()                       # (python ints, as [int(t) for t in arr] made them, 3-4x faster)
++        keyed = pt.ids.tolist() if pt.tokens is not None else None
+         snap.lineage = pt.lineage
+         snap.ids = ids
++        snap._ids = arr                          # kept_ids/kept_hash/known_key read the point's int64 arrays (never
++        if keyed is not None:                    # written in place) instead of converting the lists again at admit
++            snap.key_array = pt.ids
+         snap.pending, snap.mtp_len, snap.rows, snap.nbytes = None, -1, None, 0
+         snap.kid = self.next_kid
+         self.next_kid += 1

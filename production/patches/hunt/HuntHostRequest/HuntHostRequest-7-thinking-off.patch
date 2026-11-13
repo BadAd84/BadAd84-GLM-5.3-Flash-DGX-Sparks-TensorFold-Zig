@@ -1,0 +1,14 @@
+--- tensorfold/families/glm5_next/prompts.py	2026-10-30 07:33:55.490086600 +0000
++++ tensorfold/families/glm5_next/prompts.py	2026-10-30 07:33:55.491591900 +0000
+@@ -114,7 +114,10 @@
+     """The checkpoint text as the thinking-off template renders it: no effort line, an empty think block."""
+ 
+     text = text.replace(EFFORT_LINE, "", 1)
+-    return text + "</think>" if text.endswith(OPENED) else text
++    if text.endswith(OPENED):
++        # (OTS) ``+=`` on the only reference grows the string in place: one copy of a ~2.4M-character prompt, not two
++        text += "</think>"
++    return text
+ 
+ 
+ class GlmTokenizer:

@@ -1,0 +1,241 @@
+diff -ruN a/tensorfold/families/glm5_next/cuda/engine.py b/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 02:24:13.199069400 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 03:10:27.863751600 +0000
+@@ -950,8 +950,11 @@
+         # all-gather)
+         self.solo = bool(graphs) and solo_graphs(parallel)
+         from .dflash2_multi import DRAFT_SKIP                 # TF_GLM_DRAFT_SKIP: every rank's DFlash2 rings alike
++        from .forward import prompt_overlap                   # PrefillLeftovers-3: TF_GLM_PROMPT_OVERLAP's blocks
++                                                              # (one all-gather each under the indexer shard)
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+-                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(DRAFT_SKIP)] + \
++                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(DRAFT_SKIP),
++                       prompt_overlap()] + \
+             lay.owner_words(cfg.layers)                       # OTS 0105: TF_GLM_EXPERT_ROTATE
+         rows = self._gather_ints(mine + [spare >> 20])
+         odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+@@ -963,7 +966,8 @@
+                                "TF_GLM_MULTI_VERIFY, TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE / _WINDOW, "
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+-                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_DRAFT_SKIP): "
++                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_DRAFT_SKIP, "
++                               "TF_GLM_PROMPT_OVERLAP): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")
+diff -ruN a/tensorfold/families/glm5_next/cuda/forward.py b/tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 02:24:13.218894000 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 03:10:08.352610000 +0000
+@@ -710,6 +710,91 @@
+     return min(R, max(0, sparse.SPARSE_FROM - host_pos))
+ 
+ 
++# TF_GLM_PROMPT_OVERLAP (PrefillLeftovers-3): a prompt piece's sparse rows in blocks, the token selection of block j + 1
++# (indexer scoring + selection, and with TF_GLM_INDEXER_SHARD=prefill its all-gather: tensor-pipe-bound) on a side
++# stream beside the sparse attention of block j (sparse_onepass: DRAM-bound) on the current one. The same kernels on
++# the same rows: a row's tokens are its own (the piece's NP, its own position) and onepass's rows are independent, so
++# the same bits. 0 (default): off; 1: blocks of OVERLAP_ROWS; N (a multiple of 512): blocks of N rows. Every rank
++# must use the same blocks (each block is one all-gather under the shard): the engine checks the ranks agree.
++OVERLAP_ROWS = 1024
++
++
++def prompt_overlap(value: str | None = None) -> int:
++    """TF_GLM_PROMPT_OVERLAP's block rows (0: off)."""
++    import os
++
++    value = (os.environ.get("TF_GLM_PROMPT_OVERLAP", "") if value is None else value).strip() or "0"
++    rows = OVERLAP_ROWS if value == "1" else int(value) if value.isdecimal() else -1
++    if rows < 0 or (rows and rows % sparse.SELECT_ROWS):
++        raise ValueError(f"TF_GLM_PROMPT_OVERLAP: 0, 1 or rows a block (a multiple of {sparse.SELECT_ROWS}), "
++                         f"not {value!r}")
++    return rows
++
++
++_OVERLAP = prompt_overlap()
++_OVERLAP_STREAMS: dict = {}
++
++
++def overlap_blocks(R: int, rows: int | None = None) -> tuple:
++    """A piece's row blocks [(s0, s1), ...] for TF_GLM_PROMPT_OVERLAP, () when off or the piece is one block."""
++    rows = _OVERLAP if rows is None else rows
++    if not rows or R <= rows:
++        return ()
++    return tuple((s, min(R, s + rows)) for s in range(0, R, rows))
++
++
++def _overlap_stream(dev) -> torch.cuda.Stream:
++    s = _OVERLAP_STREAMS.get(dev)
++    if s is None:
++        s = _OVERLAP_STREAMS[dev] = torch.cuda.Stream(device=dev)
++    return s
++
++
++def _select_attend_blocks(w: Weights, b: Buffers, rs: slice, R: int, lc: torch.Tensor, pk: torch.Tensor,
++                          host_pos: int, pos_dev: torch.Tensor, qa: torch.Tensor, ol: torch.Tensor, scale: float,
++                          shard_sel: bool, blocks: tuple) -> None:
++    """``dsa_rows``' token selection and sparse attention of a piece's rows (every row sparse) in ``blocks``: the
++    selection of every block, in order, on the side stream (after the current stream's work so far, and after the row
++    split's side stream, so no two streams run collectives at once), the sparse attention of block j on the current
++    stream once block j's selection is done. The current stream ends after every selection (it waits on the last
++    block's event), so nothing after this call sees the side stream running, and the scratch below, allocated on the
++    current stream before the side stream uses it, is freed only after it is done with."""
++
++    c = w.cfg
++    dev = qa.device
++    qi, wts = b.qi[rs], b.ikr[rs, c.index_dim:]
++    np_max = pk.shape[0] - 2
++    NP = sparse.pool_count(host_pos, R, np_max)
++    B = min(R, sparse.SELECT_ROWS)
++    buf = torch.empty((B * sparse.pool_bucket(host_pos, R, np_max),), dtype=torch.float32, device=dev)
++    cand = torch.empty((B * 2 * sparse.prompt_tile(NP)[0],), dtype=torch.int32, device=dev)
++    tokens = torch.empty((R, sparse.TOKENS), dtype=torch.int32, device=dev)
++    counts = torch.empty((R,), dtype=torch.int32, device=dev)
++    main = torch.cuda.current_stream(dev)
++    side = _overlap_stream(dev)
++    side.wait_stream(main)
++    split = _side_stream(b)
++    if split is not None:
++        side.wait_stream(split)
++    done = []
++    with torch.cuda.stream(side):
++        for s0, s1 in blocks:
++            with prof.timed("dsa: select tokens"):
++                if shard_sel:
++                    indexer_shard.prompt_shard_rows(qi, wts, pk, host_pos, R, np_max, pos_dev, w.comm, s0, s1,
++                                                    tokens, counts, buf, cand)
++                else:
++                    sparse.select_prompt_rows(qi, wts, pk, host_pos, R, np_max, pos_dev, s0, s1, tokens, counts,
++                                              buf, cand)
++            ev = torch.cuda.Event()
++            ev.record(side)
++            done.append(ev)
++    for (s0, s1), ev in zip(blocks, done):
++        main.wait_event(ev)
++        with prof.timed("dsa: sparse attention"):
++            latent.sparse_onepass(qa[s0:s1], lc, tokens[s0:s1], counts[s0:s1], ol[s0:s1], scale)
++
++
+ def dense_attention(qa: torch.Tensor, lc: torch.Tensor, pos_dev: torch.Tensor, s, *, scale: float, nch: int,
+                     out: torch.Tensor, hb: int, starts: torch.Tensor | None = None) -> torch.Tensor:
+     """``latent.attention`` of qa's rows in blocks of the scratch's ``part_rows`` (block i's queries at device
+@@ -882,21 +967,28 @@
+     if sparse_rows:
+         with prof.timed("dsa: select tokens"):
+             mm(b, b.qr[rs], ix.qb, b.xs_qr[rs], b.qi[rs])
+-            if (indexer_shard.prefill_on() and b.prefill and sparse_np is None and w.comm is not None
+-                    and R >= sparse.PROMPT_ROWS):
+-                # OTS draft (ShardMimo): the piece's rows sharded over the ranks (each scores its own share with
+-                # sparse._prompt_rank_pools), the pools all-gathered, then _tokens over every row - the same
+-                # bits as the _select_prompt above (per-row bits unchanged)
+-                tokens, counts = indexer_shard.prompt_shard(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
+-                                                   pk.shape[0] - 2, pos_dev, w.comm)
+-            else:
+-                tokens, counts = sparse.select_tokens(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
+-                                                      pk.shape[0] - 2, pos_dev, bucket=sparse_np)
+-        with prof.timed("dsa: sparse attention"):
+-            if b.prefill and latent.SPARSE_ONEPASS:     # prompt rows: one pass a row, no partials (their own bits)
+-                latent.sparse_onepass(qa, lc, tokens, counts, ol, scale)
+-            else:
+-                latent.sparse_attention(qa, lc, tokens, counts, ol, scale)
++        shard_sel = (indexer_shard.prefill_on() and b.prefill and sparse_np is None and w.comm is not None
++                     and R >= sparse.PROMPT_ROWS)
++        blocks = overlap_blocks(R) if (b.prefill and all_sparse and sparse_np is None and host_pos is not None
++                                       and latent.SPARSE_ONEPASS and R >= sparse.PROMPT_ROWS) else ()
++        if blocks:
++            _select_attend_blocks(w, b, rs, R, lc, pk, host_pos, pos_dev, qa, ol, scale, shard_sel, blocks)
++        else:
++            with prof.timed("dsa: select tokens"):
++                if shard_sel:
++                    # OTS draft (ShardMimo): the piece's rows sharded over the ranks (each scores its own share with
++                    # sparse._prompt_rank_pools), the pools all-gathered, then _tokens over every row - the same
++                    # bits as the _select_prompt above (per-row bits unchanged)
++                    tokens, counts = indexer_shard.prompt_shard(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
++                                                                pk.shape[0] - 2, pos_dev, w.comm)
++                else:
++                    tokens, counts = sparse.select_tokens(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
++                                                          pk.shape[0] - 2, pos_dev, bucket=sparse_np)
++            with prof.timed("dsa: sparse attention"):
++                if b.prefill and latent.SPARSE_ONEPASS:     # prompt rows: one pass a row, no partials (their own bits)
++                    latent.sparse_onepass(qa, lc, tokens, counts, ol, scale)
++                else:
++                    latent.sparse_attention(qa, lc, tokens, counts, ol, scale)
+     with prof.timed("dsa: expand"):
+         return latent.expand_v(ol, a.absorb, b.vn[rs], prompt=b.prefill and latent.PROMPT_MMA).view(R, HL * c.v_dim)
+ 
+diff -ruN a/tensorfold/families/glm5_next/cuda/indexer_shard.py b/tensorfold/families/glm5_next/cuda/indexer_shard.py
+--- tensorfold/families/glm5_next/cuda/indexer_shard.py	2026-10-30 02:24:14.702946000 +0000
++++ tensorfold/families/glm5_next/cuda/indexer_shard.py	2026-10-30 03:08:51.987903100 +0000
+@@ -471,19 +471,31 @@
+     cap = sparse.prompt_tile(NP)[0]
+     buf = torch.empty((B * sparse.pool_bucket(pos, R, np_max),), dtype=torch.float32, device=dev)
+     cand = torch.empty((B * 2 * cap,), dtype=torch.int32, device=dev)
+-    step = -(-R // comm.world)                                # every rank sends step rows (the last padded)
+-    lo, hi = min(comm.rank * step, R), min((comm.rank + 1) * step, R)
+-    mine = torch.empty((step, TOPK_POOLS), dtype=torch.int32, device=dev)
+-    if hi - lo < step:                                        # the padded rows (never read after the gather)
+-        mine[hi - lo:].zero_()
+-    prefill_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand, out=mine[:hi - lo])
+-    pools = _all_gather(comm, mine).view(comm.world, step, TOPK_POOLS).reshape(-1, TOPK_POOLS)[:R]
+     tokens = torch.empty((R, TOKENS), dtype=torch.int32, device=dev)
+     counts = torch.empty((R,), dtype=torch.int32, device=dev)
+-    sparse._tokens[(R,)](pools, pos_dev, tokens, counts, W=TOKENS, K=TOPK_POOLS, PL=POOL, BLOCK=1024, num_warps=4)
++    prompt_shard_rows(qi, wts, pk, pos, R, np_max, pos_dev, comm, 0, R, tokens, counts, buf, cand)
+     return tokens, counts
+ 
+ 
++def prompt_shard_rows(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, comm, s0: int, s1: int, tokens, counts,
++                      buf, cand) -> None:
++    """prompt_shard over rows s0 .. s1 of the R-row piece only, into tokens[s0:s1] / counts[s0:s1]: this rank scores
++    and selects its share of those rows (contiguous slices of ceil((s1 - s0) / world), with the piece's NP, so each
++    row's pools are its own), one all-gather of the rows' pools, then _tokens over them at their positions. Every
++    rank must run the same blocks (PrefillLeftovers-3's TF_GLM_PROMPT_OVERLAP, agreed at start) in the same order."""
++    n = s1 - s0
++    step = -(-n // comm.world)                                # every rank sends step rows (the last padded)
++    lo, hi = s0 + min(comm.rank * step, n), s0 + min((comm.rank + 1) * step, n)
++    mine = torch.empty((step, TOPK_POOLS), dtype=torch.int32, device=qi.device)
++    if hi - lo < step:                                        # the padded rows (never read after the gather)
++        mine[hi - lo:].zero_()
++    prefill_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand, out=mine[:hi - lo])
++    pools = _all_gather(comm, mine).view(comm.world, step, TOPK_POOLS).reshape(-1, TOPK_POOLS)[:n]
++    at = pos_dev if s0 == 0 else pos_dev + s0
++    sparse._tokens[(n,)](pools, at, tokens[s0:s1], counts[s0:s1], W=tokens.shape[1], K=TOPK_POOLS, PL=POOL,
++                         BLOCK=1024, num_warps=4)
++
++
+ def seg_shard(qi, wts, pk, rows, sel, comm):
+     """seg_select_tokens over the ranks (the module docstring's decode pool shard): this rank's share
+     (seg_shard_rank), one gather of the pairs (4 KB a row a rank, rank blocks of R rows), the merge on every
+diff -ruN a/tensorfold/families/glm5_next/cuda/sparse.py b/tensorfold/families/glm5_next/cuda/sparse.py
+--- tensorfold/families/glm5_next/cuda/sparse.py	2026-10-30 02:24:14.877659800 +0000
++++ tensorfold/families/glm5_next/cuda/sparse.py	2026-10-30 03:08:24.668452900 +0000
+@@ -586,13 +586,26 @@
+     tokens = torch.empty((R, width), dtype=torch.int32, device=dev)
+     counts = torch.empty((R,), dtype=torch.int32, device=dev)
+     cand = torch.empty((B * 2 * prompt_tile(NP)[0],), dtype=torch.int32, device=dev)   # prompt_pools' candidates
+-    for a in range(0, R, B):
+-        n = min(B, R - a)
++    select_prompt_rows(qi, wts, pk, pos, R, np_max, pos_dev, 0, R, tokens, counts, buf, cand)
++    return tokens, counts
++
++
++def select_prompt_rows(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: int, R: int, np_max: int,
++                       pos_dev: torch.Tensor, s0: int, s1: int, tokens: torch.Tensor, counts: torch.Tensor,
++                       buf: torch.Tensor, cand: torch.Tensor) -> None:
++    """_select_prompt over rows s0 .. s1 of the R-row piece only, into tokens[s0:s1] / counts[s0:s1] (``buf`` /
++    ``cand``: _select_prompt's scratch): the piece's NP = pool_count(pos, R, np_max) and each row's own position,
++    so every row gets the tokens and count of the whole piece's call (PrefillLeftovers-3 selects a piece's rows in
++    blocks, each block's selection beside the previous block's sparse attention)."""
++
++    B = min(R, SELECT_ROWS)
++    width = tokens.shape[1]
++    for a in range(s0, s1, B):
++        n = min(B, s1 - a)
+         at = pos_dev if a == 0 else pos_dev + a
+         pools = _prompt_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, a, a + n, buf, cand)
+         _tokens[(n,)](pools, at, tokens[a:a + n], counts[a:a + n], W=width, K=TOPK_POOLS, PL=POOL, BLOCK=1024,
+                       num_warps=4)
+-    return tokens, counts
+ 
+ 
+ @triton.jit

@@ -1,0 +1,111 @@
+--- tensorfold/cuda/literal_tokens.py
++++ tensorfold/cuda/literal_tokens.py
+@@ -211,6 +211,13 @@
+             ids.extend(self.plain[part] if part in self.plain else next(encoded).ids)
+         return ids
+ 
++    def plain_end(self, text: str, end: int) -> int:
++        """(OTS) The first mask in ``text[:end]``, else ``end``: ``encode`` splits there, so before it ``encode`` gives
++        the tokenizer's own ids of that piece (a masked prompt continues an unmasked one's kept ids up to it)."""
++
++        found = self._split.search(text, 0, end) if self._split is not None else None
++        return end if found is None else found.start()
++
+ 
+ def _as_text(tok: Any, text: str, added_ids: set[int]) -> list[int] | None:
+     """The token's text as ordinary tokens: encoded in two pieces so the added token cannot match."""
+--- tensorfold/cuda/prompt_ids.py
++++ tensorfold/cuda/prompt_ids.py
+@@ -179,6 +179,47 @@
+         self.kept: list[_Kept] = []     # most recent first
+         self.lock = threading.Lock()
+         self.warned = False
++        # (OTS) another cache whose kept prompts this one may continue too (``borrow``), and where a text's ids here
++        # part from the tokenizer's plain encode, which that cache's are
++        self.donor: PromptIds | None = None
++        self.plain_end: Callable[[str, int], int] | None = None
++
++    def borrow(self, donor: "PromptIds | None", plain_end: Callable[[str, int], int]) -> None:
++        """(OTS) Continue a prompt from ``donor``'s kept prompts too, where none of this cache's own goes further:
++        ``donor`` keeps the same tokenizer's plain ids, and ``plain_end(text, end)`` is the first position before
++        ``end`` from which this cache's ``encode_fast`` of ``text`` is not the plain encode of ``text[:position]``
++        followed by its own encode of the rest (``end`` when there is none). GLM's masked prompts (patch 0116): a
++        conversation's first turn quoting a template token was encoded whole (~0.2 s at 200k tokens) though its
++        unmasked turns' ids were kept; its text before the first mask is now continued from them."""
++
++        self.donor, self.plain_end = donor, plain_end
++
++    def _lent(self, text: str, beat: int) -> tuple[_Kept, int] | None:
++        """(OTS) The donor's kept prompt and match index whose cut lies past ``beat`` and furthest into ``text``,
++        among those whose agreement with ``text`` ends before ``plain_end``: the plain ids before that cut are then
++        this cache's too. None if no such prompt."""
++
++        donor = self.donor
++        if donor is None:
++            return None
++        with donor.lock:
++            kept = list(donor.kept)
++        out = None
++        for e in kept:
++            # (a prompt that differs from ``text`` in the 64 characters up to beat + 1 agrees with it no further than
++            # that: passed without the full comparison, ~0.3 ms a prompt at 600k tokens, every other conversation's)
++            lo = max(0, beat - 63)
++            if len(e.text) <= beat + 1 or e.text[lo:beat + 2] != text[lo:beat + 2]:
++                continue
++            j = bisect.bisect_right(e.ends, self._common(e.text, text)) - 1
++            if j < 0 or e.starts[j] <= beat:
++                continue
++            if not e.text.isascii():    # (an ASCII text agrees with ``text`` only where ``text`` holds no mask)
++                j = bisect.bisect_right(e.ends, self.plain_end(text, e.ends[j])) - 1
++                if j < 0 or e.starts[j] <= beat:
++                    continue
++            out, beat = (e, j), e.starts[j]
++        return out
+ 
+     @classmethod
+     def make(cls, tok: Any, encode_fast: Callable[[str], list[int]]) -> "PromptIds | None":
+@@ -245,6 +286,10 @@
+             j = bisect.bisect_right(e.ends, common) - 1
+             if j >= 0 and (best is None or e.starts[j] > best.starts[j_best]):
+                 best, j_best, whole = e, j, common == len(e.text)
++        # (OTS) or a donor's kept prompt it continues further (``borrow``): never kept here itself
++        lent = self._lent(text, best.starts[j_best] if best is not None else -1)
++        if lent is not None:
++            best, j_best, whole = lent[0], lent[1], False
+         made = None
+         if best is not None:
+             cut, k = best.starts[j_best], best.at[j_best]
+@@ -279,7 +324,7 @@
+             # (one entry a conversation: the next request, or a retry of this one, reuses nearly as much from this);
+             # one it shares less with (another conversation's system prompt and tools, an edited history) stays
+             # beside it, as recent
+-            spent = best is None or whole or len(best.text) - best.starts[j_best] <= SLACK
++            spent = best is None or lent is not None or whole or len(best.text) - best.starts[j_best] <= SLACK
+             rest = [e for e in self.kept if e is not best]
+             self.kept = [made] + ([] if spent else [best]) + rest
+             del self.kept[self.entries:]
+--- tensorfold/cuda/server.py
++++ tensorfold/cuda/server.py
+@@ -312,7 +312,8 @@
+         (``prompt_ids.PromptIds``, OTS 0110). ``literal``: the family's LiteralTokens for a request it masked (patch
+         0116): the ids are ``literal.encode``'s, through a cache of their own (``literal_prompt_ids``). The same cut is
+         exact there: ``literal.encode`` encodes the text between masks piece by piece, the tokenizer splits each piece
+-        at its added tokens, and a cut falls only at an added token's start (a mask is one character, never cut)."""
++        at its added tokens, and a cut falls only at an added token's start (a mask is one character, never cut). (OTS:
++        that cache also continues the unmasked prompts' kept ids, before the text's first mask: ``PromptIds.borrow``.)"""
+ 
+         return _prompt_ids(self, text, special, literal, False)[:2]
+ 
+--- tensorfold/families/glm5_next/cuda/app.py
++++ tensorfold/families/glm5_next/cuda/app.py
+@@ -108,6 +108,10 @@
+         literal = self.literal
+         self.literal_prompt_ids = (PromptIds.make(self.tok, lambda text: literal.encode(self.tok, text))
+                                    if literal is not None else None)
++        # OTS: a conversation's first masked turn continues its unmasked turns' ids up to its first mask, not encoded
++        # whole (PromptIds.borrow)
++        if self.literal_prompt_ids is not None:
++            self.literal_prompt_ids.borrow(self.prompt_ids, literal.plain_end)
+         # OTS: TF_GLM_GRAMMAR_AT_LOAD=1 builds the structured-output compiler at load, not at the first request that
+         # asks for one (measured on a workstation: importing xgrammar ~11 s cold, the tokenizer's grammar info ~2.1 s,
+         # all before that request's first token). Off by default (unset or 0: built at the first structured request,

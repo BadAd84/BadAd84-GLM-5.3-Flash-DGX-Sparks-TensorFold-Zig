@@ -1,0 +1,52 @@
+# HuntUpstream-4: OTS ots0126 (kept branch point, lane KeptBase; ACCOUNT 'later') ported onto the synced tree: upstream
+# 0120 moved the fork rule, so the original's hunk 1 fails. A resumed kept state that another kept state extends on
+# another line is flagged shared, so a conversation whose turns all branch from one base keeps it. No spill-point mark
+# (upstream 0120 marks none for forks either). Test: test_kept_branch_point_sync.py (pool arm; the NVMe-tier checks
+# 2/3 and 6's tier half need the retired OTS tier). Apply: cd work/hunt/tree/.. && patch -p0 < this file
+diff -r a/tensorfold/families/glm5_next/cuda/multi.py b/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:23:28.317651700 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:23:28.320453400 +0000
+@@ -1553,6 +1553,15 @@
+                 hit.after = line
+             elif forks(after, line):
+                 hit.shared, hit.own = True, False
++            # OTS 0126, a branch point (Qwen patch 0027's ``branched``): another kept state extends this one on another
++            # line, a turn that went on from it before while this prompt goes on otherwise. ``after`` cannot tell when
++            # the prompt that wrote it ended within FORK_SPAN ids of it (a turn's own state at its grid point: every
++            # next turn goes on from it with its own reply and message) or when it came back from disk, which keeps
++            # no line. Unflagged, the turn's longer state in its extent makes it "superseded" again, cap_victim drops
++            # it before the next turn, and that turn prefills it whole (docs/notes/kept-state-eviction-hosttest-
++            # 2026-10-12.md 3.1). Flagged as a fork is (upstream 0120, from our ots0117).
++            if not getattr(hit, "shared", False) and self._branched(hit, line):
++                hit.shared, hit.own = True, False
+         # the conversation this stream belongs to: the chain it resumed from when that state is a turn's own; else the
+         # one whose own state it still repeats past that conversation's first reply (it rewound before its kept turns,
+         # or resumed from a shared prefix, from disk or from nothing: continued_chat); else a new one
+@@ -1663,6 +1672,27 @@
+         """The lane's slot's DFlash2 context."""
+         return self.drafts.contexts[lane.slot]
+ 
++    def _branched(self, hit, line) -> bool:
++        """Both ranks (OTS 0126): whether another kept state extends ``hit`` on a line other than ``line`` (the
++        resuming prompt's ids past it). Not a state with pictures: two pictures' states have the same ids, so equal ids
++        are no shared prefix there. Not a salted state, nor by a salted one: rank 1 knows no salt's value (OTS 0120), so
++        on ids alone the ranks could not tell a branch of one salt from another salt's prompt, and one salt's prompts
++        must not change how another's states are kept. The longer state's first ids are compared as OTS 0124's int64
++        arrays (no list copies on the admission path), and only once its ids past ``hit`` part from ``line``."""
++
++        if hit.images or getattr(hit, "salt", None) is not None:
++            return False
++        n = len(hit.ids)
++        mine = None
++        for c in self.kept:
++            if getattr(c, "salt", None) is not None or not forks(c.ids[n:n + FORK_SPAN], line):
++                continue
++            if mine is None:
++                mine = kept_ids(hit)
++            if np.array_equal(kept_ids(c)[:n], mine):
++                return True
++        return False
++
+     def _inner_ok(self, lane: Lane, n: int) -> bool:
+         """OTS 0121 (TF_GLM_ONE_CHUNK_WARM): whether the lane's kept point B (``lane.point`` < n) is taken inside the
+         prompt chunk that fills past it rather than at a chunk stop. B lies on the prompt grid (16 to 128, a multiple

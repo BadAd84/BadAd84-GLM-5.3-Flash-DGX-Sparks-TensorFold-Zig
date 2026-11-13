@@ -1,0 +1,94 @@
+# HuntDrafter-3b (lane HuntDrafter, 2026-10-30; -3 rebased to apply at the END of stack/all6.list): one candidate merge for every stream of a batched DFlash2 block pass.
+# MultiDrafter.candidates merged each asking stream's host rows with its own merge_candidates call (two torch.cat,
+# .numpy, two astype, lexsort, two take_along_axis, the vocabulary check, the projected rows' astype: ~0.05-0.11 ms a
+# stream of host time, on the critical path between the pass's readback and the verify launch; HuntRoundLoop's
+# round harness, real shapes: merge + chain ~0.28 ms a stream; GB10 nsys (DecNsysOpus) PROPOSE GPU idle 0.39 ms a
+# round at 4 streams). dflash2.merge_streams does each of those once over every stream's rows: every operation is per
+# row (the casts) or along a row (the sort by value then id), so each stream's arrays equal its own call's, bit for
+# bit; merge_candidates (the solo drafter) is merge_streams of one stream (one implementation). BadCandidates: the
+# first offending stream's rows within its depth, the reference's message; rows past a stream's depth are sorted and
+# never returned or checked, as before. Every rank runs it (followers propose too).
+# Workstation (test_merge_streams.py --bench, paired, 400 reps, 3 ranks x 16 x 7 rows): 1 stream 0.048 -> 0.048 ms
+# min (median 0.110 -> 0.107); 4 streams 0.195 -> 0.073 (0.488 -> 0.181); 8 streams 0.411 -> 0.115 (0.896 -> 0.256).
+# Expected on GB10: about -0.1..-0.3 ms a round at 4 streams, -0.3..-0.6 at 8 (round ~75 / ~105 ms: +0.15..0.6%).
+# The same change as HuntDrafter-3 on the code all6 leaves (DrafterLeftovers-2b added copy_taps to the import line -3
+# touched; the merge and candidates() bodies are otherwise unchanged by the stack).
+# Test: test_merge_streams.py <dir holding tensorfold/> (CPU) against stack/all6 as the reference: 1,342 stream merges
+# (ranks 1..3, 1..8 streams, mixed depths, tie-heavy logits, NaN / inf past the depths), BadCandidates parity, the
+# real MultiDrafter.candidates of both trees on a stand-in drafter (60 calls, one merge_streams each), the solo
+# merge_candidates. Mutants: mutants_3b.py (each must make the test fail).
+--- tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-30 08:18:35.575876600 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-30 08:18:56.819689500 +0000
+@@ -6,6 +6,7 @@
+ import sys
+ from dataclasses import dataclass
+ from pathlib import Path
++from typing import Sequence
+ 
+ import numpy as np
+ import torch
+@@ -269,19 +270,37 @@
+     """A block pass's host rows -> (ids [depth, k], logits, projected rows): ``g`` [ranks, depth, 2 * k] (each rank's
+     top-k values, then ids as fp32 bits), merged by value then id over the ranks; ``proj`` [depth, selector rank]."""
+ 
++    return merge_streams(g, proj, k, [g.shape[1]], vocab)[0]
++
++
++def merge_streams(g: torch.Tensor, proj: torch.Tensor, k: int, depths: Sequence[int],
++                  vocab: int | None = None) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
++    """``merge_candidates`` of S streams' rows in one pass (lane HuntDrafter): ``g`` [ranks, S * m, 2 * k] and
++    ``proj`` [S * m, selector rank], stream s at rows s * m .. (m = rows a stream), its first ``depths[s]`` rows
++    merged. Every operation is per row (the casts) or per row along it (the sort by value then id), so each
++    stream's arrays are the ones a call on its own rows returns; the casts, the sort and the vocabulary check run
++    once for all the rows instead of once a stream (a stream's rows past its depth are sorted and never returned)."""
++
++    S = len(depths)
++    m = g.shape[1] // S
+     values = torch.cat([g[r, :, :k] for r in range(g.shape[0])], dim=1).numpy().astype(np.float64)
+     tokens = torch.cat([g[r, :, k:].contiguous().view(torch.int32) for r in range(g.shape[0])],
+                        dim=1).numpy().astype(np.int64)
+-    if vocab is not None and tokens.size and (int(tokens.min()) < 0 or int(tokens.max()) >= vocab):
+-        bad = tokens[(tokens < 0) | (tokens >= vocab)]
+-        raise BadCandidates(f"{bad.size} of {tokens.size} candidate ids are outside the vocabulary of {vocab} "
+-                            f"(first {int(bad[0])} = 0x{int(bad[0]) & 0xFFFFFFFF:08x}, as a float "
+-                            f"{float(np.array([int(bad[0]) & 0xFFFFFFFF], dtype=np.uint32).view(np.float32)[0]):.4g})")
++    if vocab is not None:
++        for s, depth in enumerate(depths):        # the first stream whose rows hold an id outside the vocabulary
++            t = tokens[s * m:s * m + depth]
++            if t.size and (int(t.min()) < 0 or int(t.max()) >= vocab):
++                bad = t[(t < 0) | (t >= vocab)]
++                raise BadCandidates(f"{bad.size} of {t.size} candidate ids are outside the vocabulary of {vocab} "
++                                    f"(first {int(bad[0])} = 0x{int(bad[0]) & 0xFFFFFFFF:08x}, as a float "
++                                    f"{float(np.array([int(bad[0]) & 0xFFFFFFFF], dtype=np.uint32).view(np.float32)[0]):.4g})")
+     if g.shape[0] > 1:
+         order = np.lexsort((tokens, -values), axis=-1)[:, :k]
+         values = np.take_along_axis(values, order, axis=1)
+         tokens = np.take_along_axis(tokens, order, axis=1)
+-    return tokens, values, proj.numpy().astype(np.float64)          # astype copies: nothing keeps the host buffer
++    rows = proj[:S * m].numpy().astype(np.float64)                 # astype copies: nothing keeps the host buffer
++    return [(tokens[s * m:s * m + depth], values[s * m:s * m + depth], rows[s * m:s * m + depth])
++            for s, depth in enumerate(depths)]
+ 
+ 
+ def read_mask_embedding(path: Path, mask_id: int, dim: int) -> torch.Tensor | None:
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-30 08:18:35.594465600 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-30 08:18:56.820685700 +0000
+@@ -34,7 +34,7 @@
+ from tensorfold.engine.exact_sampling import Sampling
+ 
+ from . import glue
+-from .dflash2 import NO_LIMIT, BadCandidates, Drafter, _dconv, _mm, copy_taps, merge_candidates, ring_skip
++from .dflash2 import NO_LIMIT, BadCandidates, Drafter, _dconv, _mm, copy_taps, merge_streams, ring_skip
+ 
+ 
+ @triton.jit
+@@ -524,8 +524,7 @@
+             g_all = self.cand_host[:d.gathered * S * m * 2 * k].view(d.gathered, S * m, 2 * k)
+             p_all = self.cand_host[self.cand_n:].view(St * m, -1)
+             try:
+-                return [merge_candidates(g_all[:, s * m:s * m + depth], p_all[s * m:s * m + depth], k, vocab)
+-                        for s, (_, _, depth) in enumerate(reqs)]
++                return merge_streams(g_all, p_all, k, [depth for _, _, depth in reqs], vocab)
+             except BadCandidates as e:
+                 if attempt:
+                     raise

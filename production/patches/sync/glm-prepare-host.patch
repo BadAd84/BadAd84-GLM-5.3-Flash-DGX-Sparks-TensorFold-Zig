@@ -1,0 +1,211 @@
+# glm-prepare-host.patch (sync, 2026-10-29; no production counterpart): a chat request's preparation (GlmApp._prepare)
+# on the synced base had upstream costs production never had; they are cut with the same prompt ids:
+#  - the kept reasoning was walked twice: _messages_to_mask restores it before the literal mask (recipe 0116), then the
+#    template restored again and found nothing more (a filled step carries reasoning, which restore skips; an unfilled
+#    one has the same keys again, the conversation's hash leaving reasoning out). _messages_to_mask now returns
+#    app.Restored, which the template takes as it is; a masked copy is a plain list and is restored as before;
+#  - the literal mask scanned every string twice: for a mask character, then for guarded text through an alternation
+#    of the 35 guarded texts tried one by one. Now one walk (literal_tokens._strings) passes every string an earlier
+#    request showed holds nothing to mask (LiteralTokens._clean: an agent's turn sends its whole history again, so a
+#    dict lookup - the string's hash, then its characters compared - replaces both scans; at most CLEAN_CHARS
+#    characters, the oldest out first), matches guarded text through a prefix trie (literal_tokens._trie; _find stays
+#    the substitution's), and skips the mask-character scan for an ASCII string, which cannot hold one.
+# Measured on test_prompt_ids.py F's ~671k-token agent turn, each request a fresh JSON object as a server parses it
+# (workstation CPU, median of five): _prepare 83.4 -> 52.5 ms; production, which has neither cost, 51.9 ms.
+# Test: tests/host/test_prepare_once.py (restore once, the same render; the trie and _maybe against the alternation;
+# _collides against the class; _strings against _any_string; mask with the memory against a reference copy of the
+# code before the patch over 600 requests, the memory clean and bounded; _prepare's prompt ids with and without the
+# shortcuts); mutants: tests/host/mutants_prepare_once.py (10 of 10 killed). Applies after
+# glm-prestage-one-array.patch.
+--- tensorfold/families/glm5_next/cuda/app.py	2026-10-29 18:49:24.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/app.py	2026-10-29 20:22:49.001657500 +0000
+@@ -26,6 +26,15 @@
+     return salt
+ 
+ 
++class Restored(list):
++    """Messages the kept reasoning was put back into already (``GlmApp._messages_to_mask``, before the literal mask).
++    ``KeptReasoning.restore`` over them again finds nothing more: a step it filled carries reasoning now, which it
++    skips, and a step it could not fill has the same keys again (the conversation's hash leaves reasoning out). So the
++    template takes them as they are instead of walking the conversation a second time (at 670k tokens that walk is
++    ~10 ms of the request's preparation). The mask hands back this same list when it changes nothing; a masked copy is
++    a plain list and is restored as before."""
++
++
+ class ThinkingOffTemplate:
+     """The checkpoint's chat template, rendered as GLM-5.3's thinking-off template renders it when thinking is off
+     (``prompts.thinking_off``, as the Mac's tokenizer renders it), an agent's history made renderable first
+@@ -39,7 +48,7 @@
+         self.clear_thinking = clear_thinking
+ 
+     def render(self, messages, *, tools, enable_thinking, extra=None, allow_images: bool = False) -> str:
+-        if self.kept is not None:
++        if self.kept is not None and not isinstance(messages, Restored):
+             messages = self.kept.restore(messages)
+         # earlier turns keep their reasoning unless the request says otherwise, as in zai-org's current template
+         extra = {"clear_thinking": self.clear_thinking, **(extra or {})}
+@@ -97,10 +106,13 @@
+     def _messages_to_mask(self, messages: Any) -> Any:
+         """The kept reasoning put back before the messages are masked (patch 0116): found by the messages as sent
+         (``remember`` keyed them so), and masked like reasoning a client sends back. The template's own ``restore``
+-        is then left only the steps found nowhere."""
++        is then left only the steps found nowhere: none, so it takes these as they are (``Restored``) unless the mask
++        changed them."""
+ 
+         kept = getattr(self.template, "kept", None)
+-        return kept.restore(messages) if kept is not None else messages
++        if kept is None or not isinstance(messages, list):
++            return messages
++        return Restored(kept.restore(messages))
+ 
+     def _check_fields(self, body: Any) -> str | None:
+         try:                        # OTS 0120: a malformed cache_salt is refused before a stream's headers go out
+--- tensorfold/cuda/literal_tokens.py	2026-10-29 18:49:24.000000000 +0000
++++ tensorfold/cuda/literal_tokens.py	2026-10-29 20:38:52.950475500 +0000
+@@ -21,11 +21,14 @@
+ import json
+ import os
+ import re
++import threading
+ from typing import Any
+ 
+ # Kept as a token even inside a user's text: GLM reads "/nothink" in a user turn as its no-thinking switch.
+ KEEP = frozenset({"/nothink"})
+ _BASE = 0xE000                      # Unicode private use area: one character per guarded token
++# OTS: characters of the strings the mask remembers as holding nothing to mask (``LiteralTokens._clean``)
++CLEAN_CHARS = 32 << 20
+ 
+ 
+ class LiteralTokens:
+@@ -49,6 +52,17 @@
+         # OTS: the masks' private-use range as one character class. _collides reads every string of every chat request;
+         # as a Python loop over the characters it cost ~50 ms at ~600k tokens (1.4M characters), the regex ~2 ms.
+         self._coll = re.compile(f"[{chr(_BASE)}-{chr(_BASE + len(self.plain) - 1)}]") if self.plain else None
++        # OTS: whether a string holds guarded text at all (``_maybe``) through the texts as a prefix trie, which the
++        # regex engine walks once from each '<' or '[': the same strings match as through ``_find``'s alternation of 35
++        # texts tried one by one (13 -> 7 ms over a ~670k-token agent conversation). ``_find`` stays the substitution's.
++        self._any_text = re.compile(_trie(self._mask_of)) if self._mask_of else None
++        # OTS: strings of earlier requests that held no mask character, no guarded text and no "\u" escape. An agent's
++        # turn sends its whole history again, as new string objects: a string equal to a remembered one is passed by a
++        # dict lookup (its hash, then its characters compared) instead of both scans (~13 -> ~3 ms at ~670k tokens).
++        # At most CLEAN_CHARS characters, the oldest out first.
++        self._clean: dict[str, None] = {}
++        self._clean_chars = 0
++        self._clean_lock = threading.Lock()
+ 
+     @classmethod
+     def from_env(cls, tok: Any) -> "LiteralTokens | None":
+@@ -69,10 +83,20 @@
+ 
+         if self._find is None or not isinstance(messages, list):
+             return messages, tools, False
+-        request = [messages, tools]
+-        if _any_string(request, self._collides):         # a private-use character of ours already in the request
+-            return messages, tools, False
+-        if not _any_string(request, self._maybe):
++        # (OTS: one pass over the request's strings, each remembered clean one passed: a mask character anywhere
++        # leaves the request unmasked, as the scan for one did; no guarded text or escape anywhere leaves it unmasked)
++        clean, fresh, maybe = self._clean, [], False
++        for text in _strings([messages, tools]):
++            if text in clean:
++                continue
++            if self._collides(text):                     # a private-use character of ours already in the request
++                return messages, tools, False
++            if self._maybe(text):
++                maybe = True
++            else:
++                fresh.append(text)
++        self._remember(fresh)
++        if not maybe:
+             return messages, tools, False
+         out = [[self._message(m) if isinstance(m, dict) else m for m in messages],
+                self._sub(tools) if tools is not None else None]
+@@ -82,10 +106,26 @@
+             return messages, tools, False
+         return out[0], out[1], True
+ 
++    def _remember(self, texts: list[str]) -> None:
++        """(OTS) ``texts`` hold nothing to mask: kept for later requests, at most CLEAN_CHARS characters."""
++
++        if not texts:
++            return
++        with self._clean_lock:
++            clean = self._clean
++            for text in texts:
++                if text not in clean:
++                    clean[text] = None
++                    self._clean_chars += len(text)
++            while self._clean_chars > CLEAN_CHARS and clean:
++                old = next(iter(clean))
++                del clean[old]
++                self._clean_chars -= len(old)
++
+     def _maybe(self, text: str) -> bool:
+         """Guarded text, or a JSON escape that may decode to some (in a call's arguments)."""
+ 
+-        return bool(self._find.search(text)) or "\\u" in text
++        return bool(self._any_text.search(text)) or "\\u" in text
+ 
+     def _message(self, message: dict[str, Any]) -> dict[str, Any]:
+         out = dict(message)
+@@ -135,7 +175,8 @@
+         return value
+ 
+     def _collides(self, text: str) -> bool:
+-        return self._coll is not None and self._coll.search(text) is not None
++        # (OTS: an ASCII string holds no private-use character: no scan)
++        return self._coll is not None and not text.isascii() and self._coll.search(text) is not None
+ 
+     # -- encoding ----------------------------------------------------------------------------------------------------
+ 
+@@ -165,6 +206,26 @@
+     return None
+ 
+ 
++def _trie(words) -> str:
++    """A regex matching exactly ``words`` (literal texts), as a prefix trie: one alternation a branching point."""
++
++    root: dict = {}
++    for w in words:
++        node = root
++        for ch in w:
++            node = node.setdefault(ch, {})
++        node[""] = {}
++
++    def build(node: dict) -> str:
++        alts = [re.escape(ch) + build(sub) for ch, sub in sorted(node.items()) if ch]
++        if not alts:
++            return ""
++        body = alts[0] if len(alts) == 1 and "" not in node else "(?:" + "|".join(alts) + ")"
++        return body + ("?" if "" in node else "")
++
++    return build(root)
++
++
+ def _any_string(value: Any, test) -> bool:
+     if isinstance(value, str):
+         return bool(test(value))
+@@ -175,6 +236,23 @@
+     return False
+ 
+ 
++def _strings(value: Any):
++    """(OTS) Every string ``_any_string`` would test in ``value``, in its order: list items, dict keys and values."""
++
++    stack = [value]
++    while stack:
++        v = stack.pop()
++        if isinstance(v, str):
++            yield v
++        elif isinstance(v, list):
++            stack.extend(reversed(v))
++        elif isinstance(v, dict):
++            for k, x in reversed(list(v.items())):
++                stack.append(x)
++                stack.append(k)
++
++
++
+ def _flat_text(content: Any) -> str:
+     if isinstance(content, str):
+         return content

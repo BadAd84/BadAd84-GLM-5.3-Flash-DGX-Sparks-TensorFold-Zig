@@ -1,0 +1,186 @@
+--- tensorfold/cuda/spill.py
++++ tensorfold/cuda/spill.py
+@@ -28,6 +28,7 @@
+ 
+ from __future__ import annotations
+ 
++import array
+ import contextlib
+ import dataclasses
+ import errno
+@@ -234,11 +235,36 @@
+     return digest.hexdigest()[:16]
+ 
+ 
+-def ids_key(ids: Sequence[int]) -> tuple[int, int]:
+-    h = hashlib.sha1(np.asarray(ids, dtype=np.int64).tobytes()).digest()
++def int64s(ids: Sequence[int]) -> np.ndarray:
++    """``np.asarray(ids, dtype=np.int64)``, the same values: an array as it is; a list of ints through ``array.array``
++    (~20 against ~27 ms at 772k ids on the workstation), anything else (or a list it refuses) through numpy."""
++
++    if type(ids) is list:
++        try:
++            return np.frombuffer(array.array("q", ids), dtype=np.int64)
++        except (TypeError, OverflowError):
++            pass
++    return np.asarray(ids, dtype=np.int64)
++
++
++def _arr_key(a: np.ndarray) -> tuple[int, int]:
++    h = hashlib.sha1(a.tobytes()).digest()
+     return int.from_bytes(h[0:4], "big", signed=True), int.from_bytes(h[4:8], "big", signed=True)
+ 
+ 
++def ids_key(ids: Sequence[int]) -> tuple[int, int]:
++    return _arr_key(int64s(ids))
++
++
++def _ids_json(ids: Sequence[int], arr: np.ndarray | None = None) -> str:
++    """``json.dumps([int(t) for t in ids])``, the same text: a list of plain ints dumped as it is, anything else as its
++    int64 values (``arr``, if made already). ~70 against ~110 ms at 772k ids on the workstation."""
++
++    if type(ids) is list and set(map(type, ids)) <= {int}:
++        return json.dumps(ids)
++    return json.dumps((int64s(ids) if arr is None else arr).tolist())
++
++
+ def key_name(key: tuple[int, int], n: int) -> str:
+     return f"{key[0] & 0xffffffff:08x}{key[1] & 0xffffffff:08x}_{n}"
+ 
+@@ -726,7 +752,7 @@
+              usable: Callable[[Entry], bool] | None = None) -> Entry | None:
+         """The longest stored prompt that ``prompt`` extends (or equals, when its head row was stored)."""
+ 
+-        arr = np.asarray(prompt, dtype=np.int64)
++        arr = int64s(prompt)
+         best = None
+         with self.lock:
+             entries = list(self.index.values())
+@@ -977,16 +1003,21 @@
+     def save(self, ids: Sequence[int], obj: Any = None, rows: Sequence[tuple[str, torch.Tensor]] = (), *,
+              skip: Sequence[str] = (), materialize: Callable[[Any], None] | None = None, head: bool = False,
+              meta: dict | None = None,
+-             tokens: Sequence[int] | None = None, keep: frozenset = frozenset()) -> Job | None:
++             tokens: Sequence[int] | None = None, keep: frozenset = frozenset(),
++             key: tuple[int, int] | None = None) -> Job | None:
+         """Every rank, in the same order: queue prompt ``ids``'s state (``obj``'s fields, see ``encode``) and the
+         named ``rows`` (read back into caller views) for writing; one all-gather agrees the size and the free-disk
+-        floor. Returns the job, or None when skipped (stored or on its way, too short, no room, no disk)."""
++        floor. Returns the job, or None when skipped (stored or on its way, too short, no room, no disk). ``key``:
++        ``ids_key(ids)``, if the caller holds it (else made here)."""
+ 
+         t0 = time.perf_counter()
+         n = len(ids)
+         if n < self.cfg.min_tokens:
+             return None
+-        key = ids_key(ids)
++        arr = None                                     # ids as int64, made once (the key, the header, the entry)
++        if key is None:
++            arr = int64s(ids)
++            key = _arr_key(arr)
+         with self.lock:
+             e = self.index.get(key)
+             if e is not None and e.n == n:             # stored or on its way (every rank alike)
+@@ -1000,8 +1031,8 @@
+                 raise ValueError(f"rows {name}: not contiguous")
+             items.append((f"rows.{name}", t))
+         info = {"format": FORMAT, "compat": self.compat, "model": self.model_id, "n": n,
+-                "tokens": json.dumps([int(t) for t in (ids if tokens is None else tokens)]),
+-                **({} if tokens is None else {"keyed": json.dumps([int(t) for t in ids])}),
++                "tokens": _ids_json(ids, arr) if tokens is None else _ids_json(tokens),
++                **({} if tokens is None else {"keyed": _ids_json(ids, arr)}),
+                 "layers": json.dumps([layer] if layer else []),
+                 "rows": json.dumps([nm for nm, _ in rows]), "head": "1" if head else "0",
+                 "saved": f"{time.time():.3f}",
+@@ -1025,7 +1056,7 @@
+         self._start()
+         self._throttle(size)
+         name = key_name(key, n)
+-        entry = Entry(key, n, name, size, ids=np.asarray(ids, dtype=np.int64), head=head,
++        entry = Entry(key, n, name, size, ids=int64s(ids) if arr is None else arr, head=head,
+                       fields=_plain([layer] if layer else []))
+         src = None
+         if torch.cuda.is_available():
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1445,6 +1445,22 @@
+                 return "no_draft_window"
+         return None
+ 
++    @staticmethod
++    def _spill_key(snap) -> tuple[int, int]:
++        """``spill.ids_key`` of a kept snapshot's ids, made once a snapshot: its ids list is replaced, never changed in
++        place, so the key is cached with the list it was made from (``_spill_key``, never stored: ``spill.encode`` leaves
++        ``_`` fields out). Before, every write, eviction and flush pick made it again for the snapshot and for each
++        longer one of its conversation (~25 ms at 772k ids on the workstation)."""
++
++        got = getattr(snap, "_spill_key", None)
++        if got is not None and got[0] is snap.ids:
++            return got[1]
++        from tensorfold.cuda.spill import ids_key
++
++        key = ids_key(snap.ids)
++        snap._spill_key = (snap.ids, key)
++        return key
++
+     def _superseded(self, snap) -> bool:
+         """A longer kept snapshot of the same conversation, stored or writable itself, holds this one's tokens (never
+         a shared-prefix state's: other conversations resume from it, not from the longer one)."""
+@@ -1453,7 +1469,7 @@
+             return False
+         n = len(snap.ids)
+         return any(c is not snap and len(c.ids) > n and c.ids[:n] == snap.ids
+-                   and (self.spill.has(c.ids) or self._unwritable(c) is None) for c in self.cache)
++                   and (self.spill.has(c.ids, self._spill_key(c)) or self._unwritable(c) is None) for c in self.cache)
+ 
+     def _spill_snap(self, snap, leaving: bool = False, keep: frozenset = frozenset()) -> None:
+         """Every rank alike: write a kept snapshot whose rows are at hand (saved, or still the live caches').
+@@ -1461,7 +1477,7 @@
+         entries no room is made from."""
+ 
+         n = len(snap.ids)
+-        if n < self.spill.cfg.min_tokens or self.spill.has(snap.ids):
++        if n < self.spill.cfg.min_tokens or self.spill.has(snap.ids, self._spill_key(snap)):
+             return
+         why = self._unwritable(snap) or ("superseded" if self._superseded(snap) else None)
+         if why is not None:
+@@ -1473,7 +1489,7 @@
+         viewed = False
+         try:
+             job = self.spill.save(snap.ids, snap, (), skip=self._SPILL_SKIP, materialize=self._spill_rows,
+-                                  head=getattr(snap, "head", None) is not None, keep=keep)
++                                  head=getattr(snap, "head", None) is not None, keep=keep, key=self._spill_key(snap))
+         except Exception as exc:                  # noqa: BLE001  (the prompt is only lost)
+             print(f"[tensorfold] spill rank {self.rank}: not written: {exc!r}", flush=True)
+             job = None
+@@ -1515,6 +1531,7 @@
+             self.spill.forget(key)
+             return None
+         snap.ids = list(ids)
++        snap._spill_key = (snap.ids, key)         # (the key it was read by: its ids')
+         snap.nbytes = sum(r.numel() * r.element_size() for r in (snap.rows or []))
+         self._remember(snap)
+         return snap
+@@ -1534,7 +1551,8 @@
+         picks, t = [], 0.0
+         for i in range(len(self.cache) - 1, -1, -1):
+             snap = self.cache[i]
+-            if (len(snap.ids) < self.spill.cfg.min_tokens or self.spill.has(snap.ids) or self._unwritable(snap)
++            if (len(snap.ids) < self.spill.cfg.min_tokens or self.spill.has(snap.ids, self._spill_key(snap))
++                    or self._unwritable(snap)
+                     or self._superseded(snap)):
+                 continue
+             nb = snapshot_bytes(snap) + (row_bytes(self.e, snap, self._kept_drafter()) if snap.rows is None else 0)
+@@ -1550,11 +1568,9 @@
+ 
+     def _do_flush(self, picks: list[int], budget: float) -> None:
+         t = time.perf_counter()
+-        from tensorfold.cuda.spill import ids_key
+-
+         done: list = []
+         for i in picks:                          # newest first: the flush's own earlier (newer) picks stay
+-            self._spill_snap(self.cache[i], keep=frozenset(ids_key(c.ids) for c in done))
++            self._spill_snap(self.cache[i], keep=frozenset(self._spill_key(c) for c in done))
+             done.append(self.cache[i])
+         ok = self.spill.drain(max(1.0, budget - (time.perf_counter() - t)))
+         print(f"[tensorfold] spill rank {self.rank}: flushed {len(picks)} kept prompts in "

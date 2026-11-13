@@ -1,0 +1,36 @@
+--- tensorfold/engine/call_gate.py
++++ tensorfold/engine/call_gate.py
+@@ -138,7 +138,23 @@
+ 
+ def generate_gated(generate: Callable[[list[int], int, Callable[[list[int]], bool]], Any], prompt: Sequence[int],
+                    max_tokens: int, gates: Sequence[Any], on_tokens: Callable[[list[int]], bool]) -> Any:
+-    """Decode with ``gates``: at a cut go on from the prompt, reply and fix, or (a ``replay`` gate) run the prompt again."""
++    """Decode with ``gates``: at a cut go on from the prompt, reply and fix, or (a ``replay`` gate) run the prompt again.
++
++    (OTS) ``prompt`` goes to ``generate`` as it is when it is a list (nothing on the path writes it; a copy of a
++    650k-token prompt is ~5 ms with the GIL held), and with no gates each round's tokens go straight to ``on_tokens``
++    (no gate can cut, so there is one run and nothing to track)."""
++
++    ids = prompt if type(prompt) is list else list(prompt)
++    if not gates:
++        stopped = [False]
++
++        def passed(new: list[int]) -> bool:
++            if stopped[0]:
++                return True                      # an engine that decodes on after a stop: the rest is not the reply
++            stopped[0] = bool(on_tokens(new))
++            return stopped[0]
++
++        return dict(generate(ids, max_tokens, passed) or {})
+ 
+     reply: list[int] = []
+     owed: list[int] = []                         # a replay's tokens already sent (a ``replay`` gate's cut)
+@@ -167,7 +183,7 @@
+         return state["stopped"] or state["cut"]
+ 
+     anchor = 0                                   # reply tokens in the current run's prompt
+-    runs = [generate(list(prompt), max_tokens, take)]
++    runs = [generate(ids, max_tokens, take)]
+     while state["cut"] and not state["stopped"] and len(reply) < max_tokens:
+         state["cut"] = False
+         if state["replay"]:                      # from the same prompt again: its reply comes back token for token

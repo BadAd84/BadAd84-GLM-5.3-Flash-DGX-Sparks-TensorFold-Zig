@@ -1,0 +1,122 @@
+# HuntMatmulExperts-3 (new, bit-identical): a decode window's 4-bit [gate | up] matmul whose K slices the stock launch
+# reduces through the partials buffer (qmm.cu: up to 64 rows, under 28 Mi values, not TF_GLM_QMM_CLUSTERS=1; no
+# DEC_TILES config) leaves the slices unreduced, and the SwiGLU sums them in slice order and rounds once to bf16
+# (reduce_kernel's arithmetic), then runs _swiglu line for line (glue._swiglu_sum). At TP=3 that is every MoE layer's
+# shared-expert gate/up (1536 or 1280 x 4096, K in 8 slices): one launch and the bf16 [gate | up] round trip less a
+# MoE layer, 42 a verify window; the dense MLP's gate/up (32 Mi, clustered) and prompt chunks are unchanged.
+# Bits: test_swiglu_sum.py (sm_120): act and its group sums equal the stock pair at 1536 / 1280 / 1024 x 4096, rows
+# 1-32, 48, 64, outputs NaN-prefilled; declines (nothing written) at 65 rows, 32 Mi, one slice, a DEC_TILES shape,
+# TF_GLM_SWIGLU_SUM=0. Laptop (RTX 5070, CUDA graph, 8 weight copies, interleaved medians): -0.6 to -1.4 us a call
+# (-6 to -15% of the pair) at 1-32 rows. GB10 estimate: ~1-2 us a MoE layer = 40-80 us a verify window (0.05-0.3%
+# of a 27-114 ms window), unmeasured. TF_GLM_SWIGLU_SUM=0: the stock pair.
+diff -r tensorfold.orig/families/glm5_next/cuda/forward.py tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold.orig/families/glm5_next/cuda/forward.py	2026-10-30 00:08:50.912247800 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 00:08:50.926921900 +0000
+@@ -965,6 +965,9 @@
+ 
+ def mlp_front(layer: LayerW, w: Weights, b: Buffers, lo: int, hi: int) -> None:
+     m = layer.mlp
++    if not b.prefill and qmm.matmul_swiglu(b.normed[lo:hi], m.gu, b.xs[lo:hi], b.act[lo:hi], b.xs_act[lo:hi],
++                                           w.cfg.limit, b.sk):
++        return
+     mm(b, b.normed[lo:hi], m.gu, b.xs[lo:hi], b.gu[lo:hi])
+     glue.swiglu(b.gu[lo:hi], b.act[lo:hi], b.xs_act[lo:hi], w.cfg.limit)
+ 
+@@ -982,8 +985,10 @@
+     s, c = layer.moe.shared, w.cfg
+     _, sgu, sact, sxs = b.moe_views(s.width)              # this layer's share of the shared expert (OTS 0105)
+     with prof.timed("moe: shared expert"):
+-        mm(b, b.normed[lo:hi], s.gu, b.xs[lo:hi], sgu[lo:hi])
+-        glue.swiglu(sgu[lo:hi], sact[lo:hi], sxs[lo:hi], c.limit)
++        if b.prefill or not qmm.matmul_swiglu(b.normed[lo:hi], s.gu, b.xs[lo:hi], sact[lo:hi], sxs[lo:hi], c.limit,
++                                              b.sk):
++            mm(b, b.normed[lo:hi], s.gu, b.xs[lo:hi], sgu[lo:hi])
++            glue.swiglu(sgu[lo:hi], sact[lo:hi], sxs[lo:hi], c.limit)
+         mm(b, sact[lo:hi], s.down, sxs[lo:hi], b.sy[lo:hi], f32=True)
+ 
+ 
+diff -r tensorfold.orig/families/glm5_next/cuda/glue.py tensorfold/families/glm5_next/cuda/glue.py
+--- tensorfold.orig/families/glm5_next/cuda/glue.py	2026-10-30 00:08:50.865874200 +0000
++++ tensorfold/families/glm5_next/cuda/glue.py	2026-10-30 00:08:50.878183000 +0000
+@@ -377,6 +377,39 @@
+ 
+ 
+ @triton.jit
++def _swiglu_sum(PART, OUT, XS, LIMIT, M, W: tl.constexpr, SK: tl.constexpr, BLOCK: tl.constexpr):
++    """``_swiglu`` on a 4-bit [gate | up] matmul's K-slice partials PART [SK, M, 2W] fp32: each value summed in slice
++    order and rounded to bf16 once (qmm.cu's reduce_kernel), then _swiglu's arithmetic line for line. The same bits as
++    reduce_kernel + _swiglu, without the bf16 [gate | up] round trip and one launch (HuntMatmulExperts-3)."""
++
++    r = tl.program_id(0)
++    cb = tl.program_id(1)
++    d = cb * BLOCK + tl.arange(0, BLOCK)
++    gs = tl.load(PART + r * (2 * W) + d)
++    us = tl.load(PART + r * (2 * W) + W + d)
++    for s in tl.static_range(1, SK):
++        gs = gs + tl.load(PART + (s * M + r) * (2 * W) + d)
++        us = us + tl.load(PART + (s * M + r) * (2 * W) + W + d)
++    g = tl.minimum(gs.to(tl.bfloat16).to(tl.float32), LIMIT)
++    u = us.to(tl.bfloat16).to(tl.float32)
++    u = tl.minimum(tl.maximum(u, -LIMIT), LIMIT)
++    a = ((g / (1.0 + tl.exp(-g))).to(tl.bfloat16).to(tl.float32) * u).to(tl.bfloat16)
++    tl.store(OUT + r * W + d, a)
++    s = tl.sum(tl.reshape(a.to(tl.float32), (BLOCK // 64, 64)), axis=1)
++    tl.store(XS + r * (W // 64) + cb * (BLOCK // 64) + tl.arange(0, BLOCK // 64), s)
++
++
++def swiglu_sum(part: torch.Tensor, out: torch.Tensor, xs: torch.Tensor, limit: float) -> None:
++    """``swiglu`` on ``part`` [SK, rows, 2 * width] fp32 (a matmul's unreduced K slices, ``qmm.matmul_swiglu``)."""
++
++    sk, rows, w2 = part.shape
++    w = out.shape[1]
++    block = math.gcd(512, w)
++    if block < 64 or w2 != 2 * w or out.shape[0] != rows or not part.is_contiguous():
++        raise ValueError(f"swiglu_sum: partials {tuple(part.shape)} for {tuple(out.shape)}")
++    _swiglu_sum[(rows, w // block)](part, out, xs, float(limit), rows, W=w, SK=sk, BLOCK=block, num_warps=4)
++
++@triton.jit
+ def _router(X, W, OUT, M, x_stride, D: tl.constexpr, NE: tl.constexpr, BM: tl.constexpr,
+             BLOCK_E: tl.constexpr, BK: tl.constexpr):
+     """OUT[m, e] = fp32 x[m] . w[e] (bf16 inputs, tensor cores, K in BK steps in order)."""
+diff -r tensorfold.orig/families/glm5_next/cuda/qmm.py tensorfold/families/glm5_next/cuda/qmm.py
+--- tensorfold.orig/families/glm5_next/cuda/qmm.py	2026-10-30 00:08:50.892485200 +0000
++++ tensorfold/families/glm5_next/cuda/qmm.py	2026-10-30 00:08:50.894529400 +0000
+@@ -347,6 +347,38 @@
+                          variant=dec_tile(q.n, q.k) if x.shape[0] <= 16 else None)
+ 
+ 
++# A decode window's [gate | up] 4-bit matmul whose K slices go through the partials buffer and reduce_kernel (qmm.cu's
++# rule: up to 64 rows, fewer than 28 Mi values, unless TF_GLM_QMM_CLUSTERS=1) leaves the slices unreduced and the
++# SwiGLU sums them (glue.swiglu_sum): the same bits, one launch and a bf16 round trip less a MoE layer
++# (HuntMatmulExperts-3; TF_GLM_SWIGLU_SUM=0: the separate reduce and SwiGLU).
++SWIGLU_SUM = __import__("os").environ.get("TF_GLM_SWIGLU_SUM", "1") != "0"
++_CLUSTER_ROWS, _CLUSTER_VALUES = 64, 28 << 20
++
++
++def matmul_swiglu(x: torch.Tensor, q, xs: torch.Tensor, act: torch.Tensor, act_xs: torch.Tensor, limit: float,
++                  part: torch.Tensor) -> bool:
++    """act, act_xs = swiglu(x @ q.T) when q is a Q4 [gate | up] whose decode K slices are reduced in the partials
++    buffer by the stock launch (then True); False (nothing run) for every other matmul, which takes ``matmul`` +
++    ``glue.swiglu`` (clustered slices, one slice, a DEC_TILES config: their launches stay as they are)."""
++
++    import os
++
++    m = x.shape[0]
++    if not SWIGLU_SUM or not isinstance(q, Q4) or m > _CLUSTER_ROWS or os.environ.get("TF_GLM_QMM_CLUSTERS") == "1":
++        return False
++    sk = split_k(q.n, q.k)
++    if sk == 1 or q.n * q.k >= _CLUSTER_VALUES or q.n % 2 or (m <= 16 and dec_tile(q.n, q.k) is not None) or \
++            part.numel() < sk * m * q.n:
++        return False
++    if x.shape[1] != q.k or x.stride(1) != 1 or x.dtype != torch.bfloat16:
++        raise ValueError(f"matmul_swiglu: x {tuple(x.shape)} {x.dtype} does not match K={q.k}")
++    from . import glue
++
++    slices = shared.matmul(x, q, xs, sk=sk, reduce=False, part=part)
++    glue.swiglu_sum(slices, act, act_xs, limit)
++    return True
++
++
+ # Decode rows (up to 16) of a Q4 matmul on another column tile / warp / stage count (``shared.qmm_cfg``): every
+ # output keeps its chain, so every choice gives the same bits. By per-rank shape (n, k), measured on GB10.
+ DEC_TILES: dict[tuple[int, int], int] = {(4096, 4096): 2, (2048, 4096): 2, (8192, 1536): 2, (4096, 8192): 4,

@@ -1,0 +1,31 @@
+diff -ruN a/tensorfold/families/glm5_next/cuda/forward.py b/tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 02:24:13.218894000 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 02:33:38.833630000 +0000
+@@ -67,7 +67,11 @@
+             width = kda_layers[0].kda.proj.n if kda_layers else 0
+             self.kproj = torch.zeros((1, rows, width), dtype=bf, device=dev)
+             self.kscratch = kda_mod.KDAScratch(rows, LL, dev)
+-        self.hin = torch.empty((rows, c.hidden), dtype=torch.bfloat16, device=dev)      # MTP input rows
++        # MTP rows (hin, me, mcat, mxs, mx; 10 D + D / 8 bytes a row, 41.5 KB at D 4,096): only ``mtp.mtp_stage`` /
++        # ``mtp_compute`` read them, on the engine's MTP buffers (``Engine.mbuf``, built only when ``w.mtp`` is
++        # loaded); without the head (DFlash2 drafts) no Buffers holds them (PrefillLeftovers-1)
++        mtp = w.mtp is not None
++        self.hin = torch.empty((rows, c.hidden), dtype=torch.bfloat16, device=dev) if mtp else None
+         self.zero_first = False          # MTP: this step starts at position 0 (its embedding is zeroed)
+         self.x = torch.empty((rows, S * D), dtype=bf, device=dev)
+         self.normed = torch.empty((rows, D), dtype=bf, device=dev)
+@@ -139,10 +143,10 @@
+         self.fxs = torch.empty((rows, D // 64), dtype=f32, device=dev)
+         self.logits = torch.empty((head_rows, w.head.n), dtype=bf, device=dev)
+         # MTP
+-        self.me = torch.empty((rows, D), dtype=bf, device=dev)
+-        self.mcat = torch.empty((rows, 2 * D), dtype=bf, device=dev)
+-        self.mxs = torch.empty((rows, 2 * D // 64), dtype=f32, device=dev)
+-        self.mx = torch.empty((rows, D), dtype=bf, device=dev)
++        self.me = torch.empty((rows, D), dtype=bf, device=dev) if mtp else None
++        self.mcat = torch.empty((rows, 2 * D), dtype=bf, device=dev) if mtp else None
++        self.mxs = torch.empty((rows, 2 * D // 64), dtype=f32, device=dev) if mtp else None
++        self.mx = torch.empty((rows, D), dtype=bf, device=dev) if mtp else None
+         self._parents: dict[int, torch.Tensor] = {}
+         # DFlash2 taps: the mean of the streams after chosen layers (``set_taps``), filled by every forward
+         self.taps: list[torch.Tensor] = []

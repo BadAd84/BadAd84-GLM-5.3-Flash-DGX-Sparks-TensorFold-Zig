@@ -1,0 +1,51 @@
+# WarmupGraphs-1 (lane WarmupGraphs, 2026-10-31): RoundGraphs-1's commit graphs (BatchedVerify.capture_commit, one per
+# DFlash2 update bucket: 0 and every bucket T with T - block < the window's rows) are captured through graphs.capture,
+# ONE eager run each (BootGaps-1), with its BootLeft-2 ordered barriers. RoundGraphs-1 landed with the engine's old
+# capture loop (two eager runs, then the capture) and BootGaps-1, made on a tree without it, converted every other
+# capture site but not this one. The body changes no host state and, on its capture tables, writes only the drafter's
+# trash rows and slot 0's position (saved and put back after the loop), so the second eager run left every launch the
+# capture records as the first did (test: graph dumps and commit replays equal the tree without BootGaps-1's). Boot
+# only; replies unchanged. Test: WarmupGraphs/test_one_warmup.py (GPU). Applies with patch -p0 at the end of all6t.
+--- tensorfold/families/glm5_next/cuda/graphs.py
++++ tensorfold/families/glm5_next/cuda/graphs.py
+@@ -15,10 +15,11 @@
+     workspaces, the caching allocator's blocks); none of the captured windows changes host state a later call reads
+     (positions, parities, extents and tables are device tensors or set by the caller before each capture), so a second
+     eager run left every launch the capture records as the first one did. Every capture site of the GLM engine takes
+-    this (one-stream graphs here, ``verify.BatchedVerify``, ``dflash2.Drafter``, ``dflash2_multi.MultiDrafter``); it
+-    was two eager runs a graph, ~44 ms each at boot (an eager window's RoCE gathers each wait in an NCCL barrier until
+-    ``RoceComm.settle``). The eager run's barriers are ordered on the stream (``roce.ordered_barriers``, lane BootLeft):
+-    every rank's GPU still meets the others in NCCL before each RoCE gather, without the host waiting for the GPU."""
++    this (one-stream graphs here, ``verify.BatchedVerify``'s window graphs and its commit graphs ``capture_commit``,
++    ``dflash2.Drafter``, ``dflash2_multi.MultiDrafter``); it was two eager runs a graph, ~44 ms each at boot (an eager
++    window's RoCE gathers each wait in an NCCL barrier until ``RoceComm.settle``). The eager run's barriers are ordered
++    on the stream (``roce.ordered_barriers``, lane BootLeft): every rank's GPU still meets the others in NCCL before
++    each RoCE gather, without the host waiting for the GPU."""
+ 
+     from tensorfold.cuda.roce import ordered_barriers
+ 
+--- tensorfold/families/glm5_next/cuda/verify.py
++++ tensorfold/families/glm5_next/cuda/verify.py
+@@ -429,6 +429,7 @@
+ 
+         from . import kda as kda_mod
+         from .forward import conv_shift_segments
++        from .graphs import capture                     # one eager run, then the capture (BootGaps-1)
+ 
+         if self.scratch is None or not torch.cuda.is_available():
+             return
+@@ -472,13 +473,7 @@
+         buckets = [0] + ([T for T in d.buckets if T - d.block < self.rows_max] if d is not None else [])
+         graphs: dict[int, torch.cuda.CUDAGraph] = {}
+         for T in buckets:
+-            for _ in range(2):
+-                body(T)
+-            torch.cuda.synchronize()
+-            g = torch.cuda.CUDAGraph()
+-            with torch.cuda.graph(g, pool=pool):
+-                body(T)
+-            graphs[T] = g
++            graphs[T] = capture(lambda: body(T), pool)
+         torch.cuda.synchronize()
+         e.slots.pos_dev.copy_(saved_pos)
+         if d is not None:

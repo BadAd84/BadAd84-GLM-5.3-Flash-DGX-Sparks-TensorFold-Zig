@@ -1,0 +1,183 @@
+--- tensorfold/cuda/sampling.py
++++ tensorfold/cuda/sampling.py
+@@ -10,7 +10,7 @@
+ import numpy as np
+ import torch
+ 
+-from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows, uniform
++from tensorfold.engine.exact_sampling import MARGIN, Sampling, _mix, choose_rows, uniform
+ 
+ MASS = 2.0 ** 40        # a token's share of the mass in fixed point: shard sums are exact, so ranks agree bit for bit
+ NUCLEUS = 1024          # candidates a rank reads for a top_k-off draw; a row they don't cover reads whole shards
+@@ -37,6 +37,73 @@
+     return choose_rows(values_np, ids_np, positions, sampling)
+ 
+ 
++def _uniform_seeded(seeds: np.ndarray, positions: np.ndarray, ids: np.ndarray) -> np.ndarray:
++    """``exact_sampling.uniform_rows`` with a seed a row: row r is ``uniform(seeds[r], positions[r], ids[r])``."""
++
++    with np.errstate(over="ignore"):
++        x = _mix(seeds + np.uint64(0x9E3779B97F4A7C15))[:, None]
++        x = _mix(x ^ (positions.astype(np.uint64)[:, None] * np.uint64(0xD1B54A32D192ED03)))
++        x = _mix(x ^ ids.astype(np.uint64))
++    return (x >> np.uint64(11)).astype(np.float64) * 2.0 ** -53 + 2.0 ** -54
++
++
++def _choose_seeded(values: np.ndarray, ids: np.ndarray, positions: np.ndarray, seeds: np.ndarray,
++                   s: Sampling) -> list[int]:
++    """``choose_rows`` for rows of several streams that share ``s``'s settings, each row keyed by its own seed."""
++
++    rows, width = ids.shape
++    order = np.lexsort((ids, -values), axis=-1)
++    k = max(1, min(int(s.top_k) if s.top_k else width, width))
++    ids = np.take_along_axis(ids, order, axis=-1)[:, :k]
++    scaled = np.take_along_axis(values, order, axis=-1)[:, :k].astype(np.float64) / max(float(s.temperature), 1e-6)
++    score = scaled - np.log(-np.log(_uniform_seeded(seeds, positions, ids)))
++    if 0.0 < s.top_p < 1.0:
++        probs = np.exp(scaled - scaled.max(axis=-1, keepdims=True))
++        probs /= probs.sum(axis=-1, keepdims=True)
++        keep = (np.cumsum(probs, axis=-1) < s.top_p).sum(axis=-1) + 1    # searchsorted(cumsum, top_p) + 1
++        score[np.arange(k)[None, :] >= keep[:, None]] = -np.inf
++    if s.min_p > 0.0:
++        score[scaled < scaled[:, :1] + s.min_log] = -np.inf               # ``choose``'s min_p prefix
++    return [int(t) for t in ids[np.arange(rows), np.argmax(score, axis=-1)]]
++
++
++def topk_host(host: torch.Tensor, layout: Sequence[tuple[int, int, int, int]], parts: Sequence[tuple],
++              out: list) -> None:
++    """The host half of a round's top-k (and greedy) sampling: ``host`` [world, words] float32 on the CPU, every
++    rank's packed candidates (each part's rows of n values, then n ids as float32 bits); ``layout`` [(part, rows, n,
++    first word)]; each part's tokens go to ``out[part]``. Row for row ``choose_rows``' arithmetic (greedy: the best
++    value, then the lowest id), with the ranks' columns read as one numpy view and the rows of every part with the
++    same settings drawn in one call, each keyed by its own stream's seed (the per-part loop's torch.cat, .numpy and
++    numpy calls a part were ~0.17 ms a part a round on the engine thread)."""
++
++    hn = host.numpy()
++    world = hn.shape[0]
++    groups: dict[tuple, list] = {}
++    for k, R, n, at in layout:
++        g = hn[:, at:at + R * 2 * n].reshape(world, R, 2 * n)
++        values = g[:, :, :n].transpose(1, 0, 2).reshape(R, world * n)
++        tokens = np.ascontiguousarray(g[:, :, n:]).view(np.int32).transpose(1, 0, 2).reshape(R, world * n) \
++            .astype(np.int64)
++        _, positions, sampling = parts[k]
++        if sampling is None or sampling.temperature <= 0:
++            order = np.lexsort((tokens, -values), axis=-1)
++            out[k] = [int(tokens[i, order[i, 0]]) for i in range(R)]
++            continue
++        key = (n, float(sampling.temperature), int(sampling.top_k), float(sampling.top_p), float(sampling.min_p))
++        groups.setdefault(key, []).append((k, values, tokens, positions, sampling.seed & 0xFFFFFFFFFFFFFFFF))
++    for members in groups.values():
++        sampling = parts[members[0][0]][2]
++        values = np.concatenate([m[1] for m in members]) if len(members) > 1 else members[0][1]
++        tokens = np.concatenate([m[2] for m in members]) if len(members) > 1 else members[0][2]
++        positions = np.concatenate([np.asarray(m[3], dtype=np.int64) for m in members])
++        seeds = np.concatenate([np.full(len(m[3]), m[4], dtype=np.uint64) for m in members])
++        drawn = _choose_seeded(values, tokens, positions, seeds, sampling)
++        at = 0
++        for k, _, _, rows, _ in members:
++            out[k] = drawn[at:at + len(rows)]
++            at += len(rows)
++
++
+ def sample_streams(logits: torch.Tensor, starts: Sequence[int], positions: Sequence[Sequence[int]],
+                    samplings: Sequence[Sampling | None]) -> list[list[int]]:
+     """``sample_rows`` for several streams, grouped by candidate count so each row gets its own stream's call."""
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -579,11 +579,11 @@
+     each alone: every top-k (and greedy) part's candidates in ONE all-gather, a nucleus part (top_k off) through the
+     shared nucleus rule (its own gathers), in part order on every rank."""
+ 
+-    from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank
+-    from tensorfold.engine.exact_sampling import MARGIN, choose_rows
++    from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank, topk_host
++    from tensorfold.engine.exact_sampling import MARGIN
+ 
+     out: list[list[int] | None] = [None] * len(parts)
+-    packed, layout = [], []
++    packed, layout, at = [], [], 0
+     for k, (logits, positions, sampling) in enumerate(parts):
+         greedy = sampling is None or sampling.temperature <= 0
+         if not greedy and not sampling.top_k:
+@@ -592,7 +592,8 @@
+         vals, ids = torch.topk(logits.float(), n, dim=-1)
+         ids = (ids + w.vocab_offset).to(torch.int32)
+         packed.append(torch.cat([vals, ids.view(torch.float32)], dim=1).reshape(-1))
+-        layout.append((k, logits.shape[0], n))
++        layout.append((k, logits.shape[0], n, at))
++        at += logits.shape[0] * 2 * n
+     if packed:
+         flat = torch.cat(packed) if len(packed) > 1 else packed[0]
+         if w.comm is None:
+@@ -601,19 +602,7 @@
+             got = torch.empty((w.world * flat.numel(),), dtype=torch.float32, device=flat.device)
+             w.comm.all_gather(flat.contiguous(), got)
+             host = got.view(w.world, -1).cpu()
+-        at = 0
+-        for k, R, n in layout:
+-            g = host[:, at:at + R * 2 * n].reshape(host.shape[0], R, 2 * n)
+-            at += R * 2 * n
+-            values = torch.cat([g[r, :, :n] for r in range(g.shape[0])], dim=1).numpy().astype(np.float32)
+-            tokens = torch.cat([g[r, :, n:].contiguous().view(torch.int32) for r in range(g.shape[0])],
+-                               dim=1).numpy().astype(np.int64)
+-            _, positions, sampling = parts[k]
+-            if sampling is None or sampling.temperature <= 0:
+-                order = np.lexsort((tokens, -values), axis=-1)
+-                out[k] = [int(tokens[i, order[i, 0]]) for i in range(R)]
+-            else:
+-                out[k] = choose_rows(values, tokens, positions, sampling)
++        topk_host(host, layout, parts, out)
+     for k, (logits, positions, sampling) in enumerate(parts):
+         if out[k] is None:
+             out[k] = nucleus_rows(logits, positions, sampling, offset=w.vocab_offset,
+--- tensorfold/families/glm5_next/cuda/multi_tune.py
++++ tensorfold/families/glm5_next/cuda/multi_tune.py
+@@ -148,8 +148,9 @@
+     ``NUCLEUS`` best (value, id, mass), its shard's mass and width. Row by row the arithmetic is ``nucleus_rows``' and
+     ``sample_rows``'; a nucleus part some row of which runs past the candidates reads whole shards on its own."""
+ 
+-    from tensorfold.cuda.sampling import MASS, NUCLEUS, WIDER, _draw, _shares, comm_gather, one_rank, union_cover
+-    from tensorfold.engine.exact_sampling import MARGIN, choose_rows
++    from tensorfold.cuda.sampling import (MASS, NUCLEUS, WIDER, _draw, _shares, comm_gather, one_rank, topk_host,
++                                          union_cover)
++    from tensorfold.engine.exact_sampling import MARGIN
+ 
+     gather = one_rank if w.comm is None else comm_gather(w.comm)
+     world = 1 if w.comm is None else w.world
+@@ -201,18 +202,8 @@
+         words2 = packed.contiguous().view(torch.float32).view(-1)
+         host2 = gather(words2).reshape(-1, words2.numel()).view(torch.int64).reshape(-1, rows, 3 * count + 2)
+         host2 = host2.cpu().numpy()
+-    host1 = got1.cpu()
+-    for k, R, n, at in topk:
+-        g = host1[:, at:at + R * 2 * n].reshape(host1.shape[0], R, 2 * n)
+-        values = torch.cat([g[r, :, :n] for r in range(g.shape[0])], dim=1).numpy().astype(np.float32)
+-        tokens = torch.cat([g[r, :, n:].contiguous().view(torch.int32) for r in range(g.shape[0])],
+-                           dim=1).numpy().astype(np.int64)
+-        _, positions, sampling = parts[k]
+-        if sampling is None or sampling.temperature <= 0:
+-            order = np.lexsort((tokens, -values), axis=-1)
+-            out[k] = [int(tokens[i, order[i, 0]]) for i in range(R)]
+-        else:
+-            out[k] = choose_rows(values, tokens, positions, sampling)
++    if topk:
++        topk_host(got1.cpu(), topk, parts, out)
+     if nucl:
+         r0 = 0
+         for k, scaled_k, _ in nucl:
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -99,8 +99,10 @@
+         else:
+             got = vote.gather(comm_gather(w.comm))(packed.view(-1))
+         g = got.reshape(w.world, R, 2 * k).cpu()
+-        values = torch.cat([g[r, :, :k] for r in range(w.world)], dim=1).numpy().astype(np.float32)
+-        tokens = torch.cat([g[r, :, k:].contiguous().view(torch.int32) for r in range(w.world)], dim=1).numpy()
++        # every rank's columns side by side, as one numpy view (the per-rank torch.cat and .numpy cost ~30 us a round)
++        h = g.numpy()
++        values = h[:, :, :k].transpose(1, 0, 2).reshape(R, w.world * k).astype(np.float32)
++        tokens = np.ascontiguousarray(h[:, :, k:]).view(np.int32).transpose(1, 0, 2).reshape(R, w.world * k)
+         tokens = tokens.astype(np.int64)
+     if greedy:
+         order = np.lexsort((tokens, -values), axis=-1)

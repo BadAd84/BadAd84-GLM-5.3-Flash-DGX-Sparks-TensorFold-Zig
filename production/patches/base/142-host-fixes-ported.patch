@@ -1,0 +1,609 @@
+diff -ruN -x '*.orig' -x __pycache__ port/src/tensorfold/cuda/prompt_ids.py stack/src/tensorfold/cuda/prompt_ids.py
+--- tensorfold/cuda/prompt_ids.py	1970-01-01 01:00:00.000000000 +0100
++++ tensorfold/cuda/prompt_ids.py	2026-10-29 12:34:54.508650691 +0000
+@@ -0,0 +1,256 @@
++"""A prompt's token ids from the ids of the last prompts it continues (OTS 0110): only the new text is tokenized.
++
++An agent's request is its previous request's prompt plus a reply and a tool result, and tokenizing all of it again took
++0.65 s at 592k tokens (rank 0's HTTP thread, every request, before any prefill), plus 60 ms for ``seed_for`` (with the
++GIL held). Here the last few prompts are kept with their ids, and a new prompt reuses the ids of the longest kept
++prefix up to an added token (``<|observation|>``, ``<|assistant|>``, ``<tool_call>`` ...), tokenizing only the text from
++there on: a few milliseconds.
++
++Why the ids are the same as a full encode's. HF ``tokenizers`` first finds the added tokens in the whole text (Aho-
++Corasick, leftmost-longest, non-overlapping), then normalizes, pre-tokenizes and runs the model on each piece between
++them separately; an added token's id is fixed. So where an added token starts in the text's own matching, the ids of
++the text are the ids of the text before it followed by the ids of the text from it. That holds when nothing else
++crosses a piece: no normalizer, added tokens without ``normalized`` / ``lstrip`` / ``rstrip`` / ``single_word``, a
++pre-tokenizer that treats each piece alike (``Split`` / ``ByteLevel`` without a prefix space: GLM-5.3's), no
++truncation, no BPE dropout; ``PromptIds.make`` checks the tokenizer's own JSON for each and keeps nothing otherwise.
++Two texts that agree up to L have the same matches up to a kept match at s, and that match too, when it ends by L and
++no added token holds another inside it (GLM-5.3's: a match at s is then decided by its own characters, and no match
++of the other text can start before s and cover it); with tokens that do hold others, when s + M <= L (M: the longest
++added token, in bytes; the matcher reads no further from s). The ids of the text before such an s are the kept ids
++before it.
++
++Where a kept prompt's added tokens start is found with ``re`` (the same leftmost-longest rule: the alternatives longest
++first) and checked against the tokenizer's own ids: the added-token ids among them, in order, must be exactly the
++matches found, else the prompt is not kept (and a tail that fails it is tokenized again in full).
++``seed_for``'s sha256 over the ids' decimal text is kept the same way, at every ``SUM_STEP`` tokens.
++
++``TF_GLM_PROMPT_IDS``: prompts kept (default 8, about one per conversation in flight; 0 turns this off).
++scripts/glm53/v110/tests/host: test_prompt_ids.py, mutants_0110.sh.
++"""
++
++from __future__ import annotations
++
++import bisect
++import hashlib
++import json
++import os
++import re
++import sys
++import threading
++from array import array
++from dataclasses import dataclass, field
++from typing import Any, Callable
++
++import numpy as np
++
++SUM_STEP = 16384        # tokens between kept sha256 states of ``seed_for``'s text (a new prompt hashes at most this
++                        # many of the kept ids again, plus its own)
++SLACK = 256             # a kept prompt whose text past the cut a newer prompt reuses is at most this long is dropped
++                        # for it (a dropped generation prompt, a turn retried: its tokens cost microseconds again)
++_SAFE_PRE = {"Split", "ByteLevel", "Digits", "Punctuation", "Whitespace", "WhitespaceSplit", "Sequence"}
++
++
++def _env_entries() -> int:
++    raw = os.environ.get("TF_GLM_PROMPT_IDS", "").strip()
++    if not raw:
++        return 8
++    try:
++        value = int(raw)
++    except ValueError:
++        raise ValueError(f"TF_GLM_PROMPT_IDS={raw!r}: expected a whole number") from None
++    if value < 0:
++        raise ValueError(f"TF_GLM_PROMPT_IDS={raw!r}: expected 0 or more")
++    return value
++
++
++def unsplittable(spec: dict[str, Any]) -> str | None:
++    """Why a tokenizer's ids may not split at its added tokens (its JSON as ``Tokenizer.to_str`` gives it), or None."""
++
++    if spec.get("normalizer") is not None:
++        return "it has a normalizer"
++    if spec.get("truncation") is not None or spec.get("padding") is not None:
++        return "it truncates or pads"
++    added = spec.get("added_tokens") or []
++    if not added:
++        return "it has no added tokens"
++    for t in added:
++        if t.get("normalized") or t.get("lstrip") or t.get("rstrip") or t.get("single_word") or not t.get("content"):
++            return f"added token {t.get('content')!r} is normalized, stripped or single-word"
++
++    def pre(p: Any) -> str | None:
++        if p is None:
++            return None
++        kind = p.get("type")
++        if kind not in _SAFE_PRE:
++            return f"pre-tokenizer {kind}"
++        if kind == "ByteLevel" and p.get("add_prefix_space"):
++            return "a ByteLevel pre-tokenizer adds a prefix space"
++        for inner in p.get("pretokenizers") or []:
++            problem = pre(inner)
++            if problem:
++                return problem
++        return None
++
++    problem = pre(spec.get("pre_tokenizer"))
++    if problem:
++        return problem
++    if (spec.get("model") or {}).get("dropout"):
++        return "its model drops merges at random"
++    return None
++
++
++def _feed(h: Any, ids: array, start: int, end: int) -> None:
++    """Feed ``h`` the decimal text of ``ids[start:end]`` as ``seed_for`` joins them (after ``ids[:start]``)."""
++
++    if end > start:
++        h.update(("," if start else "").encode() + ",".join(map(str, ids[start:end])).encode())
++
++
++@dataclass(slots=True)
++class _Kept:
++    text: str
++    ids: array                          # array("I"): 4 bytes a token (a list of ints holds ~36)
++    starts: list[int]                   # where each added token starts in ``text`` (as the tokenizer matched them)
++    ends: list[int]                     # how far another text must agree for it to split there too (rising)
++    at: list[int]                       # its index in ``ids``
++    sums: list[tuple[int, Any]] = field(default_factory=list)   # (n, sha256 of seed_for's text of ids[:n]), n % SUM_STEP == 0
++
++
++class PromptIds:
++    """The last ``entries`` prompts' ids, to tokenize a prompt that continues one of them from the last added token
++    they share (``encode``: the same ids as ``encode_fast``, the tokenizer's own call)."""
++
++    def __init__(self, added: dict[str, int], vocab: int, encode_fast: Callable[[str], list[int]],
++                 entries: int = 8) -> None:
++        self.encode_fast = encode_fast
++        self.entries = int(entries)
++        self.id_of = dict(added)
++        # how far past a match's start another text must agree for the match to be its too: the token's own end when
++        # no added token holds another, else the longest token's bytes (the matcher reads no further)
++        longest = max(len(s.encode("utf-8")) for s in added)
++        nested = any(a != b and a in b for a in added for b in added)
++        self.reach = {s: longest if nested else len(s) for s in added}
++        # leftmost-longest, as the tokenizer's matcher: at each start ``re`` takes the first alternative that matches
++        self.pattern = re.compile("|".join(re.escape(s) for s in sorted(added, key=len, reverse=True)))
++        self.is_added = np.zeros(max(vocab, max(added.values()) + 1), dtype=bool)
++        self.is_added[list(added.values())] = True
++        self.kept: list[_Kept] = []     # most recent first
++        self.lock = threading.Lock()
++        self.warned = False
++
++    @classmethod
++    def make(cls, tok: Any, encode_fast: Callable[[str], list[int]]) -> "PromptIds | None":
++        """For ``tok`` (a ``tokenizers.Tokenizer``), or None: TF_GLM_PROMPT_IDS=0, or its ids may not split."""
++
++        entries = _env_entries()
++        if not entries:
++            return None
++        spec = json.loads(tok.to_str())
++        problem = unsplittable(spec)
++        if problem:
++            print(f"[tensorfold] prompt ids: every prompt is tokenized in full ({problem})", file=sys.stderr, flush=True)
++            return None
++        return cls({t["content"]: int(t["id"]) for t in spec["added_tokens"]}, tok.get_vocab_size(with_added_tokens=True),
++                   encode_fast, entries)
++
++    def _starts(self, text: str, ids: array) -> tuple[list[int], list[int], list[int]] | None:
++        """Where ``text``'s added tokens start, their ``_Kept.ends``, and their indexes in ``ids`` (its ids, an
++        ``array("I")``); None if the tokenizer matched other added tokens than these."""
++
++        found = [(m.start(), self.id_of[m.group()], m.start() + self.reach[m.group()])
++                 for m in self.pattern.finditer(text)]
++        arr = np.frombuffer(ids, dtype=np.uint32) if ids else np.zeros(0, dtype=np.uint32)
++        if arr.size and int(arr.max()) >= self.is_added.size:
++            return None
++        at = np.flatnonzero(self.is_added[arr])
++        if at.size != len(found) or not np.array_equal(arr[at], np.asarray([i for _, i, _ in found], dtype=np.uint32)):
++            return None
++        return [s for s, _, _ in found], [e for _, _, e in found], at.tolist()
++
++    @staticmethod
++    def _common(kept: str, text: str) -> int:
++        """The length of the longest common prefix of ``kept`` and ``text``."""
++
++        if text.startswith(kept):
++            return len(kept)
++        lo, hi = 0, min(len(kept), len(text))     # kept[:lo] == text[:lo]; past hi they differ or end
++        while hi - lo > 64:
++            mid = (lo + hi) // 2
++            if text.startswith(kept[lo:mid], lo):
++                lo = mid
++            else:
++                hi = mid
++        while lo < hi and kept[lo] == text[lo]:
++            lo += 1
++        return lo
++
++    def encode(self, text: str) -> tuple[list[int], Callable[[], Any]]:
++        """``text``'s ids (a list of the caller's own) and a function giving a sha256 fed their ``seed_for`` text
++        (``exact_sampling.seed_of``'s input; called only when a seed is drawn from the prompt)."""
++
++        with self.lock:
++            kept = list(self.kept)
++        best, j_best, whole = None, -1, False
++        for e in kept:
++            common = self._common(e.text, text)
++            j = bisect.bisect_right(e.ends, common) - 1
++            if j >= 0 and (best is None or e.starts[j] > best.starts[j_best]):
++                best, j_best, whole = e, j, common == len(e.text)
++        made = None
++        if best is not None:
++            cut, k = best.starts[j_best], best.at[j_best]
++            tail = self.encode_fast(text[cut:])
++            found = self._starts(text[cut:], array("I", tail))
++            if found is not None:
++                head = best.ids[:k]
++                ids = head.tolist() + tail
++                head.extend(tail)
++                made = _Kept(text, head, best.starts[:j_best] + [cut + s for s in found[0]],
++                             best.ends[:j_best] + [cut + e for e in found[1]],
++                             best.at[:j_best] + [k + a for a in found[2]], [s for s in best.sums if s[0] <= k])
++            else:
++                self._warn("a tail's added tokens differ from the tokenizer's")
++        if made is None:
++            ids = self.encode_fast(text)
++            arr = array("I", ids)
++            found = self._starts(text, arr)
++            if found is None or not found[0]:       # the tokenizer differs here, or nothing to continue from
++                if found is None:
++                    self._warn("a prompt's added tokens differ from the tokenizer's")
++                return ids, _summer(_Kept(text, arr, [], [], []), None)
++            made, best = _Kept(text, arr, *found), None
++        with self.lock:
++            # the prompt it came from goes when this one continues all of it, or all but its last SLACK characters
++            # (one entry a conversation: the next request, or a retry of this one, reuses nearly as much from this);
++            # one it shares less with (another conversation's system prompt and tools, an edited history) stays
++            # beside it, as recent
++            spent = best is None or whole or len(best.text) - best.starts[j_best] <= SLACK
++            rest = [e for e in self.kept if e is not best]
++            self.kept = [made] + ([] if spent else [best]) + rest
++            del self.kept[self.entries:]
++        return ids, _summer(made, self.lock)
++
++    def _warn(self, what: str) -> None:
++        if not self.warned:
++            self.warned = True
++            print(f"[tensorfold] prompt ids: {what}; tokenizing it in full", file=sys.stderr, flush=True)
++
++
++def _summer(e: _Kept, lock: threading.Lock | None) -> Callable[[], Any]:
++    """A function giving the sha256 of ``seed_for``'s text of ``e.ids`` (a new one each call, the caller's to update),
++    from its last kept state; with ``lock``, it keeps the states it passes for the prompts that continue this one."""
++
++    def summed() -> Any:
++        n, h = (e.sums[-1][0], e.sums[-1][1].copy()) if e.sums else (0, hashlib.sha256())
++        end = len(e.ids)
++        while n < end:
++            step = min(end, (n // SUM_STEP + 1) * SUM_STEP)
++            _feed(h, e.ids, n, step)
++            n = step
++            if n % SUM_STEP == 0 and lock is not None:
++                with lock:
++                    if not e.sums or e.sums[-1][0] < n:
++                        e.sums.append((n, h.copy()))
++        return h
++
++    return summed
+diff -ruN -x '*.orig' -x __pycache__ port/src/tensorfold/cuda/server.py stack/src/tensorfold/cuda/server.py
+--- tensorfold/cuda/server.py	2026-10-29 12:16:50.763301242 +0000
++++ tensorfold/cuda/server.py	2026-10-29 12:36:15.551985244 +0000
+@@ -26,6 +26,7 @@
+ 
+ from tensorfold.cuda import health
+ from tensorfold.cuda.chat_template import ChatTemplate
++from tensorfold.cuda.prompt_ids import PromptIds
+ from tensorfold.cuda.reply_text import (THINK_CALL_HOLD, GlmCallStreamer, StopStrings, StreamDecoder, ThinkSplit,
+                                         close_glm_call, hide_tool_calls, parse_tool_calls)
+ from tensorfold.cuda.stream_pacing import Playout, smooth_streaming
+@@ -107,6 +108,8 @@
+         if self.context_window < 0:
+             raise ValueError("context_window must be 0 or a positive token count")
+         self.turns = Turns()                # one request at a time where the engine decodes one
++        # recent prompts' ids, so a prompt that continues one is tokenized from where they part (OTS 0110)
++        self.prompt_ids = PromptIds.make(self.tok, lambda text: self._encode_ids(text, False))
+ 
+     @property
+     def model_ids(self) -> list[str]:
+@@ -257,18 +260,18 @@
+                                        vision=rendered.vision, grammar=compiled, think_budget=budget)
+             else:
+                 text = render(messages, shown_tools)
+-            prompt = literal.encode(self.tok, text) if masked else self._encode_ids(text, False)
++            prompt, joined = (literal.encode(self.tok, text), None) if masked else self._prompt_ids(text, False)
+         elif isinstance(body.get("prompt"), list):       # token ids (vLLM's and OpenAI's form): served as given
+-            prompt = self.token_ids(body["prompt"])
++            prompt, joined = self.token_ids(body["prompt"]), None
+         else:
+             text = body.get("prompt")
+             if not isinstance(text, str):
+                 raise RequestError("prompt must be a string or a list of token ids")
+-            prompt = self._encode_ids(text, _flag(body, "add_special_tokens", False))
++            prompt, joined = self._prompt_ids(text, _flag(body, "add_special_tokens", False))
+         if not prompt:
+             raise RequestError("rendered prompt is empty")
+         # sampling is resolved here, so a malformed control is refused before a stream opens
+-        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
++        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt, joined=joined),
+                                ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget)
+ 
+     def _messages_to_mask(self, messages: Any) -> Any:
+@@ -299,6 +302,16 @@
+ 
+         return self.tok.encode_batch_fast([text], add_special_tokens=special)[0].ids
+ 
++    def _prompt_ids(self, text: str, special: bool) -> tuple[list[int], Callable[[], Any] | None]:
++        """A prompt's ids (``_encode_ids``' own) and, when kept, a function giving ``seed_for``'s sha256 of them: with
++        no special tokens added, only the text past the longest prefix it shares with a recent prompt is tokenized
++        (``prompt_ids.PromptIds``, OTS 0110)."""
++
++        kept = getattr(self, "prompt_ids", None)
++        if kept is None or special:
++            return self._encode_ids(text, special), None
++        return kept.encode(text)
++
+     def tokenize(self, body: dict[str, Any]) -> dict[str, Any]:
+         """vLLM's ``/tokenize``: a prompt's ids (``add_special_tokens`` as vLLM, default true), or ``messages``' as the
+         chat route renders them (``add_generation_prompt``, default true)."""
+@@ -381,10 +394,11 @@
+         if check is not None:
+             check(body.get("priority") == "background" or (chat and is_title_request(body.get("messages"), prepared.tools)))
+ 
+-    def sampling_for(self, body: dict[str, Any], prompt: list[int]):
+-        """Keyed sampling (the seed, else one drawn from the prompt), or None for greedy; RequestError if malformed."""
++    def sampling_for(self, body: dict[str, Any], prompt: list[int], *, joined: Callable[[], Any] | None = None):
++        """Keyed sampling (the seed, else one drawn from the prompt), or None for greedy; RequestError if malformed.
++        ``joined``: gives ``seed_for``'s sha256 of ``prompt``, kept from earlier prompts (``_prompt_ids``)."""
+ 
+-        from tensorfold.engine.exact_sampling import Sampling, seed_for
++        from tensorfold.engine.exact_sampling import Sampling, seed_for, seed_of
+ 
+         fields = parse_numbers({k: body[k] for k in _SAMPLING_FIELDS if body.get(k) is not None})
+         temp = float(fields.get("temperature", self.sampling["temperature"]))
+@@ -394,7 +408,8 @@
+         top_k = fields.get("top_k", self.sampling["top_k"])
+         top_p = fields.get("top_p", self.sampling["top_p"])
+         min_p = fields.get("min_p", self.sampling.get("min_p", 0.0))
+-        return Sampling(int(seed) if seed is not None else seed_for(prompt), temp, int(top_k), float(top_p),
++        return Sampling(int(seed) if seed is not None
++                        else seed_for(prompt, joined=getattr(prompt, "joined", None)), temp, int(top_k), float(top_p),
+                         float(min_p))
+ 
+     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
+diff -ruN -x '*.orig' -x __pycache__ port/src/tensorfold/engine/exact_sampling.py stack/src/tensorfold/engine/exact_sampling.py
+--- tensorfold/engine/exact_sampling.py	2026-10-29 12:16:48.665565377 +0000
++++ tensorfold/engine/exact_sampling.py	2026-10-29 12:35:39.611622073 +0000
+@@ -35,7 +35,15 @@
+ def seed_for(tokens: Sequence[int], salt: int = 0) -> int:
+     """A reproducible seed from the prompt: the same conversation samples the same reply."""
+ 
+-    digest = hashlib.sha256((",".join(str(int(t)) for t in tokens) + f"|{salt}").encode()).digest()
++    return seed_of(hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()), salt)
++
++
++def seed_of(joined: Any, salt: int = 0) -> int:
++    """``seed_for`` from a sha256 already fed its tokens' text (``",".join`` of their decimals; OTS 0110: kept across
++    requests by ``tensorfold.cuda.prompt_ids``, so a long prompt's is not hashed again), which this goes on to update."""
++
++    joined.update(f"|{salt}".encode())
++    digest = joined.digest()
+     return int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
+ 
+ 
+diff -ruN -x '*.orig' -x __pycache__ port/src/tensorfold/families/glm5_next/cuda/app.py stack/src/tensorfold/families/glm5_next/cuda/app.py
+--- tensorfold/families/glm5_next/cuda/app.py	2026-10-29 12:31:44.485915607 +0000
++++ tensorfold/families/glm5_next/cuda/app.py	2026-10-29 12:35:39.611756040 +0000
+@@ -10,6 +10,7 @@
+ from tensorfold.cuda.server import App, PreparedRequest, RequestError
+ from tensorfold.server.errors import CONTEXT_LIMIT
+ from tensorfold.families.glm5_next.cuda.kept_reasoning import KeptReasoning
++from tensorfold.families.glm5_next.cuda.prompt_cache import PromptIds, RenderedPromptCache
+ from tensorfold.families.glm5_next.prompts import agent_history, effort_tail_enabled, effort_to_tail, thinking_off
+ 
+ 
+@@ -87,6 +88,20 @@
+         effort_tail_enabled()       # a typo fails at load, not at the first request
+         self.template = ThinkingOffTemplate(self.template, KeptReasoning.from_env(), clear_thinking=clear == "1")
+         self.literal = LiteralTokens.from_env(self.tok)     # patch 0116: added-token text in a request stays text
++        self.prompt_cache = RenderedPromptCache.from_env(self.tok)
++
++    def _encode_ids(self, text: str, special: bool):
++        """The rendered prompt's ids through the prefix cache (OTS 0100, ``prompt_cache``): a request that shares a
++        prefix with a recent one reuses its ids up to the last added-token boundary inside the shared part and encodes
++        only the tail - ids equal to a full encode - and carries the ids' joined string for the request's seed
++        (``seed_for``). What the cache cannot take (small texts, added-token shapes it never saw) encodes as before."""
++
++        cache = self.prompt_cache
++        if cache is not None:
++            cached = cache.encode(text, special)
++            if cached is not None:
++                return PromptIds(cached[0], cached[1])
++        return super()._encode_ids(text, special)
+ 
+     def _messages_to_mask(self, messages: Any) -> Any:
+         """The kept reasoning put back before the messages are masked (patch 0116): found by the messages as sent
+diff -ruN -x '*.orig' -x __pycache__ port/src/tensorfold/families/glm5_next/cuda/prompt_cache.py stack/src/tensorfold/families/glm5_next/cuda/prompt_cache.py
+--- tensorfold/families/glm5_next/cuda/prompt_cache.py	1970-01-01 01:00:00.000000000 +0100
++++ tensorfold/families/glm5_next/cuda/prompt_cache.py	2026-10-29 12:34:54.513437338 +0000
+@@ -0,0 +1,208 @@
++"""Recent rendered prompts' token ids reused across requests, so a long agent session tokenizes only its new tail.
++
++This tokenizer has no normalizer and every added token matches without strip flags, so its ids for any text are the
++ids of the pieces between added-token boundaries, concatenated (tokenizers splits added tokens out of the text before
++each remaining piece is pre-tokenized on its own; verified piece by piece in tests/test_prompt_cache.py). A request
++whose rendered prompt shares a prefix with a cached one - every turn of a session does - then reuses the cached ids
++up to the last boundary inside the shared part and encodes only the tail: ~592k tokens go from ~0.65 s to a few ms,
++with ids equal to a full encode by construction.
++
++The boundaries carried are the added tokens that start ``"<|"`` (the template's step markers: ``<|user|>``,
++``<|assistant|>``, ``<|observation|>``); a text that shares none of them with a cache entry encodes whole. The ids'
++``","``-joined string (``seed_for``'s seed text) is carried at the same cut, so the request's seed is hashed from the
++tail alone. ``TF_GLM_PROMPT_CACHE``: 0 turns this off (default 1).
++
++OTS patch 0100; tests/test_kept_reasoning.py, tests/test_prompt_cache.py, tests/mutants_host_fixes.py,
++tests/bench_host_fixes.py.
++"""
++
++from __future__ import annotations
++
++import bisect
++import os
++import threading
++from typing import Any
++
++MIN_CHARS = 4_096          # texts below this encode whole: the cache cannot pay for its bookkeeping
++MAX_CHARS = 16 << 20       # nor above (16 MiB of text): one such entry is not worth the memory
++ENTRIES = 6                # prompts kept (a few concurrent sessions, most recent first)
++
++
++class PromptIds(list):
++    """A rendered prompt's ids carrying their ``","``-joined string, so the request's seed (server's
++    ``sampling_for`` -> ``seed_for``) hashes it instead of re-joining ~600k ids (~26 ms a request). A plain list
++    subclass: readers that copy it (``[int(t) for t in prompt]``) get a plain list back."""
++
++    __slots__ = ("joined",)
++
++    def __init__(self, ids: Any, joined: str) -> None:
++        super().__init__(ids)
++        self.joined = joined
++
++
++class _Entry:
++    __slots__ = ("text", "ids", "bounds", "joined")
++
++    def __init__(self, text: str, ids: list[int], bounds: list[tuple[int, int, int]], joined: str) -> None:
++        self.text = text
++        self.ids = ids
++        self.bounds = bounds        # (char pos of an added-token start, ids index there, joined offset there)
++        self.joined = joined        # ",".join(str(t) for t in ids): seed_for's text over exactly self.ids
++
++
++def _shared(a: str, b: str) -> int:
++    """How many leading chars ``a`` and ``b`` share: whole blocks first (a memcmp each), then the differing block
++    halved to the first differing char - ~2 ms on a 2.3 MiB prompt against a char-by-char walk's ~150 ms."""
++
++    n = min(len(a), len(b))
++    lo, step = 0, 1 << 20          # a[:lo] == b[:lo] already known
++    while lo < n:
++        hi = min(lo + step, n)
++        if a[lo:hi] == b[lo:hi]:
++            lo = hi
++            continue
++        left, right = lo, hi       # a[:left] == b[:left], a[left:right] differs somewhere
++        while right - left > 1:
++            mid = (left + right) // 2
++            if a[left:mid] == b[left:mid]:
++                left = mid
++            else:
++                right = mid
++        return left
++    return n
++
++
++class RenderedPromptCache:
++    """The last few rendered prompts (text, ids, boundary table, seed string), a new prompt served at its longest
++    shared prefix cut back to an added-token boundary."""
++
++    def __init__(self, tok: Any, entries: int = ENTRIES, min_chars: int = MIN_CHARS,
++                 max_chars: int = MAX_CHARS) -> None:
++        self.tok = tok
++        self.entries, self.min_chars, self.max_chars = int(entries), int(min_chars), int(max_chars)
++        self.lock = threading.Lock()
++        self.items: list[_Entry] = []               # most recent first
++        self.last = (0, 0)                          # the previous encode: (ids reused, ids encoded)
++        self.splits: dict[str, tuple[str, ...]] | None = None
++        decoder = getattr(tok, "get_added_tokens_decoder", None)
++        if decoder is None:                          # not tokenizers' Tokenizer: nothing here knows its splits
++            return
++        added = list(decoder().values())
++        if getattr(tok, "normalizer", None) is not None:
++            return                                  # a normalizer can read across any cut (case folding)
++        if any(t.lstrip or t.rstrip or t.single_word for t in added):
++            return                                  # an added token that eats or gates on its context breaks cuts
++        if any(t.content.find("<|", 1) >= 0 for t in added):
++            return                                  # a "<|" inside an added token could cut into it: stay off
++        buckets: dict[str, list[str]] = {}
++        for token in sorted((t.content for t in added if t.content.startswith("<|") and len(t.content) >= 4),
++                            key=len, reverse=True):
++            buckets.setdefault(token[2:4], []).append(token)
++        self.splits = {key: tuple(value) for key, value in buckets.items()}
++
++    @classmethod
++    def from_env(cls, tok: Any) -> "RenderedPromptCache | None":
++        raw = os.environ.get("TF_GLM_PROMPT_CACHE", "1").strip() or "1"
++        if raw not in ("0", "1"):
++            raise ValueError(f"TF_GLM_PROMPT_CACHE={raw!r}: expected 0 or 1")
++        return cls(tok) if raw == "1" else None
++
++    def _positions(self, text: str, c: int) -> list[int]:
++        """The added-token starts in ``text[c:]`` (ascending): each ``"<|"`` hit checked against the tokens whose
++        first chars follow, longest first - a hit that matches no added token is plain text, not a boundary."""
++
++        out: list[int] = []
++        find, buckets = text.find, self.splits
++        p = find("<|", c)
++        while p >= 0:
++            for token in buckets.get(text[p + 2:p + 4], ()):
++                if text.startswith(token, p):
++                    out.append(p)
++                    break
++            p = find("<|", p + 2)
++        return out
++
++    def _starts_token(self, text: str, p: int) -> bool:
++        """Whether an added token (one this cache cuts at) starts at ``text[p]``. A cut at ``p`` is exact only when
++        the NEW text also has one there: the text before ``p`` then ends at an added-token split in both prompts. A
++        prompt that shares the old one up to ``p`` but carries plain text at ``p`` (the old token absent) would let the
++        tokenizer merge the chars before ``p`` with the new ones (OTS 0100 review, cutprobe.py: 4 of 15 cases)."""
++
++        if not text.startswith("<|", p):
++            return False
++        return any(text.startswith(token, p) for token in self.splits.get(text[p + 2:p + 4], ()))
++
++    def _encode_tail(self, text: str, c: int, base_count: int = 0, base_join: int = 0) \
++            -> tuple[list[int], list[tuple[int, int, int]], int]:
++        """``text[c:]``'s ids with its boundaries, encoded piece by piece at them (one batch call): pieces between
++        boundaries encode independently, which is what makes any such cut exact. The ids extend a prefix of
++        ``base_count`` ids whose join is ``base_join`` chars (an entry's ids before a cut), so the boundaries come
++        back as (char pos, ids index, join offset) absolute in that entry and the last number is the join length
++        over prefix and tail. The join counts one ``","`` before every id after the first, per id and not per
++        piece."""
++
++        starts = [c, *self._positions(text, c)]
++        pieces = [text[a:b] for a, b in zip(starts, [*starts[1:], len(text)])]
++        encodings = self.tok.encode_batch_fast(pieces, add_special_tokens=False)
++        ids: list[int] = []
++        bounds: list[tuple[int, int, int]] = []
++        count, joined = base_count, base_join
++        for start, enc in zip(starts, encodings):
++            if start > c:
++                bounds.append((start, count, joined))
++            for t in enc.ids:
++                if count:
++                    joined += 1                      # the "," before this id in the join
++                count += 1
++                joined += len(str(t))
++            ids.extend(enc.ids)
++        return ids, bounds, joined
++
++    def _front(self, item: _Entry) -> None:
++        with self.lock:
++            if item in self.items:
++                self.items.remove(item)
++                self.items.insert(0, item)
++
++    def _store(self, item: _Entry) -> None:
++        with self.lock:
++            self.items = [item, *(e for e in self.items if e.text != item.text)][:self.entries]
++
++    def encode(self, text: str, special: bool) -> tuple[list[int], str] | None:
++        """``text``'s ids and their joined string, as ``tok.encode(text, add_special_tokens=special).ids`` and its
++        join, when the cache can serve this text (a recent prompt shares an added-token boundary with it); None
++        when it cannot and the caller encodes itself. The ids equal a full encode exactly."""
++
++        if special or self.splits is None or not self.min_chars <= len(text) <= self.max_chars:
++            return None
++        with self.lock:
++            items = self.items[:]
++        best = None                                   # (boundary index, entry): the deepest boundary under a share
++        for item in items:
++            if item.text == text:
++                self._front(item)
++                self.last = (len(item.ids), 0)
++                return item.ids, item.joined
++            i = bisect.bisect_right(item.bounds, (_shared(text, item.text) + 1,)) - 1
++            while i >= 0 and not self._starts_token(text, item.bounds[i][0]):
++                i -= 1
++            if i >= 0 and (best is None or item.bounds[i][1] > best[1].bounds[best[0]][1]):
++                best = (i, item)
++        if best is None:                              # nothing shares a boundary: encode whole, keep the table
++            ids, bounds, _ = self._encode_tail(text, 0)
++            joined = ",".join(map(str, ids))
++            self._store(_Entry(text, ids, bounds, joined))
++            self.last = (0, len(ids))
++            return ids, joined
++        i, item = best
++        c, k, j = item.bounds[i]
++        tail_ids, tail_bounds, _ = self._encode_tail(text, c, k, j)   # boundaries absolute in the new entry
++        ids = item.ids[:k] + tail_ids
++        # the entry's boundaries up to the cut are this text's own (its ids and join up to them), the tail's scan
++        # carries the rest, rebased onto them by the base counts above
++        bounds = item.bounds[:i + 1] + tail_bounds
++        tail_join = ",".join(map(str, tail_ids))
++        joined = item.joined[:j] + ("," + tail_join if k and tail_ids else tail_join)
++        self._store(_Entry(text, ids, bounds, joined))
++        self.last = (k, len(tail_ids))
++        return ids, joined

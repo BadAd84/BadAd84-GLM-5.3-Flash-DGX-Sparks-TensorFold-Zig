@@ -1,0 +1,72 @@
+--- tensorfold/cuda/prompt_ids.py
++++ tensorfold/cuda/prompt_ids.py
+@@ -50,6 +50,8 @@
+                         # GIL held, for ~330 states of ~0.2 KiB at 670k tokens)
+ SLACK = 256             # a kept prompt whose text past the cut a newer prompt reuses is at most this long is dropped
+                         # for it (a dropped generation prompt, a turn retried: its tokens cost microseconds again)
++SHARE = 8               # (OTS) a kept prompt's list past its base joins the base once it holds more than 1/SHARE as
++                        # many ids (``_Kept.parts``): one extra list copy each time the prompt grows by ~1/SHARE
+ _SAFE_PRE = {"Split", "ByteLevel", "Digits", "Punctuation", "Whitespace", "WhitespaceSplit", "Sequence"}
+ 
+ 
+@@ -150,11 +152,20 @@
+     ends: list[int]                     # how far another text must agree for it to split there too (rising)
+     at: list[int]                       # its index in ``ids``
+     sums: list[tuple[int, Any]] = field(default_factory=list)   # (n, sha256 of seed_for's text of ids[:n]), n % SUM_STEP == 0
+-    # (OTS) ``ids`` as a list of ``PromptIds.ints``' objects, made at the first prompt that continues this one: a prompt
+-    # continuing it slices this list (~2 ms at 670k tokens) where ``ids[:k].tolist()`` made an int a token (~8-13 ms)
+-    items: list[int] | None = None
++    # (OTS) ``ids`` as two lists of ``PromptIds.ints``' objects, ``base`` + ``more``, made at the first prompt that
++    # continues this one. A prompt continuing it shares ``base`` (its own ``more`` is the kept ``more`` up to the cut
++    # plus its tail), so its ids are one join of the two (~2 ms at 650k tokens), where slicing one kept list, growing it
++    # by the tail and copying it for the caller made two (~5 ms). No list here is ever written or handed out: each is
++    # made whole by a slice or a join, and the caller's list is a new join.
++    parts: tuple[list[int], list[int]] | None = None
+ 
++    @property
++    def items(self) -> list[int] | None:
++        """``ids`` as one list of the shared int objects (a new list), or None before a prompt continued this one."""
+ 
++        return None if self.parts is None else self.parts[0] + self.parts[1]
++
++
+ class PromptIds:
+     """The last ``entries`` prompts' ids, to tokenize a prompt that continues one of them from the last added token
+     they share (``encode``: the same ids as ``encode_fast``, the tokenizer's own call)."""
+@@ -172,7 +183,7 @@
+         # leftmost-longest, as the tokenizer's matcher: at each start ``re`` takes the first alternative that matches
+         self.pattern = re.compile("|".join(re.escape(s) for s in sorted(added, key=len, reverse=True)))
+         self.is_added = np.zeros(max(vocab, max(added.values()) + 1), dtype=bool)
+-        # (OTS) one int object a token id, shared by the kept prompts' lists (``_Kept.items``): a list of them costs 8
++        # (OTS) one int object a token id, shared by the kept prompts' lists (``_Kept.parts``): a list of them costs 8
+         # bytes a token beside the array's 4, where ints of their own cost ~36
+         self.ints = np.array(range(self.is_added.size), dtype=object)
+         self.is_added[list(added.values())] = True
+@@ -299,15 +310,21 @@
+             if found is not None:
+                 head = best.ids[:k]
+                 head.extend(tail_ids)
+-                if best.items is None:          # the first prompt continuing it: its list, once
+-                    best.items = self.ints[np.frombuffer(best.ids, dtype=np.uint32)].tolist()
+-                items = best.items[:k]
+-                items.extend(self.ints[np.frombuffer(tail_ids, dtype=np.uint32)].tolist())   # the tail's, shared too
+-                ids = items[:]                  # the caller's own; the kept list is never handed out
++                if best.parts is None:          # the first prompt continuing it: its list, once
++                    best.parts = (self.ints[np.frombuffer(best.ids, dtype=np.uint32)].tolist(), [])
++                base, more = best.parts
++                tail_items = self.ints[np.frombuffer(tail_ids, dtype=np.uint32)].tolist()   # the tail's, shared too
++                if k < len(base):               # a cut inside the base (its first continuation, an edited history)
++                    base, more = base[:k], tail_items
++                else:
++                    more = more[:k - len(base)] + tail_items
++                if len(more) * SHARE > len(base):
++                    base, more = base + more, []
++                ids = base + more               # the caller's own list: a kept list is never handed out
+                 made = _Kept(text, head, best.starts[:j_best] + [cut + s for s in found[0]],
+                              best.ends[:j_best] + [cut + e for e in found[1]],
+                              best.at[:j_best] + [k + a for a in found[2]], [s for s in best.sums if s[0] <= k],
+-                             items)
++                             (base, more))
+             else:
+                 self._warn("a tail's added tokens differ from the tokenizer's")
+         if made is None:

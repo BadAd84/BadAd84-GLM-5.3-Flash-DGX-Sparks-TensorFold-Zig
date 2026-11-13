@@ -1,0 +1,3 @@
+{"tag": "pyprod-P1", "n": 1, "round": 0, "agg_tok_s": 81.94, "decode_agg_tok_s": 83.83, "wall_s": 4.88, "per_stream": [83.83], "ttft_ms": [121], "tokens": [400], "sha": ["8347edfe4ee6"], "names": ["prose"]}
+{"tag": "pyprod-P1", "n": 1, "round": 1, "agg_tok_s": 81.72, "decode_agg_tok_s": 83.61, "wall_s": 4.89, "per_stream": [83.61], "ttft_ms": [122], "tokens": [400], "sha": ["8347edfe4ee6"], "names": ["prose"]}
+{"tag": "pyprod-P1", "n": 1, "round": 2, "agg_tok_s": 81.54, "decode_agg_tok_s": 83.43, "wall_s": 4.91, "per_stream": [83.43], "ttft_ms": [122], "tokens": [400], "sha": ["8347edfe4ee6"], "names": ["prose"]}

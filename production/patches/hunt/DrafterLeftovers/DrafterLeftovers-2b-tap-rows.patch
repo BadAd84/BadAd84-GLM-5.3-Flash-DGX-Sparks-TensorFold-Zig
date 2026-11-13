@@ -1,0 +1,238 @@
+# DrafterLeftovers-2b (lane DrafterLeftovers, 2026-10-30; HuntDrafter F6): DFlash2 taps reach the drafter unbuilt.
+# A prompt chunk's taps were concatenated whole (torch.cat over the 5 tap layers: 4,096 x 20,480 bf16 = 168 MB written,
+# then read again by the update's copies) though the update launches only the rows it keeps (HuntDrafter-1's
+# ring_skip: the last 34 x 64 of 4,096; TF_GLM_DRAFT_SKIP's WindowTaps: the rows near a read point). Now the producers
+# (decode.prefill_chunk / prefill_chunk_steps via Engine.tap_view, multi_prefill.prefill_pieces / prefill_piece_steps,
+# and BatchedVerify.forward's round windows) hand a dflash2.TapRows view of the forward's per-layer buffers; the update
+# copies each launch's rows straight into its input (copy_taps: torch.cat(out=) of the row slices), so dropped rows are
+# never copied and kept rows are copied once. The same bytes land in tap_in: bit-identical ring rows, device ends,
+# context ends and candidates (GPU test against the base tree's digests). TapRows is read before the next forward on
+# those buffers: every update launches its copies before returning, on the same stream.
+# Applies with `patch -p0` in the folder holding tensorfold/, after DrafterLeftovers-1.
+# 2b: rebased onto stack/all6's base (RoundGraphs' lazy verify.WindowTaps: its items are now TapRows views).
+--- tensorfold/families/glm5_next/cuda/dflash2.py
++++ tensorfold/families/glm5_next/cuda/dflash2.py
+@@ -59,6 +59,42 @@
+     return max(0, (rows - ring) // step) * step if ring else 0
+ 
+ 
++class TapRows:
++    """Rows lo .. hi of a forward's per-layer DFlash2 taps (``Buffers.taps``), read as their concatenation
++    [rows, taps * D] in layer order without building it (lane DrafterLeftovers): a context update copies the rows it
++    launches straight into its input (``copy_taps``), so a prompt chunk's rows it drops (``ring_skip``,
++    ``WindowTaps``) are never copied, and the rows it keeps are copied once instead of twice. The same bytes land in
++    the input either way. Read before the next forward on those buffers (every update launches its copies before
++    returning)."""
++
++    __slots__ = ("parts", "lo", "hi")
++
++    def __init__(self, parts: list[torch.Tensor], lo: int, hi: int) -> None:
++        self.parts, self.lo, self.hi = parts, int(lo), int(hi)
++
++    @property
++    def shape(self) -> tuple[int, int]:
++        return (self.hi - self.lo, sum(int(p.shape[1]) for p in self.parts))
++
++    def __getitem__(self, rows: slice) -> TapRows:
++        start, stop, step = rows.indices(self.hi - self.lo)
++        if step != 1:
++            raise ValueError("tap rows slice with step 1 only")
++        return TapRows(self.parts, self.lo + start, self.lo + max(start, stop))
++
++    def copy_to(self, out: torch.Tensor) -> None:
++        torch.cat([p[self.lo:self.hi] for p in self.parts], dim=1, out=out)
++
++
++def copy_taps(out: torch.Tensor, taps) -> None:
++    """``out.copy_(taps)`` for a taps tensor or ``TapRows``."""
++
++    if isinstance(taps, TapRows):
++        taps.copy_to(out)
++    else:
++        out.copy_(taps)
++
++
+ @triton.jit
+ def _dconv_kernel(X, DYN, BASE, RES, OUT, D: tl.constexpr, G: tl.constexpr, GS: tl.constexpr,
+                   BRANCH: tl.constexpr, HAS_RES: tl.constexpr, BLOCK: tl.constexpr, SEG: tl.constexpr = 0):
+@@ -538,8 +574,9 @@
+         self.pos_dev += n
+ 
+     @torch.no_grad()
+-    def add_taps(self, taps: torch.Tensor) -> None:
+-        """Committed rows' taps [n, taps * D] (bf16) at positions context_end, context_end + 1, ..."""
++    def add_taps(self, taps: torch.Tensor | TapRows) -> None:
++        """Committed rows' taps [n, taps * D] (bf16, or their ``TapRows``) at positions context_end,
++        context_end + 1, ..."""
+ 
+         size = self.tap_in.shape[0]
+         first = ring_skip(taps.shape[0], self.ring, size)
+@@ -553,7 +590,7 @@
+             n = part.shape[0]
+             if self.context_end + n > self.capacity:
+                 raise ValueError("drafter context past its capacity")
+-            self.tap_in[:n].copy_(part)
++            copy_taps(self.tap_in[:n], part)
+             g = self.tap_graphs.get(n)
+             if g is not None:
+                 g.replay()
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py
+@@ -34,7 +34,7 @@
+ from tensorfold.engine.exact_sampling import Sampling
+ 
+ from . import glue
+-from .dflash2 import NO_LIMIT, BadCandidates, Drafter, _dconv, _mm, merge_candidates, ring_skip
++from .dflash2 import NO_LIMIT, BadCandidates, Drafter, _dconv, _mm, copy_taps, merge_candidates, ring_skip
+ 
+ 
+ @triton.jit
+@@ -121,7 +121,8 @@
+         self.pos_dev.zero_()
+ 
+     def add_taps(self, taps: torch.Tensor) -> None:
+-        """This stream's committed rows' taps alone (a prompt's chunks): ``MultiDrafter.commit`` of one stream."""
++        """This stream's committed rows' taps alone (a prompt's chunks; a tensor or ``dflash2.TapRows``):
++        ``MultiDrafter.commit`` of one stream."""
+         self.owner.commit([(self, taps)])
+ 
+     def propose(self, pending: int, depth: int, sampling: Sampling | None, confidence: float = 0.0, *,
+@@ -377,7 +378,7 @@
+         off = 0
+         for j, (c, part, p0) in enumerate(pieces):
+             r = part.shape[0]
+-            self.tap_in[off:off + r].copy_(part)
++            copy_taps(self.tap_in[off:off + r], part)
+             p = torch.arange(p0, p0 + r, dtype=torch.int64)
+             h[off:off + r] = p
+             h[Tm + off:Tm + off + r] = c.slot * self.cap + (p % self.d.ring if self.d.ring else p)
+@@ -403,10 +404,10 @@
+ 
+     @torch.no_grad()
+     def commit(self, items: Sequence[tuple[DraftContext, torch.Tensor]]) -> None:
+-        """Each stream's committed rows' taps [n, taps * D] (bf16) at its positions context_end, context_end + 1, ...:
+-        every stream's rows stacked into launches of up to ``t_max`` rows. A stream's rows that start a launch and
+-        that its own update overwrites in the ring before returning (a prompt chunk wider than the ring) are not
+-        launched (``dflash2.ring_skip``)."""
++        """Each stream's committed rows' taps [n, taps * D] (bf16, or ``dflash2.TapRows``) at its positions
++        context_end, context_end + 1, ...: every stream's rows stacked into launches of up to ``t_max`` rows. A
++        stream's rows that start a launch and that its own update overwrites in the ring before returning (a prompt
++        chunk wider than the ring) are not launched (``dflash2.ring_skip``)."""
+ 
+         seen: set[int] = set()
+         for c, taps in items:
+--- tensorfold/families/glm5_next/cuda/decode.py
++++ tensorfold/families/glm5_next/cuda/decode.py
+@@ -316,6 +316,13 @@
+ 
+         return torch.cat([t[:n] for t in (b or self.buf).taps], dim=1)
+ 
++    def tap_view(self, n: int, b: Buffers | None = None):
++        """``tap_rows`` as ``dflash2.TapRows``: the drafter copies only the rows it launches (a prompt chunk's)."""
++
++        from .dflash2 import TapRows
++
++        return TapRows((b or self.buf).taps, 0, n)
++
+     def main_hidden(self, rows: slice) -> torch.Tensor:
+         """Return the final-normed main-model rows that the MTP head reads after a forward with logits."""
+ 
+@@ -650,7 +657,7 @@
+     out = out.clone() if head else None
+     e.last_hidden = b.fnormed[R - 1:R].clone()
+     if drafter is not None:
+-        drafter.add_taps(e.tap_rows(R, b))
++        drafter.add_taps(e.tap_view(R, b))
+     if mtp:
+         nxt = list(prompt[start + 1:start + R + 1])
+         if nxt:
+@@ -674,7 +681,7 @@
+     out = out.clone() if head else None
+     e.last_hidden = b.fnormed[R - 1:R].clone()
+     if drafter is not None:
+-        drafter.add_taps(e.tap_rows(R, b))
++        drafter.add_taps(e.tap_view(R, b))
+     with prof.timed("commit"):
+         commit(w, st, b, R, R)
+     return out
+--- tensorfold/families/glm5_next/cuda/multi_prefill.py
++++ tensorfold/families/glm5_next/cuda/multi_prefill.py
+@@ -170,6 +170,7 @@
+     commit (each stream's position advances by its rows)."""
+ 
+     from . import latent
++    from .dflash2 import TapRows
+     from .forward import commit, compute, mm
+ 
+     if not latent.ENABLED:
+@@ -186,8 +187,8 @@
+         else:
+             heads.append(None)
+     for p in pieces:
+-        if p.drafter is not None:
+-            p.drafter.add_taps(torch.cat([t[p.lo:p.lo + p.rows] for t in b.taps], dim=1))
++        if p.drafter is not None:                  # only the rows the drafter launches are copied (TapRows)
++            p.drafter.add_taps(TapRows(b.taps, p.lo, p.lo + p.rows))
+     for p in pieces:
+         commit(w, p.st, b, p.rows, p.rows)
+     return heads
+@@ -196,6 +197,7 @@
+ def prefill_piece_steps(e, pieces: Sequence[Piece]):
+     """Sliced counterpart of prefill_pieces; no position/tap publication before the final slice."""
+     from . import latent
++    from .dflash2 import TapRows
+     from .forward import commit, compute_steps, mm
+ 
+     if not latent.ENABLED:
+@@ -213,7 +215,7 @@
+             heads.append(None)
+     for p in pieces:
+         if p.drafter is not None:
+-            p.drafter.add_taps(torch.cat([t[p.lo:p.lo + p.rows] for t in b.taps], dim=1))
++            p.drafter.add_taps(TapRows(b.taps, p.lo, p.lo + p.rows))
+     for p in pieces:
+         commit(w, p.st, b, p.rows, p.rows)
+     return heads
+--- tensorfold/families/glm5_next/cuda/verify.py
++++ tensorfold/families/glm5_next/cuda/verify.py
+@@ -43,30 +43,29 @@
+ @dataclass
+ class Verified:
+     logits: list[torch.Tensor]              # per segment [rows, V / world] (this rank's vocabulary columns)
+-    taps: list[torch.Tensor | None]         # per segment [rows, taps * D] (DFlash2's inputs), or None
++    taps: Sequence                          # per segment [rows, taps * D] (DFlash2's inputs; a batched window's are
++                                            # ``WindowTaps``' ``dflash2.TapRows`` views of its buffers), or None
+ 
+ 
+ class WindowTaps(Sequence):
+-    """A batched window's taps by segment, each [rows, taps * D] made (``torch.cat`` of the window's tap buffers' rows)
+-    when first read: a round whose commit graph takes the kept rows straight from the window's buffers
+-    (``BatchedVerify.commit_taps``) never makes them. Read before the next forward on the same buffers."""
++    """A batched window's taps by segment, each [rows, taps * D] as a ``dflash2.TapRows`` view of the window's tap
++    buffers' rows (lane DrafterLeftovers: the drafter's update copies only the kept rows, straight into its input;
++    nothing is concatenated): a round whose commit graph takes the kept rows straight from the window's buffers
++    (``BatchedVerify.commit_taps``) never reads them. Read before the next forward on the same buffers."""
+ 
+     def __init__(self, bufs: list[torch.Tensor], spans: list[tuple[int, int]]) -> None:
+         self.bufs, self.spans = bufs, spans
+-        self.made: dict[int, torch.Tensor] = {}
+ 
+     def __len__(self) -> int:
+         return len(self.spans)
+ 
+     def __getitem__(self, k):
++        from .dflash2 import TapRows
++
+         if isinstance(k, slice):
+             return [self[i] for i in range(*k.indices(len(self)))]
+-        k = range(len(self))[k]
+-        t = self.made.get(k)
+-        if t is None:
+-            at, n = self.spans[k]
+-            t = self.made[k] = torch.cat([b[at:at + n] for b in self.bufs], dim=1)
+-        return t
++        at, n = self.spans[range(len(self))[k]]
++        return TapRows(self.bufs, at, at + n)
+ 
+ 
+ 

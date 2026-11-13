@@ -1,0 +1,66 @@
+# ForkChunk-1: TF_GLM_FILL_LOG_MS (default 0: off), rank 0's one line a slow multi-prompt chunk (_fill_many): host ms of
+# the forward / keeps / first tokens, their GPU ms between events, and the rest (GPU backlog queued before it, e.g.
+# the ADMITs' kept-row copies, or host stalls). Diagnostics only: events and clocks, no sync of its own; replies unchanged.
+# Applies at the end of work/hunt/stack/all6.list (patch -p0 from the dir holding tensorfold/).
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -334,6 +334,11 @@
+ # TF_GLM_GROW_CLEAR (default 1; 0: as before): an extent that cannot grow in place moves the extents in its way when they
+ # hold fewer used rows than it does (``MultiDecoder._clear_after``), instead of moving itself whole. Rank 0 decides.
+ GROW_CLEAR = (os.environ.get("TF_GLM_GROW_CLEAR", "").strip() or "1") != "0"
++# TF_GLM_FILL_LOG_MS (ForkChunk; default 0: off): rank 0 prints one line for a multi-prompt chunk (``_fill_many``) whose
++# host window is at least this many ms: the GPU's backlog when it started (work queued before it, e.g. the ADMITs'
++# kept-row copies, timed between events around the chunk), the forward's, the keeps' and the first tokens' GPU and host
++# ms. Events and host clocks only (no added sync: the first tokens' sample already waits for the device).
++FILL_LOG_MS = float(os.environ.get("TF_GLM_FILL_LOG_MS", "0") or 0)
+ 
+ 
+ def shard_tune(tune):
+@@ -3436,6 +3441,10 @@
+             pieces.append(multi_prefill.Piece(lane.st, list(lane.s.prompt[start:stop]),
+                                               drafter=self._prompt_ctx(lane) if lane.dflash else None, head=stop == n))
+         t = time.perf_counter()
++        log = FILL_LOG_MS > 0 and self.rank == 0
++        if log:                                         # (TF_GLM_FILL_LOG_MS: events only, no sync of their own)
++            evs = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
++            evs[0].record()
+         if layers is None:
+             heads = multi_prefill.prefill_pieces(e, pieces)
+         else:
+@@ -3447,6 +3456,9 @@
+                 for lane, _ in group:
+                     lane.s.prefill_s += dt
+                 return [None] * len(group)
++        if log:
++            evs[1].record()
++            th1 = time.perf_counter()
+         parts, who = [], []
+         for k, ((lane, stop), out) in enumerate(zip(group, heads)):
+             if self.partial is not None and lane.sid in self.partial.retired:
+@@ -3465,6 +3477,9 @@
+                 lane.constraint.mask(logits, lane.constraint.window([0], [-1]), self.w.vocab_offset)
+             parts.append((logits, [n], lane.s.sampling))
+             who.append(k)
++        if log:
++            evs[2].record()
++            th2 = time.perf_counter()
+         firsts: list[int | None] = [None] * len(group)
+         if parts:
+             for k, rows in zip(who, sample_streams(self.w, parts)):
+@@ -3473,6 +3488,16 @@
+                 if lane.constraint is not None:
+                     lane.constraint.advance([rows[0]])
+         dt = time.perf_counter() - t
++        if log and dt * 1000 >= FILL_LOG_MS:
++            evs[3].record()
++            evs[3].synchronize()
++            g = [evs[i].elapsed_time(evs[i + 1]) for i in range(3)]
++            rows = sum(p.rows for p in pieces)
++            print(f"[tensorfold] fill of {len(group)} pieces ({rows} rows{', its last slice' if layers else ''}"
++                  f"): host {dt * 1000:.1f} ms (forward {1000 * (th1 - t):.1f}, keeps {1000 * (th2 - th1):.1f}, first "
++                  f"tokens {1000 * (time.perf_counter() - th2):.1f}); GPU from its start: forward {g[0]:.1f}, keeps "
++                  f"{g[1]:.1f}, first tokens {g[2]:.1f} ms; so {dt * 1000 - sum(g):.1f} ms waited for work queued "
++                  f"before it or on the host", flush=True)
+         for (lane, _), first in zip(group, firsts):
+             lane.s.prefill_s += dt
+             if first is not None:

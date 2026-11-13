@@ -1,0 +1,256 @@
+--- tensorfold/cuda/reply_text.py
++++ tensorfold/cuda/reply_text.py
+@@ -137,6 +137,50 @@
+         pos = end + len(_CALL_CLOSE)
+ 
+ 
++class CallHider:
++    """``hide_tool_calls`` of one streamed reply's text as it grows, the same text back: the steps it has decided for
++    good (a call's block through its ``</tool_call>``, a mentioned tag) are not read again. A step is decided for good
++    once the text holds ``_call_head``'s whole window after its opener (and a call's close): any text that begins
++    with this one decides it the same. A text that does not begin with the last one is read from its start."""
++
++    def __init__(self) -> None:
++        self.text = ""              # the text last read: the steps before ``pos`` were decided on it
++        self.pos = 0                # where hide_tool_calls' loop goes on
++        self.kept = ""              # what that loop keeps before ``pos``
++        self.seek = (0, 0)          # (from, at): no opener in the text read between ``from`` and ``at``
++        self.close = (-1, 0)        # (start, at): no close in the text read between a call's ``start`` and ``at``
++
++    def __call__(self, text: str, *, finished: bool) -> str:
++        if not text.startswith(self.text):
++            self.pos, self.kept, self.seek, self.close = 0, "", (0, 0), (-1, 0)
++        out, pos, done, at = [self.kept], self.pos, 1, self.pos
++        while True:
++            seek = self.seek[1] if self.seek[0] == pos else pos
++            start = text.find(_CALL_OPEN, max(pos, seek))
++            if start < 0:
++                self.seek = (pos, max(pos, len(text) - len(_CALL_OPEN) + 1))
++                tail = text[pos:]
++                out.append(tail[: len(tail) - (0 if finished else _partial_tag(tail, _CALL_OPEN))])
++                break
++            head = start + len(_CALL_OPEN)
++            if not _call_head(text, head):                          # a mentioned tag: text
++                out.append(text[pos:head])
++                pos = head
++            else:
++                out.append(text[pos:start])
++                end = text.find(_CALL_CLOSE, max(start, self.close[1]) if self.close[0] == start else start)
++                if end < 0:
++                    self.close = (start, max(start, len(text) - len(_CALL_CLOSE) + 1))
++                    break
++                pos = end + len(_CALL_CLOSE)
++            if len(text) >= head + _HEAD_WINDOW:                    # the opener's window is whole: decided for good
++                done, at = len(out), pos
++        if done > 1:
++            self.kept, self.pos = "".join(out[:done]), at
++        self.text = text
++        return "".join(out)
++
++
+ def _tool_name(tool: dict[str, Any]) -> str:
+     fn = tool.get("function") if isinstance(tool, dict) else None
+     return str((fn or tool).get("name") or "").strip() if isinstance(tool, dict) else ""
+@@ -332,36 +376,96 @@
+ 
+ class _ReplyMarks:
+     """One reply's real markers: for each marker's text, which of its occurrences the reply's marker tokens wrote
+-    (the occurrences of that text in the decode before each such token), read as the tokens arrive."""
++    (the occurrences of that text in the decode before each such token), read as the tokens arrive.
++
++    Both reads go on from where the last one ended instead of from the reply's start (each was the whole reply again
++    every round: ~0.5 ms a round at 16k reply tokens, ~2 s over a 4k-token reply of short calls). A marker token's
++    occurrence count is the count through the previous marker token plus the count in the decode of the tokens
++    between: a decode cut just after an added token is the decode of the two pieces joined (the token's text is its
++    own, and the bytes before it end there), and no marker text can begin inside another's (each ends with ``>``,
++    the only ``>`` in it). A text that begins with the last one masked is scanned on from where each marker's scan
++    of it ended: the occurrences inside it are the same ones and decided the same, unless a marker token's count
++    falls on one of them, which reads the text again from its start (as does any text that does not begin with it)."""
+ 
+     def __init__(self, marks: ReplyMarks) -> None:
+         self.marks = marks
+         self.real: dict[str, set[int]] = {mark: set() for mark in marks.ids.values()}
+         self.seen = 0
++        self.base = 0                                   # tokens through the last marker token read
++        self.before = dict.fromkeys(self.real, 0)       # each marker's occurrences in their decode
++        heads = {mark[0] for mark in self.real}         # GLM's all begin with "<": text without one has none
++        self.head = heads.pop() if len(heads) == 1 else None
++        self.longest = max(map(len, self.real), default=1)
++        self._restart()
++
++    def _restart(self) -> None:
++        self.text = ""                                  # the last text masked
++        self.found = dict.fromkeys(self.real, 0)        # each marker's occurrences in it
++        self.next = dict.fromkeys(self.real, 0)         # where each marker's scan goes on
++        self.masked: str | None = None                  # it masked, once it has a cut (None: the text itself)
+ 
+     def mask(self, text: str, tokens: list[int]) -> str:
+         ids = self.marks.ids
++        again = False
+         for at in range(self.seen, len(tokens)):
+             mark = ids.get(tokens[at])
+             if mark is not None:
+-                self.real[mark].add(self.marks.tok.decode(tokens[:at], skip_special_tokens=False).count(mark))
++                piece = self.marks.tok.decode(tokens[self.base:at], skip_special_tokens=False)
++                index = self.before[mark] + piece.count(mark)
++                self.real[mark].add(index)
++                again |= index < self.found[mark]       # an occurrence decided already: read the text again
++                piece += mark
++                for other in self.before:
++                    self.before[other] += piece.count(other)
++                self.base = at + 1
+         self.seen = len(tokens)
++        if again or not text.startswith(self.text):
++            self._restart()
++        old = len(self.text)
+         cuts = []
+-        for mark, real in self.real.items():
+-            at, n = text.find(mark), 0
+-            while at >= 0:
+-                if n not in real:
+-                    cuts.append((at, mark))
+-                n += 1
+-                at = text.find(mark, at + len(mark))
+-        if not cuts:
++        if self.head is None or text.find(self.head, max(0, old - self.longest + 1)) >= 0:
++            for mark, real in self.real.items():
++                n = self.found[mark]
++                at = text.find(mark, max(self.next[mark], old - len(mark) + 1))
++                while at >= 0:
++                    if n not in real:
++                        cuts.append(at + len(mark) - 1)     # its last character goes inert (``inert``: same length)
++                    n += 1
++                    self.next[mark] = at = at + len(mark)
++                    at = text.find(mark, at)
++                self.found[mark] = n
++        self.text = text
++        if not cuts and self.masked is None:
+             return text
+-        out, done = [], 0
+-        for at, mark in sorted(cuts):
+-            out += [text[done:at], self.marks.inert[mark]]
+-            done = at + len(mark)
++        out, done = [self.masked if self.masked is not None else text[:old]], old
++        for at in sorted(cuts):
++            out += [text[done:at], _INERT]
++            done = at + 1
+         out.append(text[done:])
+-        return "".join(out)
++        self.masked = "".join(out)
++        return self.masked
++
++
++class SentText:
++    """``unmask(text)[sent:]`` for a streamed text that grows (``unmask``: ``ReplyMarks.unmask``, or None when the
++    reply has no masking), without unmask's two scans of the whole text every round: unmask gives a text with no inert
++    character and no inert character's JSON escape back as it is, and the part since the last text decides whether
++    this one has any. A text that does not begin with the last one is checked whole."""
++
++    def __init__(self, unmask: Any = None) -> None:
++        self.unmask, self.text, self.inert = unmask, "", False
++
++    def tail(self, text: str, sent: int) -> str:
++        if self.unmask is None:
++            return text[sent:]
++        if text.startswith(self.text):
++            old = len(self.text)
++            inert = (self.inert or _INERT in text[old:]
++                     or _INERT_JSON in text[max(0, old - len(_INERT_JSON) + 1):])
++        else:
++            inert = _INERT in text or _INERT_JSON in text
++        self.text, self.inert = text, inert
++        return self.unmask(text)[sent:] if inert else text[sent:]
+ 
+ 
+ class ThinkSplit:
+@@ -381,14 +485,32 @@
+         self.floor = 0                  # calls before this are reasoning
+         self.committed: int | None = None
+         self.stream_from: int | None = None
++        # searches already made on the text last read (a streamed reply's text only grows): no ``</think>`` starts
++        # before ``close_from``, no ``<tool_call>`` between ``seek``'s floor and its end; a text that does not begin
++        # with the last one is searched from its start
++        self.text = ""
++        self.close_from = 0
++        self.seek = (0, 0)
+ 
+     def __call__(self, text: str, finished: bool) -> tuple[str, str]:
++        if not text.startswith(self.text):
++            self.close_from, self.seek = 0, (0, 0)
++        self.text = text
+         if self.committed is not None:
+             at = self.committed
+-            return text[:at], text[at:].replace(_THINK_CLOSE, "", 1).lstrip()
+-        close = text.find(_THINK_CLOSE)
++            close = text.find(_THINK_CLOSE, max(at, self.close_from))      # text[at:].replace(_THINK_CLOSE, "", 1)
++            if close < 0:
++                self.close_from = max(self.close_from, len(text) - len(_THINK_CLOSE) + 1)
++                return text[:at], text[at:].lstrip()
++            return text[:at], (text[at:close] + text[close + len(_THINK_CLOSE):]).lstrip()
++        close = text.find(_THINK_CLOSE, self.close_from)
++        if close < 0:
++            self.close_from = max(self.close_from, len(text) - len(_THINK_CLOSE) + 1)
+         while True:
+-            call = text.find(_CALL_OPEN, self.floor)
++            floor = self.floor
++            call = text.find(_CALL_OPEN, max(floor, self.seek[1]) if self.seek[0] == floor else floor)
++            if call < 0:
++                self.seek = (floor, max(floor, len(text) - len(_CALL_OPEN) + 1))
+             if close >= 0 and (call < 0 or close < call):
+                 self.stream_from = close + len(_THINK_CLOSE)
+                 return text[:close], text[self.stream_from:].lstrip("\n")
+@@ -463,7 +585,8 @@
+             rest = text[self.pos:]
+             if self.state == "outside":
+                 at = rest.find(_CALL_OPEN)
+-                if at < 0:
++                if at < 0:                              # (``feed``'s text only grows: an opener starts past here)
++                    self.pos = max(self.pos, len(text) - len(_CALL_OPEN) + 1)
+                     return out
+                 self.start = self.pos + at
+                 self.pos, self.state = self.start + len(_CALL_OPEN), "name"
+--- tensorfold/cuda/server.py
++++ tensorfold/cuda/server.py
+@@ -27,8 +27,8 @@
+ from tensorfold.cuda import health
+ from tensorfold.cuda.chat_template import ChatTemplate
+ from tensorfold.cuda.prompt_ids import PromptIds
+-from tensorfold.cuda.reply_text import (THINK_CALL_HOLD, GlmCallStreamer, StopStrings, StreamDecoder, ThinkSplit,
+-                                        close_glm_call, hide_tool_calls, parse_tool_calls)
++from tensorfold.cuda.reply_text import (THINK_CALL_HOLD, CallHider, GlmCallStreamer, SentText, StopStrings,
++                                        StreamDecoder, ThinkSplit, close_glm_call, parse_tool_calls)
+ from tensorfold.cuda.stream_pacing import Playout, smooth_streaming
+ from tensorfold.cuda.turns import Turns, Yield
+ from tensorfold.server.text import is_title_request, reasoning_count, split_thinking
+@@ -465,6 +465,9 @@
+         # GLM's calls written inside the think block: calls when the reply ends on them (``ThinkSplit``)
+         think = (ThinkSplit(THINK_CALL_HOLD if calls_stream is not None else None) if glm_calls and chat and thinking
+                  else None)
++        hide = CallHider()                   # hide_tool_calls of the answer as it grows (its decided blocks kept)
++        # what each text delta adds, unmasked: the text since the last round decides whether unmask has work
++        shown = {kind: SentText(unmask if reply_marks is not None else None) for kind in sent}
+ 
+         def split(raw: str, finished: bool) -> tuple[str, str]:
+             if not (chat and thinking):
+@@ -487,7 +490,7 @@
+             answer_raw[0] = answer
+             if tools:
+                 answer = (policy.content(answer, finished=finished) if policy.single
+-                          else hide_tool_calls(answer, finished=finished))
++                          else hide(answer, finished=finished))
+             return reasoning, answer, raw
+ 
+         serving: list[Any] = [None]
+@@ -511,10 +514,10 @@
+             reasoning, answer, raw = visible(False)
+             delta: dict[str, Any] = {}
+             if len(reasoning) > sent["reasoning"]:
+-                delta["reasoning_content"] = unmask(reasoning)[sent["reasoning"]:]
++                delta["reasoning_content"] = shown["reasoning"].tail(reasoning, sent["reasoning"])
+                 sent["reasoning"] = len(reasoning)
+             if len(answer) > sent["content"]:
+-                delta["content"] = unmask(answer)[sent["content"]:]
++                delta["content"] = shown["content"].tail(answer, sent["content"])
+                 sent["content"] = len(answer)
+             return delta, raw
+ 

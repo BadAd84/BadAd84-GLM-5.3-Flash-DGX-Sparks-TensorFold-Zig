@@ -1,0 +1,21 @@
+# The order these patches apply in. Dependencies are real: expert-rotate's anchor is a line shard-agreement adds,
+# so an alphabetical glob fails (measured: glm-expert-rotate ran second and rejected). build/e2e must read this file.
+glm-indexer-shard-ported.patch
+glm-cache-salt-ported.patch
+glm-host-fixes-ported.patch
+glm-warm-fill-admit-ported.patch
+glm-shard-agreement-ported.patch
+glm-expert-rotate-ported.patch
+glm-prompt-scores-regroup-ported.patch
+glm-solo-graphs-boot-ported.patch
+glm-literal-prompt-ids.patch
+glm-ring-tail-ported.patch
+glm-msg-gather-ported.patch
+glm-prompt-experts-k64-ported.patch
+glm-draft-pass-fusion-ported.patch
+glm-msg-gather-tail-ported.patch
+glm-drafter-config-ported.patch
+glm-peer-watch-ported.patch
+glm-fill-fast-ported.patch
+glm-prestage-one-array.patch
+glm-prepare-host.patch

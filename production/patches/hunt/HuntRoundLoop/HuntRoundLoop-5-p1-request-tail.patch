@@ -1,0 +1,112 @@
+diff -ruN tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -466,6 +466,36 @@
+     return struct.unpack("<d", struct.pack("<2i", lo, hi))[0]
+ 
+ 
++PID_MOD = 2_147_483_647
++
++
++def prefix_pid(ids, start: int = 0, stop: int | None = None, base: tuple[int, int] = (0, 0)) -> tuple[int, int]:
++    """--parallel 1: the identity of ``ids[:stop]`` both ranks compute alike, extended from ``base`` (``ids[:start]``'s)
++    by the ids start .. stop: two sums mod 2^31 - 1 of each id weighted by its position (p + 1 and (p + 1)^2), so a kept
++    state's identity is its resume point's plus its own new rows' (O(new rows)). Rank 0 names the kept state a
++    request resumes from by it and sends only the ids past it (``generate``); a follower finds the state by its
++    length, salt and identity and rebuilds the prompt from the state's ids (``follow_one``)."""
++
++    import numpy as np
++
++    a = np.asarray(ids[start:stop], dtype=np.int64)
++    if not a.size:
++        return base
++    p = np.arange(start + 1, start + 1 + a.size, dtype=np.int64)
++    h1 = (base[0] + int(((a * p) % PID_MOD).sum())) % PID_MOD
++    h2 = (base[1] + int(((a * (p * p % PID_MOD)) % PID_MOD).sum())) % PID_MOD
++    return h1, h2
++
++
++def snap_pid(snap) -> tuple[int, int]:
++    """A kept state's ``prefix_pid`` (kept with it by ``_run_once``; worked out once for one that came without it)."""
++
++    pid = getattr(snap, "pid", None)
++    if pid is None:
++        pid = snap.pid = prefix_pid(snap.ids)
++    return pid
++
++
+ MTP_DEFAULT = "1"                     # TF_GLM_MTP when unset: the MTP head stays beside DFlash2 (auto, 0: left out)
+ 
+ 
+@@ -1644,12 +1679,16 @@
+         if point is not None and point < len(prompt):
+             stops.append(point)
+         resume, kept = hit, []
++        # each kept state's identity (``prefix_pid``), from the resume point's on by the new rows alone
++        at, pid = (cut, snap_pid(hit)) if hit is not None and feed is None else (0, (0, 0))
+         for stop in stops:
+             head = list(prompt[:stop])
+             prefill(self.e, head, sampling, mtp=use_mtp, drafter=drafter, resume=resume, sample=False)
+             resume = take_snapshot(self.e, head, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
+                                    drafter=drafter)
+             resume.shared = stop != point                         # (a shared-prefix point; --spill-gib writes it)
++            at, pid = stop, prefix_pid(prompt, at, stop, pid)
++            resume.pid = pid
+             kept.append(resume)
+         # a replay of a kept prompt (``decode.whole``: its state and head's logits row) prefills nothing and keeps
+         # nothing new; a prompt's own end state keeps the head's row it sampled from, for a later replay
+@@ -1662,6 +1701,7 @@
+             snap = take_snapshot(self.e, prompt, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
+                                  drafter=drafter)
+             snap.head, self.e.head = self.e.head, None
++            snap.pid = prefix_pid(prompt, at, len(prompt), pid)
+             kept.append(snap)
+         if self.shared and draft and feed is None and hit is not None:     # what it resumed from is used again
+             self.cache = [c for c in self.cache if c is not hit] + [hit]
+@@ -1791,12 +1831,15 @@
+                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
+                   *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
+                   int(constraint is not None), len(positions),
+-                  *(shared + [0] * SHARED_MOST)[:SHARED_MOST]] + code + [int(salt is not None)]   # OTS 0120: last
++                  *(shared + [0] * SHARED_MOST)[:SHARED_MOST]] + code + [int(salt is not None)]   # OTS 0120
++        # the kept state it resumes from by identity (``prefix_pid``; -1: none), then the ids past it alone
++        pid = snap_pid(hit) if cached > 0 and feed is None else None
++        header += list(pid) if pid is not None else [-1, -1]
+         from tensorfold.engine.grammar import pack
+ 
+         self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
+         self._share(header)
+-        self._share(list(prompt))
++        self._share(list(prompt[cached:]) if pid is not None else list(prompt))
+         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
+             self._share(pack(constraint))
+         if positions:
+@@ -1834,8 +1877,10 @@
+         if max_tokens == 0 and self.spill is not None:     # rank 0's clean shutdown: the spill tier's flush
+             self._do_flush(self._share(None), self.spill.cfg.flush_s)
+             return
+-        # the header's last value: rank 0's request is salted (OTS 0120), its states kept with salt "" here
+-        shared, code, salted = [p for p in rest[:SHARED_MOST] if p], rest[SHARED_MOST:-1], bool(rest[-1])
++        # the header's last values: rank 0's request is salted (OTS 0120), its states kept with salt "" here; the
++        # identity of the kept state it resumes from (-1: none, the whole prompt follows), then the ids past it
++        shared, code, salted = [p for p in rest[:SHARED_MOST] if p], rest[SHARED_MOST:-3], bool(rest[-3])
++        pid = (rest[-2], rest[-1]) if rest[-2] >= 0 else None
+         prompt = self._share(None)
+         packed = self._share(None) if shaped else []
+         constraint = None
+@@ -1853,10 +1898,13 @@
+             hit = self._spill_load(list(prompt[:-cached]), code)
+         elif cached:
+             # OTS 0120: the state as salted as rank 0's hit (the same ids may be kept salted and not)
+-            hit = next((c for c in self.cache if len(c.ids) == cached and prompt[:cached] == c.ids
+-                        and (getattr(c, "salt", None) is not None) == salted), None)
++            hit = next((c for c in self.cache if len(c.ids) == cached
++                        and (getattr(c, "salt", None) is not None) == salted
++                        and (prompt[:cached] == c.ids if pid is None else snap_pid(c) == pid)), None)
+             if hit is None:
+                 raise RuntimeError(f"rank {self.rank} has no snapshot of the {cached} tokens rank 0 resumes from")
++            if pid is not None:
++                prompt = hit.ids + prompt             # rank 0's prompt: the kept state's ids, then the ids past them
+         if self.spill is not None:
+             self._spill_wait()
+         self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),

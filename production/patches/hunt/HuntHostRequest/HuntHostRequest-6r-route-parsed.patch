@@ -1,0 +1,90 @@
+diff -r a/tensorfold/cuda/http.py b/tensorfold/cuda/http.py
+--- tensorfold/cuda/http.py	2026-10-30 01:40:48.524536600 +0000
++++ tensorfold/cuda/http.py	2026-10-30 01:40:50.048528000 +0000
+@@ -113,6 +113,8 @@
+         # event, and with Nagle's algorithm a write waits for the client's ACK of the one before it; a client that
+         # delays its ACKs (Windows: ~40 ms measured) then gets every other event late and the reply's end with them
+         disable_nagle_algorithm = True
++        takes_parsed_body = True            # OTS: a translated route hands do_POST its body parsed (``parsed_body``)
++        parsed_body = None
+ 
+         def log_message(self, fmt, *args):  # quiet
+             pass
+@@ -180,8 +182,11 @@
+                 self._discard_body()
+                 return self._json(404, {"error": "not found"})
+             try:
+-                # up to 50 pictures or 4 clips as data URLs; Content-Length or chunked (patch 0094)
+-                body = json.loads(read_body(self, limit=96 * 1024**2) or b"{}")
++                # up to 50 pictures or 4 clips as data URLs; Content-Length or chunked (patch 0094). OTS: a translated
++                # route (responses._run_chat) hands the body as its JSON round trip would give it
++                body = self.parsed_body
++                if body is None:
++                    body = json.loads(read_body(self, limit=96 * 1024**2) or b"{}")
+             except RequestError as exc:
+                 return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+             except (json.JSONDecodeError, UnicodeDecodeError):
+diff -r a/tensorfold/server/responses.py b/tensorfold/server/responses.py
+--- tensorfold/server/responses.py	2026-10-30 01:40:48.923919600 +0000
++++ tensorfold/server/responses.py	2026-10-30 01:40:49.658951100 +0000
+@@ -170,13 +170,58 @@
+         pass
+ 
+ 
++_SCALARS = (str, int, float, bool, type(None))
++
++
++def json_copy(value: Any) -> Any:
++    """(OTS) ``json.loads(json.dumps(value))`` without the text: fresh dicts and lists over the same (immutable) str,
++    int, float, bool and None leaves, in the same order; ``_NOT_JSON`` when ``value`` holds anything else (a tuple, a
++    non-str key, a subclass), whose round trip would change it."""
++
++    t = type(value)
++    if t is dict:
++        out = {}
++        for k, v in value.items():
++            if type(k) is not str:
++                return _NOT_JSON
++            v = json_copy(v) if type(v) in (dict, list) else (v if type(v) in _SCALARS else _NOT_JSON)
++            if v is _NOT_JSON:
++                return _NOT_JSON
++            out[k] = v
++        return out
++    if t is list:
++        out = []
++        for v in value:
++            v = json_copy(v) if type(v) in (dict, list) else (v if type(v) in _SCALARS else _NOT_JSON)
++            if v is _NOT_JSON:
++                return _NOT_JSON
++            out.append(v)
++        return out
++    return value if t in _SCALARS else _NOT_JSON
++
++
++_NOT_JSON = object()
++
++
+ def _run_chat(handler: Any, body: dict[str, Any], wire: Wire) -> None:
+-    """The server's own chat-completions handler on ``body``, over this connection, its response written to ``wire``."""
++    """The server's own chat-completions handler on ``body``, over this connection, its response written to ``wire``.
++    (OTS) A handler with ``takes_parsed_body`` (the CUDA server's) is handed a fresh copy of ``body`` as the JSON round
++    trip would make it (``json_copy``: ~30 ms less at 650k tokens, where ``json.dumps`` and ``json.loads`` each held
++    the GIL 13-20 ms); one that holds anything else, and any other handler, gets the JSON text as before."""
+ 
+-    data = json.dumps(body).encode()
++    parsed = _NOT_JSON
++    if getattr(type(handler), "takes_parsed_body", False):
++        try:
++            parsed = json_copy(body)
++        except RecursionError:          # nested deeper than a copy goes: the JSON text decides, as before
++            parsed = _NOT_JSON
++        if parsed is None:              # do_POST reads None as "no parsed body": a null body goes as its text
++            parsed = _NOT_JSON
++    data = json.dumps(body).encode() if parsed is _NOT_JSON else b""
+     inner = type(handler).__new__(type(handler))
+     inner.__dict__.update(handler.__dict__)
+     inner.path, inner.rfile, inner.wfile, inner._headers_buffer = "/v1/chat/completions", io.BytesIO(data), wire, []
++    inner.parsed_body = None if parsed is _NOT_JSON else parsed
+     inner.headers = http.client.HTTPMessage()
+     inner.headers["Content-Type"] = "application/json"
+     inner.headers["Content-Length"] = str(len(data))

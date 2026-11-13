@@ -1,0 +1,39 @@
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 02:29:54.075556100 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 05:53:44.357381200 +0000
+@@ -558,6 +558,23 @@
+     return f"tf_glm_request_{n}" if rank == 1 else f"tf_glm_request_r{rank}_{n}"
+ 
+ 
++def keep_empty_cache(value: str | None = None) -> str:
++    """TF_GLM_KEEP_EMPTY_CACHE (--parallel 1): when a kept state's drop past TF_GLM_CACHE_ENTRIES / the bytes cap hands
++    torch's cached blocks back to the driver (``_remember``). ``always`` (default, as before): after every such drop,
++    which once the entry cap is reached is every turn, and the next prompt chunk then allocates its temporaries again
++    (RTX 5070: 67 ms to empty 40 x 64 MiB, 5.4 ms against 0.07 ms to allocate them again). ``rows``: only when a dropped
++    state held saved rows (another conversation's copy, the memory the empty is for); a drop of a state whose rows were
++    the live caches' frees fixed-size tensors the next keep reuses. Memory policy only: replies are the same bits."""
++
++    raw = (os.environ.get("TF_GLM_KEEP_EMPTY_CACHE", "") if value is None else value).strip() or "always"
++    if raw not in ("always", "rows"):
++        raise ValueError(f"TF_GLM_KEEP_EMPTY_CACHE: always or rows, not {raw!r}")
++    return raw
++
++
++KEEP_EMPTY_CACHE = keep_empty_cache()
++
++
+ class MsgGather:
+     """OTS msg-gather: rank 0's int message as ONE fixed-size all-gather, enqueued before the host needs it.
+ 
+@@ -1597,8 +1614,10 @@
+         self.cache[:] = [c for c in self.cache if c is not snap] + [snap]   # a resumed prompt kept again moves last
+         dropped = False
+         while len(self.cache) > 1 and (len(self.cache) > self.cache_entries or self._held_bytes() > self.cache_bytes):
+-            self._drop(self.cache[0])
+-            dropped = True
++            old = self.cache[0]
++            # (TF_GLM_KEEP_EMPTY_CACHE=rows: only a state holding saved rows hands back memory worth returning)
++            dropped = dropped or KEEP_EMPTY_CACHE == "always" or (old.rows is not None and old.nbytes > 0)
++            self._drop(old)
+         if dropped:
+             import torch
+ 

@@ -1,0 +1,18 @@
+--- tensorfold/cuda/http.py
++++ tensorfold/cuda/http.py
+@@ -157,6 +157,16 @@
+             elif self.path.rstrip("/") in ("/health", "/v1/health"):
+                 self._json(200, health.of(app).snapshot(app))
++            elif self.path.rstrip("/") in ("/cuda", "/v1/cuda"):
++                import torch
++
++                _s = torch.cuda.memory_stats()
++                self._json(200, {"allocated_mib": _s.get("allocated_bytes.all.current", 0) >> 20,
++                                 "reserved_mib": _s.get("reserved_bytes.all.current", 0) >> 20,
++                                 "active_segments": _s.get("segment.all.current", 0),
++                                 "live_blocks": _s.get("allocation.all.current", 0),
++                                 "alloc_count": _s.get("allocation.all.allocated", 0),
++                                 "free_count": _s.get("allocation.all.freed", 0)})
+             elif responses.route(self.path):
+                 responses.get(self, app, responses.route(self.path))
+             else:

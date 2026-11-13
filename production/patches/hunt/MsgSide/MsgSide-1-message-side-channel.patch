@@ -1,0 +1,265 @@
+--- tensorfold/cuda/roce.py
++++ tensorfold/cuda/roce.py
+@@ -375,11 +375,14 @@
+ class RoceGather:
+     """One rank's side of the exchange: the pinned region, the proxy thread and the gather launches."""
+ 
+-    def __init__(self, comm, rank: int, world: int, max_bytes: int = 256 << 10) -> None:
++    def __init__(self, comm, rank: int, world: int, max_bytes: int = 256 << 10, pinned: bool = True) -> None:
+         """Two ranks: every listed HCA to the peer's of the same index (b12x's striping), GID index TF_ROCE_GID_INDEX
+         (or NCCL_IB_GID_INDEX, 3). More ranks: each HCA's own RoCE v2 IPv4 GID (unless TF_ROCE_GID_INDEX) and routes
+-        by subnet (``plan_routes``), so a triangle of direct cables reaches each peer over that pair's rails."""
+-        cpu = proxy_cpu()                                    # TF_ROCE_PROXY_CPU, checked before any resource
++        by subnet (``plan_routes``), so a triangle of direct cables reaches each peer over that pair's rails.
++        ``pinned`` False (MsgSide's message channel, ``RoceComm.open_messages``): TF_ROCE_PROXY_CPU is not read and
++        the proxy thread is not placed; it inherits its creator's CPUs, which ``start_pinned`` has already moved off
++        the first channel's proxy CPU, so two spinning proxies never share that core."""
++        cpu = proxy_cpu() if pinned else None               # TF_ROCE_PROXY_CPU, checked before any resource
+         lib = proxy_library()
+         self.lib, self.rank, self.world, self.max_bytes = lib, rank, world, int(max_bytes)
+         self.slot_bytes = -(-self.max_bytes // SLOT_ALIGN) * SLOT_ALIGN
+@@ -568,6 +571,7 @@
+         self.small = self.large = 0
+         self.settled = False
+         self.marks = None                                     # ``ordered_barriers``' gather buffers (at first use)
++        self.msg = None                                       # MsgSide: the message channel (``open_messages``)
+ 
+     def settle(self) -> None:
+         """Startup is over on this rank (its engine is built). Until then each eager RoCE gather waits for the peer in
+@@ -634,6 +638,34 @@
+ 
+     def check(self) -> None:
+         self.roce.check()
++        if self.msg is not None:
++            self.msg.check()
++
++    def open_messages(self, nbytes: int) -> None:
++        """MsgSide (TF_GLM_MSG_SIDE=1): a second RoCE channel for the per-round message alone (``engine.SideMsgGather``):
++        its own pinned region (receive / flag / send slots and doorbell), device epoch and arrival counters, QPs, CQs
++        and proxy thread, so its gather runs on a side stream beside this channel's. Over ONE channel two gathers on
++        two streams race: both read the same epoch for their sequence, stage into the same send slot and ring the same
++        doorbell. Every rank calls it together once, after the ranks' settings comparison agreed on the knob (its
++        setup all-gathers over NCCL, as the first channel's). It lives as long as this communicator, as the first
++        does; a wait past TF_ROCE_WAIT_S poisons this channel alone, and ``check`` reads both channels."""
++
++        if self.msg is not None:
++            raise RuntimeError("the RoCE message channel is open already")
++        self.msg = RoceGather(self.nccl, self.rank, self.world, nbytes, pinned=False)
++
++    def msg_gather(self, send: torch.Tensor, recv: torch.Tensor, stream) -> None:
++        """MsgSide: one all-gather over the message channel, launched on ``stream`` (the message's side stream). RoCE
++        only: a gather the channel does not fit is refused, never sent through NCCL (NCCL collectives of one
++        communicator on two streams can deadlock). ``all_gather``'s pre-settle rule holds: before ``settle`` an NCCL
++        barrier first, on the calling (main) stream, then the gather."""
++
++        if self.msg is None or not self.msg.fits(send) or not recv.is_contiguous() or recv.data_ptr() % PACK:
++            raise ValueError("msg_gather: an open message channel and a 16-byte aligned contiguous gather it fits")
++        if not self.settled and not torch.cuda.is_current_stream_capturing():
++            self.nccl.barrier()
++        with torch.cuda.stream(stream):
++            self.msg.all_gather(send, recv)
+ 
+     def __getattr__(self, name):
+         return getattr(self.nccl, name)
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -952,6 +952,124 @@
+         return readback(self.allv[:count]).tolist()
+ 
+ 
++def msg_side(value: str | None = None) -> bool:
++    """TF_GLM_MSG_SIDE (lane MsgSide, LEADS 12): 1 gives the per-round message's fixed gather its own RoCE channel
++    (``RoceComm.open_messages``) and runs it on a side stream (``SideMsgGather``), so after a round it moves while the
++    prelaunched DFlash2 pass runs and a follower's host reads it without waiting behind that pass; 0 (the default):
++    ``MsgGather`` as before. Every rank alike (the startup settings comparison); a RoCE communicator only
++    (TF_GLM_COMM=roce). Replies are the same bits: only where and when the message's gather runs changes."""
++
++    raw = (os.environ.get("TF_GLM_MSG_SIDE", "") if value is None else value).strip() or "0"
++    if raw not in ("0", "1"):
++        raise ValueError(f"TF_GLM_MSG_SIDE: 0 or 1, not {raw!r}")
++    return raw == "1"
++
++
++class SideMsgGather(MsgGather):
++    """MsgSide (TF_GLM_MSG_SIDE=1): ``MsgGather`` whose fixed gather goes over the RoCE message channel
++    (``RoceComm.msg_gather``: its own region, counters, slots and proxy, so it never races the main channel's
++    gathers) on a side stream of its own. The collectives and their order on every rank are ``MsgGather``'s; a
++    message past the buffer still runs its values' gather on the main stream and channel, decided from the gathered
++    slot 0 as before (``take`` repeats ``MsgGather.take``'s decision; ``pre``'s refusals are ``MsgGather.pre``'s).
++
++    Where the gather starts (the gate): the side stream waits on ``gate``, an event on the main stream that ``mark``
++    records in ``MultiDecoder._round`` just before the round's prelaunched DFlash2 pass (every rank), else at the
++    gather's own enqueue, the point ``MsgGather`` starts it. So after a round the message moves while the pass runs,
++    and otherwise it starts where it did before: its RoCE wait (TF_ROCE_WAIT_S) is at most a pass longer than the old
++    path's, and it never spins on an SM through a verify window or a prompt chunk.
++
++    Why reading it on the side stream is correct - every consumer orders behind the gather: (1) a follower's host
++    reads it through ``sampling.readback`` entered on the side stream, a copy queued behind the gather whose event
++    the host waits on; (2) the next gather into ``mine`` / ``got`` is later on the same side stream; (3) rank 0's
++    pinned staging is rewritten only after ``ready`` (recorded on the side stream behind the staging copy) and
++    ``values_ready`` (on the main stream behind the values' copy). Nothing on the main stream reads or writes
++    ``mine`` or ``got`` (they are even made, zero fill and all, on the side stream: ``_fixed``); the message's effects
++    reach the main stream only through the host, after (1)."""
++
++    def __init__(self, comm, rank: int, world: int, torch) -> None:
++        super().__init__(comm, rank, world, torch)
++        self.side = torch.cuda.Stream()
++        self.gate = torch.cuda.Event()
++        self.marked = False         # ``mark`` recorded the gate since the last gather
++        self.values_ready = None    # rank 0: the values' copy out of the staging buffer (a message past it)
++
++    def mark(self) -> None:
++        """Every rank, just before a round's prelaunched DFlash2 pass (``MultiDecoder._round``): the next message's
++        gather may start from the main stream's point now instead of behind the pass."""
++
++        self.gate.record()
++        self.marked = True
++
++    def _gather(self, mine, got) -> None:
++        """The fixed gather, on the side stream from the gate (``mark``'s point, else the main stream's end now)."""
++
++        if not self.marked:
++            self.gate.record()
++        self.marked = False
++        self.side.wait_event(self.gate)
++        self.comm.msg_gather(mine, got, self.side)
++
++    def _fixed(self):
++        """``MsgGather._fixed``'s buffers, made on the side stream: their zero fill is then queued before the side
++        stream's first copy into ``mine`` (made on a busy main stream, the fill would land after that copy and send
++        zeros)."""
++
++        if self.mine is None:
++            with self.torch.cuda.stream(self.side):
++                return super()._fixed()
++        return self.mine, self.got
++
++    def _staging(self, n: int):
++        if self.values_ready is not None:
++            self.values_ready.synchronize()           # the last long message's values' copy has left it too
++        return super()._staging(n)
++
++    def pre(self) -> None:
++        if self.rank == 0 or self.pending:
++            return super().pre()                      # (its refusals, raised before any gather)
++        self._gather(*self._fixed())
++        self.pending = True
++
++    def send(self, values: list[int], echo: bool = True) -> list[int] | None:
++        torch = self.torch
++        if not exact_ints(values):
++            values = [int(v) for v in values]
++        n = len(values)
++        host = self._staging(n)
++        host[0] = n
++        if n:
++            host[1:1 + n].numpy()[:] = values
++        mine, got = self._fixed()
++        with torch.cuda.stream(self.side):            # behind the side stream's last gather, which read ``mine``
++            mine.copy_(host[:self.ints], non_blocking=True)
++            self.ready.record()                       # the staging copy is enqueued (on the side stream)
++        self._gather(mine, got)
++        if n > self.ints - 1:
++            send, recv = self._values(n)
++            send.copy_(host[1:1 + n], non_blocking=True)
++            self.comm.all_gather(send, recv)
++            if self.values_ready is None:
++                self.values_ready = torch.cuda.Event()
++            self.values_ready.record()
++        return list(values) if echo else None
++
++    def take(self) -> list[int]:
++        from tensorfold.cuda.sampling import readback
++
++        mine, got = self._fixed()
++        if not self.pending:
++            self._gather(mine, got)                   # no pre() since the last message: queue it now
++        self.pending = False
++        with self.torch.cuda.stream(self.side):       # the readback's copy and event behind the gather
++            row = readback(got[:self.ints]).tolist()
++        self.comm.check()                             # a timed-out wait poisons the channel: say so, not a torn message
++        count = row[0]
++        if count <= self.ints - 1:
++            return row[1:1 + count]
++        self.comm.all_gather(*self._values(count))
++        return readback(self.allv[:count]).tolist()
++
++
+ class GlmEngine:
+     """GLM-5.3-Flash on ``world`` ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
+ 
+@@ -1023,6 +1141,7 @@
+         self.torch = torch
+         self.rank, self.world = rank, world
+         self._msg = None            # OTS msg-gather: the message gather (``MsgGather``), built on the first message
++        self.msg_side = msg_side()  # MsgSide: TF_GLM_MSG_SIDE (the settings comparison below; channel after it)
+         parallel = int(parallel)
+         if not 1 <= parallel <= PARALLEL_MOST:
+             raise ValueError(f"--parallel: 1 to {PARALLEL_MOST} requests at once for GLM-5.3-Flash, not {parallel}")
+@@ -1245,7 +1364,7 @@
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+                        indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(self.drafter_graphs),
+                        int(DRAFT_SKIP), *_f64_ints(DRAFT_EDGE),
+-                       prompt_overlap()] + \
++                       prompt_overlap(), int(self.msg_side)] + \
+             lay.owner_words(cfg.layers) + self.prx.code() + self.split.prompt_code()   # OTS 0105; TF_GLM_PRX*;
+                                                               # TF_GLM_PROMPT_MICROBATCH (MicrobatchPort)
+         rows = self._gather_ints(mine + [spare >> 20])
+@@ -1259,7 +1378,7 @@
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+                                "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_MULTI_GRAPHS, "
+-                               "TF_GLM_DRAFT_SKIP, TF_GLM_DRAFT_EDGE, "
++                               "TF_GLM_DRAFT_SKIP, TF_GLM_DRAFT_EDGE, TF_GLM_MSG_SIDE, "
+                                "TF_GLM_PROMPT_OVERLAP, TF_GLM_PRX*, TF_GLM_PROMPT_MICROBATCH*, TF_GLM_PROMPT_OWN_FRONT): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+@@ -1367,6 +1486,10 @@
+ 
+             attach(self.comm, rank, world, self.prx, prx_regions)
+             fastboot.mark("TF_GLM_PRX connected")
++        if self.msg_side:                        # MsgSide: the message's own RoCE channel, every rank together once
++            if not hasattr(self.comm, "open_messages"):              # (the ranks agreed on the knob above)
++                raise ValueError("TF_GLM_MSG_SIDE=1: the message channel is a RoCE one (TF_GLM_COMM=roce)")
++            self.comm.open_messages(MsgGather.ints * 4)
+         w = load(model_dir, rank=rank, world=world, mtp=self.mtp_on)
+         fastboot.mark("weights", f"{w.nbytes() / 1e9:.1f} GB on the GPU")
+         w.comm = self.comm
+@@ -1727,9 +1850,15 @@
+         """This engine's message gather, built once."""
+ 
+         if self._msg is None:
+-            self._msg = MsgGather(self.comm, self.rank, self.world, self.torch)
++            side = getattr(self, "msg_side", False)   # (MsgSide; stand-in engines in tests have no knob)
++            self._msg = (SideMsgGather if side else MsgGather)(self.comm, self.rank, self.world, self.torch)
+         return self._msg
+ 
++    def _msg_mark(self) -> None:
++        """MsgSide, every rank: ``SideMsgGather.mark`` (``MultiDecoder._round``, before the prelaunched pass)."""
++
++        self._messages().mark()
++
+     def _effective(self, code: list[int]) -> list[int]:
+         """Resolve auto and MTP policies to the available heads, using EXL3_AUTO for EXL3 with DFlash2 and DFlash2 when MTP is absent."""
+ 
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -804,6 +804,8 @@
+         from .engine import DFLASH_POLICY, encode_policy
+ 
+         self.g = engine
++        # MsgSide (TF_GLM_MSG_SIDE): the next message's gather may start where the round's prelaunched pass does
++        self.msg_mark = engine._msg_mark if getattr(engine, "msg_side", False) else None
+         self.e = e = engine.e
+         self.w = e.w
+         self.rank = engine.rank
+@@ -3680,6 +3682,9 @@
+                 l.depth = min(l.policy.next(*((0, 0) if was_copy else (ndrafts, keep - 1))),
+                               max(0, s.count - len(s.out)))
+         if not short and PRELAUNCH and self.drafts is not None:
++            mark = getattr(self, "msg_mark", None)    # (MsgSide; stand-in decoders in tests have none)
++            if mark is not None:
++                mark()
+             self._prelaunch(lanes)
+         if prof is not None:
+             prof.mark("emit")

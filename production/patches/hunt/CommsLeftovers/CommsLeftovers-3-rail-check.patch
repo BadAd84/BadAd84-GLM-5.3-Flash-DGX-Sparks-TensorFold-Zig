@@ -1,0 +1,116 @@
+--- tensorfold/cuda/roce.py
++++ tensorfold/cuda/roce.py
+@@ -44,6 +44,105 @@
+     if not 1 <= seconds <= 3600:
+         raise ValueError(f"TF_ROCE_WAIT_S: 1 to 3600 seconds, not {value!r}")
+     return int(seconds * 1_000_000)
++
++
++def rail_settings(env=None) -> tuple[bool, int, float]:
++    """The boot rail check's (on, bytes a peer each way, minimum GB/s): TF_ROCE_RAIL_CHECK (1, the default, or 0),
++    TF_ROCE_RAIL_MB (1-256, default 8) and TF_ROCE_RAIL_MIN_GBPS (0.1-1000, default 8: a healthy pair of ~112 Gb/s
++    rails moves ~14-28 GB/s, a rail in the ConnectX-7 13 Gb/s state at most ~1.6-3.2)."""
++
++    env = os.environ if env is None else env
++    on = str(env.get("TF_ROCE_RAIL_CHECK", "") or "1").strip()
++    if on not in ("0", "1"):
++        raise ValueError(f"TF_ROCE_RAIL_CHECK: 0 or 1, not {on!r}")
++    mb = str(env.get("TF_ROCE_RAIL_MB", "") or "8").strip()
++    gbps = str(env.get("TF_ROCE_RAIL_MIN_GBPS", "") or "8").strip()
++    try:
++        mbv = int(mb)
++    except ValueError:
++        mbv = 0
++    try:
++        gv = float(gbps)
++    except ValueError:
++        gv = -1.0
++    if not 1 <= mbv <= 256:
++        raise ValueError(f"TF_ROCE_RAIL_MB: 1 to 256 MiB, not {mb!r}")
++    if not 0.1 <= gv <= 1000:
++        raise ValueError(f"TF_ROCE_RAIL_MIN_GBPS: 0.1 to 1000, not {gbps!r}")
++    return on == "1", mbv << 20, gv
++
++
++def rail_pairs(world: int) -> list[tuple[int, int]]:
++    """Every pair of ranks once, in one order on every rank."""
++
++    return [(a, b) for a in range(world) for b in range(a + 1, world)]
++
++
++def judge_rails(results, min_gbps: float) -> list[tuple[str, float, float, bool]]:
++    """``results``: (label, bytes each way a transfer, seconds of each transfer). Returns (label, median GB/s, best
++    GB/s, ok): ok when the median reaches ``min_gbps``."""
++
++    out = []
++    for label, nbytes, secs in results:
++        rates = sorted(nbytes / max(s, 1e-12) / 1e9 for s in secs)
++        median = rates[len(rates) // 2] if len(rates) % 2 else (rates[len(rates) // 2 - 1] + rates[len(rates) // 2]) / 2
++        out.append((label, median, rates[-1], median >= min_gbps))
++    return out
++
++
++def _cuda_times(fn, iters: int) -> list[float]:
++    events = [torch.cuda.Event(enable_timing=True) for _ in range(iters + 1)]
++    events[0].record()
++    for i in range(iters):
++        fn()
++        events[i + 1].record()
++    torch.cuda.synchronize()
++    return [events[i].elapsed_time(events[i + 1]) / 1e3 for i in range(iters)]
++
++
++RAIL_ITERS = 32
++
++
++def rail_check(nccl, rank: int, world: int, roce=None, env=None, timer=None, log=None, device: str = "cuda") -> list:
++    """A boot guard against a slow rail (the ConnectX-7 13 Gb/s state still reports 200G in sysfs): every pair of
++    ranks in turn times ``RAIL_ITERS`` transfers of TF_ROCE_RAIL_MB each way (``nccl.exchange``, the row split's
++    send/receive), then every rank ``RAIL_ITERS`` one-shot RoCE gathers of its largest size (``roce``); prints GB/s a
++    peer and a WARNING line for each below TF_ROCE_RAIL_MIN_GBPS. Every rank calls it together; it changes nothing.
++    ``timer(fn, iters)``: seconds of each call (default CUDA events). Returns ``judge_rails``' verdicts."""
++
++    on, nbytes, min_gbps = rail_settings(env)
++    log = log or (lambda s: print(s, flush=True))
++    if not on or world < 2 or not hasattr(nccl, "exchange"):
++        return []
++    timer = timer or _cuda_times
++    results = []
++    send = torch.zeros(nbytes, dtype=torch.uint8, device=device).view(torch.int32)
++    recv = torch.empty_like(send)
++    for a, b in rail_pairs(world):
++        nccl.barrier()
++        if rank not in (a, b):
++            continue
++        peer = b if rank == a else a
++        nccl.exchange([send], [recv], peer)                  # the pair's connection, outside the timing
++        results.append((f"peer {peer}", nbytes, timer(lambda: nccl.exchange([send], [recv], peer), RAIL_ITERS)))
++    if roce is not None:
++        nccl.barrier()
++        size = roce.max_bytes // PACK * PACK
++        s = torch.zeros(size, dtype=torch.uint8, device=device)
++        r = torch.empty(world * size, dtype=torch.uint8, device=device)
++        roce.all_gather(s, r)
++        results.append(("RoCE one-shot (every peer)", size, timer(lambda: roce.all_gather(s, r), RAIL_ITERS)))
++    nccl.barrier()
++    verdicts = judge_rails(results, min_gbps)
++    log(f"[tensorfold] rail check, rank {rank}: " + "; ".join(
++        f"{label} {med:.1f} GB/s (best {best:.1f}, {n >> 10} KiB x {RAIL_ITERS})"
++        for (label, med, best, _), (_, n, _) in zip(verdicts, results)))
++    for label, med, _, ok in verdicts:
++        if not ok:
++            log(f"[tensorfold] WARNING: rank {rank} {label}: {med:.1f} GB/s, below {min_gbps:g} GB/s "
++                "(TF_ROCE_RAIL_MIN_GBPS). A ConnectX-7 rail in its 13 Gb/s state reads 200G in sysfs: run "
++                "triangle_rdma_check.sh and reboot the Sparks with the cables in. The serve continues, slower.")
++    return verdicts
+ 
+ 
+ def _cache_dir() -> Path:
+@@ -327,6 +426,7 @@
+         self.nccl, self.rank, self.world = nccl, rank, world
+         limit = int(os.environ.get("TF_ROCE_MAX_KB", "256")) << 10 if max_bytes is None else max_bytes
+         self.roce = RoceGather(nccl, rank, world, limit)
++        rail_check(nccl, rank, world, self.roce)             # TF_ROCE_RAIL_CHECK: a loud warning, nothing more
+         self.small = self.large = 0
+         self.settled = False
+ 

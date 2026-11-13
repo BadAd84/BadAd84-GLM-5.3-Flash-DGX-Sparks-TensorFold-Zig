@@ -1,0 +1,352 @@
+diff -r a/tensorfold/families/glm5_next/cuda/kda_chunk.cpp b/tensorfold/families/glm5_next/cuda/kda_chunk.cpp
+--- tensorfold/families/glm5_next/cuda/kda_chunk.cpp	2026-10-30 01:54:17.536404700 +0000
++++ tensorfold/families/glm5_next/cuda/kda_chunk.cpp	2026-10-30 01:54:17.538404100 +0000
+@@ -3,17 +3,19 @@
+ 
+ void kda_chunk_cuda(const at::Tensor&, int64_t, int64_t, const at::Tensor&, int64_t, const at::Tensor&, int64_t,
+                     const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+-                    const at::Tensor&, double, double, int64_t, int64_t, at::Tensor&, at::Tensor&);
++                    const at::Tensor&, double, double, int64_t, int64_t, at::Tensor&, at::Tensor&, bool);
++int64_t kda_chunk_clusters();
+ 
+ static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
+     TORCH_CHECK(x.is_cuda() && x.scalar_type() == t, name, ": expected a CUDA tensor of the right dtype");
+ }
+ 
+-// A prompt chunk of ``rows`` rows whose first row sits ``off`` rows into its 32-row sub-chunk (kda_chunk.cu).
++// A prompt chunk of ``rows`` rows whose first row sits ``off`` rows into its 32-row sub-chunk (kda_chunk.cu);
++// ``pipe``: each head on a producer / consumer pair of CTAs (a thread-block cluster), the same bits.
+ void chain(const at::Tensor& P, int64_t p_stride, int64_t b_off, const at::Tensor& A, int64_t a_stride,
+            const at::Tensor& G, int64_t g_stride, const at::Tensor& cs, const at::Tensor& cw,
+            const at::Tensor& state_in, const at::Tensor& a_log, const at::Tensor& dt_bias, const at::Tensor& norm_w,
+-           double eps, double lower, int64_t rows, int64_t off, at::Tensor out, at::Tensor state_out) {
++           double eps, double lower, int64_t rows, int64_t off, at::Tensor out, at::Tensor state_out, bool pipe) {
+     check(P, at::kBFloat16, "P");
+     check(A, at::kBFloat16, "A");
+     check(G, at::kBFloat16, "G");
+@@ -40,7 +42,7 @@
+     TORCH_CHECK(off >= 0 && off < 32, "off");
+     c10::cuda::CUDAGuard guard(P.device());
+     kda_chunk_cuda(P, p_stride, b_off, A, a_stride, G, g_stride, cs, cw, state_in, a_log, dt_bias, norm_w, eps, lower,
+-                   rows, off, out, state_out);
++                   rows, off, out, state_out, pipe);
+ }
+ 
+ #ifdef KDA_PROF
+@@ -50,6 +52,7 @@
+ 
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     m.def("chain", &chain);
++    m.def("clusters", &kda_chunk_clusters);
+ #ifdef KDA_PROF
+     m.def("prof", &prof);
+ #endif
+diff -r a/tensorfold/families/glm5_next/cuda/kda_chunk.cu b/tensorfold/families/glm5_next/cuda/kda_chunk.cu
+--- tensorfold/families/glm5_next/cuda/kda_chunk.cu	2026-10-30 01:54:17.526290600 +0000
++++ tensorfold/families/glm5_next/cuda/kda_chunk.cu	2026-10-30 01:54:17.529470000 +0000
+@@ -34,8 +34,11 @@
+ #include <ATen/cuda/CUDAContext.h>
+ #include <cuda_bf16.h>
+ #include <cuda_runtime.h>
++#include <cooperative_groups.h>
+ #include <cstdint>
+ 
++namespace cg = cooperative_groups;
++
+ namespace {
+ 
+ constexpr int DK = 128, DV = 128, TAPS = 4;
+@@ -163,6 +166,49 @@
+     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(d), "l"(src));
+ }
+ 
++// The two halves of a cluster barrier (every thread of both CTAs): arrive (release: this thread's earlier reads and
++// writes, global memory included, happen before for the cluster) and wait (acquire).
++__device__ __forceinline__ void cluster_arrive() { asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory"); }
++__device__ __forceinline__ void cluster_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory"); }
++
++// What the consumer's steps 5-7 read of a sub-chunk, as 16-byte words of Smem: q E and k E (q, k), k E(s ->)
++// (u.x.ke), T and M (u.x.tt, u.x.mt: adjacent), v, beta and E(31) (adjacent): XW words, each thread's word j at
++// smem word ``hand_word(j)``. The producer stores them into a slot of global scratch (an L2-resident 66 KB a slot, two
++// a head: sub-chunk c's in slot c % 2) and the consumer loads them back with cp.async: a distributed-shared-memory
++// copy of the same bytes measured 5.5 us a sub-chunk on an RTX 5070 against ~1 us through L2.
++constexpr int XQK = 2 * BT * DK * 4 / 16, XKE = BT * DK * 4 / 16, XTM = 2 * BT * BT * 4 / 16, XV = BT * DV * 2 / 16;
++constexpr int XB = (BT + DK) * 4 / 16, XW = XQK + XKE + XTM + XV + XB, XPER = (XW + NT - 1) / NT;
++
++__device__ __forceinline__ int hand_word(const Smem& sm, int j) {
++    const char* b = reinterpret_cast<const char*>(&sm);
++    const int ke = (int)((reinterpret_cast<const char*>(&sm.u.x.ke[0][0]) - b) / 16);
++    const int tt = (int)((reinterpret_cast<const char*>(&sm.u.x.tt[0][0]) - b) / 16);
++    const int vv = (int)((reinterpret_cast<const char*>(&sm.v[0][0]) - b) / 16);
++    const int bb = (int)((reinterpret_cast<const char*>(&sm.beta[0]) - b) / 16);
++    return j < XQK ? j : j < XQK + XKE ? ke + j - XQK : j < XQK + XKE + XTM ? tt + j - XQK - XKE
++         : j < XQK + XKE + XTM + XV ? vv + j - XQK - XKE - XTM : bb + j - XQK - XKE - XTM - XV;
++}
++
++// the producer: this sub-chunk's words from its shared memory into ``slot`` (XW words of global memory)
++__device__ __forceinline__ void push(const Smem& sm, uint4* __restrict__ slot, int tid) {
++    const uint4* s = reinterpret_cast<const uint4*>(&sm);
++#pragma unroll
++    for (int i = 0; i < XPER; ++i) {
++        const int j = tid + i * NT;
++        if (j < XW) slot[j] = s[hand_word(sm, j)];
++    }
++}
++
++// the consumer: the words back from ``slot`` into its own shared memory (cp.async; the caller waits and syncs)
++__device__ __forceinline__ void fetch(Smem& sm, const uint4* __restrict__ slot, int tid) {
++    uint4* d = reinterpret_cast<uint4*>(&sm);
++#pragma unroll
++    for (int i = 0; i < XPER; ++i) {
++        const int j = tid + i * NT;
++        if (j < XW) cp16(d + hand_word(sm, j), slot + j);
++    }
++}
++
+ // Warm L2 with the rows of the sub-chunk whose row 0 is prompt-chunk row r0 (projection rows r0 - 3 .. r0 + 31 of
+ // this head's q | k | v channels, its decay rows and beta logits; not when ``next`` is false) and the output gate
+ // rows from gate_r0.
+@@ -223,16 +269,30 @@
+     }
+ }
+ 
++// PIPE (HuntPrefill): the head's work split between a cluster of two CTAs on two SMs, a producer (CTA rank 0) that
++// runs steps 0-4 of each sub-chunk (staging, conv + SiLU + norms, decays and beta, L, M, T, k E(s ->), k E(s), q E(s),
++// E(31): none of them reads the state) and a consumer (rank 1) that holds the state and runs steps 5-7 (the state
++// sums, Y, V' = T Y, the read-outs, the gated RMSNorm and the state update), one sub-chunk behind: while the consumer
++// computes sub-chunk c the producer computes c + 1. After its step 4 the producer stores what steps 5-7 read (q E,
++// k E, v, beta, E(31), k E(s ->), T, M) into a global slot (two a head, alternating; L2-resident), the two meet at
++// one cluster barrier a sub-chunk, and the consumer loads the slot into its own shared memory (the same bytes). The
++// cluster is what guarantees both CTAs are resident together (the barrier could not wait on an unscheduled CTA).
++// Every arithmetic operation is the !PIPE kernel's own, on the same thread of the same warp with the same operands,
++// so the outputs and the state are its bits; only where the steps run changes. 2 H CTAs instead of H: a GB10 runs
++// TP=3's 22 heads on 44 of its 48 SMs where one CTA a head used 22.
++template <bool PIPE>
+ __global__ void __launch_bounds__(NT, 1) chunk_kernel(
+         int H, const __nv_bfloat16* __restrict__ P, int p_stride, int b_off,
+         const __nv_bfloat16* __restrict__ A, int a_stride, const __nv_bfloat16* __restrict__ G, int g_stride,
+         const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
+         const float* __restrict__ state_in, const float* __restrict__ a_log, const float* __restrict__ dt_bias,
+         const __nv_bfloat16* __restrict__ norm_w, float eps, float lower, int rows, int off,
+-        __nv_bfloat16* __restrict__ out, float* __restrict__ state_out) {
++        __nv_bfloat16* __restrict__ out, float* __restrict__ state_out, uint4* __restrict__ xbuf) {
+     extern __shared__ __align__(16) unsigned char smem_raw[];
+     Smem& sm = *reinterpret_cast<Smem*>(smem_raw);
+-    const int h = blockIdx.x, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++    const int rank = PIPE ? (int)cg::this_cluster().block_rank() : 0;
++    const bool prod = !PIPE || rank == 0, cons = !PIPE || rank == 1;    // the steps this CTA runs
++    const int h = PIPE ? blockIdx.x >> 1 : blockIdx.x, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+     const int vg = tid / KP, kp = tid % KP;
+     const int par = kp < 4 ? 1 : 0;                   // parity of the rows this thread finishes
+     const int ov = VPT * vg + (kp & 3);               // their value column
+@@ -241,6 +301,7 @@
+     const bool vec_a = (a_stride % 8 == 0) && ((uintptr_t)A % 16 == 0);
+ 
+     float s[VPT][NQ][4];
++    if (cons) {
+ #pragma unroll
+     for (int vv = 0; vv < VPT; ++vv)
+ #pragma unroll
+@@ -249,6 +310,7 @@
+                 reinterpret_cast<const float4*>(state_in + sbase + (size_t)(VPT * vg + vv) * DK)[kp + KP * i];
+             s[vv][i][0] = x.x; s[vv][i][1] = x.y; s[vv][i][2] = x.z; s[vv][i][3] = x.w;
+         }
++    }
+     const float rate = expf(a_log[h]);
+     const float dtb = dt_bias[h * DK + (tid & (DK - 1))];     // the decay channel this thread computes (tid % 128)
+     float nw[4];                                      // the norm weights of value columns 4 lane .. 4 lane + 3
+@@ -268,6 +330,7 @@
+     for (int c = 0; c < nsub; ++c) {
+         const int r0 = c * BT - off;                  // the prompt chunk's row at the sub-chunk's row 0
+ 
++        if (prod) {                                   // steps 0-4 (the producer's under PIPE)
+         // 0. stage this sub-chunk's rows (warmed in L2 during the previous one), warm the next one's and this
+         // one's output gates
+         stage(sm, tid, h, H, r0, rows, P, p_stride, b_off, A, a_stride, cs, vec_p, vec_a);
+@@ -520,7 +583,23 @@
+             }
+         }
+         __syncthreads(); MARK(4);
++        }                                             // (prod)
+ 
++        if (PIPE) {
++            // the producer's sub-chunk c goes to slot c % 2; at the barrier the consumer has finished c - 1 (so it read
++            // slot (c - 1) % 2 back long ago: the producer writes it next, for c + 1); the consumer loads slot c % 2
++            uint4* slot = xbuf + (size_t)(2 * h + (c & 1)) * XW;
++            if (prod) push(sm, slot, tid);
++            cluster_arrive();
++            cluster_wait();
++            if (cons) {
++                fetch(sm, slot, tid);
++                asm volatile("cp.async.wait_all;" ::: "memory");
++                __syncthreads();                      // every thread's copies, before steps 5-7 read them
++            }
++        }
++        if (cons) {                                   // steps 5-7 (the consumer's under PIPE)
++
+         // 5. Every thread: its sums of (k E) S0^T and (q E) S0^T; Y = beta (v - (k E) S0^T) into g, the (q E) S0^T
+         // of the rows it finishes kept in o1.
+         float o1[OWN];
+@@ -700,7 +779,9 @@
+             }
+         }
+         __syncthreads(); MARK(7);
++        }                                             // (cons)
+     }
++    if (!cons) return;
+ #pragma unroll
+     for (int vv = 0; vv < VPT; ++vv)
+ #pragma unroll
+@@ -722,24 +803,88 @@
+ template <typename T>
+ static T* ptr(const at::Tensor& x) { return x.defined() && x.numel() ? (T*)x.data_ptr() : nullptr; }
+ 
++// ``pipe``: the producer / consumer cluster (chunk_kernel<true>, 2 H CTAs), else one CTA a head; the same bits. The
++// cluster form runs only where the GPU holds all H clusters at once (cudaOccupancyMaxActiveClusters: a GB10's 48 SMs
++// hold TP=3's 22; a 36-SM GPU 18): with fewer, some heads would wait for a whole chunk, so one CTA a head serves.
+ void kda_chunk_cuda(const at::Tensor& P, int64_t p_stride, int64_t b_off, const at::Tensor& A, int64_t a_stride,
+                     const at::Tensor& G, int64_t g_stride, const at::Tensor& cs, const at::Tensor& cw,
+                     const at::Tensor& state_in, const at::Tensor& a_log, const at::Tensor& dt_bias,
+                     const at::Tensor& norm_w, double eps, double lower, int64_t rows, int64_t off, at::Tensor& out,
+-                    at::Tensor& state_out) {
++                    at::Tensor& state_out, bool pipe) {
+     auto stream = at::cuda::getCurrentCUDAStream();
+     const int H = (int)a_log.numel();
+     const int smem = (int)sizeof(Smem);
+-    static int attr_device = -1;
++    static int attr_device = -1, clusters = 0;
+     const int device = P.get_device();
++    cudaLaunchConfig_t cfg = {};
++    cfg.gridDim = dim3(2 * H);
++    cfg.blockDim = dim3(NT);
++    cfg.dynamicSmemBytes = smem;
++    cfg.stream = stream;
++    cudaLaunchAttribute attr[1];
++    attr[0].id = cudaLaunchAttributeClusterDimension;
++    attr[0].val.clusterDim.x = 2;
++    attr[0].val.clusterDim.y = 1;
++    attr[0].val.clusterDim.z = 1;
++    cfg.attrs = attr;
++    cfg.numAttrs = 1;
+     if (attr_device != device) {
+-        C10_CUDA_CHECK(cudaFuncSetAttribute(chunk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++        C10_CUDA_CHECK(cudaFuncSetAttribute(chunk_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++        int major = 0;
++        C10_CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
++        clusters = 0;
++        if (major >= 9) {
++            C10_CUDA_CHECK(cudaFuncSetAttribute(chunk_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++            C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&clusters, chunk_kernel<true>, &cfg));
++        }
+         attr_device = device;
+     }
+-    chunk_kernel<<<H, NT, smem, stream>>>(
+-        H, ptr<__nv_bfloat16>(P), (int)p_stride, (int)b_off, ptr<__nv_bfloat16>(A), (int)a_stride,
+-        ptr<__nv_bfloat16>(G), (int)g_stride, ptr<__nv_bfloat16>(cs), ptr<__nv_bfloat16>(cw), ptr<float>(state_in),
+-        ptr<float>(a_log), ptr<float>(dt_bias), ptr<__nv_bfloat16>(norm_w), (float)eps, (float)lower, (int)rows,
+-        (int)off, ptr<__nv_bfloat16>(out), ptr<float>(state_out));
+-    C10_CUDA_KERNEL_LAUNCH_CHECK();
++    if (!pipe || clusters < H) {
++        chunk_kernel<false><<<H, NT, smem, stream>>>(
++            H, ptr<__nv_bfloat16>(P), (int)p_stride, (int)b_off, ptr<__nv_bfloat16>(A), (int)a_stride,
++            ptr<__nv_bfloat16>(G), (int)g_stride, ptr<__nv_bfloat16>(cs), ptr<__nv_bfloat16>(cw), ptr<float>(state_in),
++            ptr<float>(a_log), ptr<float>(dt_bias), ptr<__nv_bfloat16>(norm_w), (float)eps, (float)lower, (int)rows,
++            (int)off, ptr<__nv_bfloat16>(out), ptr<float>(state_out), nullptr);
++        C10_CUDA_KERNEL_LAUNCH_CHECK();
++        return;
++    }
++    // the producer -> consumer slots, two a head (66 KB each, 2.9 MB at 22 heads: they stay in the L2), kept for
++    // the process (prompt chunks run one after another on one stream, so one set serves every call)
++    static at::Tensor xbuf;
++    const int64_t need = (int64_t)2 * H * XW * 16;
++    if (!xbuf.defined() || xbuf.numel() < need || xbuf.get_device() != device)
++        xbuf = at::empty({need}, P.options().dtype(at::kByte));
++    C10_CUDA_CHECK(cudaLaunchKernelEx(
++        &cfg, chunk_kernel<true>, H, (const __nv_bfloat16*)ptr<__nv_bfloat16>(P), (int)p_stride, (int)b_off,
++        (const __nv_bfloat16*)ptr<__nv_bfloat16>(A), (int)a_stride, (const __nv_bfloat16*)ptr<__nv_bfloat16>(G),
++        (int)g_stride, (const __nv_bfloat16*)ptr<__nv_bfloat16>(cs), (const __nv_bfloat16*)ptr<__nv_bfloat16>(cw),
++        (const float*)ptr<float>(state_in), (const float*)ptr<float>(a_log), (const float*)ptr<float>(dt_bias),
++        (const __nv_bfloat16*)ptr<__nv_bfloat16>(norm_w), (float)eps, (float)lower, (int)rows, (int)off,
++        ptr<__nv_bfloat16>(out), ptr<float>(state_out), reinterpret_cast<uint4*>(xbuf.data_ptr())));
++}
++
++// The most producer / consumer clusters this GPU holds at once (0 without clusters): the pipe serves H heads only
++// when it is at least H.
++int64_t kda_chunk_clusters() {
++    int device = 0;
++    C10_CUDA_CHECK(cudaGetDevice(&device));
++    int major = 0;
++    C10_CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
++    if (major < 9) return 0;
++    const int smem = (int)sizeof(Smem);
++    C10_CUDA_CHECK(cudaFuncSetAttribute(chunk_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++    cudaLaunchConfig_t cfg = {};
++    cfg.gridDim = dim3(2);
++    cfg.blockDim = dim3(NT);
++    cfg.dynamicSmemBytes = smem;
++    cudaLaunchAttribute attr[1];
++    attr[0].id = cudaLaunchAttributeClusterDimension;
++    attr[0].val.clusterDim.x = 2;
++    attr[0].val.clusterDim.y = 1;
++    attr[0].val.clusterDim.z = 1;
++    cfg.attrs = attr;
++    cfg.numAttrs = 1;
++    int n = 0;
++    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&n, chunk_kernel<true>, &cfg));
++    return n;
+ }
+diff -r a/tensorfold/families/glm5_next/cuda/kda_chunked.py b/tensorfold/families/glm5_next/cuda/kda_chunked.py
+--- tensorfold/families/glm5_next/cuda/kda_chunked.py	2026-10-30 01:54:17.551093100 +0000
++++ tensorfold/families/glm5_next/cuda/kda_chunked.py	2026-10-30 01:54:17.552605200 +0000
+@@ -182,15 +182,48 @@
+                 extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
+ 
+ 
++def pipe_on() -> bool:
++    """TF_GLM_KDA_PIPE (default on where the GPU has thread-block clusters, compute capability 9.0+): each head's
++    prompt chunk on a producer / consumer pair of CTAs (kda_chunk.cu's chunk_kernel<true>: the state-free steps of
++    sub-chunk c + 1 beside the state's steps of c), the same bits as one CTA a head; 0: one CTA a head. The kernel
++    takes the pair only when the GPU holds a cluster for every head at once (``clusters``), else one CTA a head."""
++    import os
++
++    if os.environ.get("TF_GLM_KDA_PIPE", "1") == "0":
++        return False
++    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0)
++
++
++def clusters() -> int:
++    """The producer / consumer clusters this GPU holds at once (0 without clusters)."""
++    return int(_ext().clusters())
++
++
++# chunks of fewer rows take one CTA a head under the default switch: the pipe's first sub-chunk runs on the producer
++# alone and its last on the consumer alone, which a 2-sub-chunk chunk does not win back (RTX 5070, 16 heads, min of
++# 15: 64 rows 0.049 ms one CTA a head, 0.053 the pair; 2,390 rows 1.551 -> 1.018 ms, 4,096 rows 2.622 -> 1.695; a
++# sub-chunk 20.5 -> 12.9 us, so from 4 sub-chunks on the pair wins). Speed only.
++PIPE_ROWS = 128
++
++
+ def chain(p: torch.Tensor, b_off: int, a: torch.Tensor, g: torch.Tensor, conv_state: torch.Tensor,
+           conv_w: torch.Tensor, state_in: torch.Tensor, a_log: torch.Tensor, dt_bias: torch.Tensor,
+           norm_w: torch.Tensor, eps: float, lower: float, rows: int, out: torch.Tensor, state_out: torch.Tensor,
+-          pos: int = 0) -> torch.Tensor:
++          pos: int = 0, pipe: bool | None = None) -> torch.Tensor:
+     """kda.chain for a prompt chunk in chunked form: projection rows p [q | k | v | ... | b at b_off ...], bf16 gate
+     rows a (decay) and g (output gate), conv state [3, 3 H 128] (read, not shifted), state_in -> state_out
+-    [H, 128, 128]; ``pos`` is the first row's absolute position. Writes out[:rows] (bf16 [rows, H * 128])."""
++    [H, 128, 128]; ``pos`` is the first row's absolute position. Writes out[:rows] (bf16 [rows, H * 128]).
++    ``pipe``: chunk_kernel's producer / consumer form (default: ``pipe_on()`` for chunks of PIPE_ROWS rows or more),
++    the same bits either way."""
+ 
+     rows = int(rows)
++    if pipe is None:
++        pipe = _PIPE() and rows >= PIPE_ROWS
+     _ext().chain(p, p.stride(0), int(b_off), a, a.stride(0), g, g.stride(0), conv_state, conv_w, state_in, a_log,
+-                 dt_bias, norm_w, float(eps), float(lower), rows, int(pos) % CHUNK, out, state_out)
++                 dt_bias, norm_w, float(eps), float(lower), rows, int(pos) % CHUNK, out, state_out, bool(pipe))
+     return out[:rows]
++
++
++@lru_cache(maxsize=1)
++def _PIPE() -> bool:
++    return pipe_on()

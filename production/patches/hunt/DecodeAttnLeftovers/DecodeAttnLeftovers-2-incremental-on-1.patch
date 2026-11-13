@@ -1,0 +1,229 @@
+--- tensorfold/families/glm5_next/cuda/seg_scores.cu
++++ tensorfold/families/glm5_next/cuda/seg_scores.cu
+@@ -22,7 +22,8 @@
+ // in window order (blockIdx.x: the window's group; past the last the CTA exits), so a window's grid is (the most such
+ // groups a window of its rows can hold, blocks) instead of (rows / 8 for every segment, blocks, segments): a CTA scores
+ // the same tiles of the same rows as before (the same bits) and the few-row segments' and unused segments' CTAs are no
+-// longer launched (a dense segment's still exit at once: whether a segment is sparse is a device-side fact).
++// longer launched (a dense segment's still exit at once: whether a segment is sparse is a device-side fact). F5: or a
++// flat grid spread over the row groups by their pool blocks (``spread``, the kernel's comment).
+ 
+ #include <ATen/cuda/CUDAContext.h>
+ #include <c10/cuda/CUDAGuard.h>
+@@ -128,35 +129,73 @@
+     const uint8_t* __restrict__ PK, int RS, float* __restrict__ OUT, long long o_stride,
+     const int32_t* __restrict__ POS, const int32_t* __restrict__ SPR, const int32_t* __restrict__ SEG_START,
+     const int32_t* __restrict__ SEG_ROWS, const int32_t* __restrict__ SEG_PBASE, const int32_t* __restrict__ SEG_POOLS,
+-    int32_t* __restrict__ TRI_POOLS, int segs, int min_rows, float scale, float wscale) {
++    int32_t* __restrict__ TRI_POOLS, int segs, int min_rows, int spread, float scale, float wscale) {
+     extern __shared__ __align__(16) uint8_t smem[];
+     uint4* tile = reinterpret_cast<uint4*>(smem);                // 16 KB: one key tile, bf16
+     float* ks = reinterpret_cast<float*>(smem + BP * CH * 16);   // its 64 scales
+     uint8_t* raw = smem + BP * CH * 16 + BP * 4;                 // ST raw stages
+-    const int G = gridDim.y;
+     // segments of fewer than min_rows rows are the Triton kernel's (launched next, over TRI_POOLS: their pool counts,
+     // 0 for the segments scored here); a few rows' scoring is memory-bound, where Triton's programs read faster
+     if (blockIdx.x == 0 && blockIdx.y == 0)
+         for (int q = threadIdx.x; q < segs; q += RB * 32) TRI_POOLS[q] = SEG_ROWS[q] < min_rows ? SEG_POOLS[q] : 0;
+-    // the CTA's segment s and row group x: group blockIdx.x of the scored segments' groups in window order (a
+-    // uniform scan of the segment table: every thread reads the same words)
+-    int s = -1, x = 0;
+-    for (int q = 0, at = 0; q < segs; ++q) {
+-        const int nq = SEG_ROWS[q];
+-        if (nq < min_rows) continue;                             // the Triton kernel's
+-        const int ng = (nq + RB - 1) / RB;
+-        if ((int)blockIdx.x < at + ng) {
+-            s = q;
+-            x = (int)blockIdx.x - at;
+-            break;
+-        }
+-        at += ng;
+-    }
+-    if (s < 0) return;                                           // past the window's groups
++    // the CTA's segment s, row group x and its blocks b0, b0 + G, .. (a uniform scan of the segment table: every
++    // thread reads the same words). The window's items are the scored segments' row groups in window order.
++    int s = -1, x = 0, b0 = (int)blockIdx.y, G = (int)gridDim.y;
++    if (!spread) {
++        // grouped grid (gridDim.y CTAs an item): item blockIdx.x
++        for (int q = 0, at = 0; q < segs; ++q) {
++            const int nq = SEG_ROWS[q];
++            if (nq < min_rows) continue;                         // the Triton kernel's
++            const int ng = (nq + RB - 1) / RB;
++            if ((int)blockIdx.x < at + ng) {
++                s = q;
++                x = (int)blockIdx.x - at;
++                break;
++            }
++            at += ng;
++        }
++    } else {
++        // DecodeAttnLeftovers (F5): a flat grid of gridDim.x CTAs (at least the window's items: the host's
++        // groups_most) spread over the items in proportion to their pool blocks: item i takes 1 + its share of the
++        // gridDim.x - n others, CTAs start_i .. start_{i+1} - 1, start_i = i + floor((gridDim.x - n) * W_i / W)
++        // (W_i: the blocks of the items before it, W: all, at least 1), so every CTA has an item whatever the
++        // window's mix and one stream's segment gets the whole grid (a dense segment's items have no blocks: one
++        // CTA each, which exits). A CTA's tiles are still blocks b0, b0 + G, .. of one row group: which CTA scores a
++        // tile changes none of its arithmetic.
++        int n = 0;
++        long long wsum = 0;
++        for (int q = 0; q < segs; ++q) {
++            const int nq = SEG_ROWS[q];
++            if (nq < min_rows) continue;
++            const int ng = (nq + RB - 1) / RB;
++            n += ng;
++            wsum += (long long)ng * ((SEG_POOLS[q] + BP - 1) / BP);
++        }
++        wsum = wsum > 0 ? wsum : 1;
++        const long long extra = (long long)gridDim.x - n, c = blockIdx.x;
++        long long cum = 0;
++        for (int q = 0, idx = 0; q < segs && s < 0; ++q) {
++            const int nq = SEG_ROWS[q];
++            if (nq < min_rows) continue;
++            const int ng = (nq + RB - 1) / RB, nb = (SEG_POOLS[q] + BP - 1) / BP;
++            for (int xg = 0; xg < ng; ++xg, ++idx) {
++                const long long start = idx + extra * cum / wsum;
++                cum += nb;
++                const long long end = idx + 1 + extra * cum / wsum;
++                if (c >= start && c < end) {
++                    s = q;
++                    x = xg;
++                    b0 = (int)(c - start);
++                    G = (int)(end - start);
++                    break;
++                }
++            }
++        }
++    }
++    if (s < 0) return;                                           // past the window's items
+     const int nr = SEG_ROWS[s];
+     const int npm = SEG_POOLS[s];                                // pools the segment's last row sees
+     const int nblk = (npm + BP - 1) / BP;
+-    const int b0 = (int)blockIdx.y;                              // blocks b0, b0 + G, .. (neighbours read together)
+     if (b0 >= nblk) return;
+     const long long pbase = SEG_PBASE[s];
+     // the CTA's rows (up to RB) share its warps: WPR = RB / (its rows rounded up to a power of two) warps a row, each
+@@ -255,7 +294,7 @@
+ void launch(dim3 grid, cudaStream_t stream, const __nv_bfloat16* QI, const __nv_bfloat16* W, int w_stride,
+             const uint8_t* PK, int RS, float* OUT, long long o_stride, const int32_t* POS, const int32_t* SPR,
+             const int32_t* SS, const int32_t* SR, const int32_t* SB, const int32_t* SP, int32_t* TP, int segs,
+-            int min_rows, float scale, float wscale) {
++            int min_rows, int spread, float scale, float wscale) {
+     constexpr int bytes = BP * CH * 16 + BP * 4 + ST * STAGE;
+     static bool sized = false;                                   // over 48 KB needs the opt-in (once a process)
+     if (!sized) {
+@@ -263,7 +302,7 @@
+         sized = true;
+     }
+     seg_scores_kernel<ST><<<grid, RB * 32, bytes, stream>>>(QI, W, w_stride, PK, RS, OUT, o_stride, POS, SPR, SS, SR,
+-                                                            SB, SP, TP, segs, min_rows, scale, wscale);
++                                                            SB, SP, TP, segs, min_rows, spread, scale, wscale);
+ }
+ 
+ // The most row groups the scored segments of a window of R rows in ``segs`` segments can hold (the grid's x): k of
+@@ -286,12 +325,15 @@
+ // column stride), PK an FP8 pooled-key arena (rows of 128 e4m3 codes then the row's fp32 scale, RS bytes apart; a
+ // segment's pool p at row SEG_PBASE + p), the int32 SegRows tables (POS, SPR per row; SEG_START, SEG_ROWS, SEG_PBASE,
+ // SEG_POOLS per segment, ``segs`` of them). ``blocks``: CTAs a row group's pool blocks are split over, ``stages``:
+-// raw key tiles a CTA holds (2-4); ``min_rows`` (speed only, like both).
+-void seg_scores(const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK, int64_t RS,
+-                at::Tensor OUT, int64_t o_stride, const at::Tensor& POS, const at::Tensor& SPR,
+-                const at::Tensor& SEG_START, const at::Tensor& SEG_ROWS, const at::Tensor& SEG_PBASE,
+-                const at::Tensor& SEG_POOLS, at::Tensor TRI_POOLS, int64_t segs, double scale, double wscale,
+-                int64_t blocks, int64_t stages, int64_t min_rows) {
++// raw key tiles a CTA holds (2-4); ``min_rows`` (speed only, like both). seg_scores_spread's ``spread`` (speed only,
++// DecodeAttnLeftovers F5): 0, the grid above (row groups x blocks: seg_scores); N > 0, a flat grid of N CTAs (at least
++// the window's most row groups) spread over the window's row groups in proportion to their pool blocks, whatever the
++// mix of streams.
++void seg_scores_spread(const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK, int64_t RS,
++                       at::Tensor OUT, int64_t o_stride, const at::Tensor& POS, const at::Tensor& SPR,
++                       const at::Tensor& SEG_START, const at::Tensor& SEG_ROWS, const at::Tensor& SEG_PBASE,
++                       const at::Tensor& SEG_POOLS, at::Tensor TRI_POOLS, int64_t segs, double scale, double wscale,
++                       int64_t blocks, int64_t stages, int64_t min_rows, int64_t spread) {
+     TORCH_CHECK(QI.is_cuda() && QI.scalar_type() == at::kBFloat16 && W.scalar_type() == at::kBFloat16 &&
+                 OUT.scalar_type() == at::kFloat && PK.element_size() == 1, "seg scores: dtypes");
+     for (const at::Tensor* x :
+@@ -305,11 +347,13 @@
+                 "seg scores: score rows 8-byte aligned (float2 stores)");
+     TORCH_CHECK(RS % 16 == 0 && RS >= D + 4 && PK.is_contiguous(), "seg scores: an FP8 key cache of 16-byte rows");
+     TORCH_CHECK(blocks >= 1 && blocks <= 65535 && segs >= 1 && segs <= 65535 && stages >= 2 && stages <= 4 &&
+-                min_rows >= 1, "seg scores: grid / stages / rows");
++                min_rows >= 1 && spread >= 0 && spread < (int64_t(1) << 31), "seg scores: grid / stages / rows");
+     const int64_t R = QI.size(0);
+     if (R <= 0) return;
+     const c10::cuda::CUDAGuard guard(QI.device());
+-    const dim3 grid((unsigned)groups_most(R, segs, min_rows), (unsigned)blocks, 1u);
++    const int64_t most = groups_most(R, segs, min_rows);
++    const dim3 grid = spread > 0 ? dim3((unsigned)std::max(spread, most), 1u, 1u)
++                                 : dim3((unsigned)most, (unsigned)blocks, 1u);
+     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+     auto qi = reinterpret_cast<const __nv_bfloat16*>(QI.data_ptr());
+     auto w = reinterpret_cast<const __nv_bfloat16*>(W.data_ptr());
+@@ -318,7 +362,7 @@
+         f(grid, stream, qi, w, (int)w_stride, pk, (int)RS, OUT.data_ptr<float>(), (long long)o_stride,
+           POS.data_ptr<int32_t>(), SPR.data_ptr<int32_t>(), SEG_START.data_ptr<int32_t>(),
+           SEG_ROWS.data_ptr<int32_t>(), SEG_PBASE.data_ptr<int32_t>(), SEG_POOLS.data_ptr<int32_t>(),
+-          TRI_POOLS.data_ptr<int32_t>(), (int)segs, (int)min_rows, (float)scale, (float)wscale);
++          TRI_POOLS.data_ptr<int32_t>(), (int)segs, (int)min_rows, (int)(spread > 0), (float)scale, (float)wscale);
+     };
+     if (stages == 2) go(launch<2>);
+     else if (stages == 3) go(launch<3>);
+@@ -326,7 +370,17 @@
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
++void seg_scores(const at::Tensor& QI, const at::Tensor& W, int64_t w_stride, const at::Tensor& PK, int64_t RS,
++                at::Tensor OUT, int64_t o_stride, const at::Tensor& POS, const at::Tensor& SPR,
++                const at::Tensor& SEG_START, const at::Tensor& SEG_ROWS, const at::Tensor& SEG_PBASE,
++                const at::Tensor& SEG_POOLS, at::Tensor TRI_POOLS, int64_t segs, double scale, double wscale,
++                int64_t blocks, int64_t stages, int64_t min_rows) {
++    seg_scores_spread(QI, W, w_stride, PK, RS, OUT, o_stride, POS, SPR, SEG_START, SEG_ROWS, SEG_PBASE, SEG_POOLS,
++                      TRI_POOLS, segs, scale, wscale, blocks, stages, min_rows, 0);
++}
++
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     m.def("seg_scores", &seg_scores);
++    m.def("seg_scores_spread", &seg_scores_spread);
+     m.def("groups_most", &groups_most);
+ }
+--- tensorfold/families/glm5_next/cuda/sparse.py
++++ tensorfold/families/glm5_next/cuda/sparse.py
+@@ -878,6 +878,17 @@
+ SEG_SCORE_STAGES = 2
+ 
+ 
++def seg_score_blocks() -> int:
++    """TF_GLM_SEG_SCORE_BLOCKS (default 0, DecodeAttnLeftovers F5; speed only, the same bits): 0, seg_scores.cu's
++    grid of SEG_SCORE_CTAS CTAs for each scored row group; N > 0, a flat grid of N CTAs (at least the window's most row
++    groups) spread over the window's scored row groups in proportion to their pool blocks, so a window of one stream
++    gets all N and four streams N / 4 each (the fixed SEG_SCORE_CTAS fill 2/3 of a GB10's CTA slots at one stream).
++    For the GB10 sweep (recipe R2b); read at each launch (so at graph capture)."""
++    import os
++
++    return max(0, int(os.environ.get("TF_GLM_SEG_SCORE_BLOCKS", "0") or 0))
++
++
+ def seg_scores_cuda() -> bool:
+     """TF_GLM_SEG_SCORES_CUDA (default on): a segmented decode window's FP8 pool scores for its segments of
+     SEG_SCORE_CUDA_ROWS or more rows from seg_scores.cu, which stores _seg_scores' scores with _scores' instruction
+@@ -905,7 +916,7 @@
+         try:
+             if not triton_matches_ptx():
+                 raise RuntimeError(f"Triton {triton.__version__}: the kernel reproduces Triton {TRITON_PTX}'s PTX")
+-            _SEG_SCORES_EXT = load(name="tensorfold_glm_segscores_dal1",       # DecodeAttnLeftovers: grid
++            _SEG_SCORES_EXT = load(name="tensorfold_glm_segscores_dal2",       # DecodeAttnLeftovers: grids
+                                    sources=[str(Path(__file__).parent / "seg_scores.cu")],
+                                    extra_cuda_cflags=["-O3"], verbose=False)
+         except Exception as exc:
+@@ -937,9 +948,9 @@
+     tri_pools = pools
+     if ext is not None and R >= SEG_SCORE_CUDA_ROWS:
+         tri_pools = tri
+-        ext.seg_scores(qi, wts, wts.stride(0), pk, rs, scores, scores.stride(0), rows.pos, rows.sparse,
+-                       rows.seg_start, rows.seg_rows, pbase, pools, tri, segs, D ** -0.5, wscale, SEG_SCORE_CTAS,
+-                       SEG_SCORE_STAGES, SEG_SCORE_CUDA_ROWS)
++        ext.seg_scores_spread(qi, wts, wts.stride(0), pk, rs, scores, scores.stride(0), rows.pos, rows.sparse,
++                              rows.seg_start, rows.seg_rows, pbase, pools, tri, segs, D ** -0.5, wscale,
++                              SEG_SCORE_CTAS, SEG_SCORE_STAGES, SEG_SCORE_CUDA_ROWS, seg_score_blocks())
+         if SEG_SCORE_CUDA_ROWS <= 1:
+             return                                    # every segment scored above: tri holds only zeros
+     grid = min(SEG_SCORE_GRID, triton.cdiv(scores.shape[1], 64))

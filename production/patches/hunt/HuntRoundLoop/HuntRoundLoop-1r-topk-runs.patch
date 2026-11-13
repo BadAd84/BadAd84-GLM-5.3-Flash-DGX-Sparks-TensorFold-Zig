@@ -1,0 +1,114 @@
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -606,25 +606,26 @@
+ def sample_streams(w, parts: Sequence[tuple]) -> list[list[int]]:
+     """parts [(logits [R, V/world], positions, sampling)] -> each part's tokens, as ``decode.sample_rows`` samples
+     each alone: every top-k (and greedy) part's candidates in ONE all-gather, a nucleus part (top_k off) through the
+-    shared nucleus rule (its own gathers), in part order on every rank."""
++    shared nucleus rule (its own gathers), in part order on every rank. Parts whose logits are consecutive rows of one
++    buffer (a batched window's) and want the same candidate count take one ``torch.topk`` together
++    (``multi_tune.topk_words``: each row's candidates as its part's own call gives them)."""
+ 
+     from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank, topk_host
+     from tensorfold.engine.exact_sampling import MARGIN
+ 
++    from .multi_tune import topk_words
++
+     out: list[list[int] | None] = [None] * len(parts)
+-    packed, layout, at = [], [], 0
++    layout, at = [], 0
+     for k, (logits, positions, sampling) in enumerate(parts):
+         greedy = sampling is None or sampling.temperature <= 0
+         if not greedy and not sampling.top_k:
+             continue
+         n = 1 if greedy else min(logits.shape[1], int(sampling.top_k) + MARGIN)
+-        vals, ids = torch.topk(logits.float(), n, dim=-1)
+-        ids = (ids + w.vocab_offset).to(torch.int32)
+-        packed.append(torch.cat([vals, ids.view(torch.float32)], dim=1).reshape(-1))
+         layout.append((k, logits.shape[0], n, at))
+         at += logits.shape[0] * 2 * n
+-    if packed:
+-        flat = torch.cat(packed) if len(packed) > 1 else packed[0]
++    if layout:
++        flat = topk_words(w, [(parts[k][0], n) for k, _, n, _ in layout])
+         if w.comm is None:
+             host = flat.view(1, -1).cpu()
+         else:
+diff -ruN tensorfold/families/glm5_next/cuda/multi_tune.py tensorfold/families/glm5_next/cuda/multi_tune.py
+--- tensorfold/families/glm5_next/cuda/multi_tune.py
++++ tensorfold/families/glm5_next/cuda/multi_tune.py
+@@ -141,6 +141,45 @@
+ 
+ 
+ # -- sampling --------------------------------------------------------------------------------------------------------
++def _adjacent(a: torch.Tensor, b: torch.Tensor) -> bool:
++    """``b``'s rows follow ``a``'s in one buffer: same storage, dtype and row layout (unit column stride), b's first
++    row right after a's last (the parts of a batched verify window, ``verify.BatchedVerify.forward``)."""
++
++    if a.dim() != 2 or b.dim() != 2 or a.dtype != b.dtype or a.device != b.device or a.shape[1] != b.shape[1]:
++        return False
++    if a.stride() != b.stride() or a.stride(1) != 1 or a.stride(0) < a.shape[1]:
++        return False
++    if a.untyped_storage().data_ptr() != b.untyped_storage().data_ptr():
++        return False
++    return b.storage_offset() == a.storage_offset() + a.shape[0] * a.stride(0)
++
++
++def topk_words(w, items: Sequence[tuple]) -> torch.Tensor:
++    """[(logits [R_k, V/world], n_k)] in order -> one flat fp32 tensor: each item's top n_k values of every row, then
++    their ids (plus the rank's vocabulary offset, as int32 bits), row after row - what ``torch.topk(logits.float(),
++    n_k)`` of each item gives, concatenated in order. A run of consecutive items with the same n whose rows are adjacent
++    in one buffer takes ONE topk over all its rows: a row's top-k does not depend on the rows beside it (values and
++    ids, ties included; HuntRoundLoop test_topk_runs.py checks it on the serve's torch), so the words are the same, at
++    one launch sequence (~25 radix kernels) for the run instead of one a stream."""
++
++    words: list[torch.Tensor] = []
++    run: list[torch.Tensor] = []
++    run_n = 0
++    for logits, n in [*items, (None, 0)]:
++        if run and (logits is None or n != run_n or not _adjacent(run[-1], logits)):
++            first = run[0]
++            rows = first if len(run) == 1 else torch.as_strided(
++                first, (sum(x.shape[0] for x in run), first.shape[1]), first.stride(), first.storage_offset())
++            vals, ids = torch.topk(rows.float(), run_n, dim=-1)
++            ids = (ids + w.vocab_offset).to(torch.int32)
++            words.append(torch.cat([vals, ids.view(torch.float32)], dim=1).reshape(-1))
++            run = []
++        if logits is not None:
++            run.append(logits)
++            run_n = n
++    return torch.cat(words) if len(words) > 1 else words[0]
++
++
+ def sample_packed(w, parts: Sequence[tuple]) -> list[list[int]]:
+     """parts [(logits [R, V/world], positions, sampling)] -> each part's tokens, bit for bit what ``decode.sample_rows``
+     gives each part alone, in two all-gathers for every part: (1) every top-k / greedy part's top candidates (values,
+@@ -157,20 +196,24 @@
+     out: list[list[int] | None] = [None] * len(parts)
+     words, topk, nucl = [], [], []
+     at = 0                                                         # each part's first word in the first gather
++    run: list[tuple] = []                                          # consecutive top-k parts: one topk_words call
+     for k, (logits, positions, sampling) in enumerate(parts):
+         greedy = sampling is None or sampling.temperature <= 0
+         if greedy or sampling.top_k:
+             n = 1 if greedy else min(logits.shape[1], int(sampling.top_k) + MARGIN)
+-            vals, ids = torch.topk(logits.float(), n, dim=-1)
+-            ids = (ids + w.vocab_offset).to(torch.int32)
+-            words.append(torch.cat([vals, ids.view(torch.float32)], dim=1).reshape(-1))
++            run.append((logits, n))
+             topk.append((k, logits.shape[0], n, at))
+             at += logits.shape[0] * 2 * n
+         else:
++            if run:
++                words.append(topk_words(w, run))
++                run = []
+             scaled = logits.float().double() / max(float(sampling.temperature), 1e-6)
+             words.append(scaled.max(dim=-1).values.contiguous().view(torch.float32).view(-1))
+             nucl.append((k, scaled, at))
+             at += 2 * logits.shape[0]
++    if run:
++        words.append(topk_words(w, run))
+     if not words:
+         return []
+     flat = torch.cat(words) if len(words) > 1 else words[0]

@@ -1,0 +1,119 @@
+# DrafterBuckets-1 (2026-10-30): TF_GLM_DRAFT_WIDE=<rows> (default 0: off, the old launches): one stream's DFlash2 context
+# update of more than t_max rows (a prompt chunk) runs in eager launches of up to <rows> rows (after the rows it overwrites
+# itself in the ring), so the 4-bit fc weight is swept once per L2 group of row tiles instead of once per 64 rows.
+# Bit-identical ring rows, device ends and context ends (every kernel of an update is row-independent). With
+# <rows>:prompt the wide launches run on the prompt chunks' matmul (qmm.prefill_matmul): other draft bits, same replies.
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py
++++ ../b/tensorfold/families/glm5_next/cuda/dflash2_multi.py
+@@ -135,7 +135,33 @@
+ # points); the rows before are never read. 0 (the default): every row, as before.
+ DRAFT_SKIP = os.environ.get("TF_GLM_DRAFT_SKIP", "0") == "1"
+ 
++# TF_GLM_DRAFT_WIDE=<rows>[:prompt] (lane DrafterBuckets; 0, the default: off, every update in ``t_max``-row launches
++# as before): one stream's update of more than ``t_max`` rows (a prompt chunk) runs eagerly in launches of up to that
++# many rows, after the rows it overwrites itself in the ring (all but its last ``ring``) are dropped, so no launch holds
++# two rows of one ring row. A wide launch sweeps the 4-bit fc weight once per L2 group of row tiles (qmm.cu's
++# ``group``) instead of once per ``t_max`` rows. Every kernel of an update is row-independent (``_taps_rows``), so the
++# ring rows, device ends and context ends are the bits of the ``t_max`` launches; the trash rows (written only by a
++# padded graph launch, read by nothing) are left alone. ``:prompt``: a wide launch's 4-bit matmuls (fc, each layer's
++# kv) run on the prompt chunks' matmul instead (``forward.mm``'s: ``qmm.prefill_matmul`` on ``forward.prompt_tile``,
++# weights rounded to bf16, one fp32 chain over K): faster, but other bits than decode's in those ring rows, so other
++# drafts (the replies keep: the verify decides every token).
++_WIDE = (os.environ.get("TF_GLM_DRAFT_WIDE", "").strip() or "0").partition(":")
++if not _WIDE[0].isdigit() or (_WIDE[1] and _WIDE[2] != "prompt"):
++    raise ValueError("TF_GLM_DRAFT_WIDE: 0 (off), <rows> (wide launches, the same bits) or <rows>:prompt (wide "
++                     "launches on the prompt chunks' matmul: other draft bits)")
++DRAFT_WIDE, DRAFT_WIDE_PROMPT = int(_WIDE[0]), bool(_WIDE[1])
++
+ 
++def _prompt_mm(x: torch.Tensor, q) -> torch.Tensor:
++    """A 4-bit projection of a prompt chunk as ``forward.mm`` runs it (TF_GLM_DRAFT_WIDE's ``:prompt``)."""
++
++    from tensorfold.cuda.kernels import qmm as shared
++
++    from .forward import prompt_tile
++
++    return shared.prefill_matmul(x, q, tile=prompt_tile(x.shape[0], q.n, q.k))
++
++
+ class WindowTaps:
+     """``ctx.add_taps`` for a prompt's chunks, committing only the rows within ``reach`` before one of ``points``: a
+     ring holds its last ``ring`` rows only and a block pass reads its window only, so what a later pass or kept state
+@@ -235,6 +261,9 @@
+         self.block_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+         self.tap_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+         self.buckets = list(range(n, T + 1, n))
++        # TF_GLM_DRAFT_WIDE's rows a launch; 0 (off) unless wider than the stacked launches; and their matmul
++        self.wide = DRAFT_WIDE if DRAFT_WIDE > self.t_max else 0
++        self.wide_mm = _prompt_mm if DRAFT_WIDE_PROMPT else _mm
+ 
+     def nbytes(self) -> int:
+         """The pool's context rows (the weights are the drafter's)."""
+@@ -311,18 +340,41 @@
+         else:
+             self.cand[:size].copy_(packed.view(-1))
+ 
++    def _taps_rows(self, x: torch.Tensor, pos: torch.Tensor, idx: torch.Tensor, mm=_mm) -> None:
++        """Rows x [rows, taps * D] at positions ``pos`` into ring rows ``idx``, the 4-bit projections on ``mm``:
++        every kernel row-independent."""
++
++        d = self.d
++        ctx, _ = d._norm(mm(x, d.fc), d.hidden_norm)
++        cos, sin = self._rotary(pos)
++        for i, L in enumerate(d.layers):
++            d._prep(mm(ctx, L.kv), L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
++
+     def _taps_compute(self, T: int) -> None:
+         """Context updates of T stacked rows (``t_meta``: each row's position and destination), then each updated
+         stream's device end."""
+ 
+-        d, St, Tm = self.d, self.streams, self.t_max
+-        pos, idx = self.t_meta[:T], self.t_meta[Tm:Tm + T]
+-        ctx, _ = d._norm(_mm(self.tap_in[:T], d.fc), d.hidden_norm)
+-        cos, sin = self._rotary(pos)
+-        for i, L in enumerate(d.layers):
+-            d._prep(_mm(ctx, L.kv), L, cos, sin, 0, ring=(self.kc[i], self.vc[i], idx))
++        St, Tm = self.streams, self.t_max
++        self._taps_rows(self.tap_in[:T], self.t_meta[:T], self.t_meta[Tm:Tm + T])
+         self.pos.index_copy_(0, self.t_meta[2 * Tm:2 * Tm + St], self.t_meta[2 * Tm + St:2 * Tm + 2 * St])
+ 
++    def _commit_wide(self, c: DraftContext, taps) -> None:
++        """TF_GLM_DRAFT_WIDE: one stream's rows in eager launches of up to ``wide`` rows, after the rows its own
++        update overwrites in the ring (every row past the last ``ring``) are dropped."""
++
++        rows = taps.shape[0]
++        start = max(0, rows - self.d.ring) if self.d.ring else 0
++        end = c.context_end + start
++        while start < rows:
++            take = min(rows - start, self.wide)
++            x = torch.empty((take, self.tap_in.shape[1]), dtype=torch.bfloat16, device=self.dev)
++            copy_taps(x, taps[start:start + take])
++            pos = torch.arange(end, end + take, dtype=torch.int64, device=self.dev)
++            self._taps_rows(x, pos, c.slot * self.cap + self._local(pos), self.wide_mm)
++            start, end = start + take, end + take
++            c.pos_dev.fill_(end)
++            c.context_end = end
++
+     # -- graphs -------------------------------------------------------------------------------------------------
+     def _trash_tables(self) -> None:
+         """Tables that send every row to the trash rows (captures and their warm-ups touch no stream)."""
+@@ -421,7 +473,8 @@
+         """Each stream's committed rows' taps [n, taps * D] (bf16, or ``dflash2.TapRows``) at its positions
+         context_end, context_end + 1, ...: every stream's rows stacked into launches of up to ``t_max`` rows. A
+         stream's rows that start a launch and that its own update overwrites in the ring before returning (a prompt
+-        chunk wider than the ring) are not launched (``dflash2.ring_skip``)."""
++        chunk wider than the ring) are not launched (``dflash2.ring_skip``). With TF_GLM_DRAFT_WIDE, a stream's update
++        of more than ``t_max`` rows runs on its own instead (``_commit_wide``)."""
+ 
+         seen: set[int] = set()
+         for c, taps in items:
+@@ -433,6 +486,9 @@
+         pieces: list[tuple[DraftContext, torch.Tensor, int]] = []
+         used = 0
+         for c, taps in items:
++            if self.wide and taps.shape[0] > self.t_max:
++                self._commit_wide(c, taps)
++                continue
+             start = ring_skip(taps.shape[0], self.d.ring, self.t_max) if used == 0 else 0
+             end = c.context_end + start
+             while start < taps.shape[0]:

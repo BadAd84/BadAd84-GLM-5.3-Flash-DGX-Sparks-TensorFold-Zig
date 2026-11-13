@@ -1,0 +1,511 @@
+diff -ruN -x '*.orig' -x __pycache__ p5/src/tensorfold/families/glm5_next/cuda/engine.py p6/src/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 12:43:50.296573768 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 12:44:52.801855967 +0000
+@@ -569,6 +569,12 @@
+ 
+         lay = tp_mod.Layout.from_config(cfg, rank, world)
+         self.tp = lay
++        if rank == 0 and lay.owners:                    # OTS 0105
++            firsts = [sum(1 for o in lay.owners if o == r) for r in range(world)]
++            spec = os.environ.get("TF_GLM_EXPERT_ROTATE")
++            print(f"[tensorfold] expert shares rotated (TF_GLM_EXPERT_ROTATE={spec}): the widest share of "
++                  f"{sum(firsts)} MoE layers on ranks {'/'.join(map(str, firsts))}, partials summed in share order "
++                  "(the same bits)", flush=True)
+ 
+         def cut(name: str, shape: list[int], kind: str) -> tuple[int, int]:
+             """This rank's share of a split tensor (``split.rank_cut``) or of lm_head's rows, for the estimate."""
+@@ -717,7 +723,8 @@
+ 
+         # checked alike, not in the spill tier's key (``agreed``; the shard's is in its store's signature, multi.py)
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+-                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE)]   # OTS 0112: the shard's mode too
++                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE)] + \
++            lay.owner_words(cfg.layers)                       # OTS 0105: TF_GLM_EXPERT_ROTATE
+         rows = self._gather_ints(mine + [spare >> 20])
+         odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+         if odd:
+@@ -728,7 +735,7 @@
+                                "TF_GLM_MULTI_VERIFY, TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE / _WINDOW, "
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+-                               "TF_GLM_INDEXER_SHARD): "
++                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")
+diff -ruN -x '*.orig' -x __pycache__ p5/src/tensorfold/families/glm5_next/cuda/forward.py p6/src/tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold/families/glm5_next/cuda/forward.py	2026-10-29 12:39:46.828870793 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-29 12:44:20.571366831 +0000
+@@ -102,11 +102,13 @@
+         self.xs_act = torch.empty((rows, dl // 64), dtype=f32, device=dev)
+         # MoE
+         slots = c.top_k + 1
++        # the widest expert share this rank holds in any layer (OTS 0105's rotation: per layer views, ``moe_views``)
+         ml = tp.of(w).moe
+         self.mlog = torch.empty((rows, c.experts), dtype=f32, device=dev)
+         self.pick = torch.empty((rows, slots), dtype=torch.int32, device=dev)
+         self.wts = torch.empty((rows, slots), dtype=f32, device=dev)
+-        self.eact = torch.empty((rows * slots, ml), dtype=bf, device=dev)
++        self._eact = torch.empty((rows * slots * ml,), dtype=bf, device=dev)
++        self._views: dict = {}
+         exl3 = c.quant == "exl3"
+         self.ey = torch.empty((rows, slots, D), dtype=bf if prefill and not exl3 else f32, device=dev)
+         self.exl3 = None
+@@ -117,9 +119,9 @@
+             prompt = prefill and prompt_kernels()
+             sl = tp.of(w).shared
+             self.exl3 = Scratch(rows, slots, D, ml, dev, prompt=prompt)
+-            self.sgu = torch.empty((rows, 2 * sl), dtype=bf, device=dev)
+-            self.sact = torch.empty((rows, sl), dtype=bf, device=dev)
+-            self.sxs = torch.empty((rows, sl // 64), dtype=f32, device=dev)
++            self._sgu = torch.empty((rows * 2 * sl,), dtype=bf, device=dev)
++            self._sact = torch.empty((rows * sl,), dtype=bf, device=dev)
++            self._sxs = torch.empty((rows * (sl // 64),), dtype=f32, device=dev)
+             self.sy = torch.empty((rows, D), dtype=f32, device=dev)
+         # a prompt window's EXL3 experts take items of 64 pairs (the prompt kernels' pass), decode windows 16
+         self.plan = grouped.Plan(rows, slots, c.experts + 1, dev, prefill=prefill and (not exl3 or prompt),
+@@ -150,6 +152,24 @@
+         # TF_GLM_HC_SPLIT: a prompt buffer's row split (``hcsplit.HcSplit``), set by the engine; None runs unsplit
+         self.split = None
+ 
++    def moe_views(self, width: int) -> tuple:
++        """The routed experts' activations [rows * slots, width] and the shared expert's [rows, 2 width] / [rows,
++        width] / [rows, width / 64] for a layer whose expert share is ``width`` wide on this rank: contiguous views of
++        buffers sized for the widest share, so every layer's buffers have upstream's shapes (OTS 0105)."""
++
++        got = self._views.get(width)
++        if got is None:
++            rows, slots = self.alloc_rows, self.pick.shape[1]
++            eact = self._eact[:rows * slots * width].view(rows * slots, width)
++            if self.exl3 is None:
++                got = (eact, None, None, None)
++            else:
++                got = (eact, self._sgu[:rows * 2 * width].view(rows, 2 * width),
++                       self._sact[:rows * width].view(rows, width),
++                       self._sxs[:rows * (width // 64)].view(rows, width // 64))
++            self._views[width] = got
++        return got
++
+     def set_taps(self, layers: tuple[int, ...], hidden: int) -> None:
+         self.tap_at = {}
+         for i, layer in enumerate(layers):
+@@ -962,10 +982,11 @@
+     """The MoE's shared expert (an EXL3 checkpoint's, BF16 / FP8 / 4-bit matmuls) on rows lo .. hi: b.sy."""
+ 
+     s, c = layer.moe.shared, w.cfg
++    _, sgu, sact, sxs = b.moe_views(s.width)              # this layer's share of the shared expert (OTS 0105)
+     with prof.timed("moe: shared expert"):
+-        mm(b, b.normed[lo:hi], s.gu, b.xs[lo:hi], b.sgu[lo:hi])
+-        glue.swiglu(b.sgu[lo:hi], b.sact[lo:hi], b.sxs[lo:hi], c.limit)
+-        mm(b, b.sact[lo:hi], s.down, b.sxs[lo:hi], b.sy[lo:hi], f32=True)
++        mm(b, b.normed[lo:hi], s.gu, b.xs[lo:hi], sgu[lo:hi])
++        glue.swiglu(sgu[lo:hi], sact[lo:hi], sxs[lo:hi], c.limit)
++        mm(b, sact[lo:hi], s.down, sxs[lo:hi], b.sy[lo:hi], f32=True)
+ 
+ 
+ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int, done: tuple[int, int] | None = None) -> torch.Tensor:
+@@ -1003,10 +1024,11 @@
+                     glue.combine(b.ey[lo:hi], b.wts[lo:hi], b.part[lo:hi])
+ 
+         return partials(w, b, R, fill, "moe: all-gather", site=(layer.index, "f"))
++    eact = b.moe_views(m.experts.width)[0]
+     with prof.timed("moe: gate/up"):
+-        grouped.gate_up(b.normed[:R], m.experts, b.plan, b.eact, R)
++        grouped.gate_up(b.normed[:R], m.experts, b.plan, eact, R)
+     with prof.timed("moe: down"):
+-        grouped.down(b.eact, m.experts, b.plan, b.ey.view(-1, c.hidden), R)
++        grouped.down(eact, m.experts, b.plan, b.ey.view(-1, c.hidden), R)
+ 
+     def fill(lo: int, hi: int) -> None:
+         with prof.timed("moe: combine"):
+@@ -1071,7 +1093,8 @@
+         glue.hc_pre(x, h.fn, h.base, h.scale, layer.post_norm, b.normed[:R], b.xs[:R], b.post[:R], b.comb[:R],
+                     b.hcpart[:R], c.eps, c.hc_eps, c.hc_iters, prompt=b.prefill)
+     g = _ffn(layer, w, b, R)
+-    glue.hc_post(x, x, g, b.post[:R], b.comb[:R])
++    # a MoE layer's partials summed from its first expert share's rank (``tp.Layout.owner``, OTS 0105; else rank 0)
++    glue.hc_post(x, x, g, b.post[:R], b.comb[:R], tp.of(w).owner(layer.index))
+ 
+ 
+ def split_layer_steps(w: Weights, st: State, b: Buffers, R: int, nch: int | None, host_pos: int | None,
+@@ -1106,7 +1129,8 @@
+             front = mixer_front(nxt, w, b) if fronts and nxt is not None else None
+             with prof.timed("hc (layer end)"):
+                 sp.glue(nxt.attn_hc if nxt is not None else None, nxt.in_norm if nxt is not None else None,
+-                        taps=tuple(b.tap_at.get(layer.index, ())), final=nxt is None, front=front)
++                        taps=tuple(b.tap_at.get(layer.index, ())), final=nxt is None, front=front,
++                        rot=tp.of(w).owner(layer.index))
+             done = sp.own() if front is not None else None
+             yield layer.index
+     finally:
+diff -ruN -x '*.orig' -x __pycache__ p5/src/tensorfold/families/glm5_next/cuda/glue.py p6/src/tensorfold/families/glm5_next/cuda/glue.py
+--- tensorfold/families/glm5_next/cuda/glue.py	2026-10-29 12:16:50.717730216 +0000
++++ tensorfold/families/glm5_next/cuda/glue.py	2026-10-29 12:44:20.571502815 +0000
+@@ -226,15 +226,20 @@
+ 
+ @triton.jit
+ def _hc_post(X, XOUT, G, POST, COMB, RS, D: tl.constexpr, S: tl.constexpr, WORLD: tl.constexpr,
+-             BLOCK: tl.constexpr):
+-    """Round rank-ordered partials to bf16 before combining the branch with residual streams in fixed order and rounding the output."""
++             BLOCK: tl.constexpr, ROT: tl.constexpr = 0):
++    """Round rank-ordered partials to bf16 before combining the branch with residual streams in fixed order and rounding the output.
++    ROT (OTS 0105): the sum starts at rank ROT's partial and goes on in rank order modulo WORLD (a rotated MoE layer's
++    first expert share; 0: rank 0 first, upstream's loads and adds)."""
+ 
+     r = tl.program_id(0)
+     cb = tl.program_id(1)
+     d = cb * BLOCK + tl.arange(0, BLOCK)
+-    acc = tl.load(G + r * D + d)
++    if ROT == 0:
++        acc = tl.load(G + r * D + d)
++    else:
++        acc = tl.load(G + ROT * RS + r * D + d)
+     for k in tl.static_range(1, WORLD):
+-        acc = acc + tl.load(G + k * RS + r * D + d)
++        acc = acc + tl.load(G + ((ROT + k) % WORLD) * RS + r * D + d)
+     branch = acc.to(tl.bfloat16).to(tl.float32)
+     x0 = tl.load(X + r * (S * D) + d).to(tl.float32)
+     x1 = tl.load(X + r * (S * D) + D + d).to(tl.float32)
+@@ -252,14 +257,22 @@
+ 
+ 
+ def hc_post(x: torch.Tensor, xout: torch.Tensor, gathered: torch.Tensor, post: torch.Tensor,
+-            comb: torch.Tensor) -> None:
+-    """gathered: [world, R, D] fp32 partials (contiguous). x and xout may be the same tensor."""
++            comb: torch.Tensor, rot: int = 0) -> None:
++    """gathered: [world, R, D] fp32 partials (contiguous). x and xout may be the same tensor. ``rot``: the rank whose
++    partial is summed first, the rest in rank order (``tp.Layout.owner``: a rotated MoE layer's, OTS 0105)."""
+ 
+     world, rows, d = gathered.shape
+     s = x.shape[1] // d
+     block = min(1024, d)
+     _hc_post[(rows, d // block)](x, xout, gathered, post, comb, rows * d, D=d, S=s, WORLD=world, BLOCK=block,
+-                                 num_warps=4)
++                                 ROT=_rot(rot, world), num_warps=4)
++
++
++def _rot(rot: int, world: int) -> int:
++    rot = int(rot)
++    if not 0 <= rot < world:
++        raise ValueError(f"hc_post: the first partial of rank {rot} of {world}")
++    return rot
+ 
+ 
+ def hc_post_pair(x: torch.Tensor, xout: torch.Tensor, g0: torch.Tensor, g1: torch.Tensor, post: torch.Tensor,
+@@ -281,10 +294,10 @@
+ 
+ 
+ def hc_post_ranks(x: torch.Tensor, xout: torch.Tensor, first: torch.Tensor, stride: int, world: int,
+-                  post: torch.Tensor, comb: torch.Tensor) -> None:
++                  post: torch.Tensor, comb: torch.Tensor, rot: int = 0) -> None:
+     """``hc_post`` of ``world`` ranks' fp32 partials [R, D] that sit ``stride`` elements apart from rank 0's
+-    (``first``): rows of one all-gathered [world, R', D] buffer (stride R' x D), the sum rank 0 first and every bit
+-    hc_post's (TF_GLM_HC_SPLIT past two ranks)."""
++    (``first``): rows of one all-gathered [world, R', D] buffer (stride R' x D), the sum rank 0 first (rank ``rot``
++    first, a rotated MoE layer's) and every bit hc_post's (TF_GLM_HC_SPLIT past two ranks)."""
+ 
+     rows, d = first.shape
+     if first.dtype != torch.float32 or not first.is_contiguous():
+@@ -294,7 +307,7 @@
+     s = x.shape[1] // d
+     block = min(1024, d)
+     _hc_post[(rows, d // block)](x, xout, first, post, comb, int(stride), D=d, S=s, WORLD=int(world), BLOCK=block,
+-                                 num_warps=4)
++                                 ROT=_rot(rot, int(world)), num_warps=4)
+ 
+ 
+ @triton.jit
+diff -ruN -x '*.orig' -x __pycache__ p5/src/tensorfold/families/glm5_next/cuda/hcsplit.py p6/src/tensorfold/families/glm5_next/cuda/hcsplit.py
+--- tensorfold/families/glm5_next/cuda/hcsplit.py	2026-10-29 12:16:50.721086495 +0000
++++ tensorfold/families/glm5_next/cuda/hcsplit.py	2026-10-29 12:44:20.571563726 +0000
+@@ -311,32 +311,36 @@
+ 
+         return self.mine(), min(self.mine() + self.H, self.R)
+ 
+-    def _post(self, j: int, lo: int, hi: int) -> None:
+-        """hc_post of this rank's rows lo .. hi (piece j): every rank's partial of them summed rank 0 first."""
++    def _post(self, j: int, lo: int, hi: int, rot: int = 0) -> None:
++        """hc_post of this rank's rows lo .. hi (piece j): every rank's partial of them summed rank 0 first (rank
++        ``rot`` first, then on in rank order: a rotated MoE layer's, OTS 0105)."""
+ 
+         b = self.b
+         x = b.x[lo:hi]
+         own = b.part[lo:hi]
+         if self.world == 2:
++            if rot:
++                raise ValueError("two ranks hold equal expert shares: nothing rotates")
+             got = self.got[j]
+             g0, g1 = (own, got) if self.rank == 0 else (got, own)
+             glue.hc_post_pair(x, x, g0, g1, b.post[lo:hi], b.comb[lo:hi])
+         elif self.gather:
+             whole = self.got[0]
+             glue.hc_post_ranks(x, x, whole[0, lo:hi], self.Rp * whole.shape[2], self.world, b.post[lo:hi],
+-                               b.comb[lo:hi])
++                               b.comb[lo:hi], rot)
+         else:
+             block = self.got[j]
+             block[self.rank].copy_(own)
+-            glue.hc_post(x, x, block, b.post[lo:hi], b.comb[lo:hi])
++            glue.hc_post(x, x, block, b.post[lo:hi], b.comb[lo:hi], rot)
+ 
+     def glue(self, hc=None, norm=None, taps: tuple[int, ...] = (), final: bool = False,
+-             front: Callable[[int, int], None] | None = None) -> None:
++             front: Callable[[int, int], None] | None = None, rot: int = 0) -> None:
+         """hc_post of this rank's rows, then (in order) the layer's DFlash2 taps, the final stream mean (``final``)
+         and the next hc_pre (``hc``, ``norm``); their rows swapped with the peers'. ``front(lo, hi)``
+         (TF_GLM_PREFILL_OVERLAP=2): the next block's row-independent start on this rank's rows of each piece, on the
+         main stream right after the piece's glue, while its swap (and the later pieces' partials) are on the wire;
+-        the caller runs it on the peers' rows (``own`` is what was done) after this returns."""
++        the caller runs it on the peers' rows (``own`` is what was done) after this returns. ``rot``: the rank whose
++        partial hc_post sums first (``_post``)."""
+ 
+         b, c = self.b, self.w.cfg
+         mine = self.mine()
+@@ -346,7 +350,7 @@
+             lo, hi = mine + off, mine + off + n
+             if self.stream is not None:
+                 main.wait_event(self.ev_part[0 if self.world > 2 and self.gather else j])
+-            self._post(j, lo, hi)
++            self._post(j, lo, hi, rot)
+             x = b.x[lo:hi]
+             for slot in taps:
+                 glue.stream_mean(x, b.taps[slot][lo:hi])
+diff -ruN -x '*.orig' -x __pycache__ p5/src/tensorfold/families/glm5_next/cuda/split.py p6/src/tensorfold/families/glm5_next/cuda/split.py
+--- tensorfold/families/glm5_next/cuda/split.py	2026-10-29 12:16:50.718219127 +0000
++++ tensorfold/families/glm5_next/cuda/split.py	2026-10-29 12:44:20.571608878 +0000
+@@ -148,7 +148,7 @@
+         if layout.world == 2:                             # a family the config does not size: halves, as ever
+             return None
+         raise ValueError(f"{name}: split ({kind}) but the config sizes no tensor-parallel family for it")
+-    return layout.cut(family, shape[AXIS[kind]])
++    return layout.cut(family, shape[AXIS[kind]], layout.layer_of(name))   # (a MoE family's share is per layer)
+ 
+ 
+ def torch_dtype(dtype: str):
+@@ -175,6 +175,22 @@
+     return worlds.pop() if worlds else 2
+ 
+ 
++def owner_code(layout) -> str:
++    """A layout's per-layer expert share owners (``tp.expert_owners``) as a rank folder's ``tf_moe_owners``
++    metadata: '' for upstream's split."""
++
++    return ",".join(str(int(o)) for o in getattr(layout, "owners", ()) or ())
++
++
++def folder_owners(files: list[Path]) -> str:
++    """The expert share owners a rank folder was split with (``owner_code``; none: upstream's split)."""
++
++    codes = {str((read_header(path)[0].get("__metadata__") or {}).get("tf_moe_owners", "")) for path in files}
++    if len(codes) > 1:
++        raise ValueError("rank files split with different TF_GLM_EXPERT_ROTATE layouts")
++    return codes.pop() if codes else ""
++
++
+ class RankReader:
+     """Read stored-dtype CPU tensors for one rank from the full checkpoint or its pre-split folder."""
+ 
+@@ -192,6 +208,10 @@
+                              f"{self.world}: split it again (python -m {__name__} --tp {self.world}) or give the "
+                              "full checkpoint")
+         self._layout = False                              # read from config.json at the first split tensor
++        if mine and (self.dir / "config.json").exists() and folder_owners(mine) != owner_code(self.layout):
++            raise ValueError(f"{self.dir} holds rank {rank}'s expert shares for TF_GLM_EXPERT_ROTATE layers "
++                             f"{folder_owners(mine) or 'none'}, not {owner_code(self.layout) or 'none'}: split it "
++                             "again with this TF_GLM_EXPERT_ROTATE or give the full checkpoint")
+         self.io = Reader()                                # O_DIRECT reads where the file system allows them
+         self.reads = ReadAhead(self.io, READERS, RUN, GAP)
+         self.split = bool(mine)
+@@ -320,6 +340,8 @@
+         layout = layout_for(Path(src).parent, rank, world)
+     if int(world) != 2:
+         metadata = {**(metadata or {}), "tf_tp": str(int(world))}
++    if owner_code(layout):
++        metadata = {**(metadata or {}), "tf_moe_owners": owner_code(layout)}
+     mm = np.memmap(src, dtype=np.uint8, mode="r")
+     stem = os.path.basename(str(src)).replace(".safetensors", "")
+     summary = {"rep": 0, "row": 0, "col": 0, "dim1": 0, "drop": 0}
+diff -ruN -x '*.orig' -x __pycache__ p5/src/tensorfold/families/glm5_next/cuda/tp.py p6/src/tensorfold/families/glm5_next/cuda/tp.py
+--- tensorfold/families/glm5_next/cuda/tp.py	2026-10-29 12:16:50.718384854 +0000
++++ tensorfold/families/glm5_next/cuda/tp.py	2026-10-29 12:44:20.571669294 +0000
+@@ -11,6 +11,12 @@
+   moe     a routed expert's intermediate (EXL3: whole 128-column Hadamard blocks)        unit 128
+   shared  the shared expert's intermediate                                              unit 128
+   vocab   lm_head rows                                                                  unit 64
++
++OTS 0105 (TF_GLM_EXPERT_ROTATE, ``expert_owners``): a MoE layer's routed and shared expert widths may put their
++first (widest) share on another rank than 0, layer by layer, so the remainder blocks (6/5/5 at three ranks: +8.9 GiB
++on rank 0 over 42 layers) spread over the ranks. The shares themselves stay upstream's column ranges: rank r holds
++share (r - owner) mod N, so each share's partial has upstream's bits, and the MoE site sums the gathered partials in
++share order (``owner`` first, ``glue.hc_post``'s ``rot``), upstream's order. Every bit is upstream's.
+ """
+ 
+ from __future__ import annotations
+@@ -22,6 +28,7 @@
+ 
+ UNITS = {"heads": 1, "lin": 1, "dense": 128, "moe": 128, "shared": 128, "vocab": 64}
+ SIZES = (2, 3, 4)                     # the engine's tensor-parallel sizes
++ROTATED = ("moe", "shared")           # the MoE block's families: one partial a layer (OTS 0105's rotation)
+ 
+ _LAYER = re.compile(r"(?:^|\.)layers\.(\d+)\.")
+ _FAMILIES = (
+@@ -44,10 +51,13 @@
+     world: int
+     totals: dict = field(hash=False)
+     kinds: tuple = ()                  # per layer "kda" / "dsa" (an o_proj's family); past them: the MTP layer (dsa)
++    owners: tuple = ()                 # per layer: the rank holding ROTATED's first share, -1 without a MoE (0105)
+ 
+     def __post_init__(self) -> None:
+         if not 0 <= self.rank < self.world:
+             raise ValueError(f"rank {self.rank} of {self.world}")
++        if any(not -1 <= int(o) < self.world for o in self.owners):
++            raise ValueError(f"expert share owners {self.owners} for {self.world} ranks")
+         for name in self.totals:
+             self.sizes(name)                                # every family must split whole
+ 
+@@ -58,7 +68,9 @@
+         names = {"heads": "heads", "lin": "lin_heads", "dense": "dense_width", "moe": "moe_width",
+                  "shared": "shared_width", "vocab": "vocab"}
+         totals = {f: int(getattr(cfg, a)) for f, a in names.items() if getattr(cfg, a, None) is not None}
+-        return cls(int(rank), int(world), totals, tuple(getattr(cfg, "kinds", ()) or ()))
++        moe = [k == "moe" for k in (getattr(cfg, "mlp_kinds", None) or ())]
++        kinds = tuple(getattr(cfg, "kinds", ()) or ())
++        return cls(int(rank), int(world), totals, kinds, _owners(moe, totals, world))
+ 
+     @classmethod
+     def from_text(cls, t: dict, rank: int, world: int) -> "Layout":
+@@ -78,34 +90,73 @@
+             totals.update(moe=moe, shared=moe * int(t.get("n_shared_experts", 1)))
+         if "vocab_size" in t:
+             totals["vocab"] = int(t["vocab_size"])
+-        return cls(int(rank), int(world), totals, kinds)
+-
+-    def sizes(self, family: str) -> list[int]:
+-        return split_sizes(self.totals[family], self.world, UNITS[family])
++        n = int(t.get("num_hidden_layers", len(kinds)))
++        dense = int(t.get("first_k_dense_replace", 3))         # ``weights.Config.read``'s MoE layers
++        moe = [k == "sparse" for k in (t.get("mlp_layer_types") or ["dense"] * dense + ["sparse"] * (n - dense))]
++        return cls(int(rank), int(world), totals, kinds, _owners(moe, totals, world))
++
++    def owner(self, layer: int | None) -> int:
++        """The rank holding the first share of layer ``layer``'s ROTATED families: the partial its MoE site sums
++        first (``glue.hc_post``'s ``rot``). 0 without a rotation, without a layer, for a layer without a MoE block
++        and past the layers (the MTP layer, whose plain residual sums rank 0 first)."""
++
++        if layer is None or not 0 <= layer < len(self.owners):
++            return 0
++        return max(0, int(self.owners[layer]))
++
++    def sizes(self, family: str, layer: int | None = None) -> list[int]:
++        """Every rank's share of ``family`` in rank order (a ROTATED family's at ``layer``)."""
++
++        s = split_sizes(self.totals[family], self.world, UNITS[family])
++        o = self.owner(layer) if family in ROTATED else 0
++        return [s[(r - o) % self.world] for r in range(self.world)] if o else s
++
++    def size(self, family: str, layer: int | None = None) -> int:
++        """This rank's share (a ROTATED family's at ``layer``); without a layer, the widest share it holds in any
++        layer, which its buffers take."""
++
++        if layer is None and family in ROTATED and any(o >= 0 for o in self.owners):
++            s = split_sizes(self.totals[family], self.world, UNITS[family])
++            return max(s[(self.rank - o) % self.world] for o in self.owners if o >= 0)
++        return self.sizes(family, layer)[self.rank]
+ 
+-    def size(self, family: str) -> int:
+-        return self.sizes(family)[self.rank]
++    def start(self, family: str, layer: int | None = None) -> int:
++        """This rank's first element of ``family``'s total: shares lie in rank order from the owner (``owner``)."""
+ 
+-    def start(self, family: str) -> int:
+-        return sum(self.sizes(family)[:self.rank])
++        s = split_sizes(self.totals[family], self.world, UNITS[family])
++        return sum(s[:(self.rank - (self.owner(layer) if family in ROTATED else 0)) % self.world])
+ 
+     def largest(self, family: str) -> int:
+-        """The largest share any rank holds (rank 0's): what a buffer every rank sizes alike must take."""
++        """The largest share any rank holds (the first share): what a buffer every rank sizes alike must take."""
+         return max(self.sizes(family))
+ 
+-    def cut(self, family: str, length: int) -> tuple[int, int]:
++    def cut(self, family: str, length: int, layer: int | None = None) -> tuple[int, int]:
+         """This rank's [start, stop) of an axis of ``length`` elements holding ``family``'s total (rows of a weight,
+-        packed words, trellis tiles, group scales)."""
++        packed words, trellis tiles, group scales); a ROTATED family's at ``layer``."""
+ 
+-        total, a = self.totals[family], self.start(family)
+-        b = a + self.size(family)
++        total, a = self.totals[family], self.start(family, layer)
++        b = a + self.sizes(family, layer)[self.rank]
+         if (a * length) % total or (b * length) % total:
+             raise ValueError(f"rank {self.rank} of {self.world}: [{a}, {b}) of {family}'s {total} is not whole on an "
+                              f"axis of {length}")
+         return a * length // total, b * length // total
+ 
+     def at(self, rank: int) -> "Layout":
+-        return Layout(rank, self.world, self.totals, self.kinds)
++        return Layout(rank, self.world, self.totals, self.kinds, self.owners)
++
++    def layer_of(self, name: str) -> int | None:
++        """The layer index a checkpoint tensor's name carries (None: none)."""
++
++        m = _LAYER.search(name)
++        return int(m.group(1)) if m else None
++
++    def owner_words(self, layers: int) -> list[int]:
++        """``owners`` as int32 words of a fixed length for ``layers`` layers (the startup comparison): whether it
++        rotates, then 13 base-5 digits (owner + 1) a word."""
++
++        digits = [int(self.owners[i]) + 1 if i < len(self.owners) else 0 for i in range(int(layers))]
++        words = [sum(d * 5 ** k for k, d in enumerate(digits[j:j + 13])) for j in range(0, len(digits), 13)]
++        return [int(bool(self.owners))] + words
+ 
+     # the per-rank widths the engine sizes its weights and buffers by
+     @property
+@@ -158,6 +209,46 @@
+     return parts(total, world, unit)
+ 
+ 
++def expert_owners(moe: list[bool], world: int, spec: str | None = None) -> tuple:
++    """OTS 0105, TF_GLM_EXPERT_ROTATE (``spec``): per layer the rank holding the first (widest) share of its routed
++    and shared experts, -1 for a layer without a MoE block (``moe``: per layer whether it has one; the MTP layer past
++    them keeps rank 0's). ``0`` (default): () = upstream's split, rank 0 first in every layer; ``mod``: MoE layer i
++    on rank i mod ``world``; ``C0,C1,...`` (a count a rank, summing to the MoE layers): rank r first in that many,
++    interleaved by a smooth weighted round robin (ties to the lower rank). Every rank must be given the same value
++    (the engine compares them at startup)."""
++
++    import os
++
++    spec = (os.environ.get("TF_GLM_EXPERT_ROTATE", "0") if spec is None else str(spec)).strip().lower()
++    if spec in ("", "0", "off"):
++        return ()
++    layers = [i for i, m in enumerate(moe) if m]
++    if spec in ("1", "mod"):
++        first = {i: i % world for i in layers}
++    else:
++        try:
++            counts = [int(c) for c in spec.split(",")]
++        except ValueError:
++            counts = []
++        if len(counts) != world or min(counts) < 0 or sum(counts) != len(layers):
++            raise ValueError(f"TF_GLM_EXPERT_ROTATE={spec!r}: 0, mod, or {world} counts (one a rank) summing to the "
++                             f"{len(layers)} MoE layers")
++        first, credit = {}, [0] * world
++        for i in layers:
++            credit = [c + n for c, n in zip(credit, counts)]
++            r = max(range(world), key=lambda q: (credit[q], -q))
++            credit[r] -= len(layers)
++            first[i] = r
++    return tuple(first.get(i, -1) for i in range(len(moe)))
++
++
++def _owners(moe: list[bool], totals: dict, world: int) -> tuple:
++    """``expert_owners`` for a layout of ``totals``: () where the ROTATED families split evenly (nothing to spread)."""
++
++    even = all(len(set(split_sizes(totals[f], world, UNITS[f]))) == 1 for f in ROTATED if f in totals)
++    return () if even or "moe" not in totals else expert_owners(moe, world)
++
++
+ def of(w) -> Layout:
+     """The layout of a ``weights.Weights`` (or a stand-in with cfg, rank and world)."""
+ 

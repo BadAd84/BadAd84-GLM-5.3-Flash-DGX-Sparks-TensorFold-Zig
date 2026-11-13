@@ -1,0 +1,20 @@
+diff -r a/tensorfold/families/glm5_next/cuda/sparse.py b/tensorfold/families/glm5_next/cuda/sparse.py
+--- tensorfold/families/glm5_next/cuda/sparse.py	2026-10-30 01:54:17.675437000 +0000
++++ tensorfold/families/glm5_next/cuda/sparse.py	2026-10-30 01:54:17.761394400 +0000
+@@ -444,7 +444,15 @@
+     return min(np_max, max(1024, 1 << (visible - 1).bit_length()))
+ 
+ 
+-PROMPT_ROWS = 64          # windows from this many rows (prompt chunks, eager) take the prompt selection below
++# windows from this many rows (prompt chunks and their pieces, eager, with a host position) take the prompt
++# selection below, and with TF_GLM_INDEXER_SHARD=prefill its rank shard (forward.dsa_rows). Speed only: both paths
++# give every row the same tokens and count (the decode tile is _scores', the selections exact integer logic,
++# _tokens' formulas). HuntPrefill-3: 64 -> 8, so a fork's or a short warm turn's piece of 8-63 rows at depth scores
++# with prompt_scores.cu over pool_count's columns and selects in one pass, split over the ranks, instead of the
++# decode path's _scores_rows over pool_bucket's power of two and select_split's five launches (RTX 5070, one piece
++# a layer at ~202k: 39 rows 0.655 -> 0.498 ms unsharded, 63 rows 1.010 -> 0.739; at ~590k 39 rows 3.92 -> 2.63);
++# under 8 rows the two are within noise and the shard's gather would cost more than it saves.
++PROMPT_ROWS = 8
+ 
+ 
+ def pool_count(pos: int, R: int, np_max: int) -> int:

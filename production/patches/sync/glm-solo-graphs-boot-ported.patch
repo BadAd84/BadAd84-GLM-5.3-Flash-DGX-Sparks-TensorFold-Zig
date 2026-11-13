@@ -1,0 +1,218 @@
+diff -ruN -x '*.orig' -x __pycache__ p7/src/tensorfold/families/glm5_next/cuda/engine.py p9/src/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 12:44:52.801855967 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 12:48:11.336720799 +0000
+@@ -361,6 +361,32 @@
+     return max(MLA_DECODE_ROWS, int(rows) + int(window)) if parallel > 1 else MLA_DECODE_ROWS
+ 
+ 
++def solo_graphs(parallel: int, env=None) -> bool:
++    """OTS 0104: whether the one-stream CUDA graphs are captured at start (``decode.Engine``'s ``graphs``: a dense and
++    a sparse graph for every verify width and KDA parity, the sparse ones for every pool bucket - 9 widths x 2
++    parities x (1 + 12 buckets) = 234 graphs at the production pool, each after two warm-up forwards: ~30 s of every
++    boot, the longest phase after the weights). Under --parallel every request runs through the scheduler's batched
++    windows (``multi.BatchedVerify``, graphs of its own), so ``Engine.forward`` - the only replay site - is reached
++    only by a lone stream moved home (TF_GLM_MULTI_LONE=1), by the serial verify seam (TF_GLM_MULTI_VERIFY=serial:
++    ``verify.SerialVerify``, where a stream at the graphs' home replays them) and by the startup comparison
++    (TF_GLM_MULTI_PROFILE); with all three off nothing ever replays them and they are not captured (``_calibrate``
++    then times eager windows, which only the fcost policies read). TF_GLM_SOLO_GRAPHS=1 captures them as before.
++    Every rank decides alike (the inputs are in the ranks' settings comparison): the warm-up forwards all-gather, so
++    one rank capturing alone would hang."""
++
++    e = os.environ if env is None else env
++    forced = (e.get("TF_GLM_SOLO_GRAPHS", "") or "0").strip()
++    if forced not in ("0", "1"):
++        raise ValueError(f"TF_GLM_SOLO_GRAPHS is 0 or 1, not {forced!r}")
++    if forced == "1" or int(parallel) <= 1:
++        return True
++    from .multi import verify_kind
++    from .multi_tune import MultiSettings
++
++    s = MultiSettings.from_env(e)
++    return bool(s.lone or s.profile or verify_kind(e.get("TF_GLM_MULTI_VERIFY", "")) == "serial")
++
++
+ def slot_bytes(t: dict, world: int = 2, rows: int = MAX_ROWS, rank: int = 0) -> int:
+     """What one more stream slot (``forward.Slots``) takes on rank ``rank`` of ``world``, from the text config:
+     every KDA layer's recurrent states (two parities), conv window, a decode window's projections and replay
+@@ -526,6 +552,11 @@
+                              "checkpoint's MTP head drafts one request at a time, --parallel 1): give every rank "
+                              "the DFlash2 draft model (--drafter), serve with --parallel 1 for MTP drafts, or pass "
+                              f"--no-drafts to every rank to decode {int(parallel)} requests together without drafts")
++        # OTS 0104: the boot timeline ([boot] lines on every rank; ``fastboot.mark``)
++        from . import fastboot
++
++        fastboot.set_rank(rank)
++        fastboot.mark("start: container, imports, CLI")
+         torch.cuda.set_device(0)
+         self.torch = torch
+         self.rank, self.world = rank, world
+@@ -544,6 +575,7 @@
+         self.serial_only = serial_only
+         self.comm = comm if comm is not None else NCCL(rank, world, master, port)
+         self.comm.barrier()
++        fastboot.mark("NCCL init and the rank's settings")
+         if comm is None and os.environ.get("TF_GLM_COMM", "nccl") == "roce":
+             # small all-gathers (a decode round's partials, the samplers) over b12x's one-shot RoCE transport
+             from tensorfold.cuda.roce import RoceComm
+@@ -722,8 +754,11 @@
+                                                               # (a lone rank sharding would hang the others' gathers)
+ 
+         # checked alike, not in the spill tier's key (``agreed``; the shard's is in its store's signature, multi.py)
++        # OTS 0104: the one-stream graphs' capture (``solo_graphs``), the same on every rank (their warm-up forwards
++        # all-gather)
++        self.solo = bool(graphs) and solo_graphs(parallel)
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+-                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE)] + \
++                       indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo)] + \
+             lay.owner_words(cfg.layers)                       # OTS 0105: TF_GLM_EXPERT_ROTATE
+         rows = self._gather_ints(mine + [spare >> 20])
+         odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+@@ -735,7 +770,7 @@
+                                "TF_GLM_MULTI_VERIFY, TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE / _WINDOW, "
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+-                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE): "
++                               "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")
+@@ -806,10 +841,12 @@
+                 self.comm.exchange_all({p: [a] for p in peers}, {p: [torch.empty_like(a)] for p in peers})
+             torch.cuda.synchronize()
+         w = load(model_dir, rank=rank, world=world, mtp=self.mtp_on)
++        fastboot.mark("weights", f"{w.nbytes() / 1e9:.1f} GB on the GPU")
+         w.comm = self.comm
+         self.comm.ready("loading")                   # a peer stuck loading is named, not waited on in NCCL
+         self.comm.barrier()
+         self.w = w
++        fastboot.mark("barrier: the other ranks' weights")
+         if rank == 0 and cfg.mtp_layers and not self.mtp_on:
+             print("[tensorfold] the checkpoint's MTP head is not loaded (TF_GLM_MTP=" +
+                   (os.environ.get("TF_GLM_MTP", "").strip() or MTP_DEFAULT) + "): " +
+@@ -848,11 +885,19 @@
+             from .dflash2 import Drafter
+ 
+             self.drafter = Drafter(drafter, w, capacity=pool_rows or capacity, tap_rows=MAX_ROWS, ring=DRAFT_RING)
+-        self.e = Engine(w, capacity=pool_rows or capacity, max_rows=MAX_ROWS, prefill_rows=prefill_rows, graphs=graphs,
++            fastboot.mark("DFlash2 drafter weights")
++        self.e = Engine(w, capacity=pool_rows or capacity, max_rows=MAX_ROWS, prefill_rows=prefill_rows,
++                        graphs=self.solo,                    # OTS 0104: not when nothing would replay them
+                         graph_rows=GRAPH_ROWS + WIDE_GRAPHS, long_context=long_context,
+                         taps=self.drafter.tap_layers if self.drafter is not None else (), grid=self.grid,
+                         split=self.split, mtp_rows=MTP_ROWS, streams=parallel, pool_rows=pool_rows, kv=kv,
+                         display=display)
++        fastboot.mark("engine: caches, pool, one-stream graphs")
++        if rank == 0 and graphs and not self.solo:
++            print(f"[tensorfold] one-stream CUDA graphs not captured: --parallel {parallel} serves every request "
++                  "through the batched windows; the lone-stream path (TF_GLM_MULTI_LONE), the serial verify seam "
++                  "(TF_GLM_MULTI_VERIFY) and the startup comparison (TF_GLM_MULTI_PROFILE) are off; "
++                  "TF_GLM_SOLO_GRAPHS=1 captures them as before", flush=True)
+         if display and rank == 0:
+             print(f"[tensorfold] {display >> 20} MiB of the pool in the GPU's display reservation "
+                   f"(TF_GLM_DISPLAY_KV_MIB), which free memory does not count: +{display_rows} tokens, "
+@@ -895,10 +940,13 @@
+         if self.drafter is not None:
+             if graphs:
+                 self.drafter.capture()
++            fastboot.mark("DFlash2 CUDA graphs")
+         self.costs = self._calibrate()
++        fastboot.mark("calibration")
+         if rank == 0:
+             c = self.costs
+-            print(f"[tensorfold] drafter timings (ms, fastest of 7): {c['timed']}", flush=True)
++            print(f"[tensorfold] drafter timings (ms, fastest of 7{'' if self.solo else ', eager one-stream windows'}): "
++                  f"{c['timed']}", flush=True)
+             mtp = (f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row)"
+                    if w.mtp is not None else "")
+             print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) + mtp +
+@@ -915,6 +963,7 @@
+                   f"with {workspace / 2**30:.2f} GiB of workspace; at most {lim.image_tokens} tokens a picture, "
+                   f"{lim.video_tokens} a clip ({lim.video_frames} frames at {lim.fps:g} a second)"
+                   f"{'; https URLs allowed' if vision_urls else ''}", flush=True)
++            fastboot.mark("vision tower")
+         self.eos = tuple(w.cfg.eos)
+         self.model_dir = Path(model_dir)
+         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
+@@ -928,6 +977,7 @@
+ 
+             self.multi = MultiDecoder(self, parallel)
+             self.multi.model_dir = self.model_dir
++            fastboot.mark("MultiDecoder: drafter and batched-verify graphs, the tier")
+             if rank == 0:
+                 self.scheduler = GlmScheduler(self.multi, max_streams=parallel)
+                 self.concurrent = True
+@@ -941,6 +991,7 @@
+                 if self.multi.row_ms is not None:
+                     print("[tensorfold] --parallel batched window ms by rows: " +
+                           " ".join(f"{i + 1}:{ms:.1f}" for i, ms in enumerate(self.multi.row_ms)), flush=True)
++        fastboot.mark("serving")
+         if hasattr(self.comm, "settle"):                # startup is over: RoCE gathers go without a barrier first
+             self.comm.settle()
+ 
+diff -ruN -x '*.orig' -x __pycache__ p7/src/tensorfold/families/glm5_next/cuda/fastboot.py p9/src/tensorfold/families/glm5_next/cuda/fastboot.py
+--- tensorfold/families/glm5_next/cuda/fastboot.py	1970-01-01 01:00:00.000000000 +0100
++++ tensorfold/families/glm5_next/cuda/fastboot.py	2026-10-29 12:47:43.574092817 +0000
+@@ -0,0 +1,63 @@
++"""The boot timeline: ``mark(phase)`` prints one ``[boot]`` line a phase on every rank with the seconds since the
++launch, the phase's own seconds (since the previous mark) and the memory state, so a restart's phases stop being
++inferred from the gaps between unrelated log lines (OTS: the first step of the boot-time work; the prepared rank
++folders of built weights, jayleaton's 0140 adapted, extend this module in the next step).
++
++The launch time is TF_GLM_LAUNCH_T0 or TF_GLM_T0 (epoch seconds, set by a launcher) when given, else this module's
++import. No torch at import.
++"""
++
++from __future__ import annotations
++
++import os
++import time
++from pathlib import Path
++
++_IMPORT_T = time.time()
++_last = [None]
++_rank = [None]
++
++
++# -- boot timeline --------------------------------------------------------------------------------------------------
++def boot_t0() -> float:
++    for var in ("TF_GLM_LAUNCH_T0", "TF_GLM_T0"):
++        try:
++            v = float(os.environ.get(var, "") or 0)
++        except ValueError:
++            v = 0.0
++        if v > 0:
++            return v
++    return _IMPORT_T
++
++
++def meminfo() -> dict:
++    """/proc/meminfo in GiB (MemFree is what CUDA can still allocate on GB10; MemAvailable adds reclaimable cache)."""
++
++    out: dict = {}
++    try:
++        for line in Path("/proc/meminfo").read_text().splitlines():
++            k, v = line.split(":", 1)
++            if k in ("MemFree", "MemAvailable", "Cached"):
++                out[k] = int(v.split()[0]) / 2 ** 20
++    except OSError:
++        pass
++    return out
++
++
++def set_rank(rank: int) -> None:
++    _rank[0] = rank
++
++
++def mark(phase: str, detail: str = "") -> float:
++    """One timeline line: seconds since the launch, the phase, its own seconds (since the previous mark), memory.
++    Returns the phase's seconds."""
++
++    now = time.time()
++    prev = _last[0] if _last[0] is not None else boot_t0()
++    _last[0] = now
++    m = meminfo()
++    mem = f" | MemFree {m.get('MemFree', 0):.1f} GiB, MemAvailable {m.get('MemAvailable', 0):.1f} GiB" if m else ""
++    who = f"r{_rank[0]} " if _rank[0] is not None else ""
++    print(f"[boot] {who}+{now - boot_t0():.1f}s {phase}{': ' + detail if detail else ''} ({now - prev:.1f}s){mem}",
++          flush=True)
++    return now - prev

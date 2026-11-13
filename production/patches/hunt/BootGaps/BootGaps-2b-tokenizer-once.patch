@@ -1,0 +1,243 @@
+# BootGaps-2b (lane BootGaps, 2026-10-30): rank 0 reads and analyses GLM-5.3's 20 MB tokenizer.json once.
+# (a) cuda/tokenizer_file.py: GlmEngine (rank 0) starts Tokenizer.from_file on a daemon thread at its start (the parse
+# releases the GIL); vision.glm.GlmVision and server.App take that one object (both read the file before, ~0.7-1.0 s
+# each on the laptop, on the boot's critical path). (b) PromptIds.make: the tokenizer's JSON analysis once per tokenizer
+# (App.prompt_ids and GlmApp.literal_prompt_ids serialized and parsed it twice, ~0.45 s each). (c) weights.added_tokens:
+# assistant_end and engine.user_opener share one parse of tokenizer.json (0.33 s each). Same ids, same tables (tested).
+# Laptop, interleaved ABAB x6, rank 0's tokenizer work after a 3 s lead: base min 2.91 / median 3.26 s -> 0.60 / 0.74 s.
+# Test: test_tokenizer_once.py <tree> (CPU); mutants_tok.py 6/6 killed. Applies with patch -p0.
+# Rebased onto work/hunt/stack/base-BootGaps.list (after VisionGaps-1s: GlmVision's lazy tower); same change.
+diff -r tensorfold/cuda/prompt_ids.py ../tok6/tensorfold/cuda/prompt_ids.py
+--- tensorfold/cuda/prompt_ids.py	2026-10-30 06:54:48.830754500 +0000
++++ tensorfold/cuda/prompt_ids.py	2026-10-30 06:54:56.208813700 +0000
+@@ -66,6 +66,33 @@
+     return value
+ 
+ 
++_SPECS: dict[int, tuple[Any, tuple]] = {}      # id(tok) -> (tok, ``_spec_of``'s answer): the tokenizer kept alive
++_SPECS_LOCK = threading.Lock()
++
++
++def _spec_of(tok: Any) -> tuple[str | None, dict[str, int] | None, int]:
++    """(``unsplittable``'s problem or None, the added tokens' ids by text, the vocabulary with added tokens) of ``tok``,
++    worked out once per tokenizer object (lane BootGaps): the server's ids and GLM's masked ids
++    (``GlmApp.literal_prompt_ids``) are two ``make`` calls on one tokenizer, and each serialized it to JSON and parsed
++    it again (~0.45 s a call on a workstation for GLM-5.3's 20 MB tokenizer, at load, on the boot's critical path).
++    A tokenizer is never changed after load in this package, so its JSON is the same at every call."""
++
++    with _SPECS_LOCK:
++        hit = _SPECS.get(id(tok))
++    if hit is not None:                 # (the entry keeps ``tok`` alive, so its id names no other object)
++        return hit[1]
++    spec = json.loads(tok.to_str())
++    problem = unsplittable(spec)
++    if problem:
++        out = (problem, None, 0)
++    else:
++        out = (None, {t["content"]: int(t["id"]) for t in spec["added_tokens"]},
++               tok.get_vocab_size(with_added_tokens=True))
++    with _SPECS_LOCK:
++        _SPECS[id(tok)] = (tok, out)
++    return out
++
++
+ def unsplittable(spec: dict[str, Any]) -> str | None:
+     """Why a tokenizer's ids may not split at its added tokens (its JSON as ``Tokenizer.to_str`` gives it), or None."""
+ 
+@@ -160,14 +187,12 @@
+         entries = _env_entries()
+         if not entries:
+             return None
+-        spec = json.loads(tok.to_str())
+-        problem = unsplittable(spec)
++        problem, added, vocab = _spec_of(tok)
+         if problem:
+             print(f"[tensorfold] prompt ids: every prompt is tokenized in full ({problem})", file=sys.stderr, flush=True)
+             return None
+         text_table()            # (OTS) the seed text's table at load (~27 ms), not at the first request's seed
+-        return cls({t["content"]: int(t["id"]) for t in spec["added_tokens"]}, tok.get_vocab_size(with_added_tokens=True),
+-                   encode_fast, entries)
++        return cls(added, vocab, encode_fast, entries)
+ 
+     def _starts(self, text: str, ids: array) -> tuple[list[int], list[int], list[int]] | None:
+         """Where ``text``'s added tokens start, their ``_Kept.ends``, and their indexes in ``ids`` (its ids, an
+diff -r tensorfold/cuda/server.py ../tok6/tensorfold/cuda/server.py
+--- tensorfold/cuda/server.py	2026-10-30 06:54:48.852255000 +0000
++++ tensorfold/cuda/server.py	2026-10-30 06:54:56.223066100 +0000
+@@ -25,7 +25,7 @@
+ from tensorfold.engine.tool_draft import ToolCallStreamer
+ from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
+ 
+-from tensorfold.cuda import health
++from tensorfold.cuda import health, tokenizer_file
+ from tensorfold.cuda.chat_template import ChatTemplate
+ from tensorfold.cuda.prompt_ids import PromptIds
+ from tensorfold.cuda.reply_text import (THINK_CALL_HOLD, CallHider, GlmCallStreamer, SentText, StopStrings,
+@@ -94,14 +94,12 @@
+                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
+                  context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0,
+                  aliases: tuple[str, ...] | list[str] = ()):
+-        from tokenizers import Tokenizer
+-
+         self.engine = engine
+         self.vision = getattr(engine, "vision", None)
+         self.served = served
+         self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
+         self.model_dir = Path(model_dir)
+-        self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
++        self.tok = tokenizer_file.load(model_dir)        # the engine's preloaded one when it started a read (BootGaps)
+         self.template = ChatTemplate(model_dir)
+         self.default_thinking = default_thinking
+         self.reasoning_effort, self.thinking_budget = reasoning_effort, int(thinking_budget)   # the Mac's defaults
+diff -r tensorfold/cuda/tokenizer_file.py ../tok6/tensorfold/cuda/tokenizer_file.py
+--- tensorfold/cuda/tokenizer_file.py	1970-01-01 00:00:00.000000000 +0000
++++ tensorfold/cuda/tokenizer_file.py	2026-10-30 06:54:56.236665400 +0000
+@@ -0,0 +1,74 @@
++"""One ``tokenizers.Tokenizer`` per checkpoint folder per process (lane BootGaps).
++
++GLM's rank 0 read the checkpoint's 20 MB ``tokenizer.json`` twice during its start, each on the boot's critical
++path: the vision tower's (``vision.glm.GlmVision``) and the server's (``server.App``), ~0.7-1.0 s each on a
++workstation. ``preload`` starts the read on a daemon thread when the engine starts (``Tokenizer.from_file`` releases
++the GIL for its parse: a main-thread spin beside it keeps 84-101% of its pace), so the weights load hides it; ``load``
++hands every caller that one object. A ``Tokenizer`` is only read here (no padding, truncation or added tokens are set
++on it anywhere in the package), so a shared one encodes and decodes as a caller's own did.
++"""
++
++from __future__ import annotations
++
++import threading
++from pathlib import Path
++from typing import Any
++
++_LOCK = threading.Lock()
++_FILES: dict[str, "_Load"] = {}
++
++
++class _Load:
++    def __init__(self, path: str) -> None:
++        self.path = path
++        self.done = threading.Event()
++        self.tok: Any = None
++        self.error: BaseException | None = None
++
++    def run(self) -> None:
++        try:
++            from tokenizers import Tokenizer
++
++            self.tok = Tokenizer.from_file(self.path)
++        except BaseException as exc:  # noqa: BLE001 - handed to the caller of ``load``
++            self.error = exc
++        finally:
++            self.done.set()
++
++
++def _key(model_dir: str | Path) -> str:
++    return str(Path(model_dir) / "tokenizer.json")
++
++
++def preload(model_dir: str | Path) -> None:
++    """Start reading ``model_dir``'s tokenizer.json on a daemon thread (once; nothing when there is none)."""
++
++    path = _key(model_dir)
++    if not Path(path).is_file():
++        return
++    with _LOCK:
++        if path in _FILES:
++            return
++        job = _FILES[path] = _Load(path)
++    threading.Thread(target=job.run, name="tensorfold-tokenizer", daemon=True).start()
++
++
++def load(model_dir: str | Path) -> Any:
++    """``Tokenizer.from_file(model_dir / "tokenizer.json")``, the same object on every call: the preloaded one
++    (waiting for its read), else read now. A failed read raises its error, here as it did at the caller."""
++
++    path = _key(model_dir)
++    with _LOCK:
++        job = _FILES.get(path)
++        mine = job is None
++        if mine:
++            job = _FILES[path] = _Load(path)
++    if mine:
++        job.run()
++    job.done.wait()
++    if job.error is not None:
++        with _LOCK:                      # a failure is not kept: the next call reads again, as before
++            if _FILES.get(path) is job:
++                del _FILES[path]
++        raise job.error
++    return job.tok
+diff -r tensorfold/families/glm5_next/cuda/engine.py ../tok6/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 06:54:50.967553500 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 06:54:56.249772700 +0000
+@@ -291,8 +291,10 @@
+     path = Path(model_dir) / "tokenizer.json"
+     if not path.is_file():
+         return None
++    from .weights import added_tokens                   # parsed once: ``weights.assistant_end`` read it at the start
++
+     try:
+-        added = json.loads(path.read_text()).get("added_tokens", [])
++        added = added_tokens(str(Path(model_dir)))
+     except (OSError, ValueError):
+         return None
+     return next((int(t["id"]) for t in added if t.get("content") == "<|user|>"), None)
+@@ -830,6 +832,10 @@
+ 
+         fastboot.set_rank(rank)
+         fastboot.mark("start: container, imports, CLI")
++        if rank == 0:            # BootGaps: the server's and the vision tower's tokenizer, read while the weights load
++            from tensorfold.cuda import tokenizer_file
++
++            tokenizer_file.preload(model_dir)
+         torch.cuda.set_device(0)
+         self.torch = torch
+         self.rank, self.world = rank, world
+diff -r tensorfold/families/glm5_next/cuda/weights.py ../tok6/tensorfold/families/glm5_next/cuda/weights.py
+--- tensorfold/families/glm5_next/cuda/weights.py	2026-10-30 06:54:49.684575300 +0000
++++ tensorfold/families/glm5_next/cuda/weights.py	2026-10-30 06:54:56.267704500 +0000
+@@ -22,6 +22,16 @@
+ 
+ 
+ @lru_cache(maxsize=None)
++def added_tokens(model_dir: str) -> list:
++    """The ``added_tokens`` list of ``model_dir``'s tokenizer.json, parsed once per process (lane BootGaps: GLM's
++    start read the 20 MB file for it twice, ``assistant_end`` on every rank and ``engine.user_opener`` on rank 0,
++    ~0.33 s a parse on a workstation, the GIL held). A failed read or parse raises (and is not kept). Callers only
++    read the list."""
++
++    return json.loads((Path(model_dir) / "tokenizer.json").read_text()).get("added_tokens", [])
++
++
++@lru_cache(maxsize=None)
+ def assistant_end(model_dir: str) -> int | None:
+     """The id of GLM's ``<|assistant|>`` role token when it ends a reply (TF_GLM_ASSISTANT_ENDS, default 1; 0: it
+     doesn't), or None without one in the checkpoint's tokenizer. The checkpoint's end tokens are ``<|endoftext|>``,
+@@ -36,7 +46,7 @@
+     if on == "0" or not path.is_file():
+         return None
+     try:
+-        added = json.loads(path.read_text()).get("added_tokens", [])
++        added = added_tokens(str(Path(model_dir)))
+     except (OSError, ValueError):
+         return None
+     return next((int(t["id"]) for t in added if t.get("content") == "<|assistant|>" and t.get("special")), None)
+diff -r tensorfold/vision/glm.py ../tok6/tensorfold/vision/glm.py
+--- tensorfold/vision/glm.py	2026-10-30 06:54:49.450856700 +0000
++++ tensorfold/vision/glm.py	2026-10-30 06:55:01.646667800 +0000
+@@ -537,13 +537,13 @@
+ 
+     def __init__(self, model_dir: Path, device, *, allow_urls: bool = False,
+                  limits: GlmVisionLimits | None = None, lazy: bool = False) -> None:
+-        from tokenizers import Tokenizer
++        from tensorfold.cuda import tokenizer_file
+ 
+         cfg = json.loads((model_dir / "config.json").read_text())
+         self.image_token = int(cfg.get("image_token_id", 154854))
+         self.allow_urls = allow_urls
+         self.limits = limits or GlmVisionLimits.from_env()
+-        self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
++        self.tok = tokenizer_file.load(model_dir)        # the engine's preloaded one, shared with the server (BootGaps)
+         if self.tok.token_to_id(IMAGE) != self.image_token:
+             raise ValueError("the tokenizer's <|image|> id does not match config.json's image_token_id")
+         self.model_dir, self.device = Path(model_dir), device

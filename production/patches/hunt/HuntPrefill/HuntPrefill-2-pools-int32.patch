@@ -1,0 +1,129 @@
+diff -r a/tensorfold/families/glm5_next/cuda/indexer_shard.py b/tensorfold/families/glm5_next/cuda/indexer_shard.py
+--- tensorfold/families/glm5_next/cuda/indexer_shard.py	2026-10-30 01:54:17.650105400 +0000
++++ tensorfold/families/glm5_next/cuda/indexer_shard.py	2026-10-30 01:54:17.651608300 +0000
+@@ -93,10 +93,11 @@
+     return out
+ 
+ 
+-def prefill_rank_pools(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, lo: int, hi: int, buf, cand):
++def prefill_rank_pools(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, lo: int, hi: int, buf, cand, out=None):
+     """One rank's share of the piece's pools [hi - lo, TOPK_POOLS] int32 ascending: sparse._prompt_rank_pools,
+-    the one implementation (the prototype's copy of the loop folded into _select_prompt there)."""
+-    return sparse._prompt_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand)
++    the one implementation (the prototype's copy of the loop folded into _select_prompt there); ``out``: its
++    contiguous int32 destination (the send buffer), else a new tensor."""
++    return sparse._prompt_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand, out)
+ 
+ 
+ def prefill_shard(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, world: int = 3, bufs=None):
+@@ -472,8 +473,10 @@
+     cand = torch.empty((B * 2 * cap,), dtype=torch.int32, device=dev)
+     step = -(-R // comm.world)                                # every rank sends step rows (the last padded)
+     lo, hi = min(comm.rank * step, R), min((comm.rank + 1) * step, R)
+-    mine = torch.zeros((step, TOPK_POOLS), dtype=torch.int32, device=dev)
+-    mine[:hi - lo] = prefill_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand)
++    mine = torch.empty((step, TOPK_POOLS), dtype=torch.int32, device=dev)
++    if hi - lo < step:                                        # the padded rows (never read after the gather)
++        mine[hi - lo:].zero_()
++    prefill_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand, out=mine[:hi - lo])
+     pools = _all_gather(comm, mine).view(comm.world, step, TOPK_POOLS).reshape(-1, TOPK_POOLS)[:R]
+     tokens = torch.empty((R, TOKENS), dtype=torch.int32, device=dev)
+     counts = torch.empty((R,), dtype=torch.int32, device=dev)
+diff -r a/tensorfold/families/glm5_next/cuda/sparse.py b/tensorfold/families/glm5_next/cuda/sparse.py
+--- tensorfold/families/glm5_next/cuda/sparse.py	2026-10-30 01:54:17.598432700 +0000
++++ tensorfold/families/glm5_next/cuda/sparse.py	2026-10-30 01:54:17.599947300 +0000
+@@ -287,7 +287,7 @@
+         eq = (ok & (u == prefix)).to(tl.int32)
+         take = (ok & (u > prefix)) | ((eq == 1) & (tl.cumsum(eq, 0) - eq + equal_seen < need))
+         t = take.to(tl.int32)
+-        tl.store(OUT + r * K + written + tl.cumsum(t, 0) - t, i.to(tl.int64), mask=take)
++        tl.store(OUT + r * K + written + tl.cumsum(t, 0) - t, i.to(OUT.dtype.element_ty), mask=take)
+         written += tl.sum(t, 0)
+         equal_seen += tl.sum(eq, 0)
+ 
+@@ -358,7 +358,7 @@
+     eq = (ok & (u == prefix)).to(tl.int32)
+     take = (ok & (u > prefix)) | ((eq == 1) & (tl.cumsum(eq, 0) - eq < need))
+     t = take.to(tl.int32)
+-    tl.store(OUT + r * K + tl.cumsum(t, 0) - t, idx.to(tl.int64), mask=take)
++    tl.store(OUT + r * K + tl.cumsum(t, 0) - t, idx.to(OUT.dtype.element_ty), mask=take)
+ 
+ 
+ @triton.jit
+@@ -420,10 +420,13 @@
+     return next((cap, target) for most, cap, target in PROMPT_TILES if np_ <= most)
+ 
+ 
+-def prompt_pools(scores: torch.Tensor, k: int, scratch: torch.Tensor | None = None) -> torch.Tensor:
++def prompt_pools(scores: torch.Tensor, k: int, scratch: torch.Tensor | None = None,
++                 out: torch.Tensor | None = None) -> torch.Tensor:
+     """top_pools' pools for prompt rows (no visible bounds), by _select_floor: one program a row, 4,096 scores a
+     step for blocks of up to 32 rows (fewer programs than the GB10's 48 SMs), else 1,024; ``scratch``: int32, at
+-    least R * 2 * CAP (prompt_tile)."""
++    least R * 2 * CAP (prompt_tile). ``out``: contiguous [R, k] int32 or int64 the pools are stored into in its own
++    type (HuntPrefill-2: a prompt chunk's int32 pools without an int64 copy converted; pool ids fit); default a new
++    int64 tensor."""
+     R, NP = scores.shape
+     if NP < k or not scores.is_contiguous():
+         raise ValueError("prompt_pools: contiguous rows of at least k scores")
+@@ -432,7 +435,10 @@
+         scratch = torch.empty((R * 2 * cap,), dtype=torch.int32, device=scores.device)
+     elif scratch.dtype != torch.int32 or scratch.numel() < R * 2 * cap:
+         raise ValueError(f"prompt_pools: the scratch needs {R * 2 * cap} int32")
+-    out = torch.empty((R, k), dtype=torch.int64, device=scores.device)
++    if out is None:
++        out = torch.empty((R, k), dtype=torch.int64, device=scores.device)
++    elif out.dtype not in (torch.int32, torch.int64) or out.shape != (R, k) or not out.is_contiguous():
++        raise ValueError(f"prompt_pools: out must be a contiguous [{R}, {k}] int32 or int64 tensor")
+     _select_floor[(R,)](scores, out, scratch, NP, K=k, CAP=cap, NS=PROMPT_SECTORS, TARGET=target,
+                         BLOCK=4096 if R <= 32 else 1024, num_warps=8)
+     return out
+@@ -510,35 +516,40 @@
+ 
+ def _prompt_rank_pools(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: int, R: int, np_max: int,
+                        pos_dev: torch.Tensor, lo: int, hi: int, buf: torch.Tensor,
+-                       cand: torch.Tensor) -> torch.Tensor:
++                       cand: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+     """_select_prompt's scoring and selection over rows [lo, hi) ONLY (a rank's share of the piece in the
+     sharded path, cuda/indexer_shard.py), with the chunk-wide NP = pool_count(pos, R, np_max) so every row's columns,
+     radix threshold and ties are its own as before: the rows' pools [hi - lo, TOPK_POOLS] int32 ascending
+-    (pool ids fit; _tokens reads int32 pools to the same bits)."""
++    (pool ids fit; _tokens reads int32 pools to the same bits), into ``out`` when given (contiguous int32 [hi - lo,
++    TOPK_POOLS]: the sharded path's send buffer), each block's stored there by the selection itself (HuntPrefill-2)."""
+ 
++    if out is None:
++        out = torch.empty((max(hi - lo, 0), TOPK_POOLS), dtype=torch.int32, device=qi.device)
+     if hi <= lo:
+-        return torch.empty((0, TOPK_POOLS), dtype=torch.int32, device=qi.device)
++        return out
+     NP = pool_count(pos, R, np_max)
+     B = min(hi - lo, SELECT_ROWS)
+     H = wts.shape[1]
+     D = qi.shape[1] // H
+     wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5
+-    out = torch.empty((hi - lo, TOPK_POOLS), dtype=torch.int32, device=qi.device)
+     pkv, pks, rs, fp8 = kv8.parts(pk)
++    # the CUDA scoring when it is used, decided once (HuntPrefill-2: prompt_scores_cuda() is True before the first
++    # load is tried, so a failed load now falls back to _scores here, as seg_select_tokens' path does, instead of
++    # calling .scores on None)
++    ext = _scores_ext() if fp8 and H == 32 and D == 128 and NP % 64 == 0 and prompt_scores_cuda() else None
+     for a in range(lo, hi, B):
+         n = min(B, hi - a)
+         at = pos_dev if a == 0 else pos_dev + a
+         scores = buf[:n * NP].view(n, NP)
+-        if fp8 and H == 32 and D == 128 and NP % 64 == 0 and prompt_scores_cuda():
+-            _scores_ext().scores(qi[a:a + n], wts[a:a + n], wts.stride(0), pk, rs, scores, at, n, NP, D ** -0.5,
+-                                 wscale)
++        if ext is not None:
++            ext.scores(qi[a:a + n], wts[a:a + n], wts.stride(0), pk, rs, scores, at, n, NP, D ** -0.5, wscale)
+         else:
+             _scores[(n, triton.cdiv(triton.cdiv(NP, 64), SCORE_LOOP))](qi[a:a + n], wts[a:a + n], wts.stride(0), pkv,
+                                                                        pks, scores, at, n, NP, D ** -0.5, wscale, H=H,
+                                                                        HP=max(16, triton.next_power_of_2(H)), D=D,
+                                                                        BP=64, L=SCORE_LOOP, RS=rs, FP8=fp8,
+                                                                        num_warps=4)
+-        out[a - lo:a - lo + n] = prompt_pools(scores, TOPK_POOLS, cand).to(torch.int32)  # ascending pool index
++        prompt_pools(scores, TOPK_POOLS, cand, out=out[a - lo:a - lo + n])  # ascending pool index
+     return out
+ 
+ 

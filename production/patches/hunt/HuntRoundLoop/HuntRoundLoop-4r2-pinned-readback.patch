@@ -1,0 +1,86 @@
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -620,9 +620,10 @@
+     each alone: every top-k (and greedy) part's candidates in ONE all-gather, a nucleus part (top_k off) through the
+     shared nucleus rule (its own gathers), in part order on every rank. Parts whose logits are consecutive rows of one
+     buffer (a batched window's) and want the same candidate count take one ``torch.topk`` together
+-    (``multi_tune.topk_words``: each row's candidates as its part's own call gives them)."""
++    (``multi_tune.topk_words``: each row's candidates as its part's own call gives them); the gathered candidates come
++    back through a pinned buffer and an event (``sampling.readback``: the bytes ``.cpu()`` gives)."""
+ 
+-    from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank, topk_host
++    from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank, readback, topk_host
+     from tensorfold.engine.exact_sampling import MARGIN
+ 
+     from .multi_tune import topk_words
+@@ -639,11 +640,11 @@
+     if layout:
+         flat = topk_words(w, [(parts[k][0], n) for k, _, n, _ in layout])
+         if w.comm is None:
+-            host = flat.view(1, -1).cpu()
++            host = readback(flat.view(1, -1))
+         else:
+             got = torch.empty((w.world * flat.numel(),), dtype=torch.float32, device=flat.device)
+             w.comm.all_gather(flat.contiguous(), got)
+-            host = got.view(w.world, -1).cpu()
++            host = readback(got.view(w.world, -1))
+         topk_host(host, layout, parts, out)
+     for k, (logits, positions, sampling) in enumerate(parts):
+         if out[k] is None:
+diff -ruN tensorfold/families/glm5_next/cuda/multi_tune.py tensorfold/families/glm5_next/cuda/multi_tune.py
+--- tensorfold/families/glm5_next/cuda/multi_tune.py
++++ tensorfold/families/glm5_next/cuda/multi_tune.py
+@@ -187,8 +187,8 @@
+     ``NUCLEUS`` best (value, id, mass), its shard's mass and width. Row by row the arithmetic is ``nucleus_rows``' and
+     ``sample_rows``'; a nucleus part some row of which runs past the candidates reads whole shards on its own."""
+ 
+-    from tensorfold.cuda.sampling import (MASS, NUCLEUS, WIDER, _draw, _shares, comm_gather, one_rank, topk_host,
+-                                          union_cover)
++    from tensorfold.cuda.sampling import (MASS, NUCLEUS, WIDER, _draw, _shares, comm_gather, one_rank, readback,
++                                          topk_host, union_cover)
+     from tensorfold.engine.exact_sampling import MARGIN
+ 
+     gather = one_rank if w.comm is None else comm_gather(w.comm)
+@@ -244,9 +244,9 @@
+         packed = torch.cat([vals.view(torch.int64), ids, kept, mass.sum(dim=-1, keepdim=True), shard], dim=1)
+         words2 = packed.contiguous().view(torch.float32).view(-1)
+         host2 = gather(words2).reshape(-1, words2.numel()).view(torch.int64).reshape(-1, rows, 3 * count + 2)
+-        host2 = host2.cpu().numpy()
++        host2 = readback(host2, slot=1).numpy()                  # (slot 1: read below, after slot 0's readback)
+     if topk:
+-        topk_host(got1.cpu(), topk, parts, out)
++        topk_host(readback(got1), topk, parts, out)
+     if nucl:
+         r0 = 0
+         for k, scaled_k, _ in nucl:
+diff -ruN tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -661,18 +661,23 @@
+ 
+     def take(self) -> list[int]:
+         """The follower's message (rank 0's values): the fixed gather's block when the message fits, else the
+-        values' gather, the two decided from the gathered slot 0 so every rank issues the same collectives."""
++        values' gather, the two decided from the gathered slot 0 so every rank issues the same collectives. Read back
++        through a pinned buffer and an event (``sampling.readback``, LEADS #3): a follower waits here for rank 0's
++        message every round, and a pageable readback would hold every other thread's CUDA call (the spill tier's
++        reader and writers) for that whole wait."""
++
++        from tensorfold.cuda.sampling import readback
+ 
+         mine, got = self._fixed()
+         if not self.pending:
+             self.comm.all_gather(mine, got)           # no pre() since the last message: queue it now
+         self.pending = False
+-        row = got[:self.ints].tolist()                # one readback: the gathered length and the values
++        row = readback(got[:self.ints]).tolist()      # one readback: the gathered length and the values
+         count = row[0]
+         if count <= self.ints - 1:
+             return [int(v) for v in row[1:1 + count]]
+         self.comm.all_gather(*self._values(count))
+-        return [int(v) for v in self.allv[:count].tolist()]
++        return [int(v) for v in readback(self.allv[:count]).tolist()]
+ 
+ 
+ class GlmEngine:

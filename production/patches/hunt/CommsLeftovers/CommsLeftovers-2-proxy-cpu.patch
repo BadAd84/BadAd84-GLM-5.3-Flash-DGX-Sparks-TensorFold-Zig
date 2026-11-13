@@ -1,0 +1,101 @@
+--- tensorfold/cuda/roce.py
++++ tensorfold/cuda/roce.py
+@@ -44,6 +44,80 @@
+     if not 1 <= seconds <= 3600:
+         raise ValueError(f"TF_ROCE_WAIT_S: 1 to 3600 seconds, not {value!r}")
+     return int(seconds * 1_000_000)
++
++
++_CPUS = Path("/sys/devices/system/cpu")
++_TASKS = Path("/proc/self/task")
++
++
++def fastest_cpu(allowed, sysfs: Path = _CPUS) -> int:
++    """The highest-numbered of the fastest CPUs in ``allowed``: the largest ``cpu_capacity`` (arm64; on a GB10 the
++    Cortex-X925 performance cores rate above the Cortex-A725 ones), else the largest ``cpufreq/cpuinfo_max_freq``."""
++
++    def score(c: int) -> tuple[int, int]:
++        out = []
++        for name in ("cpu_capacity", "cpufreq/cpuinfo_max_freq"):
++            try:
++                out.append(int((sysfs / f"cpu{c}" / name).read_text().strip()))
++            except (OSError, ValueError):
++                out.append(0)
++        return out[0], out[1]
++
++    return max(sorted(allowed), key=lambda c: (*score(c), c))
++
++
++def proxy_cpu(env=None, allowed=None, sysfs: Path = _CPUS) -> int | None:
++    """TF_ROCE_PROXY_CPU: the CPU the RoCE proxy thread runs on alone (``start_pinned``); unset or empty: anywhere
++    (no affinity, as before); ``auto``: ``fastest_cpu`` of this process's CPUs; else a CPU number this process may
++    use. Needs two CPUs or more (the proxy's own and the rest)."""
++
++    env = os.environ if env is None else env
++    value = str(env.get("TF_ROCE_PROXY_CPU", "") or "").strip()
++    if not value:
++        return None
++    allowed = set(os.sched_getaffinity(0) if allowed is None else allowed)
++    if len(allowed) < 2:
++        raise ValueError(f"TF_ROCE_PROXY_CPU={value}: this process may use {len(allowed)} CPU, the proxy needs one of "
++                         "its own and the rest one or more")
++    if value == "auto":
++        return fastest_cpu(allowed, sysfs)
++    try:
++        cpu = int(value)
++    except ValueError:
++        cpu = -1
++    if cpu not in allowed:
++        raise ValueError(f"TF_ROCE_PROXY_CPU: 'auto' or one of this process's CPUs {sorted(allowed)}, not {value!r}")
++    return cpu
++
++
++def start_pinned(start, cpu: int | None, tasks: Path = _TASKS) -> int:
++    """``start()`` (``roce_start``: creates the proxy thread, returns 0 on success). With ``cpu``: the calling thread
++    runs on ``cpu`` alone while it creates the thread (a new thread inherits its creator's affinity), then every
++    other thread of this process moves off ``cpu`` (and so do the threads they create later), so a tokenizer burst
++    on every core cannot share or take the proxy's core. Placement only: the bits are unchanged."""
++
++    if cpu is None:
++        return start()
++    mask = set(os.sched_getaffinity(0))
++    os.sched_setaffinity(0, {cpu})
++    try:
++        rc = start()
++    finally:
++        os.sched_setaffinity(0, mask)
++    if rc != 0:
++        return rc
++    moved = 0
++    for name in os.listdir(tasks):              # this thread too; the proxy's mask is {cpu}, so it stays
++        try:
++            have = set(os.sched_getaffinity(int(name)))
++            if cpu in have and have - {cpu}:
++                os.sched_setaffinity(int(name), have - {cpu})
++                moved += 1
++        except OSError:                          # a thread that ended meanwhile
++            continue
++    print(f"[tensorfold] RoCE proxy thread on CPU {cpu} alone (TF_ROCE_PROXY_CPU); {moved} other threads moved off it",
++          flush=True)
++    return rc
+ 
+ 
+ def _cache_dir() -> Path:
+@@ -186,6 +260,7 @@
+         """Two ranks: every listed HCA to the peer's of the same index (b12x's striping), GID index TF_ROCE_GID_INDEX
+         (or NCCL_IB_GID_INDEX, 3). More ranks: each HCA's own RoCE v2 IPv4 GID (unless TF_ROCE_GID_INDEX) and routes
+         by subnet (``plan_routes``), so a triangle of direct cables reaches each peer over that pair's rails."""
++        cpu = proxy_cpu()                                    # TF_ROCE_PROXY_CPU, checked before any resource
+         lib = proxy_library()
+         self.lib, self.rank, self.world, self.max_bytes = lib, rank, world, int(max_bytes)
+         self.slot_bytes = -(-self.max_bytes // SLOT_ALIGN) * SLOT_ALIGN
+@@ -263,7 +338,8 @@
+         blobs = b"".join(bytes(r[4 + extra:].numpy().tobytes())[:blob_len] for r in rows)
+         self.spin = spin_limit()
+         _ext()                      # its first build (tens of seconds) here, before the verdict all-gather below
+-        ok = lib.roce_connect(self.ctx, blobs, len(blobs)) == 0 and lib.roce_start(self.ctx) == 0
++        ok = lib.roce_connect(self.ctx, blobs, len(blobs)) == 0 and \
++            start_pinned(lambda: lib.roce_start(self.ctx), cpu) == 0
+         verdict = torch.tensor([0 if ok else 1], dtype=torch.int32, device="cuda")
+         both = torch.empty(world, dtype=torch.int32, device="cuda")
+         comm.all_gather(verdict, both)

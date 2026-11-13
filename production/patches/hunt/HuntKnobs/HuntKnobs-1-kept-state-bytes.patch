@@ -1,0 +1,74 @@
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -201,7 +201,7 @@
+     nothing changed).
+ 
+     Each kept state owns ``state`` bytes outside the pool (its KDA recurrent state and conv window, the indexer rings'
+-    tail and the DFlash2 window copy: ~45 MiB), reserved at start out of ``budget`` (what TF_GLM_CACHE_GIB leaves the
++    tail, the kept head row and the DFlash2 window copy: ``kept_state_bytes``), reserved at start out of ``budget`` (what TF_GLM_CACHE_GIB leaves the
+     pool beyond the window), so the count is a memory reservation, not only a limit. ``share_pct`` (TF_GLM_CACHE_SHARE_PCT,
+     0: off) makes the count at least that share of the budget -- a pool-sized count, so a pool of millions of free
+     tokens is not pushed empty by 32 one-shot conversations. Past three quarters of the budget the count is cut: the
+@@ -221,6 +221,39 @@
+     return n, note
+ 
+ 
++def kept_state_bytes(t: dict, world: int = 2, rank: int = 0, draft: dict | None = None) -> int:
++    """The device bytes one kept --parallel state owns outside the pool on rank ``rank`` of ``world`` (``t``: the
++    target's text config; ``draft``: the DFlash2 drafter's config, None without one), from the shapes the code copies:
++    ``decode.take_snapshot``'s KDA states (one parity of ``forward.Slots.rec``) and conv windows (``Slots.conv``), the
++    indexer rings' tail (``_ring_tail``: at most 3 rows of keys and gates a ring), the head row a prompt's end keeps
++    (``multi._keep``: one bf16 logits row of this rank's vocabulary share, at most), and the DFlash2 window copy
++    (``decode._ring_window`` / ``_drafter_views``: the drafter window's rows of every draft layer's keys and values,
++    this rank's KV heads, ``tp.draft_parts``). It replaced a fixed ``slot_bytes(rows=0) // 2 + 22 MiB``: half the
++    conv windows plus 22 MiB, which fits the window copy at two ranks (4 KV heads: 20 MiB) but over-reserves it at
++    three (rank 0: 69.57 MiB reserved for 63.39 MiB held, /health kept_bytes 66,472,960 a state) and under-reserves a
++    longer TF_GLM_DRAFT_WINDOW."""
++
++    from tensorfold.cuda.geometry import draft_window, layer_counts
++
++    from .tp import UNITS, draft_parts, split_sizes
++
++    linear, dsa = layer_counts(t)
++    lin = t.get("linear_attn_config") or {}
++    lh = split_sizes(int(lin.get("num_heads", t.get("linear_num_heads", 64))), world, UNITS["lin"])[rank]
++    ld = int(lin.get("head_dim", t.get("linear_head_dim", 128)))
++    conv = int(lin.get("short_conv_kernel_size", t.get("linear_conv_kernel_dim", 4)))
++    held = linear * (lh * ld * ld * 4 + (conv - 1) * 3 * lh * ld * 2)       # rec (fp32, one parity) + conv (bf16)
++    rings = dsa + int(t.get("num_nextn_predict_layers", 0) or 0)          # the DSA layers' rings and the MTP layer's
++    held += rings * (3 * 8 + 2 * 3 * int(t.get("index_head_dim", 128)) * 2)  # slots (int64) + [2, <=3, dim] bf16
++    held += -(-int(t["vocab_size"]) // world) * 2                         # a kept head row (bf16 logits)
++    if draft is not None:
++        _, kvs, _ = draft_parts(int(draft["num_attention_heads"]), int(draft["num_key_value_heads"]),
++                                int(draft["intermediate_size"]), world)
++        hd = int(draft.get("head_dim") or int(draft["hidden_size"]) // int(draft["num_attention_heads"]))
++        held += int(draft["num_hidden_layers"]) * 2 * kvs[rank] * draft_window(draft)[0] * hd * 2
++    return held
++
++
+ def user_opener(model_dir: Path) -> int | None:
+     """The id of GLM's ``<|user|>`` role token (the first one ends the system block), or None without a tokenizer."""
+ 
+@@ -928,15 +961,20 @@
+             # TF_GLM_DISPLAY_KV_MIB: the display reservation's bytes too, which free memory never counted
+             display = display_kv.credit()
+             # one kept state's fixed cost outside the pool, the largest of any rank's: every rank derives the same count
+-            state = max(slot_bytes(text, world, rows=0, rank=r) // 2 + (22 << 20) for r in range(world))
++            draft_cfg = read_config(drafter) if drafter is not None else None
++            state = max(kept_state_bytes(text, world, r, draft_cfg) for r in range(world))
+             self.entries, why = kept_entries(int(os.environ.get("TF_GLM_CACHE_ENTRIES", "8")),
+                                              float(os.environ.get("TF_GLM_CACHE_SHARE_PCT", "0") or 0),
+                                              self.cache_bytes + display, state)
+             if rank == 0 and why:
+                 print(f"[tensorfold] kept prompt states: {why}", flush=True)
+-            states = self.entries * (slot_bytes(text, world, rows=0, rank=rank) // 2 + (22 << 20))
++            states = self.entries * kept_state_bytes(text, world, rank, draft_cfg)
+             pool_rows = (capacity + max(0, self.cache_bytes + display - states) // per_token) // ALIGN * ALIGN
+             display_rows = pool_rows - (capacity + max(0, self.cache_bytes - states) // per_token) // ALIGN * ALIGN
++            # every rank holds the pool rank 0 decides placements in: a rank whose kept states are smaller (fewer KDA
++            # heads or DFlash2 KV heads) would otherwise allocate pool rows no placement ever reaches
++            agreed = self._gather_ints([pool_rows, display_rows])
++            pool_rows, display_rows = min(r[0] for r in agreed), min(r[1] for r in agreed)
+             if pool_rows < ALIGN:
+                 raise ValueError(f"--parallel {parallel}: a pool of {pool_rows} tokens is less than one {ALIGN}-token "
+                                  f"extent; free memory or lower --context")

@@ -1,0 +1,37 @@
+# Sync port of ots0093-glm-ring-tail-positions.patch (production v110-ots124) onto the synced base, applied in production order after the
+# ports before it; re-based by patch(1) (0 hunk(s) at fuzz 2, every fuzzed hunk read: the change lands where
+# the original put it). The original's header (what, why, measurements, tests) is the reference: ots0093-glm-ring-tail-positions.patch.
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/decode.py next/tensorfold/families/glm5_next/cuda/decode.py
+--- tensorfold/families/glm5_next/cuda/decode.py	2026-10-29 18:12:07.000000000 +0000
++++ tensorfold/families/glm5_next/cuda/decode.py	2026-10-29 19:05:57.568842100 +0000
+@@ -413,17 +413,26 @@
+ 
+ def put_ring_tail(st, snap: Snapshot) -> None:
+     """A kept snapshot's ring tail (``_ring_tail``) into ``st``'s rings (restore, and a multi-stream stream taking
+-    over a kept prompt in any slot)."""
++    over a kept prompt in any slot). OTS patch 0093: the rows go to their positions mod THIS state's ring, not to the
++    slots recorded when the snapshot was taken: the ring's size is index_ring(capacity, prefill rows), so a state the
++    KV tier kept under one TF_GLM_PREFILL_ROWS and restored after a restart under another put its filling pool's rows
++    in the wrong slots (the next window's logits differed; ots-infra scripts/glm53/v18/lane-prefill/chunkinv
++    test_chunk_invariance.py ringtail). Under one ring size the slots are the recorded ones: the same bits."""
+     index, kc = getattr(st, "index", None) or [], getattr(st, "kc", [])
+     idx = list(index[:len(kc)]) if len(snap.ids) % 4 else []
++    ends = [len(snap.ids)] * len(idx)
+     if snap.mtp_len > 0 and snap.mtp_len % 4 and len(index) > len(kc):
+         idx.append(index[-1])
++        ends.append(snap.mtp_len)
+     tail = snap.tail or []
+     if len(tail) != len(idx):
+         raise ValueError("a snapshot's indexer ring rows do not match the caches they go back to")
+-    for (ik, ig, _), (slots, rows) in zip(idx, tail):
+-        ik.index_copy_(0, slots % ik.shape[0], rows[0])
+-        ig.index_copy_(0, slots % ig.shape[0], rows[1])
++    for (ik, ig, _), (_, rows), end in zip(idx, tail, ends):
++        pos = torch.arange(end - end % 4, end, device=ik.device)
++        if pos.numel() != rows.shape[1]:
++            raise ValueError("a snapshot's indexer ring rows do not match its length")
++        ik.index_copy_(0, pos % ik.shape[0], rows[0])
++        ig.index_copy_(0, pos % ig.shape[0], rows[1])
+ 
+ 
+ def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *, mtp: bool,

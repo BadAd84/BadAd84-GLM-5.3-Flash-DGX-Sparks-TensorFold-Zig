@@ -1,0 +1,470 @@
+diff -ruN -x '*.orig' -x __pycache__ base/src/tensorfold/families/glm5_next/cuda/forward.py port/src/tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold/families/glm5_next/cuda/forward.py	2026-10-29 12:16:50.772667424 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-29 12:18:10.296603620 +0000
+@@ -12,7 +12,7 @@
+ from tensorfold.cuda.geometry import MLA_PROMPT_ATT_ROWS as PROMPT_ATT_ROWS   # a dense latent call's prompt rows
+ from tensorfold.cuda.kernels import prefill_attention, qmm as shared
+ 
+-from . import glue, kda as kda_mod, kv8, l2pf, latent, prof, qmm, shard, sparse, tp
++from . import glue, kda as kda_mod, kv8, l2pf, latent, prof, qmm, shard, indexer_shard, sparse, tp
+ from .attention import AttnScratch, attention, kv_write
+ from .weights import LayerW, Weights
+ 
+@@ -827,8 +827,16 @@
+     if sparse_rows:
+         with prof.timed("dsa: select tokens"):
+             mm(b, b.qr[rs], ix.qb, b.xs_qr[rs], b.qi[rs])
+-            tokens, counts = sparse.select_tokens(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
+-                                                  pk.shape[0] - 2, pos_dev, bucket=sparse_np)
++            if (indexer_shard.prefill_on() and b.prefill and sparse_np is None and w.comm is not None
++                    and R >= sparse.PROMPT_ROWS):
++                # OTS draft (ShardMimo): the piece's rows sharded over the ranks (each scores its own share with
++                # sparse._prompt_rank_pools), the pools all-gathered, then _tokens over every row - the same
++                # bits as the _select_prompt above (per-row bits unchanged)
++                tokens, counts = indexer_shard.prompt_shard(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
++                                                   pk.shape[0] - 2, pos_dev, w.comm)
++            else:
++                tokens, counts = sparse.select_tokens(b.qi[rs], b.ikr[rs, c.index_dim:], pk, host_pos, R,
++                                                      pk.shape[0] - 2, pos_dev, bucket=sparse_np)
+         with prof.timed("dsa: sparse attention"):
+             if b.prefill and latent.SPARSE_ONEPASS:     # prompt rows: one pass a row, no partials (their own bits)
+                 latent.sparse_onepass(qa, lc, tokens, counts, ol, scale)
+@@ -878,7 +886,17 @@
+         if select:
+             with prof.timed("dsa: select tokens"):
+                 mm(b, b.qr[:R], ix.qb, b.xs_qr[:R], b.qi[:R])
+-                tokens, counts = sparse.seg_select_tokens(b.qi[:R], b.ikr[:R, c.index_dim:], pk, rows, sel)
++                if indexer_shard.decode_on() and w.comm is not None:
++                    # OTS draft (ShardMimo): each rank's pool blocks, then the exact merge over the gathered
++                    # candidates; the scratch sized by the scores scratch's pool width (static, capturable)
++                    got = getattr(sel, "shard", None)
++                    if got is None or got.keys.shape[0] < R:
++                        p64 = -(-sel.scores.shape[1] // 64)
++                        sel.shard = shard.ShardScratch(R, max(sparse.TOPK_POOLS, -(-p64 // w.comm.world) * 64),
++                                                       w.comm.world, b.q.device)
++                    tokens, counts = indexer_shard.seg_shard(b.qi[:R], b.ikr[:R, c.index_dim:], pk, rows, sel.shard, w.comm)
++                else:
++                    tokens, counts = sparse.seg_select_tokens(b.qi[:R], b.ikr[:R, c.index_dim:], pk, rows, sel)
+     with prof.timed("dsa: absorb"):
+         qa = latent.absorb_q(b.q[:R], a.absorb, s.qa[:R])
+     l2pf.site(layer.index, "o")
+diff -ruN -x '*.orig' -x __pycache__ base/src/tensorfold/families/glm5_next/cuda/indexer_shard.py port/src/tensorfold/families/glm5_next/cuda/indexer_shard.py
+--- tensorfold/families/glm5_next/cuda/indexer_shard.py	1970-01-01 01:00:00.000000000 +0100
++++ tensorfold/families/glm5_next/cuda/indexer_shard.py	2026-10-29 12:17:38.388574653 +0000
+@@ -0,0 +1,342 @@
++#!/usr/bin/env python3
++"""shard.py: the SHARDED DSA indexer (lane-IdeasFable51 idea 1 / lane-IdeasOpus55 idea 1). The indexer is
++replicated on every rank - the only O(context) work in the serve - so shard it over the TP ranks and gather
++the small per-row results. TF_GLM_INDEXER_SHARD = 0 (off, the default) | prefill | decode | all wires it at
++forward.dsa_rows (prompt chunks: prefill, all) and forward.dsa_segments (decode windows: decode, all); a bad
++value is refused at load. The exactness suite and the timings live in ots-infra
++scripts/glm53/v110/lanes/ShardMimo (test_shard_exact.py: every case bit-identical to the unsharded path).
++
++Prefill row shard: rank r of `world` owns rows [r*ceil(R/world), (r+1)*ceil(R/world)) of the piece, scores and
++selects them with sparse._prompt_rank_pools (the chunk-wide NP = pool_count(pos, R, np_max) and the same
++per-row positions and kernels, so each row's masked columns, threshold and ties are unchanged), one
++all-gather of the pieces' pools [R, 512] int32 (2 KB a row), then _tokens over ALL R rows on every rank (the
++integer formula; per-row bits unchanged, so the token lists are identical by row independence).
++
++Decode pool shard: each segment's pool blocks (BP = 64 pools) split in contiguous thirds between the ranks
++(any partition of the pool set works by the same total-order argument; contiguous thirds are expressible with
++the production launchers unmodified: seg_pbase + rank*offset and the shard's extent as seg_pools). Each rank
++scores its third into a compacted [rows, width] buffer (a score reads only its own row's queries and its own
++pool's key, so per-score bits are unchanged), masks the columns past a row's visible pools to -inf (production's
++own treatment of a not-visible pool), takes its top-512 by the production selection, then one gather of
++(order key, pool) x 512 a row (4 KB a row) and _merge_shards merges the world x 512 candidates a row under
++production's total order (score desc, pool asc, -inf lowest) into the same tokens, tail and counts
++_seg_select writes. A pool in the global top-512 has fewer pools preceding it inside its shard than globally,
++so it is inside its shard's top-512: the merge over the union is the global top-512 (exactness by the total
++order - integer logic only, no floating-point sum anywhere).
++
++Everything is device-only and capturable (the segment tables derived ON DEVICE from rows.seg_pools, the
++exchange through the comm's graph-replayable gather, no host syncs and no pageable copies), so the whole call
++captures into the engine's one CUDA graph a window size. Measured on spark5's GB10 against the production
++kernels (v110-ots99): prefill 57-67% of the indexer call saved per rank; decode's share pays a selection that
++cannot use 0096's one-pass floor (top_pools -> select_split over the compacted buffer) and the mask write,
++which is the named follow-up before decode ships."""
++from __future__ import annotations
++
++import numpy as np
++import torch
++import triton
++import triton.language as tl
++
++from tensorfold.families.glm5_next.cuda import kv8, sparse
++from tensorfold.families.glm5_next.cuda.sparse import (POOL, TOPK_POOLS, TOKENS, pool_count, pool_bucket,
++                                                       prompt_pools)
++
++NEG_INF_BITS = -8_388_608              # float32 -inf's bits read as int32 (0xFF800000): the mask of a not-visible column
++
++
++# ---------------------------------------------------------------- the mode switch ---------------------------
++
++_MODES = ("0", "prefill", "decode", "all")   # TF_GLM_INDEXER_SHARD: off | the prompt rows | the pool blocks | both
++
++
++def _mode_from(value: str) -> str:
++    """TF_GLM_INDEXER_SHARD's value: 0 (off) | prefill | decode | all; anything else is refused."""
++    if value not in _MODES:
++        raise ValueError(f"TF_GLM_INDEXER_SHARD is 0, prefill, decode or all, not {value!r}")
++    return value
++
++
++def _routing(value: str) -> tuple[bool, bool]:
++    """(the prompt chunk's rows sharded, the decode window's pool blocks sharded) for a validated switch value."""
++    return value in ("prefill", "all"), value in ("decode", "all")
++
++
++SHARD_MODE = _mode_from(__import__("os").environ.get("TF_GLM_INDEXER_SHARD", "0"))   # refused at load, not at first use
++
++
++def prefill_on() -> bool:
++    """forward.dsa_rows shards the prompt chunk's rows (TF_GLM_INDEXER_SHARD prefill or all)."""
++    return _routing(SHARD_MODE)[0]
++
++
++def decode_on() -> bool:
++    """forward.dsa_segments shards the decode window's pool blocks (TF_GLM_INDEXER_SHARD decode or all)."""
++    return _routing(SHARD_MODE)[1]
++
++
++# ---------------------------------------------------------------- prefill: rank r's rows -------------------
++
++
++def shard_rows(R: int, world: int) -> list[tuple[int, int]]:
++    """The rows each rank owns: contiguous [lo, hi) slices of ceil(R/world) rows (the last one short)."""
++    step = -(-R // world)
++    out = [(min(r * step, R), min((r + 1) * step, R)) for r in range(world)]
++    assert out[0][0] == 0 and out[-1][1] == R and sum(hi - lo for lo, hi in out) == R
++    return out
++
++
++def prefill_rank_pools(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, lo: int, hi: int, buf, cand):
++    """One rank's share of the piece's pools [hi - lo, TOPK_POOLS] int32 ascending: sparse._prompt_rank_pools,
++    the one implementation (the prototype's copy of the loop folded into _select_prompt there)."""
++    return sparse._prompt_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand)
++
++
++def prefill_shard(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, world: int = 3, bufs=None):
++    """The sharded prefill path's whole answer: every rank's share through prefill_rank_pools, the simulated
++    all-gather of the pools [R, 512] int32 (rank r writes its slice of the gathered buffer; on 3 GPUs one
++    all-gather), then _tokens over ALL R rows. Returns (tokens, counts, pools)."""
++    dev = qi.device
++    NP = pool_count(pos, R, np_max)
++    B = min(R, sparse.SELECT_ROWS)
++    cap = sparse.prompt_tile(NP)[0]
++    if bufs is None:
++        buf = torch.empty((B * pool_bucket(pos, R, np_max),), dtype=torch.float32, device=dev)
++        cand = torch.empty((B * 2 * cap,), dtype=torch.int32, device=dev)
++    else:
++        buf, cand = bufs
++    pools = torch.empty((R, TOPK_POOLS), dtype=torch.int32, device=dev)       # the gathered buffer
++    for lo, hi in shard_rows(R, world):
++        if hi > lo:
++            pools[lo:hi] = prefill_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand)
++    tokens = torch.empty((R, TOKENS), dtype=torch.int32, device=dev)
++    counts = torch.empty((R,), dtype=torch.int32, device=dev)
++    sparse._tokens[(R,)](pools, pos_dev, tokens, counts, W=TOKENS, K=TOPK_POOLS, PL=POOL, BLOCK=1024, num_warps=4)
++    return tokens, counts, pools
++
++
++# ---------------------------------------------------------------- decode: rank r's pool blocks -------------
++
++
++def shard_extents(npm: np.ndarray, world: int):
++    """Per segment the shards' (offset, extent) in POOLS: the segment's pool blocks (BP = 64) split in contiguous
++    thirds - [rank*cb*64, min((rank+1)*cb*64, npm)) a rank, cb = ceil(ceil(npm/64) / world). Returns int64
++    [world, segs] arrays (offs, exts) and the widest extent."""
++    offs = np.zeros((world, len(npm)), dtype=np.int64)
++    exts = np.zeros((world, len(npm)), dtype=np.int64)
++    for s, n in enumerate(npm):
++        cb = -(-((n + 63) // 64) // world)
++        for r in range(world):
++            off = r * cb * 64
++            offs[r, s], exts[r, s] = off, max(0, min(cb * 64, n - off))
++    return offs, exts, int(exts.max()) if len(npm) else 0
++
++
++def seg_shard_tables(rows, world: int):
++    """The per-rank device tables for seg_shard_scores: (seg_pbase_r, seg_pools_r, pools_r) - the segment pooled
++    bases rebased by the shard's offset, the shard extents as the segments' pool counts, and a zeroed counts
++    buffer for 0095's CUDA kernel to write the small segments' counts into (as production's launcher does)."""
++    npm = rows.seg_pools.cpu().numpy().astype(np.int64)
++    offs, exts, _ = shard_extents(npm, world)
++    tables = []
++    for r in range(world):
++        seg_pbase_r = (rows.seg_pbase.to(torch.int64) + torch.as_tensor(offs[r], device=rows.seg_pbase.device)).to(torch.int32)
++        seg_pools_r = torch.as_tensor(exts[r], device=rows.seg_pbase.device).to(torch.int32)
++        pools_r = torch.zeros((rows.max_segs,), dtype=torch.int32, device=rows.seg_pbase.device)
++        tables.append((seg_pbase_r, seg_pools_r, pools_r))
++    return tables, offs, exts
++
++
++def seg_shard_scores(qi, wts, pk, rows, scores_r, tables):
++    """seg_select_tokens' scoring (0095's CUDA kernel for the segments of SEG_SCORE_CUDA_ROWS+ rows, Triton
++    _seg_scores for the rest - the production launchers verbatim) over one rank's pool blocks only: the
++    segment tables rebased so p = 0 is the shard's first pool (seg_pbase + offset) and npm = the shard's extent,
++    scores stored into the compacted [R, width] buffer `scores_r` (a row's column p is its GLOBAL pool
++    offset_r + p, so the buffer is exactly the production scores' columns offset_r .. offset_r + width)."""
++    R = qi.shape[0]
++    H = wts.shape[1]
++    D = qi.shape[1] // H
++    wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5
++    seg_pbase_r, seg_pools_r, pools_r = tables
++    pkv, pks, rs, fp8 = kv8.parts(pk)
++    used_cuda = fp8 and H == 32 and D == 128 and sparse.seg_scores_cuda()
++    if used_cuda:
++        sparse._seg_scores_ext().seg_scores(qi, wts, wts.stride(0), pk, rs, scores_r, scores_r.stride(0),
++                                            rows.pos, rows.sparse, rows.seg_start, rows.seg_rows, seg_pbase_r,
++                                            seg_pools_r, pools_r, rows.max_segs, D ** -0.5, wscale,
++                                            sparse.SEG_SCORE_CTAS, sparse.SEG_SCORE_STAGES,
++                                            sparse.SEG_SCORE_CUDA_ROWS)
++    grid = min(sparse.SEG_SCORE_GRID, triton.cdiv(scores_r.shape[1], 64))
++    # as production: the CUDA kernel writes the small segments' counts into pools_r (0 for its own), and the
++    # Triton kernel takes THAT buffer; without the CUDA kernel the shard extents themselves
++    sparse._seg_scores[(rows.max_segs, grid)](qi, wts, wts.stride(0), pkv, pks, scores_r, scores_r.stride(0),
++                                              rows.pos, rows.sparse, rows.seg_start, rows.seg_rows, seg_pbase_r,
++                                              pools_r if used_cuda else seg_pools_r, D ** -0.5, wscale, H=H,
++                                              HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, G=grid, RS=rs,
++                                              FP8=fp8, num_warps=4)
++    return scores_r
++
++
++def order_key(scores: torch.Tensor) -> torch.Tensor:
++    """_order_key in torch: a float32 score's uint32 order key (its bits; -0 counted as +0)."""
++    bits = (scores + 0.0).view(torch.int32)
++    return bits ^ ((bits >> 31) | torch.full((), -2147483648, dtype=torch.int32, device=scores.device))
++
++
++@triton.jit
++def _merge_shards(KEYS, POOLS, POS, SPR, TOK, CNT, W: tl.constexpr, K: tl.constexpr, PL: tl.constexpr,
++                  N: tl.constexpr, BLK: tl.constexpr):
++    """Program r (a sparse row): the world shards' N = world*K candidates (order-key bits int32, global pool
++    int32) merged into the row's global top-K under production's total order (key desc, pool asc), the tokens
++    written ascending by pool exactly as _seg_select writes them (pool * PL + j, j in 0..PL), then _seg_select's
++    tail and count over the row's unchanged global npool = (pos + 1) // PL. Packing: the int64
++    (int32(key ^ 0x80000000) << 32) | (0xFFFFFFFF - pool) has SIGNED order = the total order, so one bitonic
++    sort (tl.sort: a permutation of the values, no arithmetic) takes the K best; the K winners re-sorted
++    ascending by pool give the token order (all candidates hold distinct pools, so the sort is total)."""
++    r = tl.program_id(0).to(tl.int64)
++    if tl.load(SPR + r) == 0:
++        tl.store(CNT + r, 0)
++        return
++    q = tl.load(POS + r).to(tl.int64)
++    npool = (q + 1) // PL
++    i = tl.arange(0, BLK)
++    ok = i < N
++    key = tl.load(KEYS + r * N + i, mask=ok, other=0)                        # the order keys' bits (int32)
++    pool = tl.load(POOLS + r * N + i, mask=ok, other=0x7FFFFFFF)
++    hi = key ^ tl.full((BLK,), -2147483648, tl.int32)                        # uint32 order as signed int32
++    c = (hi.to(tl.int64) << 32) | ((0xFFFFFFFF - pool.to(tl.int64)) & 0xFFFFFFFF)
++    c = tl.where(ok, c, tl.full((BLK,), -9223372036854775807 - 1, tl.int64))
++    c = tl.sort(c, descending=True)                                          # (key desc, pool asc): rank order
++    win = tl.where(i < K, 0xFFFFFFFF - (c & 0xFFFFFFFF), 0)                  # the winners' pools
++    pools = tl.sort(tl.where(i < K, win, tl.full((BLK,), 0x7FFFFFFF, tl.int64)).to(tl.int32),
++                    descending=False)                                        # the K pools ascending
++    for j in tl.static_range(PL):
++        tl.store(TOK + r * W + i * PL + j, pools * PL + j, mask=i < K)
++    jt = tl.arange(0, 4)
++    jok = jt < PL - 1
++    tail = npool * PL + jt
++    tok = jok & (tail <= q)
++    tl.store(TOK + r * W + K * PL + jt, tl.where(tok, tail, -1).to(tl.int32), mask=jok)
++    n = K * PL + tl.sum(tok.to(tl.int64), 0)
++    tl.store(CNT + r, tl.where(npool > K, n, 0).to(tl.int32))
++
++
++def merge_shards(key_buf, pool_buf, rows, tokens, counts, R: int):
++    """_merge_shards over the [R, world*K] candidate block (the gather's output laid out rank by rank)."""
++    N = key_buf.shape[1]
++    BLK = triton.next_power_of_2(N)
++    _merge_shards[(R,)](key_buf, pool_buf, rows.pos, rows.sparse, tokens, counts, W=TOKENS, K=TOPK_POOLS, PL=POOL,
++                        N=N, BLK=BLK, num_warps=8)
++    return tokens, counts
++
++
++class ShardScratch:
++    """The sharded decode path's buffers: per rank a compacted scores buffer [rows, width] (width = the widest
++    shard extent, at least TOPK_POOLS so top_pools always has k columns) and the [rows, world*K] candidate
++    block the gather fills (order-key bits int32 + global pool int32 - 4 KB a row at world 3, as the idea note
++    sizes the wire payload)."""
++
++    def __init__(self, rows: int, width: int, world: int, device) -> None:
++        self.width = max(TOPK_POOLS, -(-width // 64) * 64)
++        self.scores = [torch.full((rows, self.width), float("-inf"), dtype=torch.float32, device=device)
++                       for _ in range(world)]
++        self.keys = torch.empty((rows, world * TOPK_POOLS), dtype=torch.int32, device=device)
++        self.pools = torch.empty((rows, world * TOPK_POOLS), dtype=torch.int32, device=device)
++        self.tokens = torch.full((rows, TOKENS), -1, dtype=torch.int32, device=device)
++        self.counts = torch.zeros((rows,), dtype=torch.int32, device=device)
++
++
++def seg_shard_rank(qi, wts, pk, rows, scratch: ShardScratch, rank: int, world: int = 3):
++    """Rank ``rank``'s whole share of the decode answer, the call one rank runs in production: its pool blocks
++    scored by the production kernels into its compacted buffer, the columns past the row's visible pools held at
++    -inf (production's own treatment of a not-visible pool), its top-512 by the production selection, and its
++    (order key, global pool) candidates written into the gather's block. Everything from device tensors with
++    capturable ops (the segment tables derived ON DEVICE from rows.seg_pools: offs[r, s] = r * cb * 64,
++    exts[r, s] = clamp(npm - off, 0, cb * 64), cb = ceil(ceil(npm/64) / world)), so it captures into a CUDA
++    graph, as the engine's decode windows do."""
++    R = qi.shape[0]
++    dev = qi.device
++    npm = rows.seg_pools.to(torch.int64)                                     # [S] on the device
++    cb = ((npm + 63) // 64 + world - 1) // world                             # blocks a shard takes a segment
++    seg_i = rows.seg[:R].to(torch.int64)
++    ar = torch.arange(scratch.width, device=dev)
++    npol_row = (rows.pos[:R].to(torch.int64) + 1) // POOL
++    spr = rows.sparse[:R] != 0
++    offs_t = rank * cb * 64                                                  # [S] the shard's first pool a segment
++    exts_t = (npm - offs_t).clamp_(0, None).clamp_max_((cb * 64).clamp_max(1 << 30))
++    seg_of_row = offs_t[seg_i]
++    ext_of_row = exts_t[seg_i]
++    seg_pbase_r = (rows.seg_pbase.to(torch.int64) + offs_t).to(torch.int32)
++    seg_pools_r = exts_t.to(torch.int32)
++    pools_r = torch.zeros((rows.max_segs,), dtype=torch.int32, device=dev)
++    scores_r = scratch.scores[rank]
++    seg_shard_scores(qi, wts, pk, rows, scores_r, (seg_pbase_r, seg_pools_r, pools_r))
++    # a row's visible pools inside this shard: [off, off + ext) ∩ [0, npool); the rest -inf (never selected
++    # above a real pool: -inf's order key is below every arithmetic result)
++    valid = (ar[None, :] + seg_of_row[:, None] < npol_row[:, None]) & (ar[None, :] < ext_of_row[:, None]) & \
++            spr[:, None]
++    scores_r.masked_fill_(~valid, float("-inf"))               # capturable masked write: NEG_INF_BITS where not visible
++    local = sparse.top_pools(scores_r[:R], TOPK_POOLS)                       # production selection, ascending
++    scratch.keys[:, rank * TOPK_POOLS:(rank + 1) * TOPK_POOLS] = \
++        order_key(scores_r[:R].gather(1, local))
++    scratch.pools[:, rank * TOPK_POOLS:(rank + 1) * TOPK_POOLS] = \
++        (local + seg_of_row[:, None]).to(torch.int32)                       # local -> global pool ids
++
++
++def seg_shard_select(qi, wts, pk, rows, scratch: ShardScratch, world: int = 3, tables=None):
++    """The sharded decode path's whole answer (see the module docstring): every rank's share through
++    seg_shard_rank (on one GPU a loop, in production one rank a GPU and the simulated all-gather of the
++    candidates), then the exact merge. Returns (tokens, counts)."""
++    for r in range(world):
++        seg_shard_rank(qi, wts, pk, rows, scratch, r, world)
++    return merge_shards(scratch.keys, scratch.pools, rows, scratch.tokens, scratch.counts, qi.shape[0])
++
++
++# ---------------------------------------------------------------- the production entries -------------------
++
++
++def _all_gather(comm, mine: torch.Tensor) -> torch.Tensor:
++    """Every rank's copy of ``mine`` concatenated in rank order [world * numel] int32 through the family's
++    comm (forward's w.comm: NCCL, or RoceComm whose small gathers take its one-shot RoCE path and whose
++    device-side epoch makes the gather CUDA-graph replayable)."""
++    send = mine.contiguous().view(-1)
++    got = torch.empty((comm.world * send.numel(),), dtype=torch.int32, device=send.device)
++    comm.all_gather(send, got)
++    return got
++
++
++def prompt_shard(qi, wts, pk, pos: int, R: int, np_max: int, pos_dev, comm, bucket: int | None = None):
++    """select_tokens' prompt path (sparse.select_tokens -> _select_prompt) over the ranks: this rank scores and
++    selects its rows' share, one all-gather of the pieces' pools [R, 512] int32, then _tokens over all rows.
++    The same tokens and counts as the unsharded path (per-row bits unchanged). ``bucket`` ignored, as
++    _select_prompt's is (it scores pool_count's columns)."""
++    dev = qi.device
++    NP = sparse.pool_count(pos, R, np_max)
++    B = min(R, sparse.SELECT_ROWS)
++    cap = sparse.prompt_tile(NP)[0]
++    buf = torch.empty((B * sparse.pool_bucket(pos, R, np_max),), dtype=torch.float32, device=dev)
++    cand = torch.empty((B * 2 * cap,), dtype=torch.int32, device=dev)
++    step = -(-R // comm.world)                                # every rank sends step rows (the last padded)
++    lo, hi = min(comm.rank * step, R), min((comm.rank + 1) * step, R)
++    mine = torch.zeros((step, TOPK_POOLS), dtype=torch.int32, device=dev)
++    mine[:hi - lo] = prefill_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, lo, hi, buf, cand)
++    pools = _all_gather(comm, mine).view(comm.world, step, TOPK_POOLS).reshape(-1, TOPK_POOLS)[:R]
++    tokens = torch.empty((R, TOKENS), dtype=torch.int32, device=dev)
++    counts = torch.empty((R,), dtype=torch.int32, device=dev)
++    sparse._tokens[(R,)](pools, pos_dev, tokens, counts, W=TOKENS, K=TOPK_POOLS, PL=POOL, BLOCK=1024, num_warps=4)
++    return tokens, counts
++
++
++def seg_shard(qi, wts, pk, rows, scratch: ShardScratch, comm):
++    """seg_select_tokens over the ranks: seg_shard_rank's share, one gather of the (order key, pool) x 512
++    candidates a row, then the exact merge. The same tokens and counts as the unsharded path."""
++    R = qi.shape[0]
++    K = TOPK_POOLS
++    seg_shard_rank(qi, wts, pk, rows, scratch, comm.rank, comm.world)
++    mine = torch.empty((R, 2 * K), dtype=torch.int32, device=qi.device)       # this rank's (keys, pools) a row
++    mine[:, :K] = scratch.keys[:, comm.rank * K:(comm.rank + 1) * K]
++    mine[:, K:] = scratch.pools[:, comm.rank * K:(comm.rank + 1) * K]
++    stacked = _all_gather(comm, mine).view(comm.world, R, 2 * K).permute(1, 0, 2)
++    view = stacked.reshape(R, comm.world, 2, K)                              # [row][rank][keys | pools][cand]
++    scratch.keys.copy_(view[:, :, 0, :].reshape(R, comm.world * K))
++    scratch.pools.copy_(view[:, :, 1, :].reshape(R, comm.world * K))
++    return merge_shards(scratch.keys, scratch.pools, rows, scratch.tokens, scratch.counts, R)
+diff -ruN -x '*.orig' -x __pycache__ base/src/tensorfold/families/glm5_next/cuda/sparse.py port/src/tensorfold/families/glm5_next/cuda/sparse.py
+--- tensorfold/families/glm5_next/cuda/sparse.py	2026-10-29 12:16:50.753426485 +0000
++++ tensorfold/families/glm5_next/cuda/sparse.py	2026-10-29 12:18:10.296935139 +0000
+@@ -508,6 +508,40 @@
+     return tokens, counts
+ 
+ 
++def _prompt_rank_pools(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: int, R: int, np_max: int,
++                       pos_dev: torch.Tensor, lo: int, hi: int, buf: torch.Tensor,
++                       cand: torch.Tensor) -> torch.Tensor:
++    """_select_prompt's scoring and selection over rows [lo, hi) ONLY (a rank's share of the piece in the
++    sharded path, cuda/indexer_shard.py), with the chunk-wide NP = pool_count(pos, R, np_max) so every row's columns,
++    radix threshold and ties are its own as before: the rows' pools [hi - lo, TOPK_POOLS] int32 ascending
++    (pool ids fit; _tokens reads int32 pools to the same bits)."""
++
++    if hi <= lo:
++        return torch.empty((0, TOPK_POOLS), dtype=torch.int32, device=qi.device)
++    NP = pool_count(pos, R, np_max)
++    B = min(hi - lo, SELECT_ROWS)
++    H = wts.shape[1]
++    D = qi.shape[1] // H
++    wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5
++    out = torch.empty((hi - lo, TOPK_POOLS), dtype=torch.int32, device=qi.device)
++    pkv, pks, rs, fp8 = kv8.parts(pk)
++    for a in range(lo, hi, B):
++        n = min(B, hi - a)
++        at = pos_dev if a == 0 else pos_dev + a
++        scores = buf[:n * NP].view(n, NP)
++        if fp8 and H == 32 and D == 128 and NP % 64 == 0 and prompt_scores_cuda():
++            _scores_ext().scores(qi[a:a + n], wts[a:a + n], wts.stride(0), pk, rs, scores, at, n, NP, D ** -0.5,
++                                 wscale)
++        else:
++            _scores[(n, triton.cdiv(triton.cdiv(NP, 64), SCORE_LOOP))](qi[a:a + n], wts[a:a + n], wts.stride(0), pkv,
++                                                                       pks, scores, at, n, NP, D ** -0.5, wscale, H=H,
++                                                                       HP=max(16, triton.next_power_of_2(H)), D=D,
++                                                                       BP=64, L=SCORE_LOOP, RS=rs, FP8=fp8,
++                                                                       num_warps=4)
++        out[a - lo:a - lo + n] = prompt_pools(scores, TOPK_POOLS, cand).to(torch.int32)  # ascending pool index
++    return out
++
++
+ def _select_prompt(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: int, R: int, np_max: int,
+                    pos_dev: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+     """select_tokens for a prompt chunk, with select_tokens' counts and, for every counted row, its tokens:
+@@ -529,28 +563,14 @@
+     # bits a row), and the fp32 scores take SELECT_ROWS rows, not the chunk's, of the capacity-sized memory
+     B = min(R, SELECT_ROWS)
+     buf = torch.empty((B * pool_bucket(pos, R, np_max),), dtype=torch.float32, device=dev)
+-    H = wts.shape[1]
+-    D = qi.shape[1] // H
+-    wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5 exactly as before
+     width = TOPK_POOLS * POOL + POOL - 1
+     tokens = torch.empty((R, width), dtype=torch.int32, device=dev)
+     counts = torch.empty((R,), dtype=torch.int32, device=dev)
+-    pkv, pks, rs, fp8 = kv8.parts(pk)
+     cand = torch.empty((B * 2 * prompt_tile(NP)[0],), dtype=torch.int32, device=dev)   # prompt_pools' candidates
+     for a in range(0, R, B):
+         n = min(B, R - a)
+         at = pos_dev if a == 0 else pos_dev + a
+-        scores = buf[:n * NP].view(n, NP)
+-        ext = _scores_ext() if fp8 and H == 32 and D == 128 and NP % 64 == 0 and prompt_scores_cuda() else None
+-        if ext is not None:
+-            ext.scores(qi[a:a + n], wts[a:a + n], wts.stride(0), pk, rs, scores, at, n, NP, D ** -0.5, wscale)
+-        else:
+-            _scores[(n, triton.cdiv(triton.cdiv(NP, 64), SCORE_LOOP))](qi[a:a + n], wts[a:a + n], wts.stride(0), pkv,
+-                                                                       pks, scores, at, n, NP, D ** -0.5, wscale, H=H,
+-                                                                       HP=max(16, triton.next_power_of_2(H)), D=D,
+-                                                                       BP=64, L=SCORE_LOOP, RS=rs, FP8=fp8,
+-                                                                       num_warps=4)
+-        pools = prompt_pools(scores, TOPK_POOLS, cand)                                  # ascending pool index
++        pools = _prompt_rank_pools(qi, wts, pk, pos, R, np_max, pos_dev, a, a + n, buf, cand)
+         _tokens[(n,)](pools, at, tokens[a:a + n], counts[a:a + n], W=width, K=TOPK_POOLS, PL=POOL, BLOCK=1024,
+                       num_warps=4)
+     return tokens, counts

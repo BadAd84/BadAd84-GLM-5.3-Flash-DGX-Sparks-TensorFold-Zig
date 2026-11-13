@@ -1,0 +1,221 @@
+# HuntDrafter-2 (lane HuntDrafter, 2026-10-30): TF_GLM_COPY_AGREE=LO:K[:L] (off by default: proposals unchanged).
+# A copy proposal's occurrence is trusted by how far it agrees with the context back past the matched suffix: with
+# L=1 (default) the occurrence proposed is the one of the latest 64 (with enough tokens after them) whose agreement
+# runs furthest back, ties the latest; a proposal agreeing for fewer than LO tokens proposes at most K drafts.
+# Only proposals change: a round keeps the drafts that equal the serial sample (multi._round's keep loop), so replies
+# are the same bits under any proposal (as F44's policy sweep showed for depth policies). Policy class, not numerics.
+# Measured offline (copysim.py, the engine's own copy_drafts.CopyDrafts replayed round by round over real
+# GLM-5.3-Flash agent replies from the owner's omp sessions, prompts capped at 600k tokens): production's copy rounds
+# keep 8.5 tokens in 16-row windows (49.9% of drafts), 15% keep only the sampled token; proposals agreeing for under
+# 8 tokens (56%) keep 6.6 on average, 128+ keep 14.5. With 16:7, on three disjoint samples (1,556 / 1,556 / 1,883
+# replies, 327-417k tokens), decode time against production: one stream (concave batched window table) +1.0..+1.3%,
+# a stream's share of a 4-stream round (29 ms + 1.95 a row) +4.8..+6.2%, under every DFlash2 tokens-a-round
+# assumption for the uncopied positions (realdec code 3.63, prose 2.78, a full block 8); with TF_GLM_COPY_MISS_MAX=7
+# beside it +1.1..+1.3% / +5.5..+6.9%. Host cost: +0..+12 us a proposal at 600k contexts (paired, bench_copy_agree.py).
+# The startup comparison carries the setting (CopySettings.code() 7 ints; engine's off-case padded to match).
+# Test: test_copy_agree.py (CPU): off = the synced tree's proposals over 460 real + synthetic streams; on = an
+# independent implementation (copysim.Tiers) round for round for 16:7, 16:7:0, 24:7, 4:3, 64:15, 16:1; parse
+# refusals; wiring in multi._started and the engine. ALL PASS patched; FAILS on the synced tree.
+# GB10: agentreplay.py (real agent turns) at PARALLEL 1, 2, 4, 6, 8, arms off / 16:7 / 16:7 + MISS_MAX=7, digests equal.
+--- tensorfold/families/glm5_next/cuda/copy_drafts.py	2026-10-29 23:57:45.097694000 +0000
++++ tensorfold/families/glm5_next/cuda/copy_drafts.py	2026-10-30 00:20:27.823523200 +0000
+@@ -4,7 +4,7 @@
+ pending token included) are searched in the prompt and the reply so far, and the tokens after the latest earlier
+ occurrence become the drafts. They only propose; verification keeps the serial sample, so replies stay exact.
+ 
+-Three refinements, off by default (they only change what is proposed, never what is kept):
++Four refinements, off by default (they only change what is proposed, never what is kept):
+ - ``reply_match`` (TF_GLM_COPY_REPLY_MATCH): an occurrence that starts inside the reply must match the context's last
+   ``reply_match`` tokens, not ``match``. Code replies repeat short boilerplate (``    def __init__(self``, ``}); ``)
+   whose continuations differ: over 39 live code replies (2026-09-30) reply-sourced copies kept 23% of their drafts,
+@@ -14,6 +14,13 @@
+ - ``pad`` (the engine's TF_GLM_WIDE_GRAPHS widths): a proposal whose window (pending token + drafts) falls between 8
+   rows and a captured width is padded to that width by repeating its last draft, so the window replays a CUDA graph
+   instead of running eagerly. Padded drafts are drafts like any other: kept only where they equal the sample.
++- ``agree`` (TF_GLM_COPY_AGREE=LO:K[:L], lane HuntDrafter): how far an occurrence agrees with the context back past
++  the match decides how much of it to trust. With L=1 (the default) the occurrence proposed is the one whose agreement
++  runs furthest back (up to LO tokens; ties: the latest) among the latest 64 with enough tokens after them; a proposal
++  whose occurrence agrees for fewer than LO tokens past the match proposes at most K drafts. Over 1,556 real
++  GLM-5.3-Flash agent replies (354k tokens, omp sessions, 2026-08..10) a copy round kept 8.5 of its 15 drafts' 16 rows
++  on average, but 15% of them only the sampled token: 56% of the proposals agree for under 8 tokens past the match
++  (they keep 6.6 tokens on average, a full window 17% of the time) while those agreeing for 128+ keep 14.5.
+ 
+ Both ranks hold the same prompt and sample the same tokens, so each computes the same proposals with no exchange.
+ Pure numpy (no torch), so it is testable anywhere."""
+@@ -31,6 +38,7 @@
+ 
+ 
+ GRAPHED = 8      # verify windows up to this many rows always replay CUDA graphs (engine.GRAPH_ROWS)
++AGREE_HITS = 64  # TF_GLM_COPY_AGREE with L=1: the latest this many occurrences are compared for agreement
+ 
+ 
+ @dataclass(frozen=True)
+@@ -40,12 +48,16 @@
+     reply_match: int = 0             # 0: occurrences in the reply need ``match`` tokens like the prompt's
+     pad: tuple[int, ...] = ()        # window widths past GRAPHED rows that replay CUDA graphs (TF_GLM_WIDE_GRAPHS)
+     miss_most: int = 0               # 0: off; else drafts a copied round after one that missed
++    agree: int = 0                   # 0: off; else LO of TF_GLM_COPY_AGREE (agreement tokens past the match trusted)
++    agree_most: int = 0              # K: drafts a proposal agreeing for under ``agree`` tokens proposes at most
++    agree_longest: bool = True       # L: the occurrence agreeing furthest back among the latest AGREE_HITS
+ 
+     @classmethod
+     def from_env(cls, max_drafts: int, env=None, pad: Sequence[int] = ()) -> CopySettings | None:
+         """TF_GLM_COPY_DRAFTS=1 turns copy drafts on (off by default); TF_GLM_COPY_MATCH, TF_GLM_COPY_MAX and
+-        TF_GLM_COPY_REPLY_MATCH (0 or more than the match, up to 64) and TF_GLM_COPY_MISS_MAX (0: off, or 1 up to
+-        TF_GLM_COPY_MAX) tune; ``pad``: the engine's wide graph widths."""
++        TF_GLM_COPY_REPLY_MATCH (0 or more than the match, up to 64), TF_GLM_COPY_MISS_MAX (0: off, or 1 up to
++        TF_GLM_COPY_MAX) and TF_GLM_COPY_AGREE (LO:K[:L], LO 1 to 64, K 1 up to TF_GLM_COPY_MAX, L 0 or 1) tune;
++        ``pad``: the engine's wide graph widths."""
+ 
+         env = os.environ if env is None else env
+         on = env.get("TF_GLM_COPY_DRAFTS", "0").strip()
+@@ -68,30 +80,43 @@
+             raise ValueError(f"TF_GLM_COPY_REPLY_MATCH: 0 (off) or more than TF_GLM_COPY_MATCH ({match}), not {reply}")
+         widths = tuple(sorted(int(r) for r in pad if GRAPHED < int(r) <= max_drafts + 1))
+         most = number("TF_GLM_COPY_MAX", min(MOST, max_drafts), 1, max_drafts)
+-        return cls(match, most, reply, widths, number("TF_GLM_COPY_MISS_MAX", 0, 0, most))
++        agree = env.get("TF_GLM_COPY_AGREE", "").strip()
++        lo, k, longest = 0, 0, True
++        if agree not in ("", "0"):
++            parts = agree.split(":")
++            if (len(parts) not in (2, 3) or not all(p.isdecimal() for p in parts) or not 1 <= int(parts[0]) <= 64
++                    or not 1 <= int(parts[1]) <= most or (len(parts) == 3 and parts[2] not in ("0", "1"))):
++                raise ValueError(f"TF_GLM_COPY_AGREE: 0 (off) or LO:K[:L] with LO 1 to 64, K 1 to TF_GLM_COPY_MAX "
++                                 f"({most}) and L 0 or 1, not {agree!r}")
++            lo, k, longest = int(parts[0]), int(parts[1]), len(parts) == 2 or parts[2] == "1"
++        return cls(match, most, reply, widths, number("TF_GLM_COPY_MISS_MAX", 0, 0, most), lo, k, longest)
+ 
+     def code(self) -> list[int]:
+         """The settings as ints both ranks compare at startup (zeros: off; the pad widths are the engine's
+         TF_GLM_WIDE_GRAPHS, compared on their own)."""
+ 
+-        return [self.match, self.most, self.reply_match, self.miss_most]
++        return [self.match, self.most, self.reply_match, self.miss_most, self.agree, self.agree_most,
++                int(self.agree_longest)]
+ 
+     def drafts(self, context: Sequence[int]) -> CopyDrafts:
+         """A request's index: ``context`` is its prompt and pending token (the reply's first token)."""
+ 
+         return CopyDrafts(context, self.match, self.most, prompt=max(len(context) - 1, 0),
+-                          reply_match=self.reply_match, pad=self.pad, miss_most=self.miss_most)
++                          reply_match=self.reply_match, pad=self.pad, miss_most=self.miss_most, agree=self.agree,
++                          agree_most=self.agree_most, agree_longest=self.agree_longest)
+ 
+ 
+ class CopyDrafts:
+     """One sequence's context (prompt, then committed reply tokens and the pending one) and its copy proposals."""
+ 
+     def __init__(self, context: Sequence[int], match: int = MATCH, most: int = MOST, *, prompt: int = 0,
+-                 reply_match: int = 0, pad: Sequence[int] = (), miss_most: int = 0) -> None:
++                 reply_match: int = 0, pad: Sequence[int] = (), miss_most: int = 0, agree: int = 0,
++                 agree_most: int = 0, agree_longest: bool = True) -> None:
+         """``prompt``: how many leading context tokens are the prompt (occurrences starting at or past it are the
+         reply's, which need ``reply_match`` tokens when that is more than ``match``); ``pad``: window widths past
+         GRAPHED rows to pad a proposal's window up to (``propose``); ``miss_most``: drafts a copied round after one
+-        that missed (0: ``most`` always)."""
++        that missed (0: ``most`` always); ``agree`` / ``agree_most`` / ``agree_longest``: TF_GLM_COPY_AGREE
++        (``agree`` 0: off)."""
+ 
+         if match < 1 or most < 1:
+             raise ValueError("match and most must be positive")
+@@ -100,6 +125,9 @@
+         self.reply_match = int(reply_match) if int(reply_match) > self.match else 0
+         self.pad = tuple(sorted(int(r) for r in pad if int(r) > GRAPHED))
+         self.miss_most = int(miss_most)
++        self.agree = int(agree) if int(agree_most) > 0 else 0
++        self.agree_most = int(agree_most)
++        self.agree_longest = bool(agree_longest)
+         self.proposed = 0              # drafts of the last proposal not yet settled by ``extend``
+         self.missed = False            # the last settled copied round kept fewer than all of its drafts
+         n = len(context)
+@@ -157,11 +185,31 @@
+             hits = hits[ok]
+         return hits
+ 
++    def agreement(self, starts: np.ndarray) -> np.ndarray:
++        """For each occurrence start, how many tokens before it equal those before the context's matched suffix,
++        counted back from the match up to ``agree`` (TF_GLM_COPY_AGREE's LO)."""
++
++        L, n, ctx = self.length, self.match, self.buf
++        got = np.zeros(starts.shape, dtype=np.int64)
++        alive = np.ones(starts.shape, dtype=bool)
++        for j in range(1, self.agree + 1):
++            if L - n - j < 0:
++                break
++            alive &= starts >= j
++            idx = np.flatnonzero(alive)
++            if not idx.size:
++                break
++            alive[idx] = ctx[starts[idx] - j] == ctx[L - n - j]
++            got += alive
++        return got
++
+     def propose(self, room: int | None = None) -> list[int]:
+         """Up to ``min(most, room)`` drafts: what followed the latest earlier occurrence that has that many tokens
+         after it, else the most after any occurrence (the earliest); [] when the suffix never occurred before. With
+-        ``pad``, a window of more than GRAPHED rows short of a padded width is filled up to it (``room`` allowing)
+-        by repeating the last draft."""
++        ``agree``, the occurrence (with ``agree_longest``: the one of the latest AGREE_HITS with that many tokens
++        after it whose agreement runs furthest back, ties the latest) proposes at most ``agree_most`` drafts when it
++        agrees for fewer than ``agree`` tokens past the match. With ``pad``, a window of more than GRAPHED rows
++        short of a padded width is filled up to it (``room`` allowing) by repeating the last draft."""
+ 
+         most = min(self.most, self.miss_most) if self.missed and self.miss_most else self.most
+         k = most if room is None else min(most, int(room))
+@@ -174,6 +222,13 @@
+         L, n = self.length, self.match
+         full = hits[hits <= L - n - k]
+         s = int(full[-1]) if full.size else int(hits[0])
++        if self.agree:
++            pick = full[-AGREE_HITS:] if full.size and self.agree_longest else np.asarray([s], dtype=np.int64)
++            ag = self.agreement(pick)
++            best = len(ag) - 1 - int(np.argmax(ag[::-1]))      # the latest of the longest
++            s = int(pick[best])
++            if ag[best] < self.agree:
++                k = min(k, self.agree_most)
+         out = self.buf[s + n:min(s + n + k, L)].tolist()
+         self.proposed = len(out)                  # the copied drafts (a pad's repeats may miss without counting)
+         return self.padded(out, room)
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 23:57:45.139605300 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:20:27.790871900 +0000
+@@ -3006,7 +3006,8 @@
+         if lane.policy is not None and self.g.copy is not None:
+             c = self.g.copy                 # no pads: batched windows are not the single-stream widths
+             lane.copies = CopyDrafts(np.append(lane.ids, first), c.match, c.most, prompt=len(prompt),
+-                                     reply_match=c.reply_match, miss_most=c.miss_most)   # OTS 0124: no list rebuilt
++                                     reply_match=c.reply_match, miss_most=c.miss_most,   # OTS 0124: no list rebuilt
++                                     agree=c.agree, agree_most=c.agree_most, agree_longest=c.agree_longest)
+         if lane.policy is not None:
+             lane.depth = min(lane.policy.next(0, 0), s.count - 1)
+ 
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 23:57:45.109713100 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 00:20:27.795395300 +0000
+@@ -861,7 +861,7 @@
+         draft_win = draft_window(read_config(drafter))[0] if drafter is not None else 0
+         # every rank must run the same calls: refuse to start when they were given different settings
+         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
+-                prefill_rows, self.grid, KVB_KINDS.index(kvb)] + (self.copy.code() if self.copy is not None else [0, 0, 0, 0]) + \
++                prefill_rows, self.grid, KVB_KINDS.index(kvb)] + (self.copy.code() if self.copy is not None else [0] * 7) + \
+             self.split.code() + [int(self.dump is not None), quant_code, self.shared, int(DRAFT_RING), draft_win, int(self.mtp_on),
+                                  parallel, *verify_code, int(union_cover()), MAX_ROWS, len(WIDE_GRAPHS),
+                                  sum(WIDE_GRAPHS), max(WIDE_GRAPHS, default=0),
+@@ -1038,13 +1038,17 @@
+                     print(f"[tensorfold] note: a full {prefill_rows}-row prompt chunk runs unsplit at {world} ranks "
+                           "(only shorter ones split)", flush=True)
+         c = self.copy
+-        if rank == 0 and (WIDE_GRAPHS or MAX_ROWS != 16 or (c is not None and (c.reply_match or c.miss_most))):
++        if rank == 0 and (WIDE_GRAPHS or MAX_ROWS != 16 or (c is not None and (c.reply_match or c.miss_most
++                                                                                 or c.agree))):
+             print(f"[tensorfold] verify windows up to {MAX_ROWS} rows, CUDA graphs for "
+                   f"{', '.join(map(str, GRAPH_ROWS + WIDE_GRAPHS))} rows (TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS)"
+                   + (f"; copies from the reply match {c.reply_match} tokens (TF_GLM_COPY_REPLY_MATCH)"
+                      if c is not None and c.reply_match else "")
+                   + (f"; {c.miss_most} copied drafts after a copied round that missed (TF_GLM_COPY_MISS_MAX)"
+-                     if c is not None and c.miss_most else ""), flush=True)
++                     if c is not None and c.miss_most else "")
++                  + (f"; at most {c.agree_most} copied drafts from an occurrence agreeing for under {c.agree} tokens "
++                     f"past the match{', the longest agreeing occurrence' if c.agree_longest else ''} "
++                     f"(TF_GLM_COPY_AGREE)" if c is not None and c.agree else ""), flush=True)
+         if rank == 0 and self.dump is not None:
+             print(f"[tensorfold] TF_GLM_DRAFT_DUMP: DFlash2 requests decode serially and record the drafter's view "
+                   f"into {self.dump} (one .npz a request; replies equal draft: false)", flush=True)

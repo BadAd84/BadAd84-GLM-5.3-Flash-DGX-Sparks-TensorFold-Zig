@@ -1,0 +1,165 @@
+# DrafterLeftovers-1 (lane DrafterLeftovers, 2026-10-30; HuntDrafter F5): copy drafts index a long prompt's grams.
+# CopyDrafts.propose scanned the whole context for its last `match` tokens every round, on the host, between the
+# round's context update and the next block pass's launch (multi._prelaunch), with the GPU idle: ~220 us a lane at
+# 600k tokens, ~0.9 ms a 4-lane round. A context of TF_GLM_COPY_INDEX (default 65536) tokens or more now builds a
+# GramIndex of its prompt on a worker thread (numpy releases the GIL: ~22-27 ms at 600k, once a request); once it is
+# in, a proposal looks the gram up and scans only the reply. Its candidates are filtered exactly as the scan's, so
+# starts(), every proposal, `proposed` and `missed` are the scan's (tests: real agent replays and adversarial ones).
+# Bit-identical: drafts only propose; the committed tokens and every drafter state follow the same proposals.
+# Applies with `patch -p0` in the folder holding tensorfold/, on stack/all + HuntDrafter-1 + HuntDrafter-2.
+--- tensorfold/families/glm5_next/cuda/copy_drafts.py
++++ tensorfold/families/glm5_next/cuda/copy_drafts.py
+@@ -23,11 +23,19 @@
+   (they keep 6.6 tokens on average, a full window 17% of the time) while those agreeing for 128+ keep 14.5.
+ 
+ Both ranks hold the same prompt and sample the same tokens, so each computes the same proposals with no exchange.
+-Pure numpy (no torch), so it is testable anywhere."""
++Pure numpy (no torch), so it is testable anywhere.
++
++A long context's prompt is indexed (``GramIndex``, lane DrafterLeftovers): a proposal's scan of the whole context for
++its last ``match`` tokens (about 90-130 us at 600k tokens, between the round's context update and the next block
++pass's launch, with the GPU idle) becomes a lookup plus a scan of the reply alone. The index is built on a worker
++thread (numpy releases the GIL); until it is ready a proposal scans as before. Its hits are filtered exactly as a scan's,
++so the starts, and every proposal, are the same either way."""
+ 
+ from __future__ import annotations
+ 
+ import os
++import sys
++from concurrent.futures import Future, ThreadPoolExecutor
+ from dataclasses import dataclass
+ from typing import Sequence
+ 
+@@ -41,6 +49,68 @@
+ AGREE_HITS = 64  # TF_GLM_COPY_AGREE with L=1: the latest this many occurrences are compared for agreement
+ 
+ 
++def _index_from(env=None) -> int:
++    """TF_GLM_COPY_INDEX: contexts of at least this many tokens index their prompt (``GramIndex``); 0 never. The
++    proposals are the same either way, so ranks may differ in it."""
++
++    text = (os.environ if env is None else env).get("TF_GLM_COPY_INDEX", "").strip()
++    if text == "":
++        return INDEX_DEFAULT
++    if not text.isdecimal():
++        raise ValueError(f"TF_GLM_COPY_INDEX: 0 (off) or a context length in tokens, not {text!r}")
++    return int(text)
++
++
++INDEX_DEFAULT = 65536
++INDEX_FROM = _index_from()
++_HASH_MUL = 0x9E3779B97F4A7C15
++_MASK64 = (1 << 64) - 1
++_POOL: ThreadPoolExecutor | None = None
++
++
++def _pool() -> ThreadPoolExecutor:
++    global _POOL
++    if _POOL is None:
++        _POOL = ThreadPoolExecutor(1, thread_name_prefix="copy-index")
++    return _POOL
++
++
++class GramIndex:
++    """The starts of a token array's ``match``-token grams that leave a token after them (0 .. ``limit`` - 1),
++    grouped by a 32-bit hash of the gram. ``lookup`` returns, ascending, every start whose gram hashes like the
++    query's: a superset of the starts whose gram equals it (collisions are the caller's to filter)."""
++
++    def __init__(self, tokens: np.ndarray, match: int) -> None:
++        n = self.match = int(match)
++        self.limit = B = max(int(tokens.shape[0]) - n, 0)
++        t = tokens[:B + n - 1].astype(np.uint64)   # each step below releases the GIL (numpy loops, the sort)
++        mul = np.uint64(_HASH_MUL)
++        h = t[:B].copy()
++        for k in range(1, n):
++            h *= mul
++            h += t[k:k + B]
++        del t
++        h *= mul                                # the last token reaches the high half too
++        h >>= np.uint64(32)
++        keys = h.astype(np.uint32)
++        del h
++        self.order = np.argsort(keys)
++        self.keys = keys[self.order]
++
++    @staticmethod
++    def key(gram: Sequence[int]) -> int:
++        h = 0
++        for t in gram:
++            h = (h * _HASH_MUL + (int(t) & _MASK64)) & _MASK64
++        return ((h * _HASH_MUL) & _MASK64) >> 32
++
++    def lookup(self, gram: Sequence[int]) -> np.ndarray:
++        key = np.uint32(self.key(gram))          # the keys' own dtype: a Python int converts the whole table
++        lo = int(np.searchsorted(self.keys, key, "left"))
++        hi = int(np.searchsorted(self.keys, key, "right"))
++        return np.sort(self.order[lo:hi])
++
++
+ @dataclass(frozen=True)
+ class CopySettings:
+     match: int = MATCH
+@@ -111,12 +181,13 @@
+ 
+     def __init__(self, context: Sequence[int], match: int = MATCH, most: int = MOST, *, prompt: int = 0,
+                  reply_match: int = 0, pad: Sequence[int] = (), miss_most: int = 0, agree: int = 0,
+-                 agree_most: int = 0, agree_longest: bool = True) -> None:
++                 agree_most: int = 0, agree_longest: bool = True, index_from: int | None = None) -> None:
+         """``prompt``: how many leading context tokens are the prompt (occurrences starting at or past it are the
+         reply's, which need ``reply_match`` tokens when that is more than ``match``); ``pad``: window widths past
+         GRAPHED rows to pad a proposal's window up to (``propose``); ``miss_most``: drafts a copied round after one
+         that missed (0: ``most`` always); ``agree`` / ``agree_most`` / ``agree_longest``: TF_GLM_COPY_AGREE
+-        (``agree`` 0: off)."""
++        (``agree`` 0: off); ``index_from``: a context of at least this many tokens has it indexed (``GramIndex``;
++        0 never; default TF_GLM_COPY_INDEX)."""
+ 
+         if match < 1 or most < 1:
+             raise ValueError("match and most must be positive")
+@@ -134,6 +205,28 @@
+         self.buf = np.empty((max(1024, 2 * n),), dtype=np.int32)
+         self.buf[:n] = np.asarray(context, dtype=np.int32) if n else 0
+         self.length = n
++        self._index: GramIndex | Future | None = None
++        at = INDEX_FROM if index_from is None else int(index_from)
++        if at > 0 and n >= at and n > self.match:
++            # the context's first n tokens never change (``extend`` writes past them, or into a grown copy)
++            self._index = _pool().submit(GramIndex, self.buf[:n], self.match)
++
++    def index(self, wait: bool = False) -> GramIndex | None:
++        """The context's ``GramIndex`` once built (``wait``: block until then); None while it builds, or without one
++        (a failed build falls back to the scan, which proposes the same)."""
++
++        idx = self._index
++        if not isinstance(idx, Future):
++            return idx
++        if not wait and not idx.done():
++            return None
++        try:
++            self._index = idx.result()
++        except Exception as exc:                 # noqa: BLE001  (the scan proposes the same)
++            print(f"[tensorfold] copy drafts: prompt index failed ({exc!r}); scanning instead", file=sys.stderr,
++                  flush=True)
++            self._index = None
++        return self._index
+ 
+     def __len__(self) -> int:
+         return self.length
+@@ -166,8 +259,16 @@
+             return np.empty((0,), dtype=np.int64)
+         ctx = self.buf
+         q = ctx[L - n:L]
+-        # starts 0 .. L - n - 1 (each leaves a token after its match): by the last token, then the others
+-        hits = np.flatnonzero(ctx[n - 1:L - 1] == q[n - 1])
++        # starts 0 .. L - n - 1 (each leaves a token after its match): by the last token, then the others. The
++        # index's candidates are the starts below its limit (a superset of the matches there), the scan the rest
++        idx = self.index()
++        if idx is None:
++            hits = np.flatnonzero(ctx[n - 1:L - 1] == q[n - 1])
++        else:
++            lo = idx.limit
++            got = idx.lookup(q)
++            hits = np.concatenate((got[ctx[got + (n - 1)] == q[n - 1]],
++                                   lo + np.flatnonzero(ctx[lo + n - 1:L - 1] == q[n - 1])))
+         for k in range(n - 1):
+             if not hits.size:
+                 break

@@ -1,0 +1,78 @@
+# DraftPolicy-1 (lane DraftPolicy, 2026-10-31; HuntDrafter F10): TF_GLM_DRAFT_EDGE, the DFlash2 chain's selector edge
+# weight (dflash2.EDGE, the recipe's 0.6, fitted on 9 dumps) as a knob. Refit offline with draft_sim on the 24 real
+# agent turns' TF_GLM_DRAFT_DUMP records (work/hunt/DraftPolicy/REPORT.md), held out by turn: EDGE 0.2 with
+# DRAFT_POLICY=fcost7:noisy +1.8% (greedy) / +1.7% (sampled proxy) decode tok/s at P1 over fnc7:0.3; with fnc7:0.3
+# kept, +1.1% / +1.0%. Unset or empty: 0.6, the same float: picks, confidences and replies bit-identical to the base.
+# Any value: replies identical by construction (drafts are verified); only which drafts a round proposes changes.
+# Read once at import on every rank (start.sh passes every TF_GLM_* to every rank); the engine's startup settings
+# comparison now carries it, so ranks given different values refuse to start instead of proposing different drafts.
+# draft_dump records it in each dump's meta (``edge``), which draft_sim's check already reads.
+# Test: work/hunt/DraftPolicy/test_draft_edge.py (CPU); mutants: mutants.py (7 of 7 killed).
+# Applies with `patch -p0` in the folder holding tensorfold/, at the end of stack/all6t.list.
+--- tensorfold/families/glm5_next/cuda/dflash2.py
++++ tensorfold/families/glm5_next/cuda/dflash2.py
+@@ -3,6 +3,8 @@
+ from __future__ import annotations
+ 
+ import json
++import math
++import os
+ import sys
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -20,7 +22,29 @@
+ from . import glue, qmm
+ from .weights import PREFIX, Weights
+ 
+-EDGE = 0.6        # the selector's edge score weight in a chain pick
++EDGE_ENV = "TF_GLM_DRAFT_EDGE"
++EDGE_DEFAULT = 0.6
++
++
++def draft_edge(env: dict | None = None) -> float:
++    """TF_GLM_DRAFT_EDGE: the selector's edge score weight in a chain pick (``EDGE``); unset or empty: 0.6, the
++    recipe's. Lane DraftPolicy refit it on 24 real agent turns' TF_GLM_DRAFT_DUMP records (draft_sim, held out by
++    turn): 0.2-0.4 against 0.6, +1-2% decode tok/s. Only the chain's picks and confidences change (drafts are
++    verified: replies are the same). Every rank must read the same value (the engine's startup comparison)."""
++
++    value = (os.environ if env is None else env).get(EDGE_ENV, "").strip()
++    if not value:
++        return EDGE_DEFAULT
++    try:
++        edge = float(value)
++    except ValueError:
++        edge = math.nan
++    if not (math.isfinite(edge) and 0.0 <= edge <= 4.0):
++        raise ValueError(f"{EDGE_ENV}={value!r}: a weight from 0 to 4 (unset: {EDGE_DEFAULT})")
++    return edge
++
++
++EDGE = draft_edge()  # the selector's edge score weight in a chain pick
+ NOISE = 0.7       # the target's keyed noise weight when sampling
+ NO_LIMIT = 1e30
+ # the noise-aware stop rules' temperature B (fnc<N>:<p>, fcost<N>:noisy): draft_sim's NoisyPredictor beta, fitted by
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1220,11 +1220,12 @@
+         # all-gather)
+         self.drafter_graphs = bool(graphs) and solo_drafter_graphs(self.solo)
+         from .dflash2_multi import DRAFT_SKIP                 # TF_GLM_DRAFT_SKIP: every rank's DFlash2 rings alike
++        from .dflash2 import EDGE as DRAFT_EDGE               # TF_GLM_DRAFT_EDGE: every rank's chain picks alike
+         from .forward import prompt_overlap                   # PrefillLeftovers-3: TF_GLM_PROMPT_OVERLAP's blocks
+                                                               # (one all-gather each under the indexer shard)
+         mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK),
+                        indexer_shard._MODES.index(indexer_shard.SHARD_MODE), int(self.solo), int(self.drafter_graphs),
+-                       int(DRAFT_SKIP),
++                       int(DRAFT_SKIP), *_f64_ints(DRAFT_EDGE),
+                        prompt_overlap()] + \
+             lay.owner_words(cfg.layers) + self.prx.code() + self.split.prompt_code()   # OTS 0105; TF_GLM_PRX*;
+                                                               # TF_GLM_PROMPT_MICROBATCH (MicrobatchPort)
+@@ -1239,7 +1240,7 @@
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+                                "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_MULTI_GRAPHS, "
+-                               "TF_GLM_DRAFT_SKIP, "
++                               "TF_GLM_DRAFT_SKIP, TF_GLM_DRAFT_EDGE, "
+                                "TF_GLM_PROMPT_OVERLAP, TF_GLM_PRX*, TF_GLM_PROMPT_MICROBATCH*, TF_GLM_PROMPT_OWN_FRONT): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "

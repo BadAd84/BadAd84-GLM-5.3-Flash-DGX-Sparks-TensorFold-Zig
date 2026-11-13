@@ -1,0 +1,679 @@
+diff -ruN -x '*.orig' -x __pycache__ p3/src/tensorfold/families/glm5_next/cuda/decode.py p4/src/tensorfold/families/glm5_next/cuda/decode.py
+--- tensorfold/families/glm5_next/cuda/decode.py	2026-10-29 17:21:56.509267076 +0000
++++ tensorfold/families/glm5_next/cuda/decode.py	2026-10-29 18:10:56.234938641 +0000
+@@ -427,10 +427,20 @@
+ 
+ 
+ def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *, mtp: bool,
+-                  drafter=None) -> Snapshot:
++                  drafter=None, inner: bool = False) -> Snapshot:
+     """A ring drafter's window rows are copied now (``_ring_window``): its next rows overwrite them in the ring; so
+-    are the indexer rings' rows of the pools still filling (``_ring_tail``)."""
++    are the indexer rings' rows of the pools still filling (``_ring_tail``). ``inner`` (OTS 0121): the state at
++    len(ids), the point the prompt chunk just run was marked at inside it (``forward.State.mark``): every KDA layer's
++    state at that point in its other parity, the conv windows there in ``kept_conv``; the point is on a pool boundary
++    (no ring tail), and the chunk's rows past it do not belong to the snapshot."""
+     st = e.st
++    if inner:
++        n = len(ids)
++        if any(at != n for at in st.kept_at):
++            raise RuntimeError(f"no state kept inside the last prompt chunk at {n}: its KDA layers split at "
++                               f"{sorted(set(st.kept_at))}")
++        return Snapshot(list(ids), st.rec[1 - st.cur[0]].clone(), st.kept_conv.clone(), None, -1, -1,
++                        tail=_ring_tail(st, n, 0))
+     rec = st.rec[st.cur[0]].clone() if st.cur else st.rec[0].clone()
+     mtp_len = st.mtp_len - st.mtp_drafted if mtp and pending is not None else -1
+     snap = Snapshot(list(ids), rec, st.conv.clone(), pending.clone() if pending is not None else None,
+diff -ruN -x '*.orig' -x __pycache__ p3/src/tensorfold/families/glm5_next/cuda/engine.py p4/src/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 18:10:56.220586768 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-29 18:10:56.235266320 +0000
+@@ -122,7 +122,8 @@
+     """Where a drafted request of an n-token prompt resumed at ``cut`` keeps its prompt state, or None for nowhere.
+ 
+     Off (grid 0) and on-grid prompts: at n. Otherwise at B = floor(n / grid) * grid, when B lies past ``cut`` (so
+-    B > 0); the request then prefills up to B, keeps that state, and resumes from it to n."""
++    B > 0); the request then prefills up to B, keeps that state, and resumes from it to n (``multi``, OTS 0121: in one
++    prompt chunk across B, the state at B taken inside it, under TF_GLM_ONE_CHUNK_WARM=1, the default)."""
+ 
+     if not grid or n % grid == 0:
+         return n
+@@ -709,10 +710,11 @@
+         wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
+         spare = max(0, min(wanted, plan["budget_bytes"] - plan["total_bytes_estimate"]))
+         self.agreed = mine[:1] + mine[2:]     # the spill tier's folders are keyed on these (not the window's slots)
+-        from .multi import PRELAUNCH                          # TF_GLM_DRAFT_PRELAUNCH: every rank alike
++        from .multi import ONE_CHUNK, PRELAUNCH               # TF_GLM_DRAFT_PRELAUNCH: every rank alike;
++                                                              # TF_GLM_ONE_CHUNK_WARM: a FILL's stop, alike too
+ 
+         # checked alike, not in the spill tier's key (``agreed``; the shard's is in its store's signature, multi.py)
+-        mine = mine + [int(PRELAUNCH), int(shard.ON)]
++        mine = mine + [int(PRELAUNCH), int(shard.ON), int(ONE_CHUNK)]
+         rows = self._gather_ints(mine + [spare >> 20])
+         odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+         if odd:
+@@ -722,7 +724,7 @@
+                                "TF_GLM_DRAFT_QUANT, TF_GLM_SHARED_PREFIX, TF_GLM_DRAFT_RING, TF_GLM_MTP, --parallel, "
+                                "TF_GLM_MULTI_VERIFY, TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE / _WINDOW, "
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+-                               "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD): "
++                               "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")
+diff -ruN -x '*.orig' -x __pycache__ p3/src/tensorfold/families/glm5_next/cuda/forward.py p4/src/tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold/families/glm5_next/cuda/forward.py	2026-10-29 18:10:56.218269287 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-29 18:10:56.235606655 +0000
+@@ -363,6 +363,11 @@
+         self.latent = latent.ENABLED
+         self.mtp_len = 0
+         self.mtp_drafted = 0
++        # OTS 0121: a prompt chunk's KDA layers split their recurrence at ``keep_point`` (0: none) and record it in
++        # ``kept_at``; the state there stays in each layer's other parity, its conv window in ``kept_conv`` (``mark``)
++        self.keep_point = 0
++        self.kept_at = [-1] * n
++        self.kept_conv: torch.Tensor | None = None
+         self.bind(base, capacity)
+ 
+     def bind(self, base: int, capacity: int) -> None:
+@@ -397,6 +402,18 @@
+         self.mtp_len = n
+         self.mtp_pos_dev.fill_(n)
+ 
++    def mark(self, point: int) -> None:
++        """OTS 0121 (``multi``'s TF_GLM_ONE_CHUNK_WARM): the next prompt chunk on this state (its every slice) keeps
++        the state at ``point``, a position inside it on the prompt grid (where TF_GLM_KDA_CHUNKED's 32-row sub-chunks
++        align): ``kda_rows`` runs each layer's recurrence as rows .. point and point .. (the calls two chunks split
++        there make), so after the chunk ``rec[1 - cur]`` holds every layer's state at ``point``, ``kept_conv`` its
++        conv window, and ``kept_at`` the point for each layer that split (``decode.take_snapshot(inner=True)``).
++        0: no mark (the chunk runs whole)."""
++
++        if point and self.kept_conv is None:
++            self.kept_conv = torch.empty_like(self.conv)
++        self.keep_point = int(point)
++
+     @property
+     def parity(self) -> int:
+         return self.cur[0] if self.cur else 0
+@@ -552,20 +569,38 @@
+     """A prompt chunk's KDA recurrence for rows lo .. lo + n of the prompt buffers (their projections done) on ``st``
+     from its position: the chain into b.kscratch.out[lo:lo + n] (returned), the layer's state committed and its conv
+     window shifted. ``kda_block`` runs a chunk as rows 0 .. R; a chunk of several streams' prompts
+-    (``multi_prefill``) runs each stream's rows through this on that stream's state: the call they get alone."""
++    (``multi_prefill``) runs each stream's rows through this on that stream's state: the call they get alone.
++
++    OTS 0121: with ``st`` marked at a position inside the rows (``State.mark``), the recurrence runs as the two calls
++    two chunks split there make (the same bits), and the state between them is kept: the layer's state at the mark
++    stays in its other parity (the second call's input) and its conv window is copied to ``st.kept_conv``."""
++
++    li = st.kda_index[layer.index]
++    m = st.keep_point - st.pos if st.keep_point else 0
++    if not 0 < m < n:
++        _kda_part(layer, w, st, b, li, lo, n, st.pos)
++        return b.kscratch.out[lo:lo + n]
++    _kda_part(layer, w, st, b, li, lo, m, st.pos)
++    st.kept_conv[li].copy_(st.conv[li])
++    st.kept_at[li] = st.keep_point
++    _kda_part(layer, w, st, b, li, lo + m, n - m, st.keep_point)
++    return b.kscratch.out[lo:lo + n]
++
++
++def _kda_part(layer: LayerW, w: Weights, st: State, b: Buffers, li: int, lo: int, n: int, pos: int) -> None:
++    """``kda_rows``' chain over buffer rows lo .. lo + n at prompt position ``pos``, its state committed (the parity
++    flipped) and its conv window shifted by those rows."""
+ 
+     c = w.cfg
+     k = layer.kda
+-    li = st.kda_index[layer.index]
+     rs = slice(lo, lo + n)
+     cur = st.cur[li]
+     with prof.timed("kda: recurrence"):
+-        out = kda_mod.chain(b.kproj[0, rs], k.b_off, b.ka[rs], b.kg[rs], st.conv[li], k.conv, st.rec[cur, li],
+-                            k.a_log, k.dt_bias, k.norm, c.eps, c.lower, n, _scratch_rows(b.kscratch, lo),
+-                            st.rec[1 - cur, li], pos=st.pos)
++        kda_mod.chain(b.kproj[0, rs], k.b_off, b.ka[rs], b.kg[rs], st.conv[li], k.conv, st.rec[cur, li], k.a_log,
++                      k.dt_bias, k.norm, c.eps, c.lower, n, _scratch_rows(b.kscratch, lo), st.rec[1 - cur, li],
++                      pos=pos)
+     st.cur[li] = 1 - cur
+     _shift_conv(st.conv[li:li + 1], b.kproj[:, rs], n)
+-    return out
+ 
+ 
+ def kda_segments(layer: LayerW, w: Weights, b: Buffers, R: int, seg: torch.Tensor, slots: "Slots",
+diff -ruN -x '*.orig' -x __pycache__ p3/src/tensorfold/families/glm5_next/cuda/multi.py p4/src/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 18:10:56.221107118 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-29 18:10:56.237234410 +0000
+@@ -211,6 +211,25 @@
+ KEEP_PER_CHAT = keep_per_chat()
+ 
+ 
++def one_chunk(value: str | None = None) -> bool:
++    """TF_GLM_ONE_CHUNK_WARM (OTS 0121; default 1, 0 off: the same bits either way): a prompt whose state is kept at
++    its last grid point B short of its end n fills the chunk holding B through to n in ONE prompt chunk, the state at
++    B taken inside it (``forward.State.mark``: each KDA layer's recurrence runs [.., B) and [B, ..) as the two chunks
++    would and leaves the state at B in its other parity, the conv window at B copied), instead of a chunk to B and a
++    chunk of the n - B < grid rows after it. Every other kernel's rows are the same bits in any chunking on the grid
++    (F83), so the kept state and every token's bits are the two-chunk path's; a warm turn and a short cold prompt
++    then pay one chunk's floor (the weights read once) instead of two. Off, B is a chunk stop again. Every rank reads
++    it, and the engine's start-up settings check refuses ranks that disagree."""
++
++    value = (os.environ.get("TF_GLM_ONE_CHUNK_WARM", "") if value is None else value).strip() or "1"
++    if value not in ("0", "1"):
++        raise ValueError(f"TF_GLM_ONE_CHUNK_WARM: 0 or 1, not {value!r}")
++    return value == "1"
++
++
++ONE_CHUNK = one_chunk()
++
++
+ def kept_bytes_cap() -> int:
+     """TF_GLM_KEPT_BYTES_GIB: how much device memory the kept prompts own outside the pool, together (0, the default: no cap).
+ 
+@@ -287,16 +306,86 @@
+             "refused": {"pinned": 0, "twin": 0, "loading": 0, "partial": 0, "no_target": 0, "small": 0}}
+ 
+ 
++# -- OTS 0124: a request's admission without O(prompt) Python work ----------------------------------------------------
++# Rank 0 turns a request's key into an int64 array once; kept prefixes are matched against their own arrays (views of
++# their streams' arrays), longest first, an id by id compare only past a matching last id: no list slices. An ADMIT
++# that resumes a kept state carries only the ids past it (every rank holds its ids) and the hash of its ids, which each
++# follower checks against its own. Ids are hashed by position: hash(ids[:m]) = sum over i < m of
++# (ids[i] % SEAL_MOD + 1) * W[i], modulo SEAL_MOD, with W[i] a fixed weight of position i alone; the sum is additive,
++# so a stream hashes only the ids past its kept state, from that state's hash.
++_WEIGHTS = np.zeros(0, dtype=np.int64)
++
++
++def id_weights(n: int) -> np.ndarray:
++    """The first ``n`` position weights (1 .. SEAL_MOD - 1, splitmix64 of the position, so a longer table extends a
++    shorter one), the same on every rank."""
++
++    global _WEIGHTS
++    if len(_WEIGHTS) < n:
++        z = np.arange(max(n, 2 * len(_WEIGHTS), 1 << 16), dtype=np.uint64) + np.uint64(0x9E3779B97F4A7C15)
++        z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
++        z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
++        z ^= z >> np.uint64(31)
++        _WEIGHTS = (z % np.uint64(SEAL_MOD - 1) + np.uint64(1)).astype(np.int64)
++    return _WEIGHTS[:n]
++
++
++def prefix_sums(ids: np.ndarray, at: int = 0) -> np.ndarray:
++    """Running sums of the hash terms of ``ids`` (int64, >= 0) at positions ``at`` .., unreduced (each term is below
++    2^31, so a 2^20-id prompt's sums stay below 2^51): ids[:m]'s hash, after a prefix hashing to h, is
++    (h + sums[m - 1]) % SEAL_MOD."""
++
++    return np.cumsum((ids % SEAL_MOD + 1) * id_weights(at + len(ids))[at:] % SEAL_MOD)
++
++
++def ids_hash(ids: np.ndarray) -> int:
++    return int(prefix_sums(ids)[-1] % SEAL_MOD) if len(ids) else 0
++
++
++def kept_ids(c) -> np.ndarray:
++    """A kept state's ids as an int64 array (both ranks): the view its stream's array gave it (``_keep``), else
++    converted once (a state loaded from a tier, or kept without one)."""
++
++    arr = getattr(c, "_ids", None)
++    if arr is None:
++        arr = c._ids = np.asarray(c.ids, dtype=np.int64)
++    return arr
++
++
++def kept_hash(c) -> int:
++    """The hash of a kept state's ids (both ranks: an ADMIT resuming it carries rank 0's, each follower checks its own)."""
++
++    h = getattr(c, "_hid", None)
++    if h is None:
++        h = c._hid = ids_hash(kept_ids(c))
++    return h
++
++
+ def known_key(c):
+     """A kept state's key as an int64 array, converted once: every admission scans all of ``kept`` for the prefix a
+-    new prompt shares, and rebuilding the array each time cost O(kept states x their tokens) a request."""
++    new prompt shares, and rebuilding the array each time cost O(kept states x their tokens) a request. A text state's
++    key is its ids: their array (OTS 0124)."""
+ 
++    if c.key is c.ids:
++        return kept_ids(c)
+     arr = getattr(c, "key_array", None)
+     if arr is None:
+         arr = c.key_array = np.asarray(c.key, dtype=np.int64)
+     return arr
+ 
+ 
++def key_is(c, m: int, karr: np.ndarray) -> bool:
++    """``key[:m] == c.key`` for a request's key as an int64 array ``karr``: lengths, the last id, then every id."""
++
++    if c.key is None:
++        return False
++    k = len(c.key)
++    if k != min(m, len(karr)):
++        return False
++    arr = known_key(c)
++    return not k or bool(karr[k - 1] == arr[k - 1]) and bool(np.array_equal(karr[:k], arr))
++
++
+ def cap_victim(kept: list):
+     """The kept prompt to drop past TF_GLM_CACHE_ENTRIES (``kept``: least recently used first). An extent's kept
+     prompts are prefixes of its rows, so one shorter than another in its extent is an earlier point of that
+@@ -567,8 +656,9 @@
+     feed: Any = None
+     constraint: Any = None
+     window: Any = None                 # the grammar's window of this round's rows
+-    stops: list[int] = field(default_factory=list)   # prompt positions whose states are kept (before the end)
++    stops: list[int] = field(default_factory=list)   # positions a chunk stops at to keep their states (before the end)
+     point: int | None = None           # where the prompt's own state is kept (engine.grid_point), or None
++    inner: bool = False                # OTS 0121: ``point`` is kept inside the prompt chunk that holds it (no stop)
+     shared: list[int] = field(default_factory=list)
+     head: Any = None                   # a replay's first-token logits row (its kept prompt's, ``decode.whole``)
+     key: list[int] | None = None       # rank 0: the prompt's ids with its pictures' keys in their rows (kept states)
+@@ -587,6 +677,12 @@
+     copy_drafted: int = 0
+     copy_accepted: int = 0
+     next_copy: Any = None        # ((copies length, room), proposal, proposed) the round's end worked out
++    # OTS 0124, both ranks (drafted streams): the prompt's ids as an int64 array, and their hashes past ``hcut`` (its
++    # kept state's length; that state's hash ``hbase``): prompt[:m] hashes to (hbase + hsums[m - hcut]) % SEAL_MOD
++    ids: Any = None
++    hcut: int = 0
++    hbase: int = 0
++    hsums: Any = None
+ 
+ 
+ PREFIX_WAIT = os.environ.get("TF_GLM_PREFIX_WAIT", "0") not in ("", "0")    # off unless 1
+@@ -1005,7 +1101,7 @@
+ 
+         self._check()
+         g = self.g
+-        prompt = [int(t) for t in s.prompt]
++        prompt = list(map(int, s.prompt))
+         if not prompt:
+             raise ValueError("a request needs at least one prompt token")
+         if len(prompt) >= g.limit:
+@@ -1039,12 +1135,19 @@
+         slot = next((k for k in range(self.count) if k not in {l.slot for l in self.lanes.values()}), None)
+         if slot is None:
+             raise NoRoom(f"every one of the {self.count} stream slots is taken")
+-        hit = self._resume(key, salt) if draft and key is not None else None
++        # OTS 0124: a drafted request's key and ids as int64 arrays, once (the kept prefix, the NVMe tier's lookup, the
++        # shared-prefix points, its kept states and copy drafts all read them)
++        karr = ids = None
++        if draft and key is not None:
++            karr = np.asarray(key, dtype=np.int64)
++        if draft:
++            ids = karr if key is prompt else np.asarray(prompt, dtype=np.int64)
++        hit = self._resume(key, salt, karr) if draft and key is not None else None
+         encoded_from = len(hit.ids) if hit is not None else 0
+         if s.vision is not None:              # encoded before anything is sent: a failure stops here
+             feed = self._encode(s.vision, encoded_from)
+         need = self._need(len(prompt))
+-        base, copy, hit = self._place_hit(hit, need, key)
++        base, copy, hit = self._place_hit(hit, need, key, karr)
+         if s.vision is not None and hit is None and encoded_from:
+             feed = None                       # (its rows freed before the tower runs again)
+             feed = self._encode(s.vision, 0)  # the kept state was given up: every picture, from the prompt's start
+@@ -1053,24 +1156,28 @@
+         shared: list[int] = []
+         if draft and key is not None and g.shared:
+             known = [known_key(c) for c in self.kept if c.key is not None and getattr(c, "salt", None) == salt]
+-            shared = shared_points(key, cut, grid_point(len(prompt), cut, self.grid), self.grid, g.shared, known,
++            shared = shared_points(karr, cut, grid_point(len(prompt), cut, self.grid), self.grid, g.shared, known,
+                                    g.opener)
+         sid = self.next_sid
+         payload = [sid, slot, base, need, hit.kid if hit is not None else -1, copy, s.count, int(s.stop_eos),
+                    int(draft), *pack_sampling(s.sampling), *(shared + [0] * SHARED_SLOTS)[:SHARED_SLOTS], *code,
+-                   len(prompt), *prompt]
++                   len(prompt) - cut, *prompt[cut:]]
+         from tensorfold.engine.grammar import pack
+ 
+         packed = pack(s.constraint)
+         payload += [len(packed), *packed, len(positions), *positions, int(s.vision is not None),
+-                    *pack_keys(vrows, vkeys, vpos), int(salt is not None)]       # OTS 0120: salted, last
++                    *pack_keys(vrows, vkeys, vpos), int(salt is not None)]       # OTS 0120: salted
++        if hit is not None:
++            payload += [cut, kept_hash(hit)]
+         self._emit(ADMIT, payload)
+         if copy == 2 and self.carry_kind:         # (counted once the ADMIT is queued: a placement that failed earlier is not)
+             self.carry[self.carry_kind] += 1
+         try:
+             if copy == 2:                     # a carry is a collective: the other ranks hold this ADMIT before rank 0 sends
+                 self._sync()
+-            self._admitted(self._parse_admit(payload), s, feed, s.constraint, info.get("spec", ""))
++            a = self._parse_admit(payload)
++            self._resolve(a, prompt, ids)
++            self._admitted(a, s, feed, s.constraint, info.get("spec", ""))
+         except Exception as exc:              # rank 1 applies the same ADMIT: the ranks may no longer agree
+             self._break(exc)
+             raise
+@@ -1078,7 +1185,7 @@
+ 
+     carry_kind = None                     # rank 0: which rule chose the carry ``_place_hit`` just decided (counted at the ADMIT)
+ 
+-    def _place_hit(self, hit, need: int, key) -> tuple[int, int, Any]:
++    def _place_hit(self, hit, need: int, key, karr) -> tuple[int, int, Any]:
+         """Rank 0: where a request's extent goes and how its rows get there -> (base, copy, hit). ``copy`` 0: the request
+         takes the kept extent over in place; 1: the hit's rows are copied into a new extent of its part while a stream
+         writes in it; 2 (TF_GLM_KV_SHARD_CARRY): they are carried into a new extent in ANOTHER part (``Arena.carry``, a
+@@ -1095,17 +1202,18 @@
+         another part's room, evicting there as the drop would have, keeps it (``_rescue``). A hit under ``CARRY_MIN``
+         tokens is never carried. Host-side arithmetic over the parts, nothing on the common path. A carry wanted and
+         refused is counted once a reason (``carry.refused``), however many of the rules asked; the rule that chose a
+-        carry is left in ``carry_kind`` for ``admit`` to count once the ADMIT is queued."""
++        carry is left in ``carry_kind`` for ``admit`` to count once the ADMIT is queued. ``karr``: ``key`` as the int64
++        array ``admit`` made once (OTS 0124), for the takeover's check of the other kept states."""
+ 
+         why: set[str] = set()
+         self.carry_kind = None
+         try:
+-            return self._place(hit, need, key, why)
++            return self._place(hit, need, key, why, karr)
+         finally:
+             for w in sorted(why):
+                 self._refused(w)
+ 
+-    def _place(self, hit, need: int, key, why: set) -> tuple[int, int, Any]:
++    def _place(self, hit, need: int, key, why: set, karr) -> tuple[int, int, Any]:
+         pool = self.pool
+         sharded = KV_CARRY and bool(pool.half)
+         copy = 0
+@@ -1119,7 +1227,7 @@
+             # conversations to make room would cost more than it saves, so then the rows are overwritten as before.
+             # Not with TF_GLM_MULTI_LONE=1: the copy, decoding alone, would move home to the pool's first rows and evict
+             # the writer's whole extent there, the shared state included.
+-            others = [c for c in x.kept if len(c.ids) > len(hit.ids) and key[:len(c.ids)] != c.key]
++            others = [c for c in x.kept if len(c.ids) > len(hit.ids) and not key_is(c, len(c.ids), karr)]
+             if others and not self.tune.lone:
+                 base = pool.place(need, half=pool.half_of(x) if pool.half else None)
+                 copy = int(base is not None)
+@@ -1355,6 +1463,9 @@
+ 
+     @staticmethod
+     def _parse_admit(p: list[int]) -> dict:
++        """An ADMIT's fields. With no kept state (kid -1) it carries the whole prompt (``prompt``, ``keyed``); with one,
++        OTS 0124, only the ids past it (``tail``) and that state's length and hash (``check``): ``_resolve`` joins them."""
++
+         (sid, slot, base, size, kid, copy, count, stop_eos, draft) = p[:9]
+         sampling = unpack_sampling(p[9:19])
+         shared = [v for v in p[19:19 + SHARED_SLOTS] if v]
+@@ -1362,7 +1473,7 @@
+         code = p[i:i + 4]
+         i += 4
+         n = p[i]
+-        prompt = p[i + 1:i + 1 + n]
++        tail = p[i + 1:i + 1 + n]
+         i += 1 + n
+         n = p[i]
+         packed = p[i + 1:i + 1 + n]
+@@ -1370,11 +1481,35 @@
+         n = p[i]
+         positions = p[i + 1:i + 1 + n]
+         images = bool(p[i + 1 + n])
+-        vrows, vkeys, vpos, end = unpack_keys(p, i + 2 + n)
+-        keyed = keyed_ids(prompt, vpos, vrows, vkeys) if vrows else None
+-        return dict(sid=sid, slot=slot, base=base, size=size, kid=kid, copy=copy, count=count, stop_eos=bool(stop_eos),
+-                    draft=bool(draft), sampling=sampling, shared=shared, code=code, prompt=prompt, packed=packed,
+-                    positions=positions, images=images, keyed=keyed, salted=bool(p[end]))
++        vrows, vkeys, vpos, i = unpack_keys(p, i + 2 + n)
++        a = dict(sid=sid, slot=slot, base=base, size=size, kid=kid, copy=copy, count=count, stop_eos=bool(stop_eos),
++                 draft=bool(draft), sampling=sampling, shared=shared, code=code, packed=packed, positions=positions,
++                 images=images, vision=(vrows, vkeys, vpos), salted=bool(p[i]))
++        if kid >= 0:
++            a.update(tail=tail, check=(p[i + 1], p[i + 2]))
++        else:
++            a.update(prompt=tail, keyed=keyed_ids(tail, vpos, vrows, vkeys) if vrows else None)
++        return a
++
++    def _resolve(self, a: dict, prompt: list[int] | None = None, ids=None) -> None:
++        """Both ranks, OTS 0124: an ADMIT's whole prompt as ``a["prompt"]`` (its keyed ids, ``a["keyed"]``; its int64
++        array, ``a["ids"]``, when known). Rank 0 gives its own (``prompt``, ``ids``). A follower joins its kept state's
++        ids and the ids past them, once that state's length and hash are rank 0's: the ranks would otherwise prefill
++        different prompts."""
++
++        if "prompt" not in a:
++            if prompt is None:
++                hit = self._kept_by_id(a["kid"])
++                cut, h = a["check"]
++                if len(hit.ids) != cut or kept_hash(hit) != h:
++                    raise RuntimeError(f"the kept prompt {a['kid']} is not a prefix of stream {a['sid']}'s prompt")
++                prompt = hit.ids + a["tail"]
++                if a["draft"]:
++                    ids = np.concatenate((kept_ids(hit), np.asarray(a["tail"], dtype=np.int64)))
++            vrows, vkeys, vpos = a["vision"]
++            a.update(prompt=prompt, keyed=keyed_ids(prompt, vpos, vrows, vkeys) if vrows else None)
++        if ids is not None:
++            a["ids"] = ids
+ 
+     def _admitted(self, a: dict, s: Stream, feed, constraint, spec: str = "") -> None:
+         """Both ranks: an ADMIT's stream in its slot and extent, resumed from its kept prompt if it names one."""
+@@ -1387,8 +1522,11 @@
+         prompt = a["prompt"]
+         s.prompt = list(prompt)
+         cut = len(hit.ids) if hit is not None else 0
+-        if hit is not None and hit.ids != prompt[:cut]:
+-            raise RuntimeError(f"the kept prompt {a['kid']} is not a prefix of stream {a['sid']}'s prompt")
++        # OTS 0124: the prompt's ids as an int64 array: rank 0's own, a follower's joined from its kept state's and the
++        # ADMIT's tail (``_resolve``, which checked that state's ids against rank 0's), or here a whole prompt's
++        ids = a.get("ids")
++        if ids is None and a["draft"]:
++            ids = np.asarray(prompt, dtype=np.int64)
+         if hit is not None and not a["copy"]:
+             x = hit.extent
+             if (x.base, x.size) != (a["base"], a["size"]) or x.owner is not None:
+@@ -1447,6 +1585,9 @@
+             lane.key = a["keyed"]
+         if a.get("salted"):                         # OTS 0120: rank 0 own salt; rank 1 knows only that it has one
+             lane.salt = (getattr(s, "glm", None) or {}).get("salt") or ""
++        if a["draft"]:                              # OTS 0124: its kept states' ids and hashes, and its copy drafts
++            lane.ids, lane.hcut, lane.hbase = ids, cut, kept_hash(hit) if hit is not None else 0
++            lane.hsums = np.concatenate((np.zeros(1, dtype=np.int64), prefix_sums(ids[cut:], cut)))
+         # the computation its rows belong to: its kept state's up to the resume point (rows copied or taken over are
+         # those bits), its own from there; a new one for a fresh prefill
+         from tensorfold.cuda.spill_blocks import fork
+@@ -1500,8 +1641,9 @@
+         if a["draft"]:
+             lane.point = grid_point(len(prompt), cut, self.grid)
+             lane.shared = sorted(p for p in set(a["shared"]) if lane.point is not None and cut < p < lane.point)
+-            lane.stops = list(lane.shared) + ([lane.point] if lane.point is not None and lane.point < len(prompt)
+-                                              else [])
++            short = lane.point is not None and lane.point < len(prompt)
++            lane.inner = short and self._inner_ok(lane, len(prompt))
++            lane.stops = list(lane.shared) + ([lane.point] if short and not lane.inner else [])
+         s.started = time.perf_counter()
+         lane.t0 = s.started
+         self.lanes[lane.sid] = lane
+@@ -1529,6 +1671,25 @@
+         """The lane's slot's DFlash2 context."""
+         return self.drafts.contexts[lane.slot]
+ 
++    def _inner_ok(self, lane: Lane, n: int) -> bool:
++        """OTS 0121 (TF_GLM_ONE_CHUNK_WARM): whether the lane's kept point B (``lane.point`` < n) is taken inside the
++        prompt chunk that fills past it rather than at a chunk stop. B lies on the prompt grid (16 to 128, a multiple
++        of 4: a pool boundary of the indexer, so a state there has no ring tail and the rows past it overwrite nothing
++        it needs, ``decode._ring_tail``). A DFlash2 ring must still hold B's window once the rows to n are in: a block
++        pass at B reads positions B - window - 1 .. B - 1, which the rows B .. n - 1 overwrite in the ring when
++        n - B >= ring - window (possible at grid 128 with a ring of fewer spare rows; production's 2,176-row ring holds
++        129 past its 2,047-row window, more than a 64-grid's n - B)."""
++
++        B = lane.point
++        if not ONE_CHUNK:
++            return False
++        if lane.dflash:
++            ctx = self._ctx(lane)
++            ring = getattr(ctx, "ring", 0)
++            if ring and n - B >= ring - ctx.window:
++                return False
++        return True
++
+     # -- kept prompts ------------------------------------------------------------------------------------------------------
+     def _kept_by_id(self, kid: int):
+         for c in self.kept:
+@@ -1536,19 +1697,26 @@
+                 return c
+         raise RuntimeError(f"rank {self.rank} holds no kept prompt {kid}")
+ 
+-    def _resume(self, key: list[int], salt: str | None = None):
++    def _resume(self, key: list[int], salt: str | None = None, karr: np.ndarray | None = None):
+         """The longest kept strict prefix of ``key`` (a prompt's keyed ids, ``Lane.key``), or the whole prompt when it
+         kept its head's logits row (a replay of an earlier prompt), whose DFlash2 window came along; only one a request
+-        with the same ``cache_salt`` kept (OTS 0120; None: unsalted)."""
+-        best = None
++        with the same ``cache_salt`` kept (OTS 0120; None: unsalted); the first of equals in ``kept``'s order. OTS 0124:
++        the candidates longest first, each compared with ``karr`` (the key as an int64 array; made here when not given)
++        by ``key_is``: no list slices, and the first that matches is the one."""
++        if karr is None:
++            karr = np.asarray(key, dtype=np.int64)
++        cands = []
+         for c in self.kept:
+             n = len(c.ids)
+             fits = c.drafter_end == n and c.drafter_rows is not None or self.drafts is None
+             fits = fits and not (self.grid and n % self.grid) and getattr(c, "salt", None) == salt
+             short = n < len(key) or (n == len(key) and c.head is not None)
+-            if fits and short and c.key is not None and key[:n] == c.key and (best is None or n > len(best.ids)):
+-                best = c
+-        return best
++            if fits and short and c.key is not None:
++                cands.append(c)
++        for c in sorted(cands, key=lambda c: -len(c.ids)):     # stable: kept order among equal lengths
++            if key_is(c, len(c.ids), karr):
++                return c
++        return None
+ 
+     def _touch(self, c) -> None:
+         self.kept = [k for k in self.kept if k is not c] + [c]
+@@ -1564,17 +1732,19 @@
+             return
+         self._touch(hit)
+ 
+-    def _keep(self, lane: Lane, n: int, head=None, own: bool = False) -> None:
++    def _keep(self, lane: Lane, n: int, head=None, own: bool = False, inner: bool = False) -> None:
+         """Both ranks: the lane's state at prompt position n (== its pos) becomes a kept prompt in its extent;
+         ``head``: at the prompt's end, the logits row its first token is sampled from (kept for a replay);
+         ``own``: the prompt's own end state -- its conversation's turn boundary, capped by TF_GLM_KEEP_PER_CHAT --
+-        rather than a shared-prefix state another conversation resumes from."""
++        rather than a shared-prefix state another conversation resumes from; ``inner`` (OTS 0121): n is the point
++        the prompt chunk just run was marked at, inside it (its pos is past n): the state the chunk left there
++        (``decode.take_snapshot``'s ``inner``), the DFlash2 window rows before n still in the ring (``_inner_ok``)."""
+ 
+         from .decode import take_snapshot
+ 
+         prev = self.e.use(lane.st)
+         try:
+-            snap = take_snapshot(self.e, lane.s.prompt[:n], None, mtp=False, drafter=None)
++            snap = take_snapshot(self.e, lane.s.prompt[:n], None, mtp=False, drafter=None, inner=inner)
+         finally:
+             self.e.use(prev)
+         snap.drafter_end = -1
+@@ -1584,6 +1754,9 @@
+         snap.head = head
+         # rank 0's key: a text prompt's is its ids (shared, not a second list); rank 1 keeps none
+         snap.key = None if lane.key is None else snap.ids if not lane.images else lane.key[:n]
++        if lane.ids is not None:        # OTS 0124: a view of the stream's ids, and their hash from its hash sums
++            snap._ids = lane.ids[:n]
++            snap._hid = int((lane.hbase + lane.hsums[n - lane.hcut]) % SEAL_MOD)
+         snap.images = lane.images
+         snap.salt = lane.salt            # OTS 0120: resumed only under the same cache_salt, never put on a disk tier
+         snap.kid = self.next_kid
+@@ -2746,6 +2919,17 @@
+     def _ends(self, lane: Lane) -> tuple[int, ...]:
+         return self.eos if lane.s.stop_eos else ()
+ 
++    def _mark(self, lane: Lane, start: int, stop: int) -> int:
++        """Both ranks, OTS 0121: the lane's kept point when it lies inside the chunk start .. stop (``lane.inner``),
++        else 0; the lane's state is marked there (``forward.State.mark``: each KDA layer of the chunk splits its
++        recurrence at it, and ``_keep(..., inner=True)`` takes the state it left there). Every slice of a sliced
++        chunk marks it again, at the same point. A chunk holding the point ends at the prompt's end (n - point < the
++        grid, chunks stop on it), so the lane fills no chunk after it."""
++
++        point = lane.point if lane.inner and start < lane.point < stop else 0
++        lane.st.mark(point)
++        return point
++
+     @torch.no_grad()
+     def _fill(self, lane: Lane, stop: int, *, layers=None) -> int | None:
+         """Both ranks: the lane's prompt rows pos .. stop in one chunk; its kept states; at the prompt's end its first
+@@ -2764,6 +2948,7 @@
+         t = time.perf_counter()
+         prev = e.use(lane.st)
+         try:
++            inner = self._mark(lane, start, stop)
+             if replay:
+                 out, lane.head = lane.head, None
+             else:
+@@ -2777,8 +2962,10 @@
+                         before_finalize=self.partial.layer_event.record)
+                     if not complete:
+                         return None
++            if inner:
++                self._keep(lane, inner, own=True, inner=True)       # the state the chunk left there (OTS 0121)
+             if stop < n:
+-                if stop in lane.stops:
++                if stop in lane.stops or stop == lane.point:
+                     self._keep(lane, stop, own=stop == lane.point)
+                 return None
+             if lane.point == n and not replay:
+@@ -2808,8 +2995,8 @@
+         s.started = time.perf_counter()
+         if lane.policy is not None and self.g.copy is not None:
+             c = self.g.copy                 # no pads: batched windows are not the single-stream widths
+-            lane.copies = CopyDrafts(list(prompt) + [first], c.match, c.most, prompt=len(prompt),
+-                                     reply_match=c.reply_match, miss_most=c.miss_most)
++            lane.copies = CopyDrafts(np.append(lane.ids, first), c.match, c.most, prompt=len(prompt),
++                                     reply_match=c.reply_match, miss_most=c.miss_most)   # OTS 0124: no list rebuilt
+         if lane.policy is not None:
+             lane.depth = min(lane.policy.next(0, 0), s.count - 1)
+ 
+@@ -2821,13 +3008,14 @@
+         first tokens sampled together, each as alone: ``sample_streams``). Returns each lane's first token or None."""
+ 
+         e = self.e
+-        pieces = []
++        pieces, inner = [], []
+         for lane, stop in group:
+             start, n = lane.st.pos, len(lane.s.prompt)
+             if lane.decoding or lane.feed is not None or lane.head is not None:
+                 raise RuntimeError(f"stream {lane.sid} cannot join a multi-prompt chunk")
+             if not start < stop <= n or stop - start > e.prefill_rows:
+                 raise RuntimeError(f"stream {lane.sid}: a prompt chunk {start} .. {stop} of {n}")
++            inner.append(self._mark(lane, start, stop))
+             pieces.append(multi_prefill.Piece(lane.st, list(lane.s.prompt[start:stop]),
+                                               drafter=self._ctx(lane) if lane.dflash else None, head=stop == n))
+         t = time.perf_counter()
+@@ -2847,8 +3035,10 @@
+             if self.partial is not None and lane.sid in self.partial.retired:
+                 continue
+             n = len(lane.s.prompt)
++            if inner[k]:
++                self._keep(lane, inner[k], own=True, inner=True)    # the state the chunk left there (OTS 0121)
+             if stop < n:
+-                if stop in lane.stops:
++                if stop in lane.stops or stop == lane.point:
+                     self._keep(lane, stop, own=stop == lane.point)
+                 continue
+             if lane.point == n:
+@@ -3168,7 +3358,8 @@
+         for op, p in self.parse(msg):
+             if op == ADMIT:
+                 a = self._parse_admit(p)
+-                s = Stream(list(a["prompt"]), a["count"], a["sampling"], draft=a["draft"], stop_eos=a["stop_eos"],
++                self._resolve(a)
++                s = Stream(a["prompt"], a["count"], a["sampling"], draft=a["draft"], stop_eos=a["stop_eos"],
+                            sid=a["sid"])
+                 constraint = None
+                 if a["packed"]:
+diff -ruN -x '*.orig' -x __pycache__ p3/src/tensorfold/families/glm5_next/cuda/multi_prefill.py p4/src/tensorfold/families/glm5_next/cuda/multi_prefill.py
+--- tensorfold/families/glm5_next/cuda/multi_prefill.py	2026-10-29 17:21:56.520750008 +0000
++++ tensorfold/families/glm5_next/cuda/multi_prefill.py	2026-10-29 18:10:56.236575212 +0000
+@@ -3,10 +3,10 @@
+ 
+ Without it, concurrent requests' prompts are prefilled one stream at a time (``multi.MultiDecoder``: the oldest
+ filling stream's chunk, then a decode round, then the next chunk ...), so the last of four short prompts that arrive
+-together waits for eight forwards (a 130-token prompt is two chunks: up to its 64-token grid point, where its state
+-is kept, then its tail) and the decode rounds between them. A forward's cost is mostly fixed at short lengths (~0.12 s
+-on two Sparks, the weights read once a layer whatever the rows), so a chunk of all four prompts costs little more than
+-one of them.
++together waits for the forwards of all four (each one chunk, its state at its 64-token grid point kept inside it,
++OTS 0121; two chunks with TF_GLM_ONE_CHUNK_WARM=0: up to the grid point, then its tail) and the decode rounds between
++them. A forward's cost is mostly fixed at short lengths (~0.12 s on two Sparks, the weights read once a layer
++whatever the rows), so a chunk of all four prompts costs little more than one of them.
+ 
+ A multi-prompt chunk lays its pieces back to back ([s1 rows][s2 rows]...), as a batched verify window does, and runs
+ one forward over them on the prompt buffers (``Engine.pbuf``):

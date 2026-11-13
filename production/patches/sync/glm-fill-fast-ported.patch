@@ -1,0 +1,109 @@
+# Sync port of ots0122-glm-fill-fast.patch (production v110-ots124) onto the synced base, applied in production order after the
+# ports before it; re-based by patch(1) (1 hunk(s) at fuzz 2, every fuzzed hunk read: the change lands where
+# the original put it). The original's header (what, why, measurements, tests) is the reference: ots0122-glm-fill-fast.patch.
+# Two fixes on top (2026-10-31, the upstream batch's 0144 review): /health's fill_fast counts only a chunk the setting
+# kept from being sliced (the budget's slice would end before the last layer), and with the setting off the
+# smooth-streaming settings are not read (a malformed TF_GLM_STREAM_SMOOTH_MS no longer stops the start).
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/multi.py next/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-31 13:54:29.010393173 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-31 13:54:29.212762977 +0000
+@@ -726,6 +726,9 @@
+         self.grid = engine.grid
+         self.fill_rows = fill_rows(e.prefill_rows, self.grid)
+         self.fill_budget = sliced_fill.budget_ms()
++        # OTS 0122, TF_GLM_FILL_FAST_MS: rank 0 decides each slice's layers (``_slice_end``); rank 1 follows them
++        self.fill_fast = sliced_fill.fast_ms()
++        self.fast_fills = 0                               # chunks run whole where the budget would slice (/health)
+         self.fill_drafts = sliced_fill.drafted_rounds()     # rank 0 decides; the ROUND message carries it
+         self.partial = None
+         self.fill_costs = None
+@@ -871,6 +874,7 @@
+                                       key=lambda r: -r[1])[:8],
+                 },
+                 **({"multi_prefill": dict(self.grouped)} if self.group else {}),
++                **({"fill_fast": self.fast_fills} if self.fill_fast else {}),
+                 **({"spill": self.disk.info()} if self.disk is not None else {}),
+                 "prefix_waits": self.prefix_waits, "prefix_wait_tokens": self.prefix_wait_tokens,
+                 # how long rank 0's current iteration has run (0 between iterations): a stalled server keeps growing it
+@@ -2740,7 +2744,7 @@
+         pending = self.partial
+         lo = pending.layer
+         busy = any(l.decoding and not l.paused and not l.s.done for l in self.lanes.values())
+-        hi = self.fill_costs.stop(pending.rows, lo, self.fill_budget) if busy else len(self.w.layers)
++        hi = self._slice_end(pending, busy)
+         if pending.many:
+             payload = [len(pending.group), lo, hi, *[v for lane, stop in pending.group for v in (lane.sid, stop)]]
+             self._emit(MFILLPART, payload)
+@@ -2760,6 +2764,24 @@
+         self.short_round_due = not self.fill_drafts
+         return done
+ 
++    def _slice_end(self, pending, busy: bool) -> int:
++        """Rank 0: the layer the pending prompt chunk's next slice runs to. Every layer left when no stream decodes;
++        else the slice TF_GLM_FILL_BUDGET_MS takes (``LayerCosts.stop``), a decode round after it - unless, OTS 0122
++        (TF_GLM_FILL_FAST_MS), the chunk ends every prompt in it (its layers left are all those prompts still fill)
++        and they are estimated at most that many ms (``LayerCosts.remaining``): then every layer left, so the
++        prompts take their first tokens without a decode round between their slices. /health's ``fill_fast``
++        counts the chunks this kept from being sliced (the budget's slice would have ended earlier)."""
++
++        layers = len(self.w.layers)
++        if not busy:
++            return layers
++        hi = self.fill_costs.stop(pending.rows, pending.layer, self.fill_budget)
++        if (hi < layers and self.fill_fast and all(stop == len(lane.s.prompt) for lane, stop in pending.group)
++                and self.fill_costs.remaining(pending.rows, pending.layer) <= self.fill_fast):
++            self.fast_fills += 1
++            return layers
++        return hi
++
+     @torch.no_grad()
+     def _part(self, group, lo: int, hi: int, many: bool) -> list[Stream]:
+         """Both ranks: apply one contiguous slice, including publication only on its final layer."""
+diff -ruN -x '*.orig' -x __pycache__ prev/tensorfold/families/glm5_next/cuda/sliced_fill.py next/tensorfold/families/glm5_next/cuda/sliced_fill.py
+--- tensorfold/families/glm5_next/cuda/sliced_fill.py	2026-10-31 13:54:29.021914958 +0000
++++ tensorfold/families/glm5_next/cuda/sliced_fill.py	2026-10-31 13:54:29.215611428 +0000
+@@ -32,6 +32,32 @@
+     return raw == "1"
+ 
+ 
++def fast_ms(value: str | None = None, smooth: bool | None = None, hold_ms: float | None = None) -> float:
++    """TF_GLM_FILL_FAST_MS (OTS 0122; 0, the default: off): beside decoding streams, a prompt chunk that ends every
++    prompt in it and whose layers left are estimated (``LayerCosts.remaining``) at most this many milliseconds runs
++    them all now, in one slice, instead of in TF_GLM_FILL_BUDGET_MS slices with a decode round after each: a short
++    prompt or warm turn gets its first token one or more rounds sooner, and the decoding streams pause up to this
++    long, which a smooth-streaming playout buffer at least as long hides (``tensorfold.cuda.stream_pacing``: a
++    pause shorter than its hold is spread over the tokens queued). The same bits either way (scheduling only).
++    With TF_GLM_STREAM_SMOOTH=1 it may not exceed TF_GLM_STREAM_SMOOTH_MS (``smooth`` / ``hold_ms``: those)."""
++
++    from tensorfold.cuda import stream_pacing
++
++    raw = os.environ.get("TF_GLM_FILL_FAST_MS", "") if value is None else value
++    try:
++        ms = float(raw.strip() or "0")
++    except ValueError:
++        ms = -1.0
++    if not math.isfinite(ms) or ms < 0:
++        raise ValueError(f"TF_GLM_FILL_FAST_MS: finite milliseconds >= 0 (0: off), not {raw!r}")
++    if ms and (stream_pacing.smooth_streaming() if smooth is None else smooth):     # off: nothing else read
++        hold = stream_pacing.hold_seconds() * 1000 if hold_ms is None else hold_ms
++        if ms > hold:
++            raise ValueError(f"TF_GLM_FILL_FAST_MS={ms:g}: the decoding streams would pause longer than the "
++                             f"{hold:g} ms smooth-streaming playout hides (TF_GLM_STREAM_SMOOTH_MS): at most that")
++    return ms
++
++
+ class LayerCosts:
+     """Startup timings at several row counts, interpolated separately for every KDA/DSA/dense layer.
+ 
+@@ -107,6 +133,11 @@
+         ends = [hi for hi in range(lo + 1, greedy_end(lo) + 1) if pieces(hi) <= count - 1]
+         return min(ends, key=lambda hi: (abs(sum(costs[lo:hi]) - target), -hi))
+ 
++    def remaining(self, rows: int, lo: int) -> float:
++        """OTS 0122: the estimated wall ms of a chunk of ``rows`` rows from layer ``lo`` to its end in one slice: its
++        layers, its tail (the head, taps, commit) and a slice's dispatch overhead, as ``stop`` budgets them."""
++        return sum(self.costs(rows)[lo:]) + self.tail_cost(rows) + self.overhead
++
+     def observe(self, rows: int, lo: int, hi: int, ms: float) -> None:
+         # Layer GPU time only: tail and dispatch cost must not inflate every layer's prediction.
+         predicted = sum(self.costs(rows)[lo:hi])

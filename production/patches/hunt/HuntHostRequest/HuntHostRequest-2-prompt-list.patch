@@ -1,0 +1,210 @@
+--- tensorfold/cuda/prompt_ids.py	2026-10-30 07:33:54.860840200 +0000
++++ tensorfold/cuda/prompt_ids.py	2026-10-30 07:33:54.882016800 +0000
+@@ -43,8 +43,9 @@
+ 
+ import numpy as np
+ 
+-SUM_STEP = 16384        # tokens between kept sha256 states of ``seed_for``'s text (a new prompt hashes at most this
+-                        # many of the kept ids again, plus its own)
++SUM_STEP = 2048         # tokens between kept sha256 states of ``seed_for``'s text (a new prompt hashes at most this
++                        # many of the kept ids again, plus its own; OTS: 16384 -> 2048, ~1.3 -> ~0.2 ms a turn, with the
++                        # GIL held, for ~330 states of ~0.2 KiB at 670k tokens)
+ SLACK = 256             # a kept prompt whose text past the cut a newer prompt reuses is at most this long is dropped
+                         # for it (a dropped generation prompt, a turn retried: its tokens cost microseconds again)
+ _SAFE_PRE = {"Split", "ByteLevel", "Digits", "Punctuation", "Whitespace", "WhitespaceSplit", "Sequence"}
+@@ -106,6 +107,12 @@
+         h.update(("," if start else "").encode() + ",".join(map(str, ids[start:end])).encode())
+ 
+ 
++def _wide(ids: array) -> np.ndarray:
++    """(OTS) ``ids`` (an ``array("I")``) as an int64 array of the caller's own."""
++
++    return np.frombuffer(ids, dtype=np.uint32).astype(np.int64) if ids else np.zeros(0, dtype=np.int64)
++
++
+ @dataclass(slots=True)
+ class _Kept:
+     text: str
+@@ -114,6 +121,9 @@
+     ends: list[int]                     # how far another text must agree for it to split there too (rising)
+     at: list[int]                       # its index in ``ids``
+     sums: list[tuple[int, Any]] = field(default_factory=list)   # (n, sha256 of seed_for's text of ids[:n]), n % SUM_STEP == 0
++    # (OTS) ``ids`` as a list of ``PromptIds.ints``' objects, made at the first prompt that continues this one: a prompt
++    # continuing it slices this list (~2 ms at 670k tokens) where ``ids[:k].tolist()`` made an int a token (~8-13 ms)
++    items: list[int] | None = None
+ 
+ 
+ class PromptIds:
+@@ -133,6 +143,9 @@
+         # leftmost-longest, as the tokenizer's matcher: at each start ``re`` takes the first alternative that matches
+         self.pattern = re.compile("|".join(re.escape(s) for s in sorted(added, key=len, reverse=True)))
+         self.is_added = np.zeros(max(vocab, max(added.values()) + 1), dtype=bool)
++        # (OTS) one int object a token id, shared by the kept prompts' lists (``_Kept.items``): a list of them costs 8
++        # bytes a token beside the array's 4, where ints of their own cost ~36
++        self.ints = np.array(range(self.is_added.size), dtype=object)
+         self.is_added[list(added.values())] = True
+         self.kept: list[_Kept] = []     # most recent first
+         self.lock = threading.Lock()
+@@ -188,6 +201,14 @@
+         """``text``'s ids (a list of the caller's own) and a function giving a sha256 fed their ``seed_for`` text
+         (``exact_sampling.seed_of``'s input; called only when a seed is drawn from the prompt)."""
+ 
++        ids, summed, _ = self.encode_wide(text, False)
++        return ids, summed
++
++    def encode_wide(self, text: str, wide: bool = True) -> tuple[list[int], Callable[[], Any], Any]:
++        """``encode``'s ids and sha256 function, and (``wide``) the same ids as an int64 array of the caller's own
++        (OTS: what the engine's admission reads, ~1 ms from the kept array where a list converts in ~25 ms at 670k
++        tokens), else None."""
++
+         with self.lock:
+             kept = list(self.kept)
+         best, j_best, whole = None, -1, False
+@@ -200,14 +221,20 @@
+         if best is not None:
+             cut, k = best.starts[j_best], best.at[j_best]
+             tail = self.encode_fast(text[cut:])
+-            found = self._starts(text[cut:], array("I", tail))
++            tail_ids = array("I", tail)
++            found = self._starts(text[cut:], tail_ids)
+             if found is not None:
+                 head = best.ids[:k]
+-                ids = head.tolist() + tail
+-                head.extend(tail)
++                head.extend(tail_ids)
++                if best.items is None:          # the first prompt continuing it: its list, once
++                    best.items = self.ints[np.frombuffer(best.ids, dtype=np.uint32)].tolist()
++                items = best.items[:k]
++                items.extend(self.ints[np.frombuffer(tail_ids, dtype=np.uint32)].tolist())   # the tail's, shared too
++                ids = items[:]                  # the caller's own; the kept list is never handed out
+                 made = _Kept(text, head, best.starts[:j_best] + [cut + s for s in found[0]],
+                              best.ends[:j_best] + [cut + e for e in found[1]],
+-                             best.at[:j_best] + [k + a for a in found[2]], [s for s in best.sums if s[0] <= k])
++                             best.at[:j_best] + [k + a for a in found[2]], [s for s in best.sums if s[0] <= k],
++                             items)
+             else:
+                 self._warn("a tail's added tokens differ from the tokenizer's")
+         if made is None:
+@@ -217,7 +244,7 @@
+             if found is None or not found[0]:       # the tokenizer differs here, or nothing to continue from
+                 if found is None:
+                     self._warn("a prompt's added tokens differ from the tokenizer's")
+-                return ids, _summer(_Kept(text, arr, [], [], []), None)
++                return ids, _summer(_Kept(text, arr, [], [], []), None), _wide(arr) if wide else None
+             made, best = _Kept(text, arr, *found), None
+         with self.lock:
+             # the prompt it came from goes when this one continues all of it, or all but its last SLACK characters
+@@ -228,7 +255,7 @@
+             rest = [e for e in self.kept if e is not best]
+             self.kept = [made] + ([] if spent else [best]) + rest
+             del self.kept[self.entries:]
+-        return ids, _summer(made, self.lock)
++        return ids, _summer(made, self.lock), _wide(made.ids) if wide else None
+ 
+     def _warn(self, what: str) -> None:
+         if not self.warned:
+--- tensorfold/cuda/server.py	2026-10-30 07:33:54.871498200 +0000
++++ tensorfold/cuda/server.py	2026-10-30 07:33:54.893683300 +0000
+@@ -57,6 +57,9 @@
+     vision: Any = None
+     grammar: Any = None     # (spec, compiled grammar) of the request's response_format, or None
+     think_budget: int = 0   # reply tokens before the server closes a think block the reply leaves open (0: no limit)
++    # OTS: ``prompt`` as an int64 array (from the prompt ids' kept array), for an engine whose ``generate`` takes
++    # ``prompt_array``; None otherwise
++    prompt_array: Any = None
+ 
+ 
+ def _native_context(model_dir: Path) -> int:
+@@ -260,19 +263,20 @@
+                                        vision=rendered.vision, grammar=compiled, think_budget=budget)
+             else:
+                 text = render(messages, shown_tools)
+-            prompt, joined = self._prompt_ids(text, False, literal if masked else None)
++            prompt, joined, wide = self._prompt_ids_wide(text, False, literal if masked else None)
+         elif isinstance(body.get("prompt"), list):       # token ids (vLLM's and OpenAI's form): served as given
+-            prompt, joined = self.token_ids(body["prompt"]), None
++            prompt, joined, wide = self.token_ids(body["prompt"]), None, None
+         else:
+             text = body.get("prompt")
+             if not isinstance(text, str):
+                 raise RequestError("prompt must be a string or a list of token ids")
+-            prompt, joined = self._prompt_ids(text, _flag(body, "add_special_tokens", False))
++            prompt, joined, wide = self._prompt_ids_wide(text, _flag(body, "add_special_tokens", False))
+         if not prompt:
+             raise RequestError("rendered prompt is empty")
+         # sampling is resolved here, so a malformed control is refused before a stream opens
+         return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt, joined=joined),
+-                               ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget)
++                               ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget,
++                               prompt_array=wide)
+ 
+     def _messages_to_mask(self, messages: Any) -> Any:
+         """The messages ``literal`` masks (patch 0116): as sent. A family that adds to them before its template
+@@ -311,15 +315,27 @@
+         exact there: ``literal.encode`` encodes the text between masks piece by piece, the tokenizer splits each piece
+         at its added tokens, and a cut falls only at an added token's start (a mask is one character, never cut)."""
+ 
+-        if literal is not None:
+-            kept = getattr(self, "literal_prompt_ids", None)
+-            if kept is None or special:
+-                return literal.encode(self.tok, text), None
+-            return kept.encode(text)
+-        kept = getattr(self, "prompt_ids", None)
+-        if kept is None or special:
+-            return self._encode_ids(text, special), None
+-        return kept.encode(text)
++        return _prompt_ids(self, text, special, literal, False)[:2]
++
++    def _prompt_ids_wide(self, text: str, special: bool,
++                         literal: Any = None) -> tuple[list[int], Callable[[], Any] | None, Any]:
++        """``_prompt_ids``' ids and sha256 function, and (OTS) the ids as an int64 array when they came through a kept
++        cache and the engine's ``generate`` takes ``prompt_array``, else None."""
++
++        return _prompt_ids(self, text, special, literal, self._takes_prompt_array())
++
++    def _takes_prompt_array(self) -> bool:
++        """(OTS) Whether the engine's ``generate`` reads a prompt's int64 array (``prompt_array``); asked once."""
++
++        takes = self.__dict__.get("_prompt_array")
++        if takes is None:
++            generate = getattr(getattr(self, "engine", None), "generate", None)
++            try:
++                takes = generate is not None and "prompt_array" in inspect.signature(generate).parameters
++            except (TypeError, ValueError):
++                takes = False
++            self.__dict__["_prompt_array"] = takes
++        return takes
+ 
+     def tokenize(self, body: dict[str, Any]) -> dict[str, Any]:
+         """vLLM's ``/tokenize``: a prompt's ids (``add_special_tokens`` as vLLM, default true), or ``messages``' as the
+@@ -610,6 +626,8 @@
+                 turns.give()
+                 turns.take(True, cancelled)
+             extra = dict(options)
++            if prepared.prompt_array is not None and len(ids) == len(prompt):     # OTS: the prompt, not a continuation
++                extra["prompt_array"] = prepared.prompt_array
+             if prepared.grammar is not None:    # response_format: a fresh grammar state, after </think> when thinking
+                 spec, compiled = prepared.grammar
+                 # a run after the thinking budget's close (it ends at </think> under a grammar) starts in the grammar
+@@ -783,6 +801,21 @@
+                                      encode=lambda t: list(self._encode_ids(t, False)))
+ 
+ 
++def _prompt_ids(app: Any, text: str, special: bool, literal: Any,
++                wide: bool) -> tuple[list[int], Callable[[], Any] | None, Any]:
++    """``App._prompt_ids``' ids and sha256 function, and (``wide``) the int64 array a kept cache gives of them."""
++
++    if literal is not None:
++        kept = getattr(app, "literal_prompt_ids", None)
++        if kept is None or special:
++            return literal.encode(app.tok, text), None, None
++        return kept.encode_wide(text, wide)
++    kept = getattr(app, "prompt_ids", None)
++    if kept is None or special:
++        return app._encode_ids(text, special), None, None
++    return kept.encode_wide(text, wide)
++
++
+ def _flag(body: dict[str, Any], name: str, default: bool) -> bool:
+     value = body.get(name, default)
+     if not isinstance(value, bool):

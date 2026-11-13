@@ -1,0 +1,61 @@
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py
++++ tensorfold/families/glm5_next/cuda/multi.py
+@@ -195,6 +195,18 @@
+     return share
+ 
+ 
++def fill_short_rows(prefill_rows: int, value: str | None = None) -> int:
++    """TF_GLM_FILL_SHORT_ROWS (TF_GLM_MULTI_PREFILL only): a filling prompt with at most this many rows left takes the
++    next prompt chunk before older, longer ones (``MultiDecoder._fill_turn``; default four prompt chunks, 0: the oldest
++    first, as before). The chunks each prompt runs are the ones it runs anyway: scheduling only, the same bits."""
++
++    value = (os.environ.get("TF_GLM_FILL_SHORT_ROWS", "") if value is None else value).strip()
++    rows = 4 * int(prefill_rows) if value == "" else int(value) if value.isdecimal() else -1
++    if rows < 0:
++        raise ValueError(f"TF_GLM_FILL_SHORT_ROWS: rows (0: off), not {value!r}")
++    return rows
++
++
+ def keep_per_chat(value: str | None = None) -> int:
+     """TF_GLM_KEEP_PER_CHAT: the kept states one conversation holds at its own turn boundaries (0, the default: no limit, what
+     TensorFold does). Only that conversation's own prompt-end states count; states a shared prefix kept, which every
+@@ -759,6 +773,7 @@
+             if not latent.ENABLED:
+                 raise ValueError("TF_GLM_MULTI_PREFILL=1 needs the latent cache (TF_GLM_LATENT=1)")
+         self.unit = fill_unit(self.grid)
++        self.short_rows = fill_short_rows(e.prefill_rows)   # rank 0's choice of the next prompt chunk (_fill_turn)
+         self.grouped = {"chunks": 0, "pieces": 0, "rows": 0}           # rank 0's multi-prompt chunks, for /health
+         self.drafts = drafts
+         if self.drafts is None and engine.drafter is not None:
+@@ -2656,7 +2671,13 @@
+             self._break(exc)
+             raise
+ 
++    short_rows = 0           # TF_GLM_FILL_SHORT_ROWS (``__init__`` sets it; a decoder built without it: the oldest first)
++
+     def _fill_turn(self) -> Lane | None:
++        """Rank 0: the filling stream whose prompt chunk runs this iteration, or None (a decode round): the oldest
++        foreground prompt (``next_fill``); with TF_GLM_MULTI_PREFILL, a prompt with at most ``short_rows`` rows left
++        goes first, the fewest first (``fill_short_rows``: a warm turn does not wait for a long cold prompt's whole
++        fill when its rows alone take a chunk, which ``_group`` cannot share; issue #199)."""
+         filling = [l for l in self.lanes.values() if not l.decoding]
+         if not filling:
+             return None
+@@ -2671,8 +2692,14 @@
+             if self.credit < 1:
+                 return None
+             self.credit -= 1
+-        s = next_fill([l.s for l in filling])
+-        return self.lanes[s.sid]
++        lane = self.lanes[next_fill([l.s for l in filling]).sid]
++        if self.group and self.short_rows:
++            short = [l for l in filling if len(l.s.prompt) - l.st.pos <= self.short_rows]
++            if short:
++                pick = min(short, key=lambda l: (bool(l.s.background), len(l.s.prompt) - l.st.pos, l.order))
++                if lane.s.background or not pick.s.background:
++                    lane = pick
++        return lane
+ 
+     def _iterate(self) -> list[Stream]:
+         if self.fill_budget:

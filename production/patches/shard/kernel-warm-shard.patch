@@ -1,0 +1,13 @@
+--- tensorfold/families/glm5_next/cuda/kernel_warm.py
++++ tensorfold/families/glm5_next/cuda/kernel_warm.py
+@@ -136,7 +136,9 @@
+         return n
+     a, s = dsa.dsa, b.lat_s
+     di = 0
+-    lc = st.kc[di]
++    lc = st.kc[di] if st.kc[di] is not None else next((x for x in st.kc if x is not None), None)
++    if lc is None:                # TF_GLM_KV_SHARD: a rank that owns no part of the latent cache warms none
++        return n
+     scale = c.qk_dim ** -0.5
+     nch = s.nch
+     lat = torch.empty((max(big, nch * latent.CHUNK), lc.shape[1]), dtype=lc.dtype, device=dev)

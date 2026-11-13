@@ -1,0 +1,88 @@
+# HuntDrafter-1 (lane HuntDrafter, 2026-10-30): a DFlash2 context update skips the launches whose ring rows the same
+# update overwrites before it returns. The drafter's context is a ring of 2,176 rows (window 2,047 + block 8 + a tile)
+# and a context update is row-wise (fc, norm, k / v projections, rotary; no attention), so in an update of R rows
+# the rows i < R - 2,176 are overwritten by rows i + 2,176 of the same call and nothing can read them. A prompt chunk
+# (TF_GLM_PREFILL_ROWS 4,096) commits its taps through MultiDrafter.commit in 64-row launches (t_max): 64 launches a
+# chunk, of which the first 30 only write rows the last 34 overwrite. ring_skip() (dflash2.py, the one rule) drops
+# those whole leading launches in MultiDrafter.commit (production's path: DraftContext.add_taps for every prompt
+# chunk) and in the solo Drafter.add_taps (its 64-row pieces; pos_dev / context_end advanced past them); the launches
+# left are the same rows in the same launches, so the same kernels, ring bits, device ends and context ends.
+# Decode-round commits (a few rows a stream) are never wider than the ring and are untouched.
+# Expected (GB10 taps graph at T=64 ~0.365 ms, DrafterFable's 0.382 minus 0108's 17 us): -30 launches = ~11 ms a
+# 4,096-row chunk; cold ~200k (r1, 48 full chunks + 3,419) -1,459 launches ~ -0.53 s of 78.5 s (-0.7%); cold32
+# -228 launches ~ -83 ms of 12.42 s (-0.7%); a warm +2.4k turn (r2) -3 launches ~ -1 ms. Every rank alike.
+# Workstation RTX 5070 (test_ring_skip.py --bench, the test's small drafter): a 4,096-row chunk's update 11.68 -> 6.30
+# ms (min of 20, median 19.6 -> 9.8).
+# Exactness: test_ring_skip.py (the test_draft_pass_fusion.py harness: random DFlash2 checkpoint at world 3, the
+# production 2,176-row ring, 4 streams): 70 single-stream chunks of 1 .. 8,197 rows at ends 0 .. 600,007 (ring edges)
+# with every ring row of the pool, the device ends and context_end equal, multi-stream commits, block passes after
+# the chunks, the solo drafter: ALL PASS on the patched tree; on the synced tree 49 FAIL (the launch counts).
+--- tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-29 23:57:45.105314400 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2.py	2026-10-30 00:20:27.827331700 +0000
+@@ -49,6 +49,16 @@
+     return int(np.argmax(expect / ms))
+ 
+ 
++def ring_skip(rows: int, ring: int, step: int) -> int:
++    """Leading rows of a context update that need no launch: with a ring of ``ring`` rows (0: a flat buffer), a
++    row at offset i of an update of ``rows`` rows is overwritten by row i + ring of the same update when
++    i < rows - ring, before the update returns, so nothing can read it. Whole launches of ``step`` rows of such rows
++    are skipped; the launches left are the ones the update runs anyway, row for row (the same rows a launch, so the
++    same kernels and the same ring bits)."""
++
++    return max(0, (rows - ring) // step) * step if ring else 0
++
++
+ @triton.jit
+ def _dconv_kernel(X, DYN, BASE, RES, OUT, D: tl.constexpr, G: tl.constexpr, GS: tl.constexpr,
+                   BRANCH: tl.constexpr, HAS_RES: tl.constexpr, BLOCK: tl.constexpr, SEG: tl.constexpr = 0):
+@@ -531,8 +541,15 @@
+     def add_taps(self, taps: torch.Tensor) -> None:
+         """Committed rows' taps [n, taps * D] (bf16) at positions context_end, context_end + 1, ..."""
+ 
+-        for start in range(0, taps.shape[0], self.tap_in.shape[0]):
+-            part = taps[start:start + self.tap_in.shape[0]]
++        size = self.tap_in.shape[0]
++        first = ring_skip(taps.shape[0], self.ring, size)
++        if first:                                   # rows this update overwrites itself (``ring_skip``)
++            if self.context_end + first > self.capacity:
++                raise ValueError("drafter context past its capacity")
++            self.pos_dev += first
++            self.context_end += first
++        for start in range(first, taps.shape[0], size):
++            part = taps[start:start + size]
+             n = part.shape[0]
+             if self.context_end + n > self.capacity:
+                 raise ValueError("drafter context past its capacity")
+--- tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-29 23:57:45.106313800 +0000
++++ tensorfold/families/glm5_next/cuda/dflash2_multi.py	2026-10-30 00:20:27.833375500 +0000
+@@ -33,7 +33,7 @@
+ from tensorfold.engine.exact_sampling import Sampling
+ 
+ from . import glue
+-from .dflash2 import NO_LIMIT, BadCandidates, Drafter, _dconv, _mm, merge_candidates
++from .dflash2 import NO_LIMIT, BadCandidates, Drafter, _dconv, _mm, merge_candidates, ring_skip
+ 
+ 
+ @triton.jit
+@@ -361,7 +361,9 @@
+     @torch.no_grad()
+     def commit(self, items: Sequence[tuple[DraftContext, torch.Tensor]]) -> None:
+         """Each stream's committed rows' taps [n, taps * D] (bf16) at its positions context_end, context_end + 1, ...:
+-        every stream's rows stacked into launches of up to ``t_max`` rows."""
++        every stream's rows stacked into launches of up to ``t_max`` rows. A stream's rows that start a launch and
++        that its own update overwrites in the ring before returning (a prompt chunk wider than the ring) are not
++        launched (``dflash2.ring_skip``)."""
+ 
+         seen: set[int] = set()
+         for c, taps in items:
+@@ -373,7 +375,8 @@
+         pieces: list[tuple[DraftContext, torch.Tensor, int]] = []
+         used = 0
+         for c, taps in items:
+-            start, end = 0, c.context_end
++            start = ring_skip(taps.shape[0], self.d.ring, self.t_max) if used == 0 else 0
++            end = c.context_end + start
+             while start < taps.shape[0]:
+                 take = min(taps.shape[0] - start, self.t_max - used)
+                 pieces.append((c, taps[start:start + take], end))

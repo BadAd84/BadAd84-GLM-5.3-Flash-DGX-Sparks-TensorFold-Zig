@@ -1,0 +1,332 @@
+--- tensorfold/cuda/roce.cu
++++ tensorfold/cuda/roce.cu
+@@ -15,6 +15,9 @@
+ //   5. the last block to finish advances the device epoch, so CUDA graphs replay the exchange.
+ // HuntComms (OTS): steps 3 and 4 were one loop over every source after the wait, each thread's sys-scope load waiting
+ // out the previous one's store; the output bytes are the same.
++// OutProjSplit (OTS): ``gather_cols`` writes source s's shard [rows, row_packs] at out + s * out_src + row * out_row
++// (packs): a column window of a [world, rows, D] output, so a matrix computed in column pieces gathers each piece
++// into its place (forward.out_proj, TF_GLM_OPROJ_SPLIT). ``gather`` runs the COLS = false kernels, the code before.
+ 
+ #include <ATen/ATen.h>
+ #include <ATen/cuda/CUDAContext.h>
+@@ -63,20 +66,27 @@
+ constexpr int C_SEQ = 0, C_NBYTES = 1, C_ERROR = 2, C_PEER = 3, C_SLOT_NBYTES = 4, C_HCA = 6;
+ constexpr int UNROLL = 4;            // shard positions a thread loads from every peer before it stores any
+ 
+-// pack i of ``source``'s shard in the output: rank order, or row-interleaved when a row is narrower than the shard
+-__device__ __forceinline__ long long out_at(int i, int source, int world, int row_packs, bool flat, int shard_packs) {
++// pack i of ``source``'s shard in the output: rank order, or row-interleaved when a row is narrower than the shard;
++// COLS: row i / row_packs of the shard at out_row packs a row and out_src packs a source (a column window)
++template <bool COLS>
++__device__ __forceinline__ long long out_at(int i, int source, int world, int row_packs, bool flat, int shard_packs,
++                                            int out_row, long long out_src) {
++    if (COLS) {
++        const int row = i / row_packs, col = i - row * row_packs;
++        return (long long)source * out_src + (long long)row * out_row + col;
++    }
+     if (flat) return (long long)source * shard_packs + i;
+     const int row = i / row_packs, col = i - row * row_packs;
+     return (long long)row * world * row_packs + (long long)source * row_packs + col;
+ }
+ 
+ // W: the world size when known at compile time (2 to 4: every peer's loads in flight together), 0: any world
+-template <int W>
++template <int W, bool COLS>
+ __global__ void gather_kernel(const uint4* __restrict__ in, uint4* __restrict__ out, int shard_packs, uint32_t nbytes,
+                               int row_packs, char* recv_base, char* flag_base, char* send_base, uint32_t* ctrl,
+                               long long slot_bytes, uint32_t* epoch, uint32_t* stage_ctr, uint32_t* tail_ctr,
+                               uint32_t* poison, uint32_t spin_limit, int world_arg, int rank, int slots, int flag_stride,
+-                              int n_hca) {
++                              int n_hca, int out_row, long long out_src) {
+     const int world = W ? W : world_arg;
+     const int tid = threadIdx.x;
+     const uint32_t seq = ld_relaxed_gpu(epoch) + 1u;
+@@ -100,7 +110,8 @@
+         }
+     }
+     // 3. the local shard while the peers' are on the wire
+-    for (int i = index; i < shard_packs; i += stride) out[out_at(i, rank, world, row_packs, flat, shard_packs)] = in[i];
++    for (int i = index; i < shard_packs; i += stride)
++        out[out_at<COLS>(i, rank, world, row_packs, flat, shard_packs, out_row, out_src)] = in[i];
+     if (tid < world * n_hca) {                                                                      //    the wait
+         const int peer = tid / n_hca, hca = tid - peer * n_hca;
+         if (peer != rank) {
+@@ -146,7 +157,8 @@
+                     if (i < shard_packs) {
+ #pragma unroll
+                         for (int k = 0; k < P; ++k)
+-                            out[out_at(i, source[k], world, row_packs, flat, shard_packs)] = v[u][k];
++                            out[out_at<COLS>(i, source[k], world, row_packs, flat, shard_packs, out_row, out_src)] =
++                                v[u][k];
+                     }
+                 }
+             }
+@@ -156,7 +168,8 @@
+                 const uint4* peer_slot = reinterpret_cast<const uint4*>(
+                     recv_base + ((long long)source * slots + slot) * slot_bytes);
+                 for (int i = index; i < shard_packs; i += stride)
+-                    out[out_at(i, source, world, row_packs, flat, shard_packs)] = ld_relaxed_sys_v4(peer_slot + i);
++                    out[out_at<COLS>(i, source, world, row_packs, flat, shard_packs, out_row, out_src)] =
++                        ld_relaxed_sys_v4(peer_slot + i);
+             }
+         }
+     }
+@@ -177,7 +190,7 @@
+                       int64_t recv_base, int64_t flag_base, int64_t send_base, int64_t ctrl, int64_t slot_bytes,
+                       int64_t epoch, int64_t stage_ctr, int64_t tail_ctr, int64_t poison, int64_t spin_limit,
+                       int64_t world, int64_t rank, int64_t slots, int64_t flag_stride, int64_t n_hca, int64_t grid,
+-                      int64_t threads) {
++                      int64_t threads, bool cols, int64_t out_row, int64_t out_src) {
+     auto stream = at::cuda::getCurrentCUDAStream();
+     auto launch = [&](auto kernel) {
+         kernel<<<(unsigned)grid, (unsigned)threads, 0, stream>>>(
+@@ -186,13 +199,22 @@
+             reinterpret_cast<char*>(send_base), reinterpret_cast<uint32_t*>(ctrl), (long long)slot_bytes,
+             reinterpret_cast<uint32_t*>(epoch), reinterpret_cast<uint32_t*>(stage_ctr),
+             reinterpret_cast<uint32_t*>(tail_ctr), reinterpret_cast<uint32_t*>(poison), (uint32_t)spin_limit,
+-            (int)world, (int)rank, (int)slots, (int)flag_stride, (int)n_hca);
++            (int)world, (int)rank, (int)slots, (int)flag_stride, (int)n_hca, (int)out_row, (long long)out_src);
+     };
+-    switch (world) {
+-        case 2: launch(gather_kernel<2>); break;
+-        case 3: launch(gather_kernel<3>); break;
+-        case 4: launch(gather_kernel<4>); break;
+-        default: launch(gather_kernel<0>); break;
++    if (cols) {
++        switch (world) {
++            case 2: launch(gather_kernel<2, true>); break;
++            case 3: launch(gather_kernel<3, true>); break;
++            case 4: launch(gather_kernel<4, true>); break;
++            default: launch(gather_kernel<0, true>); break;
++        }
++    } else {
++        switch (world) {
++            case 2: launch(gather_kernel<2, false>); break;
++            case 3: launch(gather_kernel<3, false>); break;
++            case 4: launch(gather_kernel<4, false>); break;
++            default: launch(gather_kernel<0, false>); break;
++        }
+     }
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+--- tensorfold/cuda/roce.cpp
++++ tensorfold/cuda/roce.cpp
+@@ -3,7 +3,7 @@
+ 
+ void roce_gather_cuda(const at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                       int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+-                      int64_t, int64_t);
++                      int64_t, int64_t, bool, int64_t, int64_t);
+ 
+ void gather(const at::Tensor& in, at::Tensor out, int64_t shard_packs, int64_t nbytes, int64_t row_packs,
+             int64_t recv_base, int64_t flag_base, int64_t send_base, int64_t ctrl, int64_t slot_bytes, int64_t epoch,
+@@ -15,9 +15,31 @@
+                 reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 == 0, "roce gather: 16-byte aligned tensors");
+     const at::cuda::CUDAGuard guard(in.device());
+     roce_gather_cuda(in, out, shard_packs, nbytes, row_packs, recv_base, flag_base, send_base, ctrl, slot_bytes, epoch,
+-                     stage_ctr, tail_ctr, poison, spin_limit, world, rank, slots, flag_stride, n_hca, grid, threads);
++                     stage_ctr, tail_ctr, poison, spin_limit, world, rank, slots, flag_stride, n_hca, grid, threads,
++                     false, 0, 0);
++}
++
++// OutProjSplit (OTS): ``gather`` with source s's shard (rows of row_packs 16-byte packs) written at out + s * out_src
++// + row * out_row packs (``out``: the window's first element; the window must fit the tensor ``out`` starts in).
++void gather_cols(const at::Tensor& in, at::Tensor out, int64_t shard_packs, int64_t nbytes, int64_t row_packs,
++                 int64_t out_row, int64_t out_src, int64_t recv_base, int64_t flag_base, int64_t send_base,
++                 int64_t ctrl, int64_t slot_bytes, int64_t epoch, int64_t stage_ctr, int64_t tail_ctr, int64_t poison,
++                 int64_t spin_limit, int64_t world, int64_t rank, int64_t slots, int64_t flag_stride, int64_t n_hca,
++                 int64_t grid, int64_t threads) {
++    TORCH_CHECK(in.is_cuda() && out.is_cuda() && in.is_contiguous(), "roce gather_cols: CUDA tensors, contiguous in");
++    TORCH_CHECK(reinterpret_cast<uintptr_t>(in.data_ptr()) % 16 == 0 &&
++                reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 == 0, "roce gather_cols: 16-byte aligned tensors");
++    TORCH_CHECK(row_packs > 0 && shard_packs % row_packs == 0 && out_row >= row_packs &&
++                out_src >= (shard_packs / row_packs) * out_row, "roce gather_cols: rows must not overlap");
++    TORCH_CHECK((world - 1) * out_src + (shard_packs / row_packs - 1) * out_row + row_packs <=
++                out.numel() * out.element_size() / 16, "roce gather_cols: the window runs past ``out``");
++    const at::cuda::CUDAGuard guard(in.device());
++    roce_gather_cuda(in, out, shard_packs, nbytes, row_packs, recv_base, flag_base, send_base, ctrl, slot_bytes, epoch,
++                     stage_ctr, tail_ctr, poison, spin_limit, world, rank, slots, flag_stride, n_hca, grid, threads,
++                     true, out_row, out_src);
+ }
+ 
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     m.def("gather", &gather, "one-shot RoCE all-gather (b12x's RoCEnante protocol)");
++    m.def("gather_cols", &gather_cols, "``gather`` into a column window of a [world, rows, D] output");
+ }
+--- tensorfold/cuda/roce.py
++++ tensorfold/cuda/roce.py
+@@ -483,6 +483,26 @@
+         if not torch.cuda.is_current_stream_capturing():
+             self.check()
+ 
++    def all_gather_cols(self, send: torch.Tensor, out: torch.Tensor, col: int) -> None:
++        """OutProjSplit: every rank's ``send`` [R, w] (contiguous) into columns col .. col + w of ``out`` [world, R, D]
++        (contiguous): ``all_gather``'s exchange, its copies placed at their rows of the window (``gather_cols``)."""
++
++        world, rows, d = out.shape
++        width = send.shape[1]
++        nbytes = send.numel() * send.element_size()
++        packs = nbytes // PACK
++        row_packs, out_row = width * send.element_size() // PACK, d * out.element_size() // PACK
++        need = max(1, -(-packs // (2 * THREADS)))
++        grid = min(1 << (need - 1).bit_length(), BLOCKS)
++        klass = grid.bit_length() - 1
++        c = self.counters.data_ptr()
++        _ext().gather_cols(send, out.view(-1)[col:], packs, nbytes, row_packs, out_row, rows * out_row, self.recv,
++                           self.flag, self.send, self.ctrl, self.slot_bytes, c, c + 4 * (1 + klass),
++                           c + 4 * (1 + self.classes + klass), c + 4 * (1 + 2 * self.classes), self.spin, self.world,
++                           self.rank, self.slots, self.flag_stride, self.n_flag, grid, THREADS)
++        if not torch.cuda.is_current_stream_capturing():
++            self.check()
++
+     def check(self) -> None:
+         """Raise if a wait timed out on the GPU or the proxy thread failed."""
+ 
+@@ -549,6 +569,26 @@
+             self.large += 1
+             self.nccl.all_gather(send, recv)
+ 
++    def cols_fit(self, nbytes: int) -> bool:
++        """OutProjSplit: whether a column piece of ``nbytes`` a rank gathers over RoCE (``all_gather_cols``); the byte
++        count alone decides, so every rank's answer is the same."""
++
++        return self.roce.fits_bytes(nbytes)
++
++    def all_gather_cols(self, send: torch.Tensor, out: torch.Tensor, col: int) -> None:
++        """``RoceGather.all_gather_cols`` for a piece ``cols_fit`` accepts: ``send`` [R, w] contiguous fp32 rows,
++        ``out`` [world, R, D] contiguous, ``col`` and w multiples of 4 (16-byte packs)."""
++
++        n = send.numel() * send.element_size()
++        if not (self.roce.fits_bytes(n) and send.is_contiguous() and out.is_contiguous() and
++                (send.shape[1] * send.element_size()) % PACK == 0 and (col * out.element_size()) % PACK == 0 and
++                send.data_ptr() % PACK == 0 and out.data_ptr() % PACK == 0):
++            raise ValueError("all_gather_cols: a RoCE-sized, 16-byte aligned contiguous piece")
++        self.small += 1
++        if not self.settled and not torch.cuda.is_current_stream_capturing():
++            self.nccl.barrier()
++        self.roce.all_gather_cols(send, out, col)
++
+     def barrier(self) -> None:
+         self.nccl.barrier()
+ 
+--- tensorfold/families/glm5_next/cuda/qmm.py
++++ tensorfold/families/glm5_next/cuda/qmm.py
+@@ -347,6 +347,20 @@
+                          variant=dec_tile(q.n, q.k) if x.shape[0] <= 16 else None)
+ 
+ 
++def matmul_cols(x: torch.Tensor, q: Q4, xs: torch.Tensor, c0: int, c1: int, out: torch.Tensor) -> torch.Tensor:
++    """Columns c0 .. c1 (multiples of 128) of ``matmul(x, q, xs, f32=True)`` into ``out`` [M, c1 - c0] (contiguous)
++    from zero-copy views of q's tiles, scales and biases, on the WHOLE matrix's K slices and decode tile: an output's
++    chain is its K slices' group order and their slice order, which the column window does not touch, so every value
++    is the whole call's bits (OutProjSplit's test_bits.py, every 128-column cut, rows 1-64). The window's own shape
++    would pick other K slices (``split_k(2048, 5632)`` is 8, the whole 4096 x 5632's 4: other bits)."""
++
++    if c0 % 128 or c1 % 128 or not 0 <= c0 < c1 <= q.n:
++        raise ValueError(f"matmul_cols: columns {c0} .. {c1} of {q.n} on 128-column boundaries")
++    v = shared.Q4(q.weight[c0 // BN:c1 // BN], q.scales[:, c0:c1], q.biases[:, c0:c1], c1 - c0, q.k, q.gs)
++    return shared.matmul(x, v, xs, sk=split_k(q.n, q.k), f32=True, out=out,
++                         variant=dec_tile(q.n, q.k) if x.shape[0] <= 16 else None)
++
++
+ # A decode window's [gate | up] 4-bit matmul whose K slices go through the partials buffer and reduce_kernel (qmm.cu's
+ # rule: up to 64 rows, fewer than 28 Mi values, unless TF_GLM_QMM_CLUSTERS=1) leaves the slices unreduced and the
+ # SwiGLU sums them (glue.swiglu_sum): the same bits, one launch and a bf16 round trip less a MoE layer
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -159,6 +159,12 @@
+         # (moe_block); None for prompt buffers and with TF_GLM_SHARED_SIDE=0
+         self.shared_side = (torch.cuda.Stream(device=dev) if not prefill and SHARED_SIDE and dev.type == "cuda"
+                             else None)
++        # OutProjSplit: the stream a decode window's first out-projection piece gathers on (``out_proj``), from the
++        # high-priority pool: the gather's blocks are scheduled ahead of the second piece's, and it is never one of the
++        # normal-priority pool's streams (the decode path's other side streams, a stream a caller runs decode on), so
++        # its gathers never queue behind their work; None for prompt buffers and with TF_GLM_OPROJ_SPLIT=0 (default)
++        self.oproj_side = (torch.cuda.Stream(device=dev, priority=-1) if not prefill and OPROJ_SPLIT and
++                           dev.type == "cuda" else None)
+ 
+     def moe_views(self, width: int) -> tuple:
+         """The routed experts' activations [rows * slots, width] and the shared expert's [rows, 2 width] / [rows,
+@@ -486,6 +492,26 @@
+ SHARED_SIDE = __import__("os").environ.get("TF_GLM_SHARED_SIDE", "1") != "0"
+ 
+ 
++def _oproj_settings(env=None) -> tuple[int, int]:
++    """OutProjSplit (HuntComms F9): (TF_GLM_OPROJ_SPLIT, TF_GLM_OPROJ_SPLIT_COL). TF_GLM_OPROJ_SPLIT=<rows> (default 0:
++    off) runs every ``out_proj`` of a decode window of at least that many rows (the attention blocks' output
++    projections and the dense MLP's down projection, 4-bit Q4 weights) in two column pieces: the first piece's rows
++    gather on ``Buffers.oproj_side`` while the second piece computes, the second gathers on the main stream after the
++    first's gather (``oproj_pieces``). The same bits. TF_GLM_OPROJ_SPLIT_COL: the first piece's columns, a multiple of
++    128 (default 0: half the output)."""
++
++    env = __import__("os").environ if env is None else env
++    rows = (env.get("TF_GLM_OPROJ_SPLIT", "") or "0").strip()
++    col = (env.get("TF_GLM_OPROJ_SPLIT_COL", "") or "0").strip()
++    if not rows.isdigit() or not col.isdigit() or int(col) % 128:
++        raise ValueError(f"TF_GLM_OPROJ_SPLIT: rows (0: off), TF_GLM_OPROJ_SPLIT_COL: a multiple of 128 (0: half), not "
++                         f"{rows!r} / {col!r}")
++    return int(rows), int(col)
++
++
++OPROJ_SPLIT, OPROJ_COL = _oproj_settings()
++
++
+ def prompt_tile(m: int, n: int, k: int) -> int:
+     """The shared prefill matmul's tile for an (m, n, k) projection of a prompt chunk (patch 0102). Every tile runs
+     each output's one fp32 mma chain over K in the same order (the tile only picks which warp computes it), so the
+@@ -531,9 +557,54 @@
+     def fill(lo: int, hi: int) -> None:          # rows are independent: any row range gives the same bits
+         mm(b, x[lo:hi], q, None if xs is None else xs[lo:hi], b.part[lo:hi], f32=True)
+ 
++    cut = oproj_cut(w, b, q, R)
++    if cut:
++        return oproj_pieces(w, b, x, q, xs, R, cut, site)
+     return partials(w, b, R, fill, site=site)
+ 
+ 
++def oproj_cut(w: Weights, b: Buffers, q, R: int) -> int:
++    """The first piece's columns when this decode window's out-projection runs in two column pieces
++    (TF_GLM_OPROJ_SPLIT), else 0 (prompt buffers have no ``oproj_side``; a communicator without ``cols_fit``, NCCL or
++    none at one rank, never splits). Each piece must pass the transport's byte rule, which refuses an empty piece (a
++    cut at or past D). Every input is the same on every rank (rows, shapes, that rule), so every rank splits the same
++    projections and their gathers pair up."""
++
++    if not OPROJ_SPLIT or R < OPROJ_SPLIT or b.oproj_side is None or not isinstance(q, qmm.Q4):
++        return 0
++    cut = OPROJ_COL or q.n // 2 // 128 * 128
++    fits = getattr(w.comm, "cols_fit", None)
++    if fits is None or not (fits(R * cut * 4) and fits(R * (q.n - cut) * 4)):
++        return 0
++    return cut
++
++
++def oproj_pieces(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, R: int, cut: int,
++                 site: tuple | None) -> torch.Tensor:
++    """``out_proj`` in two column pieces, 0 .. cut and cut .. D (``qmm.matmul_cols``: the whole matrix's K slices and
++    tile, so every output's bits are the whole call's), rows in b.part's storage as [R, cut] then [R, D - cut]; each
++    piece gathers into its columns of the [world, R, D] result (``all_gather_cols``). The first piece's gather runs on
++    b.oproj_side while the second piece computes; the main stream waits for it before the second piece's gather, so a
++    rank's gathers stay one at a time and in the same order on every rank. ``xs``: a decode window's input group sums
++    (every decode caller passes them; prompt chunks, which may not, never split)."""
++
++    d = q.n
++    flat = b.part.view(-1)
++    p0, p1 = flat[:R * cut].view(R, cut), flat[R * cut:R * d].view(R, d - cut)
++    out = b.gath[:b.world * R * d].view(b.world, R, d)
++    main, side = torch.cuda.current_stream(), b.oproj_side
++    qmm.matmul_cols(x[:R], q, xs[:R], 0, cut, p0)
++    side.wait_stream(main)
++    with torch.cuda.stream(side):
++        w.comm.all_gather_cols(p0, out, 0)
++    qmm.matmul_cols(x[:R], q, xs[:R], cut, d, p1)
++    if site is not None and l2pf.ACTIVE is not None:      # TF_GLM_L2PF: the next reads into L2 during the gathers
++        l2pf.ACTIVE.site(*site)
++    main.wait_stream(side)
++    w.comm.all_gather_cols(p1, out, cut)
++    return out
++
++
+ def undone(R: int, done: tuple[int, int] | None) -> list[tuple[int, int]]:
+     """The row ranges of [0, R) outside ``done`` (a block's front already run on those rows, TF_GLM_PREFILL_OVERLAP=2),
+     in row order; every row when ``done`` is None."""

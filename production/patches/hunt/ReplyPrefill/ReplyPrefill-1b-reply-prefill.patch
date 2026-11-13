@@ -1,0 +1,500 @@
+diff -r tensorfold/families/glm5_next/cuda/app.py ../tree6/tensorfold/families/glm5_next/cuda/app.py
+--- tensorfold/families/glm5_next/cuda/app.py	2026-10-30 06:54:59.953305900 +0000
++++ ../tree6/tensorfold/families/glm5_next/cuda/app.py	2026-10-30 06:55:04.304202600 +0000
+@@ -13,6 +13,7 @@
+ from tensorfold.server.errors import CONTEXT_LIMIT
+ from tensorfold.families.glm5_next.cuda.kept_reasoning import KeptReasoning
+ from tensorfold.families.glm5_next.cuda.prefix_render import PrefixRender
++from tensorfold.families.glm5_next.cuda import reply_prefill
+ from tensorfold.families.glm5_next.prompts import agent_history, effort_tail_enabled, effort_to_tail, thinking_off
+ 
+ 
+@@ -167,9 +168,13 @@
+         self.engine.request.policy = body.get("tf_policy") or (model.split("@", 1)[1] if "@" in model else None)
+         self.engine.request.stop_eos = not bool(body.get("ignore_eos", False))
+         self.engine.request.cache_salt = cache_salt(body)      # OTS 0120: which kept states it may resume
++        if reply_prefill.MODE and prepared is None:     # OTS: the prompt the reply's next-turn prefix must continue
++            prepared = self.prepare(body, chat)
+         result = super().run(body, chat, emit, prepared=prepared, cancelled=cancelled)
+         kept = getattr(self.template, "kept", None)
+         if chat and kept is not None and result.get("calls") and result.get("finish") == "tool_calls":
+             # the calls' reasoning, for a client that will not send it back
+             kept.remember(body.get("messages"), result["calls"], result.get("reasoning"))
++        if chat and reply_prefill.MODE:     # OTS: the next turn's prefix (the reply) prefilled before it comes
++            reply_prefill.submit(self, body, prepared, result)
+         return result
+diff -r tensorfold/families/glm5_next/cuda/engine.py ../tree6/tensorfold/families/glm5_next/cuda/engine.py
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 06:55:03.253601400 +0000
++++ ../tree6/tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 06:55:12.451379200 +0000
+@@ -2010,8 +2010,9 @@
+         return stats
+ 
+     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
+-                 constraint=None, *, vision=None, background: bool = False, prompt_array=None) -> dict[str, Any]:
+-        """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal; ``vision``: an image prompt's prepared pictures (``GlmPrepared``); ``background``: under --parallel, after the other requests and yielding to them; ``prompt_array``: the app's int64 array of exactly ``prompt``'s ids (under --parallel the scheduler's admission reads it instead of converting the prompt again, ``multi.stream_ids``)."""
++                 constraint=None, *, vision=None, background: bool = False, prompt_array=None,
++                 reply: int | None = None) -> dict[str, Any]:
++        """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal; ``vision``: an image prompt's prepared pictures (``GlmPrepared``); ``background``: under --parallel, after the other requests and yielding to them; ``prompt_array``: the app's int64 array of exactly ``prompt``'s ids (under --parallel the scheduler's admission reads it instead of converting the prompt again, ``multi.stream_ids``); ``reply`` (OTS, under --parallel only): ``prompt`` is a finished request's next-turn prefix and this a prefill-only job resuming that request's ``reply``-token prompt state (``reply_prefill``)."""
+ 
+         if len(prompt) >= self.limit:
+             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
+@@ -2029,6 +2030,8 @@
+             glm = {"code": code, "spec": spec, "salt": salt}
+             if prompt_array is not None and len(prompt_array) == len(prompt):
+                 glm["ids"] = prompt_array
++            if reply is not None:               # OTS: a reply's prefill-only job (``reply_prefill``)
++                glm["reply"] = int(reply)
+             # (OTS) the request's own list as it is (the scheduler's Stream never writes it; a copy is ~5 ms at 650k)
+             stats = self.scheduler.submit(prompt if type(prompt) is list else list(prompt), max_tokens, sampling,
+                                           bool(draft) and not self.serial_only,
+diff -r tensorfold/families/glm5_next/cuda/multi.py ../tree6/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 06:55:03.197171300 +0000
++++ ../tree6/tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 06:55:04.338592600 +0000
+@@ -51,7 +51,7 @@
+ from tensorfold.server.errors import CapacityError  # TFCAP-0075
+ from tensorfold.cuda.streams import Stream, next_fill
+ 
+-from . import multi_prefill, shard, sliced_fill
++from . import multi_prefill, reply_prefill, shard, sliced_fill
+ from .multi_tune import MultiSettings, RoundProfile, allocate, reach_of, sample_packed, scaled_confidence
+ from .pool import ALIGN, Pool, align_up
+ from .verify import COMMIT_GRAPHS, BatchedVerify, Segment, SerialVerify, Verified
+@@ -876,6 +876,9 @@
+         self.boot = os.urandom(6).hex()                  # this process's lineages (a fresh prefill's) are its own
+         self.prefix_waits = 0                            # requests that waited for a prefix another one prefilled
+         self.prefix_wait_tokens = 0                      # the prompt tokens they did not prefill again
++        # OTS (reply_prefill, rank 0): a reply job's layer slices, and what became of the jobs (/health)
++        self.reply_slice = reply_prefill.SLICE_MS
++        self.replies = {"kept": 0, "skipped": 0, "cancelled": 0}
+         self.disk = self._spill_store()                  # --spill-gib: the disk tier for kept prompts (cuda/spill.py)
+         self.next_sid = self.next_kid = self.next_order = 0
+         self.next_chat = 0
+@@ -957,6 +960,7 @@
+                 **({"multi_prefill": dict(self.grouped)} if self.group else {}),
+                 **({"fill_fast": self.fast_fills} if self.fill_fast else {}),
+                 **({"spill": self.disk.info()} if self.disk is not None else {}),
++                **({"reply_prefill": dict(self.replies)} if reply_prefill.MODE else {}),
+                 "prefix_waits": self.prefix_waits, "prefix_wait_tokens": self.prefix_wait_tokens,
+                 # how long rank 0's current iteration has run (0 between iterations): a stalled server keeps growing it
+                 "iteration_s": round(time.monotonic() - since, 1)
+@@ -1994,6 +1998,57 @@
+         self._emit(EVICT, [c.kid, int(spill)])
+         self._drop(c, spill=spill)
+ 
++    # -- OTS (reply_prefill): a finished reply's next-turn prefix, prefilled while the serve is idle (rank 0) ---------
++    def live_jobs(self) -> int:
++        """Rank 0: reply jobs holding a lane."""
++
++        return sum(1 for l in self.lanes.values() if reply_prefill.base_of(l.s) is not None and not l.s.done)
++
++    def _sliced_job(self, lane: Lane) -> bool:
++        """Rank 0: the lane is a reply job that fills in TF_GLM_REPLY_PREFILL_SLICE_MS layer slices."""
++
++        return (bool(self.reply_slice) and self.fill_costs is not None
++                and reply_prefill.base_of(lane.s) is not None)
++
++    def reply_skip(self, s: Stream) -> str | None:
++        """Rank 0, read only, before a reply job is admitted: why it is not (it then ends at once, having done
++        nothing), or None. It resumes from the longest kept prefix of its ids (its request's own prompt state, or an
++        earlier one if that went), which no stream may be using; nobody may have gone on past its request's prompt
++        (another kept state on the conversation's line past it); its rows must fit without evicting anything
++        (``fits``, ``_fits_unevicted``); and the state
++        it keeps must push nothing but superseded turn states out (``reply_prefill.cap_spares``)."""
++
++        if not s.draft or self.g.serial_only or s.vision is not None:
++            return "not drafted"
++        if KEEP_PER_CHAT == 1:
++            return "TF_GLM_KEEP_PER_CHAT=1 would drop the prompt's state"
++        prompt, karr = stream_ids(s)
++        base = reply_prefill.base_of(s)
++        b0 = base // self.grid * self.grid if self.grid else base
++        if not 0 < b0 < len(prompt) < self.g.limit or base > len(prompt):
++            return "nothing to keep"
++        hit = self._resume(prompt, (getattr(s, "glm", None) or {}).get("salt"), karr)
++        if hit is None:                  # (a longer kept prefix is a conversation that went on: the scan below)
++            return "prompt state gone"
++        if hit.extent.owner is not None:
++            return "prompt state in use"
++        for c in self.kept:
++            if c is not hit and c.key is not None and len(c.ids) > base:
++                arr = known_key(c)
++                if bool(np.array_equal(arr[:base], karr[:base])):
++                    return "conversation went on"
++        need = self._need(len(prompt))
++        others = [c for c in hit.extent.kept if len(c.ids) > len(hit.ids) and not key_is(c, len(c.ids), karr)]
++        if not self.fits(s) or not self._fits_unevicted(hit, need, others):
++            return "no free room"
++        cost = None
++        if self.kept_bytes_cap:
++            from .decode import snapshot_bytes as cost
++        if not reply_prefill.cap_spares(self.kept, hit, len(prompt), self.g.cache_entries, cap_victim, cost,
++                                        self.kept_bytes_cap):
++            return "kept-state cap"
++        return None
++
+     # -- a prefix another request is prefilling --------------------------------------------------------------------
+     # Requests that start together on a system prompt nobody has kept yet would each prefill it, side by side, each at
+     # a share of the GPU. A request whose prompt starts with a shared-prefix point another one still prefilling keeps
+@@ -2992,7 +3047,7 @@
+             return self._part_iteration()
+         group = self._group(lane) if lane is not None and self.group else None
+         busy = any(l.decoding and not l.s.done and not l.paused for l in self.lanes.values())
+-        if lane is not None and busy and self.fill_budget and lane.head is None:
++        if lane is not None and (busy or self._sliced_job(lane)) and self.fill_budget and lane.head is None:
+             self.partial = sliced_fill.PendingFill(group if group is not None else [(lane, self._stop(lane))],
+                                                   many=group is not None)
+             return self._part_iteration()
+@@ -3095,6 +3150,8 @@
+         decoding streams), so it waits for fewer decode rounds in all."""
+ 
+         layers = len(self.w.layers)
++        if any(self._sliced_job(lane) for lane, _ in pending.group):   # OTS: a reply job (alone on an idle serve)
++            return self.fill_costs.stop(pending.rows, pending.layer, self.reply_slice)
+         if not busy:
+             return layers
+         ends = self.fill_fast and all(stop == len(lane.s.prompt) for lane, stop in pending.group)
+@@ -3655,6 +3712,9 @@
+         lane_info = getattr(s, "glm_lane", None)
+         if lane_info:
+             out.update(lane_info)
++        if reply_prefill.base_of(s) is not None:          # OTS: a reply's prefill job that ran to its kept state
++            out["reply_prefill"] = "kept"
++            self.replies["kept"] += 1
+         return out
+ 
+     # -- rank 1 --------------------------------------------------------------------------------------------------------------
+@@ -3903,6 +3963,8 @@
+         if background or self.max_in_system is None:
+             return
+         held = self.decoder.live() + self._reading() + len(self.ready) + len(self.prefix)
++        if reply_prefill.MODE:              # OTS: a reply job's lane is given up for any request (``_end_jobs``)
++            held -= self.decoder.live_jobs()
+         if held + self.waiting.foreground_count() >= self.max_in_system:
+             raise CapacityError("all serving lanes are busy; retry shortly")
+ 
+@@ -3963,7 +4025,9 @@
+                 continue
+             if it[1] is not None:                    # (None: cancelled during the read, answered then)
+                 self.ready.append(it[1])
+-        while self.decoder.live() + self._reading() < self.max_streams:
++        # (OTS: a reply job's lane counts as free: the request dequeued for it ends the job first, ``_end_jobs``)
++        while self.decoder.live() - (self.decoder.live_jobs() if reply_prefill.MODE else 0) + self._reading() \
++                < self.max_streams:
+             if first is not None:
+                 item, first = first, None
+             elif self.held is not None:                 # (before a read one: ``held`` is set only while empty)
+@@ -3981,6 +4045,11 @@
+             stream, box = item
+             if stream is self._Flush:                # (it woke the worker; ``flushing`` did the flush)
+                 continue
++            if reply_prefill.MODE:
++                if reply_prefill.base_of(stream) is not None:     # OTS: a reply's prefill job
++                    self._admit_reply(item)
++                    continue
++                self._end_jobs("a request came")             # a request: no reply job holds a lane it may need
+             if not self.decoder.fits(stream):
+                 self.held = item                     # waits, first in line, for room
+                 self._why_held(stream, "no room (fits)")
+@@ -4130,6 +4199,57 @@
+             self.waiting.put((again, box))
+         self.decoder.requeue = []
+ 
++    # -- OTS (reply_prefill): reply jobs run only on an idle serve and end the moment a real request is pending --------
++    def idle(self) -> bool:
++        """Any thread (``reply_prefill``'s worker): nothing is live, held, read or queued."""
++
++        return (not self.decoder.live() and self.held is None and not self.loading and not self.ready
++                and not self.prefix and self.waiting.empty())
++
++    def _real_pending(self) -> bool:
++        """Whether any request other than a reply job waits: held, read, waiting for a prefix, or queued."""
++
++        if self.held is not None or self.ready or self.prefix or any(it is not None for _, it in self.loading):
++            return True
++        with self.waiting.mutex:
++            return any(reply_prefill.base_of(entry[2][0]) is None for entry in self.waiting.queue)
++
++    def _end_jobs(self, why: str) -> None:
++        """Every live reply job ends now, unfinished, on both ranks (FINISH, cancelled), answered with ``why``: a prompt
++        slice part way is given up (its rows past the kept state are overwritten by whoever resumes there)."""
++
++        for lane in list(self.decoder.lanes.values()):
++            s = lane.s
++            if reply_prefill.base_of(s) is None or s.done:
++                continue
++            s.done = True
++            s.started = s.finished = time.perf_counter()
++            self.decoder.replies["cancelled"] += 1
++            self.decoder.finish([s])
++            box = self.boxes.pop(id(s), None)
++            if box is not None:
++                box.put(("done", {"reply_prefill": f"cancelled: {why}"}))
++
++    def _admit_reply(self, item) -> None:
++        """A reply job into a lane when the serve is idle (``reply_prefill``'s worker submits it only then; a request
++        that came since wins) and ``MultiDecoder.reply_skip`` finds nothing against it, else answered at once with why
++        (never held first in line, never read from the spill tier)."""
++
++        stream, box = item
++        why = "serve busy" if self.decoder.live() or self._real_pending() else self.decoder.reply_skip(stream)
++        if why is None:
++            self.boxes[id(stream)] = box
++            try:
++                self.decoder.admit(stream)
++                return
++            except NoRoom:
++                why = "no room"
++            except Exception as exc:             # noqa: BLE001  (speculative work: it ends, the others go on)
++                why = f"failed: {exc!r}"
++            self.boxes.pop(id(stream), None)
++        self.decoder.replies["skipped"] += 1
++        box.put(("done", {"reply_prefill": f"skipped: {why}"}))
++
+     def _loop(self) -> None:
+         import sys
+         import traceback
+diff -r tensorfold/families/glm5_next/cuda/reply_prefill.py ../tree6/tensorfold/families/glm5_next/cuda/reply_prefill.py
+--- tensorfold/families/glm5_next/cuda/reply_prefill.py	1970-01-01 00:00:00.000000000 +0000
++++ ../tree6/tensorfold/families/glm5_next/cuda/reply_prefill.py	2026-10-30 06:55:04.406073600 +0000
+@@ -0,0 +1,241 @@
++"""OTS (ReplyPrefill): a finished reply's prompt state, prefilled while the serve is idle before the agent's next turn.
++
++A conversation's kept states sit at its PROMPTS' grid points only (``multi.MultiDecoder._admitted``: ``lane.point``):
++the reply's rows were written by decode windows, whose bits are not a prompt chunk's, so the next turn prefills the
++previous reply again (a tool call of ~120 tokens, an answer of ~2k) before its own tool result. With
++``TF_GLM_REPLY_PREFILL=1`` the app (``app.GlmApp.run``), once a reply is out, renders the conversation's next prefix as
++the client will send it back (``next_prefix``: the request's messages, the reply's assistant message and an empty
++probe of what follows it, through the same ``_prepare``: template, prefix render cache, literal mask, prompt ids), cuts
++it to its last grid point B and submits it
++as a prefill-only job (``GlmEngine.generate(..., reply=...)``, background): it resumes from the request's own prompt
++state, fills the prompt's tail and the reply in a prompt chunk starting on the grid, and keeps the state at B with its
++head row (a greedy first token is sampled from that row as for any prompt, and thrown away). The next turn's prompt
++starts with those ids, so it resumes at B and prefills only the tool result.
++
++Exactness: the state at B is the one any prompt chunking on the grid leaves there (the engine's chunk invariance,
++which every resume relies on: scripts/glm53/v110/tests/kernels/chunkinv), so a reply resumed from it has the bits of
++one resumed from the prompt's own state. A next turn that does not start with those ids resumes from the prompt's
++state, which the job never drops.
++
++Never in a real request's way: the replies wait in one worker's queue (``submit``; the newest ``WAITING``) until the
++serve is idle (``GlmScheduler.idle``: nothing live, held or queued), and only then are rendered (no host work beside
++decoding streams) and submitted one at a time. The scheduler admits a job only while nothing else is live or pending,
++and ends it, unfinished, the moment any other request is dequeued: that request waits at most for the job's current
++prompt slice (``TF_GLM_REPLY_PREFILL_SLICE_MS`` with TF_GLM_FILL_BUDGET_MS's layer costs; else its chunk). It is
++admitted only when the kept state it resumes from is in no stream's use, nobody went on past its request, its rows
++fit without evicting anything, and the state it keeps can push no other conversation's resume point out of the kept
++states (``cap_spares``: only earlier, superseded turn states may go, never a conversation's latest state, a shared
++prefix or the job's own base).
++
++``TF_GLM_REPLY_PREFILL``: 0 (off, the default) or 1. ``TF_GLM_REPLY_PREFILL_SLICE_MS``: the job's layer slices (default
++50 ms; 0: its prompt chunk whole; needs TF_GLM_FILL_BUDGET_MS > 0, whose start-up layer timings it uses).
++"""
++from __future__ import annotations
++
++import math
++import os
++import threading
++import time
++from collections import deque
++from types import SimpleNamespace
++from typing import Any
++
++WAITING = 8                     # replies waiting for an idle serve at most (the oldest go first)
++IDLE_POLL_S = 0.01              # the worker's look at the scheduler while the serve is busy
++_DROP = ("logprobs", "top_logprobs", "response_format", "seed")     # (read by ``_prepare``, never rendered)
++
++
++def mode(value: str | None = None) -> int:
++    """TF_GLM_REPLY_PREFILL: 0 (off, the default) or 1."""
++
++    value = (os.environ.get("TF_GLM_REPLY_PREFILL", "") if value is None else value).strip() or "0"
++    if value not in ("0", "1"):
++        raise ValueError(f"TF_GLM_REPLY_PREFILL: 0 or 1, not {value!r}")
++    return int(value)
++
++
++def slice_ms(value: str | None = None) -> float:
++    """TF_GLM_REPLY_PREFILL_SLICE_MS: a job's layer slices (default 50; 0: whole prompt chunks)."""
++
++    raw = (os.environ.get("TF_GLM_REPLY_PREFILL_SLICE_MS", "") if value is None else value).strip() or "50"
++    try:
++        ms = float(raw)
++    except ValueError:
++        ms = -1.0
++    if not math.isfinite(ms) or ms < 0:
++        raise ValueError(f"TF_GLM_REPLY_PREFILL_SLICE_MS: finite milliseconds >= 0 (0: whole chunks), not {raw!r}")
++    return ms
++
++
++MODE = mode()
++SLICE_MS = slice_ms()
++
++
++def base_of(s: Any) -> int | None:
++    """Rank 0: a reply job's request prompt length, or None for any other stream."""
++
++    got = (getattr(s, "glm", None) or {}).get("reply")
++    return int(got) if got is not None else None
++
++
++def cap_spares(kept: list, hit: Any, n: int, cap: int, cap_victim, cost=None, budget: int = 0) -> bool:
++    """Rank 0, read only: whether keeping one more state of ``n`` ids in ``hit``'s extent (``hit`` touched first, as
++    the job's admission does) drops, past the entry cap ``cap`` (and, with ``budget``, the bytes ``cost`` gives each
++    state; the new state costs what ``hit`` does), only SUPERSEDED states (shorter than another state in their extent,
++    not a shared prefix: a conversation's earlier turns), never ``hit`` or the new state. Follows
++    ``MultiDecoder._keep``'s loops with ``cap_victim``'s order."""
++
++    new = SimpleNamespace(ids=range(n), extent=hit.extent, shared=False)
++    sim = [c for c in kept if c is not hit] + [hit, new]
++
++    def spare(v) -> bool:
++        if v is new or v is hit or getattr(v, "shared", False):
++            return False
++        return any(len(c.ids) > len(v.ids) for c in sim if c.extent is v.extent)
++
++    while len(sim) > max(1, cap):
++        v = cap_victim(sim)
++        if not spare(v):
++            return False
++        sim.remove(v)
++    if budget and cost is not None:
++        each = {id(c): cost(hit if c is new else c) for c in sim}
++        while len(sim) > 1 and sum(each.values()) > budget:
++            v = cap_victim(sim)
++            if not spare(v):
++                return False
++            sim.remove(v)
++            each.pop(id(v))
++    return True
++
++
++# -- the app's side ------------------------------------------------------------------------------------------------------
++def assistant_message(result: dict[str, Any]) -> dict[str, Any]:
++    """The reply's assistant message as the server sends it (``cuda.http``'s non-streamed message; a stream's deltas add
++    up to the same)."""
++
++    message: dict[str, Any] = {"role": "assistant", "content": result.get("content") or None}
++    if result.get("reasoning"):
++        message["reasoning_content"] = result["reasoning"]
++    if result.get("calls"):
++        message["tool_calls"] = result["calls"]
++    return message
++
++
++def next_prefix(app: Any, body: dict[str, Any], prepared: Any, result: dict[str, Any]) -> list[int] | None:
++    """The ids the conversation's next request starts with: the request's messages, the reply, then what the client
++    sends next (the calls' tool results, else a user message) as an empty probe, rendered and tokenized by the app's
++    own ``_prepare`` (the template, the prefix render cache, the literal mask, the prompt ids' cache), cut where the
++    probe's opener token (``<|observation|>`` / ``<|user|>``) starts. The template writes each message from that message
++    alone (``prefix_render``), so whatever the next request's results, its ids agree up to there; what a template puts
++    after the last message (the generation prompt, a moved effort line) is past the cut. None when there is nothing
++    past the request's prompt, or the body cannot be rendered again."""
++
++    reply = assistant_message(result)
++    calls = reply.get("tool_calls") or []
++    probe = ([{"role": "tool", "tool_call_id": c.get("id"), "content": ""} for c in calls] if calls
++             else [{"role": "user", "content": ""}])
++    nxt = {k: v for k, v in body.items() if k not in _DROP}
++    nxt.update(messages=[*body["messages"], reply, *probe], temperature=0, stream=False)
++    try:
++        ids = app._prepare(nxt, True).prompt
++    except Exception:  # noqa: BLE001 - a body the server cannot render again is one it cannot predict
++        return None
++    mark = app.tok.token_to_id("<|observation|>" if calls else "<|user|>")
++    at = len(ids) - 1
++    while at > len(prepared.prompt) and ids[at] != mark:     # (the probe's opener is a few tokens from the end)
++        at -= 1
++    return list(ids[:at]) if at > len(prepared.prompt) else None
++
++
++class Job:
++    """A reply waiting for an idle serve (``submit``'s handle): ``done`` is set once it ran or was dropped; ``stats``:
++    what the scheduler answered (None: nothing was submitted, ``why`` says why)."""
++
++    def __init__(self, app: Any, body: dict[str, Any], prepared: Any, result: dict[str, Any], policy, salt) -> None:
++        self.app, self.body, self.prepared, self.result, self.policy, self.salt = app, body, prepared, result, \
++            policy, salt
++        self.done = threading.Event()
++        self.stats: dict[str, Any] | None = None
++        self.why: str | None = None
++
++
++_LOCK = threading.Lock()
++_WAITING: deque = deque()               # Jobs, oldest first
++_WAKE = threading.Event()
++_WORKER: list = []                       # the worker thread, once started
++
++
++def submit(app: Any, body: dict[str, Any], prepared: Any, result: dict[str, Any]) -> Job | None:
++    """After a reply (``GlmApp.run``): queue its next-turn prefix for the worker, which renders it and submits it as a
++    background prefill-only job once the serve is idle. None when there is nothing to do."""
++
++    engine = app.engine
++    if not MODE or getattr(engine, "scheduler", None) is None or getattr(engine, "serial_only", False):
++        return None
++    if result.get("finish") not in ("tool_calls", "stop") or body.get("draft", True) is False:
++        return None
++    if prepared.vision is not None or not isinstance(body.get("messages"), list):
++        return None
++    job = Job(app, body, prepared, result, getattr(engine.request, "policy", None),
++              getattr(engine.request, "cache_salt", None))
++    with _LOCK:
++        _WAITING.append(job)
++        while len(_WAITING) > WAITING:
++            old = _WAITING.popleft()
++            old.why = "too many waiting"
++            old.done.set()
++        if not _WORKER or not _WORKER[0].is_alive():
++            _WORKER[:] = [threading.Thread(target=_work, name="reply-prefill", daemon=True)]
++            _WORKER[0].start()
++    _WAKE.set()
++    return job
++
++
++def pending() -> int:
++    """Replies waiting for an idle serve."""
++
++    with _LOCK:
++        return len(_WAITING)
++
++
++def _work() -> None:
++    """The worker: the oldest waiting reply, once its engine's scheduler is idle, then the next."""
++
++    while True:
++        _WAKE.wait()
++        with _LOCK:
++            job = _WAITING[0] if _WAITING else None
++            if job is None:
++                _WAKE.clear()
++                continue
++        if not job.app.engine.scheduler.idle():
++            time.sleep(IDLE_POLL_S)
++            continue
++        with _LOCK:
++            if not _WAITING or _WAITING[0] is not job:
++                continue                # (dropped meanwhile)
++            _WAITING.popleft()
++        try:
++            _run(job)
++        except Exception as exc:  # noqa: BLE001 - speculative work: logged, never raised into a request
++            job.why = f"failed: {exc!r}"
++            print(f"[tensorfold] reply prefill failed: {exc!r}", flush=True)
++        finally:
++            job.done.set()
++
++
++def _run(job: Job) -> None:
++    engine = job.app.engine
++    ids = next_prefix(job.app, job.body, job.prepared, job.result)
++    if ids is None:
++        job.why = "no next prefix"
++        return
++    grid = int(getattr(engine, "grid", 0) or 0)
++    n = len(job.prepared.prompt)
++    point = len(ids) // grid * grid if grid else len(ids)
++    if point <= (n // grid * grid if grid else n):
++        job.why = "the reply ends in the prompt's grid step"
++        return
++    engine.request.policy, engine.request.stop_eos, engine.request.cache_salt = job.policy, True, job.salt
++    job.stats = engine.generate(ids[:point], 1, None, lambda new: False, background=True, reply=n)

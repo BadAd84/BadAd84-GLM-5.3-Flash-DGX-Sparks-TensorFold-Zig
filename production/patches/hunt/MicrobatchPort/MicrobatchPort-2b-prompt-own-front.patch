@@ -1,0 +1,435 @@
+# MicrobatchPort-2b (rebased onto stack/prx-fixed + 1b + 3b; behaviour unchanged). MicrobatchPort-2: a row-split prompt chunk's DSA layers run their replicated front on each rank's own rows, its outputs
+# shared instead of the normed rows (TF_GLM_PROMPT_OWN_FRONT=1 with TF_GLM_HC_SPLIT=1; default off until measured on
+# the GB10 triangle). The non-indexer half of the recipe's tp4 0102 (the indexer's own-row top-k is OTS 0101's).
+#
+# - Why: before each DSA layer every rank swapped its own rows of the next normed input (8 KiB a row) so that every
+#   rank could run DSA's replicated front on every row: q_a / kv_a and their RMSNorms, the indexer's key / weight
+#   projection and gate. Here the glue keeps the normed rows on their owner (HcSplit.glue / glue_side share=False);
+#   each rank runs that front on its own rows and shares b.ikr, b.igr (832 B a row) then b.qr, b.lat (4 KiB a row):
+#   4.8 KiB a row instead of 8 KiB at the DSA layers' layer-end sites, and a third of those projections a rank.
+# - own_front.py (new): applies, takes, dsa_block.
+# - hcsplit.py: SplitSettings.own_front (TF_GLM_PROMPT_OWN_FRONT) in prompt_code; HcSplit.share / wait /
+#   _swap_share (whole own shares, on the side stream with the overlap); glue / glue_side / _glue_rows share=.
+# - forward.py: split_layer_steps runs own_front.dsa_block on DSA layers and keeps the normed rows before them;
+#   dsa_rows(fronted=True) skips the index projections (already on every row).
+# - microbatch.py: each half's DSA layers likewise (MicrobatchPort-1).
+# - engine.py: the startup comparison's message.
+# - Not taken: multi-prompt chunks, unsplit chunks, decode and verify windows, TF_GLM_KV_SHARD, TF_GLM_LATENT=0.
+#
+# Bits: bit-identical. Every kernel is the unchanged path's on the same row (projections, norms and writers keep rows
+# apart); every rank writes its caches from the same shared bytes. Test: test_microbatch.py --own (6 own-front arms,
+# with and without halving, p2p and all-gather, overlap 0 / 1 / 2, x 3 delay profiles: every output and cache
+# bit-identical to the unchanged split; each arm ran the own-row front on every DSA layer and sent fewer bytes);
+# mutants own-* (mutants_microbatch.py). Applies on top of MicrobatchPort-1 and -3.
+#
+# Ported from the GLM-5.3 recipe's tp4 patch 0102 (Mia's AI Lab, Apache-2.0); design credit drowzeys
+# (github.com/drowzeys/TensorFold, glm53-tp4-2026-10-05, compute_prompt_sp, TF_GLM53_SP_SELECT). No code copied.
+--- tensorfold/families/glm5_next/cuda/hcsplit.py
++++ tensorfold/families/glm5_next/cuda/hcsplit.py
+@@ -32,7 +32,12 @@
+ 
+ TF_GLM_PROMPT_MICROBATCH=1 (``microbatch``): a chunk runs as two halves, each row-split by its own HcSplit over row
+ views of the prompt buffers, both on one side stream (``HcSplit(stream=...)``); a half's glue runs there too
+-(``glue_side``), under the other half's compute, and the main stream ``join``s it before that half's next block."""
++(``glue_side``), under the other half's compute, and the main stream ``join``s it before that half's next block.
++
++TF_GLM_PROMPT_OWN_FRONT=1 (``own_front``): the glue before a DSA layer keeps the normed rows on their owner, whose
++attention block runs DSA's replicated front (q_a / kv_a and their norms, the indexer's key / weight projection and
++gate) on them and shares those outputs (``share``: whole own shares, on the side stream with the overlap): 4.8 KiB a
++row instead of the normed row's 8 KiB, and a third of the front's matmuls a rank."""
+ 
+ from __future__ import annotations
+ 
+@@ -45,6 +50,7 @@
+ from . import glue
+ 
+ EXCHANGES = ("p2p", "gather")
++SHARES = 2               # own-row shares a DSA layer keeps in flight at once (``HcSplit.share``, TF_GLM_PROMPT_OWN_FRONT)
+ 
+ 
+ def _flag(env, name: str) -> bool:
+@@ -94,12 +100,15 @@
+     fronts: bool = False          # TF_GLM_PREFILL_OVERLAP=2: the next block's front on own rows during the swaps
+     microbatch: bool = False      # TF_GLM_PROMPT_MICROBATCH=1: a chunk in two halves (``microbatch``)
+     micro_min: int = 1920         # TF_GLM_PROMPT_MICROBATCH_MIN_ROWS: halves of fewer rows run the chunk whole
++    own_front: bool = False       # TF_GLM_PROMPT_OWN_FRONT=1: DSA's q_a / kv_a front on own rows (``own_front``)
+ 
+     def __post_init__(self) -> None:
+         if self.fronts and not self.overlap:
+             raise ValueError("the blocks' fronts run during the overlapped swaps: they need the overlap")
+         if self.microbatch and not self.split:
+             raise ValueError("TF_GLM_PROMPT_MICROBATCH=1 row-splits each half: it needs TF_GLM_HC_SPLIT=1")
++        if self.own_front and not self.split:
++            raise ValueError("TF_GLM_PROMPT_OWN_FRONT=1 runs on the row split's own rows: it needs TF_GLM_HC_SPLIT=1")
+ 
+     @classmethod
+     def from_env(cls, env=None) -> "SplitSettings":
+@@ -118,7 +127,8 @@
+         return cls(split, overlap, _int(env, "TF_GLM_OVERLAP_PIECES", 2, 1, 8),
+                    _int(env, "TF_GLM_HC_SPLIT_MIN_ROWS", 64, 2, 16384), exchange, fronts=level == "2",
+                    microbatch=_flag(env, "TF_GLM_PROMPT_MICROBATCH"),
+-                   micro_min=_int(env, "TF_GLM_PROMPT_MICROBATCH_MIN_ROWS", 1920, 64, 16384))
++                   micro_min=_int(env, "TF_GLM_PROMPT_MICROBATCH_MIN_ROWS", 1920, 64, 16384),
++                   own_front=_flag(env, "TF_GLM_PROMPT_OWN_FRONT"))
+ 
+     def piece_count(self) -> int:
+         return self.pieces if self.overlap and self.exchange == "p2p" else 1
+@@ -130,10 +140,13 @@
+                 EXCHANGES.index(self.exchange)]
+ 
+     def prompt_code(self) -> list[int]:
+-        """TF_GLM_PROMPT_MICROBATCH for the ranks' startup comparison (every rank must halve the same chunks: a lone
+-        rank halving would pair its exchanges with the others' wrong ones). Not in ``code``, which keys the spill
+-        tier's folders: halves leave the same bits, so the tier's kept states stay valid either way."""
+-        return [self.micro_min if self.split and self.microbatch else 0]
++        """TF_GLM_PROMPT_MICROBATCH and TF_GLM_PROMPT_OWN_FRONT for the ranks' startup comparison (every rank must
++        halve the same chunks and swap the same rows: a lone rank doing otherwise would pair its exchanges with the
++        others' wrong ones). Not in ``code``, which keys the spill tier's folders: both leave the same bits, so the
++        tier's kept states stay valid either way."""
++        if not self.split:
++            return [0, 0]
++        return [self.micro_min if self.microbatch else 0, int(self.own_front)]
+ 
+     def describe(self) -> str:
+         what = "rows split between the ranks"
+@@ -146,6 +159,8 @@
+         if self.microbatch:
+             what += (f"; chunks whose halves reach {self.micro_min} rows in two halves, one's exchanges under the "
+                      "other's compute")
++        if self.own_front:
++            what += "; DSA's q_a / kv_a front and the indexer's key projection on own rows, their outputs shared"
+         return f"prompt chunks' hyper-connections: {what} (chunks of {self.min_rows}+ rows)"
+ 
+ 
+@@ -202,6 +217,9 @@
+             self.ev_part = [torch.cuda.Event() for _ in range(n)]
+             self.ev_glue = [torch.cuda.Event() for _ in range(n)]
+             self.ev_done = torch.cuda.Event()
++            # TF_GLM_PROMPT_OWN_FRONT: a DSA layer's own-row shares (``share``) on the side stream
++            self.ev_share_in = [torch.cuda.Event() for _ in range(SHARES)]
++            self.ev_share_out = [torch.cuda.Event() for _ in range(SHARES)]
+ 
+     def padded(self, R: int) -> int:
+         """R rounded up to a whole share a rank (two ranks: an odd chunk gets one pad row)."""
+@@ -393,31 +411,71 @@
+                 self.prx.done(call)
+                 self.zcall[j] = None
+ 
++    def _swap_share(self, outs: list[torch.Tensor]) -> None:
++        """Every rank's whole share of rows [r H, r H + H) of each row buffer in ``outs`` to every rank (this rank's
++        out, the peers' in; pad rows travel too, never read): ``_swap_rows`` for the share in one piece."""
++
++        H, mine = self.H, self.mine()
++        if self.gather:                                 # rank order is row order
++            for t in outs:
++                self.all_gather(t[mine:mine + H].reshape(-1), t[:self.Rp].reshape(-1))
++            return
++        if self.world > 2:
++            self.w.comm.exchange_all({p: [t[mine:mine + H] for t in outs] for p in self.peers},
++                                     {p: [t[p * H:p * H + H] for t in outs] for p in self.peers})
++            return
++        theirs = self.theirs()
++        self.w.comm.exchange([t[mine:mine + H] for t in outs], [t[theirs:theirs + H] for t in outs], self.peer)
++
++    def share(self, outs: list[torch.Tensor], slot: int = 0):
++        """TF_GLM_PROMPT_OWN_FRONT: this rank's rows of ``outs`` (contiguous row buffers it wrote on the current
++        stream) to every peer, theirs in. With a side stream: there, after the current stream's work so far, returning
++        the event the reader waits on (``wait``) before it reads the peers' rows. Without: on the current stream,
++        None. Every rank issues its shares and swaps in one order, so the collectives pair."""
++
++        if self.stream is None:
++            self._swap_share(outs)
++            return None
++        ev_in, ev_out = self.ev_share_in[slot], self.ev_share_out[slot]
++        ev_in.record(torch.cuda.current_stream())
++        with torch.cuda.stream(self.stream):
++            self.stream.wait_event(ev_in)
++            self._swap_share(outs)
++            ev_out.record(self.stream)
++        return ev_out
++
++    @staticmethod
++    def wait(ev) -> None:
++        """The current stream waits for a ``share`` (None: it ran on the current stream)."""
++        if ev is not None:
++            torch.cuda.current_stream().wait_event(ev)
++
+     def glue_side(self, hc=None, norm=None, taps: tuple[int, ...] = (), final: bool = False, rot: int = 0,
+-                  rows: tuple[int, ...] | None = None) -> None:
++                  rows: tuple[int, ...] | None = None, share: bool = True) -> None:
+         """``glue`` with its kernels on the side stream after the current stream's work so far (TF_GLM_PROMPT_
+         MICROBATCH: the half's glue under the other half's compute; ``join`` before reading what it wrote). The same
+         kernels on the same rows in the same order, after the partials' exchange (earlier on the side stream, so in
+         stream order), the final rows' all-gather (``rows``) there too. Without a side stream: ``glue`` in place."""
+ 
+         if self.stream is None:
+-            self.glue(hc, norm, taps, final, rot=rot, rows=rows)
++            self.glue(hc, norm, taps, final, rot=rot, rows=rows, share=share)
+             return
+         self.ev_own.record(torch.cuda.current_stream())
+         with torch.cuda.stream(self.stream):
+             self.stream.wait_event(self.ev_own)
+-            self._glue_rows(hc, norm, taps, final, rot, rows)
++            self._glue_rows(hc, norm, taps, final, rot, rows, share)
+             self.ev_done.record(self.stream)
+         self.pending = True
+ 
+     def _glue_rows(self, hc, norm, taps: tuple[int, ...], final: bool, rot: int,
+-                   rows: tuple[int, ...] | None) -> None:
++                   rows: tuple[int, ...] | None, share: bool = True) -> None:
+         """``glue``'s work on the current stream, piece by piece, its swaps in place (``glue_side``)."""
+ 
+         b, c = self.b, self.w.cfg
+         mine = self.mine()
+         whole = final and rows is None
+-        outs = [b.taps[slot] for slot in taps] + ([b.hidden] if whole else []) + ([b.normed] if hc is not None else [])
++        outs = [b.taps[slot] for slot in taps] + ([b.hidden] if whole else []) + \
++            ([b.normed] if hc is not None and share else [])
+         fin = self._fin(len(rows)) if final and rows else None
+         for j, (off, n) in enumerate(self.pieces):
+             lo, hi = mine + off, mine + off + n
+@@ -441,7 +499,7 @@
+ 
+     def glue(self, hc=None, norm=None, taps: tuple[int, ...] = (), final: bool = False,
+              front: Callable[[int, int], None] | None = None, rot: int = 0,
+-             rows: tuple[int, ...] | None = None) -> None:
++             rows: tuple[int, ...] | None = None, share: bool = True) -> None:
+         """hc_post of this rank's rows, then (in order) the layer's DFlash2 taps, the final stream mean (``final``)
+         and the next hc_pre (``hc``, ``norm``); their rows swapped with the peers'. ``front(lo, hi)``
+         (TF_GLM_PREFILL_OVERLAP=2): the next block's row-independent start on this rank's rows of each piece, on the
+@@ -449,13 +507,16 @@
+         the caller runs it on the peers' rows (``own`` is what was done) after this returns. ``rot``: the rank whose
+         partial hc_post sums first (``_post``). ``rows`` (with ``final``): the only rows of b.hidden anything reads
+         (sorted, below R; ``forward.compute``'s ``need``): their stream means alone, by their owners, then one
+-        all-gather of those rows instead of every row in the swaps (None: every row, as before)."""
++        all-gather of those rows instead of every row in the swaps (None: every row, as before). ``share`` False
++        (TF_GLM_PROMPT_OWN_FRONT, before a DSA layer): the normed rows stay this rank's own (the DSA block's own-row
++        front shares what the peers need); the taps and the final mean still travel."""
+ 
+         b, c = self.b, self.w.cfg
+         mine = self.mine()
+         main = torch.cuda.current_stream()
+         whole = final and rows is None
+-        outs = [b.taps[slot] for slot in taps] + ([b.hidden] if whole else []) + ([b.normed] if hc is not None else [])
++        outs = [b.taps[slot] for slot in taps] + ([b.hidden] if whole else []) + \
++            ([b.normed] if hc is not None and share else [])
+         fin = self._fin(len(rows)) if final and rows else None
+         for j, (off, n) in enumerate(self.pieces):
+             lo, hi = mine + off, mine + off + n
+--- tensorfold/families/glm5_next/cuda/forward.py
++++ tensorfold/families/glm5_next/cuda/forward.py
+@@ -993,12 +993,13 @@
+ 
+ def dsa_rows(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffers, R: int, nch: int | None,
+              index, host_pos: int | None, sparse_np: int | None = None, layer: int = -1, lo: int = 0,
+-             twin: bool = False, root: int = -1) -> torch.Tensor:
++             twin: bool = False, root: int = -1, fronted: bool = False) -> torch.Tensor:
+     """``_dsa_latent`` up to its output projection, for rows lo .. lo + R of the buffers (their front done) on one
+     stream's caches (``lc``, ``index``, ``pos_dev``, ``host_pos``: its first row's position): the latent write,
+     indexer update, absorb, attention and expand; returns the rows' attention output [R, heads * v_dim] (b.vn's rows).
+     A chunk of several streams' prompts (``multi_prefill``) runs each stream's rows through this: the call they get
+-    alone."""
++    alone. ``fronted`` (TF_GLM_PROMPT_OWN_FRONT): the index keys / weights and gates are already in b.ikr / b.igr on
++    every row (``own_front``; b.normed holds this rank's rows only), so they are not projected here."""
+ 
+     c = w.cfg
+     HL = a.heads
+@@ -1015,8 +1016,9 @@
+         ik, ig, pk = index
+         ix = a.index
+         with prof.timed("dsa: indexer update"):
+-            mm(b, b.normed[rs], ix.kw, b.xs[rs], b.ikr[rs])
+-            glue.router(b.normed[rs], ix.gate, b.igr[rs])
++            if not fronted:
++                mm(b, b.normed[rs], ix.kw, b.xs[rs], b.ikr[rs])
++                glue.router(b.normed[rs], ix.gate, b.igr[rs])
+             sparse.index_update(b.ikr[rs, :c.index_dim], b.igr[rs], ix.ln_w, ix.ln_b, ix.ape, ik, ig, pk, pos_dev)
+     with prof.timed("dsa: absorb"):
+         qa = latent.absorb_q(b.q[rs], a.absorb, s.qa[rs], prompt=b.prefill and latent.PROMPT_MMA)
+@@ -1289,7 +1291,7 @@
+     ``mixer``: the layers' KDA / DSA blocks as ``mixer(layer, done)`` instead of on ``st`` (a chunk of several
+     streams' prompts, ``multi_prefill``). TF_GLM_PROMPT_MICROBATCH: the chunk in two halves (``microbatch``)."""
+ 
+-    from . import microbatch
++    from . import microbatch, own_front
+ 
+     if microbatch.applies(w, st, b, mixer, host_pos, R):
+         yield from microbatch.layer_steps(w, st, b, R, nch, host_pos, need)
+@@ -1299,6 +1301,8 @@
+     layers = w.layers
+     sp.begin(R)
+     fronts = sp.settings.fronts
++    # TF_GLM_PROMPT_OWN_FRONT: DSA layers' replicated front on own rows, its outputs shared instead of the normed rows
++    own = own_front.applies(w, st, b, mixer, host_pos)
+     try:
+         Rp = sp.Rp                               # R, or R + 1 with a zero pad row for an odd chunk
+         first, h = layers[0], layers[0].attn_hc
+@@ -1308,6 +1312,9 @@
+         for i, layer in enumerate(layers):
+             if mixer is not None:
+                 mixer(layer, done)
++            elif own and own_front.takes(layer):
++                with prof.timed("dsa (total)"):
++                    own_front.dsa_block(layer, w, st, b, R, nch, host_pos, done)
+             else:
+                 _mixer(layer, w, st, b, R, nch, host_pos, None, done)
+             front = ffn_front(layer, w, b) if fronts else None
+@@ -1319,7 +1326,8 @@
+             with prof.timed("hc (layer end)"):
+                 sp.glue(nxt.attn_hc if nxt is not None else None, nxt.in_norm if nxt is not None else None,
+                         taps=tuple(b.tap_at.get(layer.index, ())), final=nxt is None, front=front,
+-                        rot=tp.of(w).owner(layer.index), rows=need)
++                        rot=tp.of(w).owner(layer.index), rows=need,
++                        share=not (own and nxt is not None and own_front.takes(nxt)))
+             done = sp.own() if front is not None else None
+             yield layer.index
+     finally:
+--- tensorfold/families/glm5_next/cuda/microbatch.py
++++ tensorfold/families/glm5_next/cuda/microbatch.py
+@@ -37,7 +37,8 @@
+ 0121 (a kept point inside the chunk): halves only when the point is not in half A (it then splits half B's
+ recurrence as it split the chunk's, so the state at the point is the one left in the other parity).
+ 
+-The glue's fronts (TF_GLM_PREFILL_OVERLAP=2) are not run during the halves' glue: the other half's compute covers the
++With TF_GLM_PROMPT_OWN_FRONT each half's DSA block runs its own-row front (``own_front``) on the main stream, its
++shares on the side stream after the other half's queued chain. The glue's fronts (TF_GLM_PREFILL_OVERLAP=2) are not run during the halves' glue: the other half's compute covers the
+ exchanges instead. Without a side stream (TF_GLM_PREFILL_OVERLAP=0) the chains run in place, in the same order: the
+ same bits, no overlap. Layer-sliced prefill (``forward.compute_steps``) joins both halves' side work at each yield, as
+ the unhalved split joins its side stream there.
+@@ -171,6 +172,7 @@
+     b.hidden's rows (``need``: only those, each by its half's owner, as the unhalved loop leaves them; None: every
+     row) at the end."""
+ 
++    from . import own_front
+     from .forward import _ffn, _mixer
+ 
+     c = w.cfg
+@@ -178,6 +180,7 @@
+     lay = tp.of(w)
+     hv = _halves(w, b, R)
+     halves = ((hv.a, st, hv.h, host_pos), (hv.b, _state(st, hv.h), R - hv.h, host_pos + hv.h))
++    own = own_front.applies(w, st, b, None, host_pos)     # TF_GLM_PROMPT_OWN_FRONT: each half's DSA front on own rows
+     # the final rows a half's glue gathers: its own of ``need``, in its rows (None: every row)
+     fins = (None, None) if need is None else (tuple(r for r in need if r < hv.h),
+                                              tuple(r - hv.h for r in need if r >= hv.h))
+@@ -195,7 +198,11 @@
+             for half, hs, n, pos in halves:
+                 half.split.join()
+                 # (the chunk's nch: every row's dense attention visits the chunks it does in the whole chunk)
+-                _mixer(layer, w, hs, half, n, nch, pos, None)
++                if own and own_front.takes(layer):
++                    with prof.timed("dsa (total)"):
++                        own_front.dsa_block(layer, w, hs, half, n, nch, pos)
++                else:
++                    _mixer(layer, w, hs, half, n, nch, pos, None)
+                 with prof.timed("hc"):
+                     half.split.glue_side(layer.ffn_hc, layer.post_norm)
+             for (half, hs, n, pos), fin in zip(halves, fins):
+@@ -205,7 +212,8 @@
+                     half.split.glue_side(nxt.attn_hc if nxt is not None else None,
+                                          nxt.in_norm if nxt is not None else None,
+                                          taps=tuple(b.tap_at.get(layer.index, ())), final=nxt is None,
+-                                         rot=lay.owner(layer.index), rows=fin if nxt is None else None)
++                                         rot=lay.owner(layer.index), rows=fin if nxt is None else None,
++                                         share=not (own and nxt is not None and own_front.takes(nxt)))
+             yield layer.index
+     finally:
+         for half, _, _, _ in halves:
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -1081,7 +1081,7 @@
+                                "TENSORFOLD_NUCLEUS_UNION, TF_GLM_MAX_ROWS, TF_GLM_WIDE_GRAPHS, TF_GLM_KV, TF_GLM_ASSISTANT_ENDS, "
+                                "TF_GLM_DRAFT_PRELAUNCH, TF_GLM_KV_SHARD, TF_GLM_ONE_CHUNK_WARM, "
+                                "TF_GLM_INDEXER_SHARD, TF_GLM_EXPERT_ROTATE, TF_GLM_SOLO_GRAPHS, TF_GLM_DRAFT_SKIP, "
+-                               "TF_GLM_PROMPT_OVERLAP, TF_GLM_PRX*, TF_GLM_PROMPT_MICROBATCH*): "
++                               "TF_GLM_PROMPT_OVERLAP, TF_GLM_PRX*, TF_GLM_PROMPT_MICROBATCH*, TF_GLM_PROMPT_OWN_FRONT): "
+                                f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                                "; pull the draft model on every machine (or pass --drafter none to all) and give "
+                                "every rank the same flags")
+--- /dev/null
++++ tensorfold/families/glm5_next/cuda/own_front.py
+@@ -0,0 +1,84 @@
++"""TF_GLM_PROMPT_OWN_FRONT=1: a row-split prompt chunk's DSA layers run their replicated front on each rank's own rows.
++
++With the row split (``hcsplit``, TF_GLM_HC_SPLIT=1) each rank ends a layer holding the next layer's normed input for
++its own rows [r H, r H + H) only, and swaps those bf16 rows (hidden 4,096: 8 KiB a row) so that every rank can run the
++next block on every row. KDA blocks and the MoE need every row (their projections are split by heads and experts),
++but a DSA block's front is replicated, not head-split: q_a / kv_a (one projection, ``a.proj``) and their RMSNorms,
++the indexer's key and weight projection (``kw``) and its gate. Every rank ran all of it on every row.
++
++Here, before a DSA layer, the glue keeps the normed rows on their owner (``HcSplit.glue(share=False)``); each rank runs
++that front on its own rows and the ranks share its outputs instead:
++
++1. own rows: q_a / kv_a, their norms (b.qr, b.lat) and q_b for this rank's heads (``forward.dsa_front``, already run
++   during the glue with TF_GLM_PREFILL_OVERLAP=2), and with the indexer the index keys and weights (b.ikr) and gates
++   (b.igr);
++2. shared: b.ikr and b.igr's rows (832 B a row), then b.qr and b.lat's rows (4 KiB a row);
++3. every rank, every row, as before (``forward.dsa_rows(fronted=True)``): q_b for its heads on the other ranks' rows,
++   the latent write, the index update, absorb, dense attention, the token selection (OTS 0101's shard: each rank its
++   own rows' pools), sparse attention, expand; then o_proj into the split's partials.
++
++Every kernel is the unchanged path's on the same row (the projections, norms and writers keep rows apart), so the
++caches and every output are the unchanged path's bit for bit, and identical on every rank: what each rank writes it
++computed from the same shared bytes. The selection's half (the indexer's top-k on own rows) is OTS 0101's, already in
++the tree; this is the recipe's tp4 0102 without it.
++
++Order: with the overlap (TF_GLM_PREFILL_OVERLAP=1 or 2) the shares run on the split's side stream, in one order on
++every rank (index keys, then the rows). Without it they run in place. Not for several streams' prompts in one chunk
++(``multi_prefill``'s mixer), chunks too short to split, decode and verify windows, TF_GLM_KV_SHARD, nor without the
++latent cache: those keep the unchanged path.
++
++Ported from the GLM-5.3 recipe's tp4 patch 0102 (Mia's AI Lab, Apache-2.0), its non-indexer half. Design credit:
++drowzeys (github.com/drowzeys/TensorFold, branch glm53-tp4-2026-10-05, ``compute_prompt_sp`` with
++TF_GLM53_SP_SELECT); no code of theirs."""
++
++from __future__ import annotations
++
++from . import glue, latent, prof, qmm, shard
++
++
++def applies(w, st, b, mixer, host_pos) -> bool:
++    """Whether a row-split prompt chunk's DSA layers take the own-row front: TF_GLM_PROMPT_OWN_FRONT, one stream's
++    prompt on ``st`` (no ``mixer``), its position known on the host, the latent cache without the shard."""
++
++    sp = b.split
++    return (sp is not None and sp.settings.own_front and mixer is None and st is not None and host_pos is not None
++            and b.prefill and latent.ENABLED and not shard.ON)
++
++
++def takes(layer) -> bool:
++    """A layer whose attention block runs here: DSA on the latent cache."""
++    return layer.kind == "dsa" and layer.dsa.absorb is not None
++
++
++def dsa_block(layer, w, st, b, R: int, nch: int | None, host_pos: int, done: tuple[int, int] | None = None):
++    """A DSA block of a row-split prompt chunk with its replicated front on this rank's rows (the module's steps);
++    this rank's partials go out through the split (None returned). ``done``: rows ``forward.dsa_front`` already ran
++    on (the glue's fronts, TF_GLM_PREFILL_OVERLAP=2)."""
++
++    from .forward import dsa_front, dsa_rows, mm, out_proj, undone
++
++    c = w.cfg
++    a = layer.dsa
++    sp = b.split
++    di = st.dsa_index[layer.index]
++    index = st.index[di] if st.index is not None else None
++    lo, hi = sp.own()
++    # 1. the replicated front on this rank's rows
++    with prof.timed("dsa: own front"):
++        if hi > lo:
++            if done != (lo, hi):
++                dsa_front(layer, w, b, lo, hi)
++            if index is not None:
++                mm(b, b.normed[lo:hi], a.index.kw, b.xs[lo:hi], b.ikr[lo:hi])
++                glue.router(b.normed[lo:hi], a.index.gate, b.igr[lo:hi])
++    # 2. shared: the index keys and gates, then the norms' rows (one order on every rank)
++    ev_keys = sp.share([b.ikr, b.igr], slot=0) if index is not None else None
++    ev_rows = sp.share([b.qr, b.lat], slot=1)
++    # 3. every row: q_b for this rank's heads on the other ranks' rows, then the block as before
++    sp.wait(ev_rows)
++    with prof.timed("dsa: projections"):
++        for x, z in undone(R, (lo, hi)):
++            mm(b, b.qr[x:z], a.q_b, b.xs_qr[x:z], b.q[x:z].view(z - x, a.heads * c.qk_dim))
++    sp.wait(ev_keys)
++    o = dsa_rows(a, w, st.kc[di], st.pos_dev, b, R, nch, index, host_pos, None, layer.index, fronted=True)
++    return out_proj(w, b, o, a.o, qmm.group_sums(o, b.xs_ao[:R]), R, site=(layer.index, "a"))

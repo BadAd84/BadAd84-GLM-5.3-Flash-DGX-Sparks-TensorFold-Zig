@@ -1,0 +1,97 @@
+--- tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 06:54:55.672790300 +0000
++++ tensorfold/families/glm5_next/cuda/engine.py	2026-10-30 06:55:15.968312200 +0000
+@@ -522,6 +522,15 @@
+     return fraction
+ 
+ 
++def exact_ints(seq) -> bool:
++    """Whether ``seq`` is a list of Python ints and nothing else (bool and numpy ints excluded): an iteration message's
++    lists are (``_emit`` makes them, a follower's readback ``tolist()`` gives them), so they are used as they are
++    instead of converted value by value again on every hop (~10 ms a hop at an ADMIT of 200k prompt ids). ~1.5 ms at
++    200k values; anything else is converted as before."""
++
++    return type(seq) is list and set(map(type, seq)) <= {int}
++
++
+ def _f64_ints(x: float) -> list[int]:
+     return list(struct.unpack("<2i", struct.pack("<d", float(x))))
+ 
+@@ -710,7 +719,8 @@
+         (the gather's rank-0 block is this buffer), so every rank issues the same collectives. What is returned is
+         this rank's own values, the block every other rank reads out of the gather."""
+ 
+-        values = [int(v) for v in values]
++        if not exact_ints(values):                    # (a list of Python ints, a sealed message's, goes as it is)
++            values = [int(v) for v in values]
+         n = len(values)
+         host = self._staging(n)
+         host[0] = n
+@@ -742,10 +752,10 @@
+         self.pending = False
+         row = readback(got[:self.ints]).tolist()      # one readback: the gathered length and the values
+         count = row[0]
+-        if count <= self.ints - 1:
+-            return [int(v) for v in row[1:1 + count]]
++        if count <= self.ints - 1:                    # (``tolist`` gives Python ints: no conversion of its own)
++            return row[1:1 + count]
+         self.comm.all_gather(*self._values(count))
+-        return [int(v) for v in readback(self.allv[:count]).tolist()]
++        return readback(self.allv[:count]).tolist()
+ 
+ 
+ class GlmEngine:
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 06:54:55.331659700 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 06:55:15.968312200 +0000
+@@ -54,6 +54,7 @@
+ from . import multi_prefill, shard, sliced_fill
+ from .multi_tune import MultiSettings, RoundProfile, allocate, reach_of, sample_packed, scaled_confidence
+ from .pool import ALIGN, Pool, align_up
++from .engine import exact_ints
+ from .verify import COMMIT_GRAPHS, BatchedVerify, Segment, SerialVerify, Verified
+ 
+ ADMIT, EVICT, MOVE, GROW, FILL, ROUND, FINISH, IDLE, SLOT, MFILL, FILLPART, MFILLPART, LOAD, FLUSH, LOADED, \
+@@ -148,7 +149,9 @@
+ 
+ 
+ def digest(msg: Sequence[int], seq: int) -> int:
+-    a = np.asarray(msg, dtype=np.int64) % SEAL_MOD
++    # (a list: the same int64 values through fromiter, a third faster than asarray's on a list)
++    a = (np.fromiter(msg, dtype=np.int64, count=len(msg)) if type(msg) is list
++         else np.asarray(msg, dtype=np.int64)) % SEAL_MOD
+     w = np.arange(1, len(a) + 1, dtype=np.int64) % SEAL_MOD
+     return int((int((a * w % SEAL_MOD).sum()) + seq * 1_000_003) % SEAL_MOD)
+ 
+@@ -161,7 +164,7 @@
+     if len(msg) < 2:
+         raise RuntimeError(f"rank {rank}: message {seq} from rank 0 is {len(msg)} values long, too short to be sealed; "
+                            "the ranks are out of step: restart them all")
+-    body, got_seq, got = list(msg[:-2]), int(msg[-2]), int(msg[-1])
++    body, got_seq, got = (msg[:-2] if type(msg) is list else list(msg[:-2])), int(msg[-2]), int(msg[-1])
+     if got_seq != seq or got != digest(body, got_seq):
+         raise RuntimeError(f"rank {rank}: expected rank 0's message {seq}, received number {got_seq} "
+                            f"({'checksum matches' if got == digest(body, got_seq) else 'checksum differs'}, "
+@@ -972,7 +975,7 @@
+ 
+     # -- messages --------------------------------------------------------------------------------------------------------
+     def _emit(self, op: int, payload: Sequence[int]) -> list[int]:
+-        payload = [int(v) for v in payload]
++        payload = list(payload) if exact_ints(payload) else [int(v) for v in payload]
+         self.outbox += [op, len(payload), *payload]
+         return payload
+ 
+@@ -1090,13 +1093,14 @@
+     @staticmethod
+     def parse(msg: Sequence[int]) -> list[tuple[int, list[int]]]:
+         ops, i = [], 0
++        exact = exact_ints(msg)               # (a follower's message is: each op's payload a slice of it)
+         while i < len(msg):
+             if i + 2 > len(msg):
+                 raise RuntimeError("truncated multi-stream op header")
+             op, n = int(msg[i]), int(msg[i + 1])
+             if op not in OPS or n < 0 or i + 2 + n > len(msg):
+                 raise RuntimeError("invalid multi-stream op or payload length")
+-            p = [int(v) for v in msg[i + 2:i + 2 + n]]
++            p = msg[i + 2:i + 2 + n] if exact else [int(v) for v in msg[i + 2:i + 2 + n]]
+             if op == FILLPART and (len(p) != 4 or not 0 <= p[2] < p[3]):
+                 raise RuntimeError("invalid FILLPART payload")
+             if op == MFILLPART and (len(p) < 5 or p[0] < 1 or len(p) != 3 + 2 * p[0]

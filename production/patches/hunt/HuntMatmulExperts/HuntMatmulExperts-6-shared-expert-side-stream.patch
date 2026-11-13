@@ -1,0 +1,62 @@
+# HuntMatmulExperts-6 (new, bit-identical scheduling): a decode window's EXL3 shared expert (gate/up 4-bit matmul + its
+# split-K reduce, SwiGLU, down) runs on its own stream (Buffers.shared_side) from the MoE block's start, beside the
+# routing (router, top-k, plan) and the routed experts' kernels, and the current stream waits for it before the
+# combine reads sy. Its kernels and buffers are unchanged and disjoint from the routed path's (sgu/sact/sxs/sy and the
+# b.sk partials, which nothing on the current stream touches between the fork and the join); no collective runs on
+# the side stream. Prompt windows (b.prefill), a row split, and TF_GLM_SHARED_SIDE=0 keep the in-line order.
+# Today the shared expert is 4-5 latency-bound launches in series with the DRAM-bound routed experts in every one of
+# the 42 MoE layers. Laptop (RTX 5070, bench_shared_overlap.py, one MoE layer x 8 routings in a CUDA graph,
+# interleaved medians, combine output bit-identical inline vs forked): -8.1 / -11.5 / -10.8 / -19.7 / -15.0 / -24.8 /
+# -20.2 us a layer at 1 / 2 / 4 / 8 / 16 / 24 / 32 rows (NI 768; NI 640: -15.4 / -13.6 / -16.3 at 1 / 8 / 32), with the
+# fork after the routing (this patch forks before it: more overlap). x 42 layers = 0.34-1.0 ms a verify window.
+# GB10 estimate: 0.3-0.6 ms a window: +1-2% decode at 1-2 rows (27 ms windows), +0.3-0.6% at 4 x 8 rows; unmeasured
+# (recipe in REPORT.md). Wiring test: test_shared_side.py.
+diff -r tensorfold.orig/families/glm5_next/cuda/forward.py tensorfold/families/glm5_next/cuda/forward.py
+--- tensorfold.orig/families/glm5_next/cuda/forward.py	2026-10-30 00:46:53.744139600 +0000
++++ tensorfold/families/glm5_next/cuda/forward.py	2026-10-30 00:46:53.762062700 +0000
+@@ -151,6 +151,10 @@
+         self.top_k = c.top_k
+         # TF_GLM_HC_SPLIT: a prompt buffer's row split (``hcsplit.HcSplit``), set by the engine; None runs unsplit
+         self.split = None
++        # HuntMatmulExperts-6: a decode window's EXL3 shared expert runs on this stream beside the routed experts
++        # (moe_block); None for prompt buffers and with TF_GLM_SHARED_SIDE=0
++        self.shared_side = (torch.cuda.Stream(device=dev) if not prefill and SHARED_SIDE and dev.type == "cuda"
++                            else None)
+ 
+     def moe_views(self, width: int) -> tuple:
+         """The routed experts' activations [rows * slots, width] and the shared expert's [rows, 2 width] / [rows,
+@@ -473,6 +477,9 @@
+ 
+ # patch 0102: TF_GLM_PROMPT_TILE=0 launches every prompt projection on tile 0 as before (an A/B on one image)
+ PROMPT_TILES = __import__("os").environ.get("TF_GLM_PROMPT_TILE", "1") != "0"
++# HuntMatmulExperts-6: TF_GLM_SHARED_SIDE=0 runs a decode window's shared expert in line, as before (the same kernels on
++# disjoint buffers either way: the same bits)
++SHARED_SIDE = __import__("os").environ.get("TF_GLM_SHARED_SIDE", "1") != "0"
+ 
+ 
+ def prompt_tile(m: int, n: int, k: int) -> int:
+@@ -992,6 +999,15 @@
+ 
+     c = w.cfg
+     m = layer.moe
++    # HuntMatmulExperts-6: a decode window's EXL3 shared expert on its own stream from the block's start, beside the
++    # routing and the routed experts (its own buffers and kernels: the same bits), joined before the combine reads sy;
++    # no collective runs on it
++    side = b.shared_side if (m.shared is not None and done is None and not b.prefill and b.split is None) else None
++    if side is not None:
++        side.wait_stream(torch.cuda.current_stream())
++        with torch.cuda.stream(side):
++            shared_front(layer, w, b, 0, R)
++        done = (0, R)
+     with prof.timed("moe: route"):
+         glue.router(b.normed[:R], m.router, b.mlog[:R])
+         glue.select(b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts, c.routed_scale, c.norm_topk)
+@@ -1007,6 +1023,8 @@
+             done = (0, R)
+         with prof.timed("moe: routed (exl3)"):
+             exl3_mm.routed(b.normed[:R], b.pick, b.plan, m.experts, b.exl3, b.ey.view(-1, c.hidden), R, c.limit)
++        if side is not None:
++            torch.cuda.current_stream().wait_stream(side)
+ 
+         def fill(lo: int, hi: int) -> None:
+             for a, z in undone(hi, done):     # rows lo .. hi the front has not run on

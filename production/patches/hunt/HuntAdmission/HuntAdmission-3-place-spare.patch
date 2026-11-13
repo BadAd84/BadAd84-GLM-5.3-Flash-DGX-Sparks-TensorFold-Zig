@@ -1,0 +1,176 @@
+diff -ruN tensorfold/families/glm5_next/cuda/multi.py ../b/tensorfold/families/glm5_next/cuda/multi.py
+--- tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:43:19.081164300 +0000
++++ tensorfold/families/glm5_next/cuda/multi.py	2026-10-30 00:43:19.266253900 +0000
+@@ -280,6 +280,25 @@
+ RELOCATE_HOLD = 256
+ 
+ 
++def place_spare(value: str | None = None) -> int:
++    """TF_GLM_PLACE_SPARE_BLOCKS (default 16; 0: placement as before): rank 0 places a new extent, and an extent that
++    must move to grow, where it leaves this many ALIGN blocks free after itself and after the extent its range starts
++    behind, when a free range has them (else lowest first, as ever): a conversation's next turn and a decoding stream
++    then grow in place instead of being MOVEd whole (a copy of every row they hold). Placement only: the same replies;
++    rank 0 decides, so only its setting matters."""
++
++    raw = (os.environ.get("TF_GLM_PLACE_SPARE_BLOCKS", "") if value is None else value).strip() or "16"
++    if not raw.isdecimal():
++        raise ValueError(f"TF_GLM_PLACE_SPARE_BLOCKS: a count of {ALIGN}-token blocks (0: off), not {raw!r}")
++    return int(raw) * ALIGN
++
++
++PLACE_SPARE = place_spare()
++# TF_GLM_GROW_CLEAR (default 1; 0: as before): an extent that cannot grow in place moves the extents in its way when they
++# hold fewer used rows than it does (``MultiDecoder._clear_after``), instead of moving itself whole. Rank 0 decides.
++GROW_CLEAR = (os.environ.get("TF_GLM_GROW_CLEAR", "").strip() or "1") != "0"
++
++
+ def shard_tune(tune):
+     """The settings the decoder runs with: TF_GLM_MULTI_LONE is on by default (``MultiSettings``), but a lone stream
+     moves home to the pool's first rows and its one-stream graphs bake the extent's base, which the shard refuses (an
+@@ -1221,7 +1240,7 @@
+             # the writer's whole extent there, the shared state included.
+             others = [c for c in x.kept if len(c.ids) > len(hit.ids) and not key_is(c, len(c.ids), karr)]
+             if others and not self.tune.lone:
+-                base = pool.place(need, half=pool.half_of(x) if pool.half else None)
++                base = self._spaced(need, half=pool.half_of(x) if pool.half else None)
+                 copy = int(base is not None)
+                 if base is None and sharded:             # its part is full: free rows of another carry them instead
+                     base = self._free_elsewhere(hit, need, why)
+@@ -2501,7 +2520,7 @@
+         together: moving rows costs far less than prefilling an evicted conversation again. None if even evicting
+         every other kept prompt leaves too little (with halves: in any part, in which case none is evicted)."""
+ 
+-        base = self.pool.place(need, half=half)
++        base = self._spaced(need, half=half)
+         if base is None and self.pool.half and self._revoke_twins(half):
+             base = self.pool.place(need, half=half)
+         if base is None and self.pool.half and self._gathered(need, half) is False:
+@@ -2516,17 +2535,73 @@
+             h = self._gathered(need, half)
+             if h is not False:
+                 self._compact(half=h)
+-                return self.pool.place(need, half=h)
++                return self._spaced(need, half=h)
+             victims = self._victims(protect, half)
+             if not victims:
+                 break
+             self._evict(victims[0])
+-            base = self.pool.place(need, half=half)
++            base = self._spaced(need, half=half)
+         return base
+ 
++    def _spaced(self, need: int, half: int | None = None, ignore=()) -> int | None:
++        """Rank 0: ``Pool.place``'s base for ``need`` rows, or, in the part it chose, one with TF_GLM_PLACE_SPARE_BLOCKS
++        free blocks after the new extent and after the one before it (``Pool.place``'s ``spare``) when a free range
++        has them: the same answer to whether it fits, in the same part, with room for the neighbours to grow."""
++
++        base = self.pool.place(need, ignore=ignore, half=half)
++        if base is None or not PLACE_SPARE:
++            return base
++        roomy = self.pool.place(need, ignore=ignore, half=self.pool.half_of(base) if self.pool.half else None,
++                                spare=PLACE_SPARE)
++        return base if roomy is None else roomy
++
++    def _clear_after(self, x, size: int) -> bool:
++        """Rank 0 (TF_GLM_GROW_CLEAR): extent x cannot grow to ``size`` rows in place, because extents start in the rows
++        it would grow into: when those hold fewer used rows than x (``_used``: what a MOVE copies), each of them MOVEs
++        to free rows outside x's grown range (``_spaced``'s choice there) and True (x then grows in place); False, with
++        nothing done, when they hold as many or more, cannot all be placed so, or one of them cannot move now (a twin, a
++        stored prompt being read into it, a filling prompt in a slice in flight)."""
++
++        pool = self.pool
++        end = x.base + size
++        hx = pool.half_of(x) if pool.half else None
++        if end > ((hx + 1) * pool.half if pool.half else pool.rows):
++            return False
++        ways = [y for y in pool.extents if y is not x and x.end <= y.base < end]
++        if not ways or any(y.twin or getattr(y, "loading", None) is not None
++                           or (y.owner is not None and self.partial is not None and self.partial.contains(y.owner))
++                           for y in ways):
++            return False
++        if sum(self._used(y) for y in ways) >= self._used(x):
++            return False
++        # where each goes, planned on a copy of the pool's bookkeeping: every other extent, x at its grown size, and the
++        # rows of the ones in the way past that size (still theirs until they move), so no MOVE lands on rows in use
++        held = Pool(pool.rows, pool.align, pool.half)
++        for y in pool.extents:
++            if y is not x and not any(y is w for w in ways):
++                held.add(y.base, y.size)
++            elif y is not x and y.end > end:
++                held.add(end, y.end - end)
++        held.add(x.base, size)
++        plan = []
++        for y in ways:
++            hy = pool.half_of(y) if pool.half else None
++            base = held.place(y.size, half=hy, spare=PLACE_SPARE) if PLACE_SPARE else None
++            if base is None:
++                base = held.place(y.size, half=hy)
++            if base is None:
++                return False
++            held.add(base, y.size)
++            plan.append((y, base))
++        for y, base in plan:
++            self._emit(MOVE, [y.eid, base, y.size])
++            self._move(y, base, y.size)
++        return True
++
+     def _grow(self, x, size: int, protect=()) -> bool:
+         """Rank 0: extent x to at least ``size`` rows, in place or moved; as in ``_room``, compacting before evicting
+-        more than the free rows fall short."""
++        more than the free rows fall short. With TF_GLM_GROW_CLEAR the extents in its way move instead when they hold
++        fewer rows than x (``_clear_after``); x itself moves where it has room to grow on (``_spaced``)."""
+ 
+         size = align_up(size)
+         if size <= x.size:
+@@ -2537,8 +2612,10 @@
+                 self._emit(GROW, [x.eid, size])
+                 self._resize(x, size)
+                 return True
++            if GROW_CLEAR and self._clear_after(x, size):
++                continue
+             hx = self.pool.half_of(x) if self.pool.half else None
+-            base = self.pool.place(size, ignore=[x], half=hx)
++            base = self._spaced(size, ignore=[x], half=hx)
+             if base is None and self.pool.half and self._revoke_twins(hx):
+                 continue
+             if base is not None:
+diff -ruN tensorfold/families/glm5_next/cuda/pool.py ../b/tensorfold/families/glm5_next/cuda/pool.py
+--- tensorfold/families/glm5_next/cuda/pool.py	2026-10-30 00:43:19.082170900 +0000
++++ tensorfold/families/glm5_next/cuda/pool.py	2026-10-30 00:43:19.225720300 +0000
+@@ -261,12 +261,16 @@
+             return self.rows - sum(x.size for x in self.extents)
+         return self.half - sum(x.size for x in self.extents if self.half_of(x) == half)
+ 
+-    def place(self, size: int, ignore: Iterable[Extent] = (), half: int | None = None) -> int | None:
++    def place(self, size: int, ignore: Iterable[Extent] = (), half: int | None = None, spare: int = 0) -> int | None:
+         """The lowest base with ``size`` free rows (``ignore``'s rows free), or None. With halves: in ``half``, or
+         else in the half with fewer live streams first (each row's owner computes its decode attention, so the ranks'
+-        shares of that stay even), then the one with more free rows."""
++        shares of that stay even), then the one with more free rows. ``spare`` (rows): only a free range that also
++        leaves that many free rows after the extent placed and, unless the range starts the pool (or its part),
++        that many before it, behind the extent that ends there (the base then that far in): room for both to grow in
++        place; None when no range has them (the caller then places without: what fits the pool still fits)."""
+ 
+         size = align_up(size, self.align)
++        spare = align_up(spare, self.align) if spare > 0 else 0
+         gaps = self.gaps(ignore)
+         if not self.half:
+             order = [None]
+@@ -276,8 +280,15 @@
+             order = sorted(range(self.parts), key=lambda h: (self.live(h), -self.free_rows(h), h))
+         for h in order:
+             for base, n in gaps:
+-                if n >= size and (h is None or self.half_of(base) == h):
+-                    return base
++                if h is not None and self.half_of(base) != h:
++                    continue
++                if not spare:
++                    if n >= size:
++                        return base
++                    continue
++                lead = 0 if base == (self.half_of(base) * self.half if self.half else 0) else spare
++                if n >= lead + size + spare:
++                    return base + lead
+         return None
+ 
+     def segments(self, half: int | None = None, pinned=None) -> list[tuple[int, int]]:

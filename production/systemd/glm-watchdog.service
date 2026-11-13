@@ -1,0 +1,11 @@
+[Unit]
+Description=GLM serve watchdog (wedge auto-restart)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/glm-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
