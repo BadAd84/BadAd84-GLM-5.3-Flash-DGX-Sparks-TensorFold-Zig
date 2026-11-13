@@ -330,3 +330,31 @@ One-knob arms on `rs1` (each against the pad-only cells, replies equal): `INDEX_
 `MM_WIDE` and `SPARSE_ONEPASS` are within +-1% at every level, that is noise; `KEPT_WALK`, `GLUE_FUSE` and `ROUTER_WARM` read -2% in
 their first cells and -0.6 to +1.4% when repeated, so they are neutral. With `DRAFT_KEEPWIN=1` added to the drafter set the cells
 read +8.6 / +6.5 / +5.9 / +6.5 / +6.0% against +8.1 / +6.1 / +5.5 / +6.0 / +4.2%, inside the noise, so it stays out of the set.
+
+## 18. The series re-seated on upstream main (`0fed2e4a5`, 192 commits past v1.2.7), and upstream's RoCE and drafter split
+
+Images: `mb` is pristine main, `mr1` is our 32 patches on it (tree `bc5a465b22b1`; `0029` retired because `8978c4357` runs a
+prompt in calls of up to 4,096 rows). Every arm has the pad, one fresh boot a level, replies equal to the control's. `rs2-ctl` is the
+seven-knob arm of section 17 run again on image `rs2` the same day; `mr1-7` is the same seven knobs on `mr1`. tok/s at 1/2/4/6/8
+streams (change against `rs2-measured`, the first cell of section 17):
+
+| arm | 1 | 2 | 4 | 6 | 8 | ms/round | accept |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rs2-ctl` (v1.2.7 series, seven knobs) | 70.86 (+1.0%) | 79.53 (+1.0%) | 100.01 (+0.6%) | 134.52 (+0.2%) | 165.26 (0.0%) | 38.2 | 0.651 |
+| `mb-pad` (main, pad only) | 63.87 | 72.21 | 91.13 | 121.39 | 146.19 | 42.8 | 0.638 |
+| `mb-roce` (main, pad, `TF_ROCE=1`) | 66.04 | 74.02 | 94.34 | 126.61 | 154.10 | 40.7 | 0.643 |
+| `mr1-7` (re-seated, seven knobs) | 68.48 | 77.05 | 97.59 | 131.24 | 160.23 | 39.5 | 0.651 |
+| `mr1-7-roce` (+ `TF_ROCE=1`) | 68.56 | 76.81 | 96.97 | 131.05 | 160.67 | 39.5 | 0.651 |
+| `mr1-7-nosplit-roce` (`TF_ROCE=1`, no `MLPSPLIT`) | 68.23 | 76.22 | 96.97 | 135.05 | 167.07 | 39.7 | 0.651 |
+
+- **Main is slower than the v1.2.7 series.** With the same seven knobs the re-seated stack reads -3.4 / -3.1 / -2.4 / -2.4 / -3.0%
+  against `rs2-ctl`, a round of 39.5 ms against 38.2, with the same acceptance. The pin stays at v1.2.7; main is not adopted.
+- **The RoCE gather never connected.** Every `TF_ROCE=1` boot printed `RoCE all-gather: PeerRefused (HCA 0: the queue pair toward rank 1
+  refused RTR); NCCL carries every gather`. Upstream pairs HCA h with the peer's HCA h; the cabled triangle pairs differently (skill
+  `fix-crossed-mesh-roce-rail-pairing`). So `TF_ROCE=1` here only turned on upstream's drafter MLP split on every pass, and the
+  `mb-roce` gain over `mb-pad` (+3.4 / +2.5 / +3.5 / +4.3 / +5.4%) is that split, not RoCE. A RoCE gather on this cabling needs the
+  GID-derived pairing patch first; its measured size on the fork was +1.4% at one stream and -1.3% at eight.
+- **The drafter split on every pass helps at six and eight streams.** `mr1-7-nosplit-roce` (upstream's split, every pass) against
+  `mr1-7-roce` (ours, only while at most four streams are in a pass): -0.5 / -0.8 / 0.0 / +3.1 / +4.0%. Our knob already takes a
+  stream count, so `TF_GLM_OVN_DRAFT_MLPSPLIT=8` on image `rs2` should give the same at six and eight without leaving v1.2.7; measured
+  in section 19.
