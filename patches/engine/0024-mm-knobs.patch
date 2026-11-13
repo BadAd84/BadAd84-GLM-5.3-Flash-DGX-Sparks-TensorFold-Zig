@@ -25,10 +25,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0024-mm-knobs.patch
 
 diff --git a/docs/environment.md b/docs/environment.md
-index afc1da2438ec8bc6d2333ae1bf285eed423c62ec..d3b4d92407ff9c977228bfe0f1c4a40abcacdbde 100644
+index 5d48dbd6d50ae45396267c2440221cc85d44bfd4..416f638ea5249b5cd35103a4b79af9f6e4ea2fb3 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -67,6 +67,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -66,6 +66,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
@@ -361,7 +361,7 @@ index 77e6fb61714d08104a810afb64578bec284f72f3..afa323593a2cc4ad5a2924e2a6c68634
      }
      const sk = splitK(n, k);
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 354b1de991681644e404966a30b46f3d46df24ca..5446aba0e4d2473643b569170eecc30cf224ddd4 100644
+index cf6031060614e826ab400f8e6dd7f9e04220a6b0..9367d66951998cff92a54352d668be05eba465d2 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
 @@ -77,10 +77,15 @@ pub const Kernels = struct {
@@ -687,10 +687,10 @@ index 1f21c38811a0d338da344cc4b98ea14c99a1b5ce..e388752914c7842359e0a2fb84784cf5
      var a: cuda.Args = .{};
      a.add(s.sy + lo * d * 4);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 565b043aed2f0346da2d2130a7abaa398b6e142f..d5c06cdb9b20d8c2199bb0eb0450b911b5142e57 100644
+index f98713af75683ac5987bf2a75515f1051551ff57..fde9dcf0b2649b803425e0e8395ab126f1c5da82 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -101,6 +101,11 @@ pub const rules = [_]Rule{
+@@ -100,6 +100,11 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

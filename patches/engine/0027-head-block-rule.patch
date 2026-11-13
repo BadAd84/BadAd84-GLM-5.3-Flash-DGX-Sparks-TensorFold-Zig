@@ -29,10 +29,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0029-head-block-rule.patch
 
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
-index 78efbca5acf53c3672a76c7cf9d942e0c1a3fc8f..4110ab59a56682917c00db6f42b9f2079e76049e 100644
+index e17f7c1f4421f883df3aa852644ecb1d3486b6c0..2ba67f72931a3e8016236d5a504fce87132159cd 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -215,7 +215,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -211,7 +211,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
      const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
      if (host_pos < l.dense_limit) { // the same keys today's whole-chunk call read for this row
          var stamp = prof.span(k.prof, stream, .mla);
@@ -41,7 +41,7 @@ index 78efbca5acf53c3672a76c7cf9d942e0c1a3fc8f..4110ab59a56682917c00db6f42b9f207
          stamp.end();
      }
      if (sparseRows(l, host_pos, rows)) {
-@@ -232,7 +232,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -228,7 +228,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
  
  /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
  fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
@@ -86,10 +86,10 @@ index 781843f0f9420d3e4a3398f45b51aad783a1d20f..eb4fe7a145da967379556acf53ef978f
      try std.testing.expectEqual(@as(usize, 3), chunksFor(1025));
      try std.testing.expectEqual(@as(usize, 1), chunksFor(512));
 diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
-index 36a7d66d875f7e83505d2bfa0ebda193386c76a9..dc3a201517966d97627e53a36f8875244b31f3b2 100644
+index f81a7b3d7696150cae09ce2692b7f110fb6d4486..e4ddf35001d1f5ab1488445a45f81c182d000440 100644
 --- a/zig/src/families/glm/cuda_onepass.zig
 +++ b/zig/src/families/glm/cuda_onepass.zig
-@@ -103,7 +103,7 @@ pub fn takes(prompt: bool, scales: u64, heads: usize, lw: usize) bool {
+@@ -97,7 +97,7 @@ pub fn takes(prompt: bool, scales: u64, heads: usize, lw: usize) bool {
  
  /// `takes`'s shapes, only where the default uses 32-head blocks (headBlock == heads_tile_wide), else chunk programs.
  pub fn takesExact(prompt: bool, scales: u64, heads: usize, lw: usize, rows: usize) bool {
@@ -98,10 +98,10 @@ index 36a7d66d875f7e83505d2bfa0ebda193386c76a9..dc3a201517966d97627e53a36f887524
  }
  
  /// latent.sparse_onepass: rows with counts > 0 over their `w`-wide token lists (as `t` maps them) into out bf16.
-@@ -153,9 +153,9 @@ test "onepass exact: the knob gates the path and the 32-head-block shapes take i
-     try std.testing.expect(!wantedExact());
-     cuda.ovn.fake("ONEPASS_EXACT", "1");
-     try std.testing.expect(wantedExact());
+@@ -131,9 +131,9 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
+ }
+ 
+ test "onepass pipe: its exact variant takes the onepass shapes where the default uses 32-head blocks" {
 -    // the exact path takes the onepass shapes only where the default uses 32-head blocks (64 rows on this base))
 +    // the exact path takes the onepass shapes only where the default uses 32-head blocks (5 rows at 17-24 heads))
      try std.testing.expect(takesExact(true, 0x1000, 22, 512, 64)); // a prompt chunk

@@ -11,11 +11,14 @@ re-seated on v1.2.7 (`docs/audit-2026-11-12/reseat-v127.md`: what upstream chang
 for each). Every patch header names its provenance and its receipts. Every switch defaults off, is a row of the
 `.glm` or `.cuda` scope of `zig/src/platform/environment.zig`, and has a line in `docs/environment.md`.
 
-Proof the series rebuilds: `scripts/apply.sh` on the tag gives tree `7d98e90edd1f2ae411e9f5df218229634d8b4cb4`; all
+Proof the series rebuilds: `scripts/apply.sh` on the tag gives tree `4ed20ea3d1754a820372d1db5eb072d328eeef3e`; all
 patches apply with plain `git apply --check`, no file passes 600 lines at any prefix, and lean base against head is
 386 problems against 386. With every switch off the image decodes 51.55 / 60.88 / 83.11 / 111.63 / 137.43 tok/s at
 1 / 2 / 4 / 6 / 8 streams against 50.16 / 58.57 / 79.23 / 106.37 / 129.66 on the clean tag, replies byte-identical
-(`docs/OVERNIGHT-2026-11-12.md` section 13).
+(`docs/OVERNIGHT-2026-11-12.md` section 13), measured on the tree before the 2026-11-12 boot fix in 0025
+(`93a99447e7030697ca29b93cc1410871bb34c98a`). That fix (`docs/audit-2026-11-12/mla-boot-fix.md`) changes only what
+TF_GLM_OVN_MLA_FUSEMERGE launches and adds the GPU check `glm-mla-skip-check`; with it 0022 stops registering
+TF_GLM_OVN_ONEPASS_EXACT, a switch whose kernel lever the series does not carry.
 
 | patch | subject | switches it registers |
 |---|---|---|
@@ -40,7 +43,7 @@ patches apply with plain `git apply --check`, no file passes 600 lines at any pr
 | 0019 | glm: TF_GLM_OVN_ROUTER_WARM warms the router kernels at boot | `TF_GLM_OVN_ROUTER_WARM` |
 | 0020 | glm lanes: TF_GLM_OVN_WIN_FREE, shared rounds fill with no cost model | `TF_GLM_OVN_WIN_FREE` |
 | 0021 | glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt sparse attention | `TF_GLM_OVN_SPARSE_ONEPASS` |
-| 0022 | glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches | `TF_GLM_OVN_ONEPASS_PIPE`, `TF_GLM_OVN_ONEPASS_EXACT`, `TF_GLM_OVN_MLA_FUSEMERGE`, `TF_GLM_OVN_ABSORB_VEC`, `TF_GLM_OVN_KVB8` |
+| 0022 | glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-exact switches | `TF_GLM_OVN_ONEPASS_PIPE`, `TF_GLM_OVN_MLA_FUSEMERGE`, `TF_GLM_OVN_ABSORB_VEC`, `TF_GLM_OVN_KVB8` |
 | 0023 | glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA prompt kernel | `TF_GLM_OVN_KDA_CHUNKED` |
 | 0024 | glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM_DECTILE | `TF_GLM_OVN_MM_WIDE`, `TF_GLM_OVN_MM_CLUSTER`, `TF_GLM_OVN_MM_DECTILE`, `TF_GLM_OVN_ROUTER16`, `TF_GLM_OVN_SWIGLU_REDUCE` |
 | 0025 | glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8 | - |

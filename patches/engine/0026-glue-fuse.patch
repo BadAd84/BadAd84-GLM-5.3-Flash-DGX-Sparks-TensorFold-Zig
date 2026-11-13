@@ -32,10 +32,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0026-glue-fuse.patch
 
 diff --git a/docs/environment.md b/docs/environment.md
-index d3b4d92407ff9c977228bfe0f1c4a40abcacdbde..f95a03189a116c31800ba7dd4886d86144f9efd5 100644
+index 416f638ea5249b5cd35103a4b79af9f6e4ea2fb3..c6092bf0a562b9a90acb7a2c11f7e4dfaa56d84e 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -72,6 +72,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -71,6 +71,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MM_DECTILE` | Whole block count; a decode launch of fewer blocks takes 16-row windows on 32-column tiles; default 0 (off) |
  | `TF_GLM_OVN_ROUTER16` | Whole number; set, router launches of 16 rows or fewer take the 16-row tile (4: four pipeline stages, any other: three); default 0 (off) |
  | `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
@@ -805,7 +805,7 @@ index 0000000000000000000000000000000000000000..4c5d661fd49bf758bd82651b383e00c1
 +    try glue.hcPre(f.set(), f.stream, b.x + lo * S * D * 2, hc.fn_w, hc.base, hc.scale, norm, b.normed + lo * D * 2, b.xs + lo * (D / 64) * 4, b.post + lo * S * 4, b.comb + lo * S * S * 4, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, hi - lo, D, S);
 +}
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index a4ddd7af595f9734b4e63d4c987ef11a2c8d8a56..8975e76b2137e225ce0f8009caebf7e40d601552 100644
+index afea1bd91aa7ab0dcb11a71658237fc25d48185e..70defb87c9464c21e8ef01b3649b09f9106dd283 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
 @@ -20,9 +20,9 @@ pub const Mla = struct {
@@ -1004,10 +1004,10 @@ index 06c267ba06a80181a0feae9c4133d7a5d52b4b0e..e408a91daa9d31bcaa9c0be495a2938f
      }
  };
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index d5c06cdb9b20d8c2199bb0eb0450b911b5142e57..5bb0f54c5a7abb858620c3dac5d3fcd8a272b778 100644
+index fde9dcf0b2649b803425e0e8395ab126f1c5da82..a68c2ca3576b4f0696dcb5a9596fb24ab4268495 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -106,6 +106,9 @@ pub const rules = [_]Rule{
+@@ -105,6 +105,9 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MM_DECTILE", .scope = .glm, .kind = .u64, .forms = "a whole block count, 0 (off) or the launch size below which decode windows take 16-row tiles" },
      .{ .name = "TF_GLM_OVN_ROUTER16", .scope = .glm, .kind = .u64, .forms = "0 (off), 4 (four stages) or any other value (three stages)" },
      .{ .name = "TF_GLM_OVN_SWIGLU_REDUCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

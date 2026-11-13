@@ -33,10 +33,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0023-kda-chunked.patch
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 658710caf1358514a45c3dee33296ee52d4dc5ab..afc1da2438ec8bc6d2333ae1bf285eed423c62ec 100644
+index 776af8367b056aead63068bafccc74b3069297e0..5d48dbd6d50ae45396267c2440221cc85d44bfd4 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -66,6 +66,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -65,6 +65,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
@@ -1018,10 +1018,10 @@ index 1c669938d782cb317b20a20a1efc3bde6344e0a9..da3673d1b87a6a1808981d479c1660d2
              if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
          },
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index b9ceb649a6c4375e5d07a7467e042e944403e39c..565b043aed2f0346da2d2130a7abaa398b6e142f 100644
+index 6c64479fce42b52aaab1d4d0d3d39b6c9232fcc7..f98713af75683ac5987bf2a75515f1051551ff57 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -100,6 +100,7 @@ pub const rules = [_]Rule{
+@@ -99,6 +99,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

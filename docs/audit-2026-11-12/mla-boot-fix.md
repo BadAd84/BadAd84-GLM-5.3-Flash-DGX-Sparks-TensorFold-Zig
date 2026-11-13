@@ -81,8 +81,9 @@ are the current files, 0025's tree is the current one with four files set over i
 re-applied with plain `git apply --cached` and re-emitted as `git diff-tree -p --full-index`. 31 of the 33 files come
 out byte for byte as they are now; **0025** carries the fix, and **0027** differs only in its `cuda_latent.zig` index
 line and two hunk offsets (+6 lines, the longer `fused()`). 0032 needs no change: it touches `common/mla.cuh` and
-`pending_133.zig`, never the OVN file, and none of its claims moves. Final tree
-`7d98e90edd1f2ae411e9f5df218229634d8b4cb4` (was `93a99447`).
+`pending_133.zig`, never the OVN file, and none of its claims moves. Final tree of this step
+`7d98e90edd1f2ae411e9f5df218229634d8b4cb4` (was `93a99447`; committed by the main session as `bb68cec`), and
+`4ed20ea3d1754a820372d1db5eb072d328eeef3e` after the retirement in section 3.
 
 What changes in 0025 (its header gains a paragraph saying so):
 
@@ -139,7 +140,7 @@ for sm_121 (`work/mlafix/k/final/report.txt`, `work/mlafix/k/final-glue/report.t
 | KDA_CHUNKED (0023) | `tf_glm_kda_chunk` | 0 | `sizeof(Smem)` 95,488 (`static_assert`, `glm_kda_chunk.cu`) | `smem_bytes` 95,488 (`cuda_kda_chunk.zig:27`) | `smem_bytes` (`:64`) | 20 / 20, 124 B | OK (255 registers, 12 B spill) |
 | SPARSE_ONEPASS (0021) | `tf_glm_sparse_onepass` | 0 | `sizeof(Smem)` 100,416 (`static_assert`) | `smem` (`cuda_onepass.zig:28`) | `smem` (`:116`) | 10 / 10, 64 B | OK, 960 B under the limit |
 | ONEPASS_PIPE (0022) | `tf_glm_onepass_pipe_{off,decode,scale,chunk,exact}` | 0 | `sizeof(SmemPipe)` 100,512 (`static_assert`) | `pipe_smem`, all five (`cuda_onepass.zig:77-81`) | `pipe_smem` (`:136`) | 10 / 10, 64 B | OK, 864 B under; `_chunk` and `_exact` spill 464 B |
-| ONEPASS_EXACT (0022) | `tf_glm_onepass_exact` | - | - | - | `runExact` (`cuda_onepass.zig:120-127`) | no such entry in any `.cu` | INERT: `Set.onepass_exact` is never assigned, so the path is unreachable and the switch does nothing |
+| ONEPASS_EXACT (0022) | `tf_glm_onepass_exact` | - | - | - | `runExact` (`cuda_onepass.zig:120-127`) | no such entry in any `.cu` | was INERT (`Set.onepass_exact` never assigned); RETIRED from 0022, below |
 | DECODE_INDEX (0014) | `tf_glm_index_split` | 1,104 | none | none needed | 0 (`cuda_index.zig:186`) | 14 / 14, 96 B | OK |
 | INDEX_SCHED (0014), INDEX_REGROUP (0015) | `tf_glm_index_scores_sched`, `_regroup` | 34,816 / 32,768 | none | none needed | 0 (`:164`) | 15 / 15, 108 B | OK |
 | DRAFT_DOWN4 (0007) | `group_kernel<64,16,64,1,4,8,true,...>` | - | `LaneTile<64,16,64,1,4,8>::SMEM` 35,328 (F32 does not enter it, `qmm_frag.cuh:12-25`) | 35,328 (`cuda_q4.zig` `loadF32`) | 35,328 | the bf16 tile's signature (`qmm_group.cu:348`) | OK |
@@ -147,10 +148,23 @@ for sm_121 (`work/mlafix/k/final/report.txt`, `work/mlafix/k/final-glue/report.t
 | ROUTER_WARM (0019) | none of its own | | | | | | launches the router, MoE and mixer paths at boot; with MLA_FUSEMERGE and an FP8 cache its level-2 mixer warm (16 to 33 rows) would have met the same defect |
 
 So the argument defect is confined to the two FP8 bounded entries, and no knob kernel is short of shared memory.
-The one other finding is outside this class: TF_GLM_OVN_ONEPASS_EXACT is a registered switch with no kernel and no
-assignment behind it (0022). It cannot fail a launch; it silently does nothing. Not changed here.
+The one other finding is outside this class, and it is now retired (the main session's decision, 2026-11-12).
+TF_GLM_OVN_ONEPASS_EXACT was a registered switch with no kernel and no assignment behind it: 0022's header says its
+Set line was left out because "that lever rides its own patch" (`0022-onepass-pipe.patch:12-14`), and no patch carries
+that lever. `work/mlafix/retire.py` takes it out of 0022 by the rule 0022 already applied to LATENT_MMA, SEG_PASS,
+DECODE_SHARD and PK8 (a registered switch that changes nothing): the row, the `docs/environment.md` line, `wantedExact`,
+`runExact`, `Set.onepass_exact`, the DSA block's branch, the `glue` import only `runExact` used, and the test's knob
+lines. `takesExact` stays, because the ONEPASS_PIPE branch uses it, and its shape cases stay in the renamed test
+`onepass pipe: its exact variant takes the onepass shapes where the default uses 32-head blocks`. Every tree from 0022
+on is the previous one with these exact-text removals, each matched exactly once. 0022's header gains a note. 0023,
+0024, 0025, 0026, 0027, 0030 and 0033 keep the same added and removed lines, with only context, offsets and index lines
+moved (`work/mlafix/cmpchanges.py`), and the other 25 files are byte for byte as committed in `bb68cec`. No arms file
+sets the switch. New final tree `4ed20ea3d1754a820372d1db5eb072d328eeef3e`.
 
 ## 4. Checks (run here, outputs quoted)
+
+The bullets up to the nvcc ones are the boot-fix round (tree `7d98e90e`, committed as `bb68cec`). The retirement round
+(tree `4ed20ea3`) follows at the end of the section.
 
 - C: before the gates (`df -h /mnt/c`): 594 GB free.
 - Plain `git apply --cached --check` of every emitted patch in order from v1.2.7, each applied and its tree compared
@@ -180,12 +194,31 @@ assignment behind it (0022). It cannot fail a launch; it silently does nothing. 
 - 0032's register receipt is current, not the pin's: `pending_133.zig` records `tf_glm_chunks_16_fp8` 148 (sm_80) and
   128 (sm_121), `tf_glm_chunks_32_fp8` 194 and 163; these compiles of this body read the same four numbers
   (`work/mlafix/k/fixed80/report.txt`, `work/mlafix/k/fixed/report.txt`).
+- Retirement round, tree `4ed20ea3d1754a820372d1db5eb072d328eeef3e`, `sha256(work/mlafix/SHA256SUMS)` =
+  `6b65a11eb8c15f41d10b3bdc8de12026fe48a071af7dd4520f598cfa8b57390c`. `checks2.py apply`: 33 of 33 apply with plain
+  `git apply --cached --check`, 0 failures. `lines`: 147 files, 0 over 600 at any prefix, 0 long or stacked added
+  comments. `refs`: the same 5 flags in 0005, 0006, 0007 and 0011; 0022 onward clean. Lean: base 6,253 files and 386
+  problems, head 6,254 files and 386 problems, 0 new. Package: 33 of 33 hashes OK, no CR, and exactly 0022, 0023,
+  0024, 0025, 0026, 0027, 0030 and 0033 differ from `bb68cec`. C: had 593 GB free before the gates.
+- Retirement round, `gates.sh`: check-native-cuda-host, compile-cuda-tests, the four standalone host steps and fmt rc=0.
+  test-cuda-host rc=1 on three wall-clock ratio tests: `linear_time.test.fastest's work leaves out a sleep in a run`
+  (`zig/src/server/linear_time.zig:49`), `cortheon.html.test.a page of unclosed tags reads in linear time`
+  (`zig/src/server/cortheon/html.zig:417`) and `cortheon.fuzz.test.cortheon fuzz: every reader takes linear time on
+  long inputs` (1 to 2 ms baselines on 16 KiB). `gate-names.sh` therefore lists those three as "only mlafix fails".
+  They are FLAKY under load, not introduced. No patch touches `zig/src/server/cortheon/` or `linear_time.zig`, and the
+  series' own `checks2.py` job was running on the same machine during this gate run. The same two cached test binaries,
+  rerun alone twice each from the gate copy with the run's seed (`work/mlafix/rerun-timing.sh`), pass every time:
+  `e88cda15...` 52 of 52 twice, `88330282...` 1,314 passed, 5 skipped, 0 failed twice. The boot-fix round's gate run
+  passed the same tests. The gate step itself, rerun alone with gates.sh's cache and environment
+  (`work/mlafix/retest-host.sh`; passing steps stay cached, so only the steps that failed ran again): test-cuda-host
+  rc=0, 383/383 steps; the steps that executed ran 1,504 tests, 1,499 passed and 5 skipped. `gate-names.sh v127base
+  mlafix2` reports 0 failing names, and "only mlafix2 fails" is none.
 
 ## 5. The GPU proof (reserved to the main session)
 
 The assignment keeps GPU work, the Spark boxes and `patches/engine/` out of this lane, so the proof on hardware is
 the main session's: the files above dropped over `patches/engine/` (then `scripts/check-patch-packages.sh`), the image
-built from tree `7d98e90e...` (which compiles the new `static_assert`s), `tf-cuda-test glm-mla-skip-check` on one GPU
+built from tree `4ed20ea3...` (which compiles the new `static_assert`s), `tf-cuda-test glm-mla-skip-check` on one GPU
 (its pass line reads `... on 28 calls; the control differs`; a FAIL line names the arm, cache and shape, a launch error
 is logged by `cuda.launch` with the kernel and its grid), and the TP=3 boot with `TF_GLM_OVN_MLA_FUSEMERGE=1
 TF_GLM_KDA_PAD=1` and the drafter on, whose digests compare with the knob-off pad digests (BENCH.md records the knob
@@ -194,6 +227,8 @@ bit-exact at the pin) before any speed cell.
 ## Files
 
 - `work/mlafix/0001..0033-*.patch`, `SHA256SUMS`, `RECORD.md`, `series.tsv` (trees before and after each patch).
-- `work/mlafix/new25/` the four files set over 0025's tree; `work/mlafix/series.py` the build and emit;
-  `checks2.py`, `mf.py`, `lib.py` (shim for the re-seat's `refs.py`), `kcheck.py` (nvcc resources and parameter
-  lists), `fmt.sh`, `run-gates.sh`, `sums.sh`, `wslstate.sh`; `k/{final,final-glue,planted,fixed,fixed80}/report.txt`.
+- `work/mlafix/new25/` the four files set over 0025's tree; `work/mlafix/series.py` the boot-fix build and emit;
+  `retire.py` the ONEPASS_EXACT retirement and re-emit; `cmpchanges.py` (added and removed lines against
+  `patches/engine/`); `checks2.py`, `mf.py`, `lib.py` (shim for the re-seat's `refs.py`), `kcheck.py` (nvcc resources
+  and parameter lists), `fmt.sh`, `run-gates.sh`, `sums.sh`, `wslstate.sh`, `failctx.sh`, `rerun-timing.sh`, `retest-host.sh`;
+  `k/{final,final-glue,planted,fixed,fixed80}/report.txt`.

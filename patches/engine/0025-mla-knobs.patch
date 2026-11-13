@@ -563,7 +563,7 @@ index e35d97f84b2617175961f8b34367bcb84e4b3580..501c8c1cdf8c19ceb373b6deb3a5c614
      _ = @import("cuda_prof.zig");
      _ = @import("cuda_load_owner.zig");
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
-index 2f34752aba5876bef9e47195332a1139dcea6a99..78efbca5acf53c3672a76c7cf9d942e0c1a3fc8f 100644
+index b25a352cc67862e5468130bd7ada25ba175590f7..e17f7c1f4421f883df3aa852644ecb1d3486b6c0 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
 @@ -24,6 +24,8 @@ pub const Layer = struct {
@@ -593,7 +593,7 @@ index 2f34752aba5876bef9e47195332a1139dcea6a99..78efbca5acf53c3672a76c7cf9d942e0
      if (qi) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
  }
  
-@@ -189,7 +191,7 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
+@@ -185,7 +187,7 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
      const pstamp = prof.span(k.prof, stream, .projections);
      defer pstamp.end();
      const off = (rows - 1) * l.heads * l.lw * 2;
@@ -632,7 +632,7 @@ index a2bd4bc172c260c29cf30b4dfe712a8649052b66..4d39dcb18ab47e4aad0ee967346230c6
  
      /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 5446aba0e4d2473643b569170eecc30cf224ddd4..a4ddd7af595f9734b4e63d4c987ef11a2c8d8a56 100644
+index 9367d66951998cff92a54352d668be05eba465d2..afea1bd91aa7ab0dcb11a71658237fc25d48185e 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
 @@ -20,9 +20,9 @@ pub const Mla = struct {

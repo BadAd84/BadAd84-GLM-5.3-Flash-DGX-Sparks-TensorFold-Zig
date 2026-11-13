@@ -26,21 +26,21 @@ Folded in by the 2026-11-12 fold (work/fold/MAP.tsv), each hunk where it belongs
 - 0057: the DECODE scale is broadcast across the warp, with the reset check beside it
 
 Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat (work/reseat/DECISIONS.md):
-- lean_check.py's DIRECT_GETENV/HIDDEN_GETENV: every TF_* setting this patch reads is a row of platform/environment.zig with a line in docs/environment.md, read through cuda.ovn or environment, never getenv. Rows: TF_GLM_OVN_ONEPASS_PIPE, _ONEPASS_EXACT, _ABSORB_VEC, _KVB8 (flags), _MLA_FUSEMERGE (u64); cuda_glue.Mla arrives here whole (fold-series.md J20).
+- lean_check.py's DIRECT_GETENV/HIDDEN_GETENV: every TF_* setting this patch reads is a row of platform/environment.zig with a line in docs/environment.md, read through cuda.ovn or environment, never getenv. Rows: TF_GLM_OVN_ONEPASS_PIPE, _ABSORB_VEC, _KVB8 (flags), _MLA_FUSEMERGE (u64); cuda_glue.Mla arrives here whole (fold-series.md J20).
 - Not carried: Mla's mma and seg fields and the LATENT_MMA, SEG_PASS, DECODE_SHARD and PK8 reads (fold-series.md F9): no code reads set.mla.mma or set.mla.seg and none of the four levers is ported, so each would be a registered switch that changes nothing.
 - zig/build/glm_family_host.zig: test-glm-onepass-order-host sits beside v1.2.7's new test-glm-thin-weights-host.
+- Not carried (2026-11-12, docs/audit-2026-11-12/mla-boot-fix.md): TF_GLM_OVN_ONEPASS_EXACT's row and docs/environment.md line, wantedExact, runExact, Set.onepass_exact and the DSA block's branch. Its kernel lever rides its own patch, which this series does not carry, so it was a registered switch that changes nothing, the rule the four reads above were dropped under. takesExact stays (the ONEPASS_PIPE branch takes it), and so do its shape cases, in the same test without the knob lines.
 - source: work/fold/0021-onepass-pipe.patch
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 058dde4fac7aee1871e1b5d7a0e975e98e97d6be..658710caf1358514a45c3dee33296ee52d4dc5ab 100644
+index 058dde4fac7aee1871e1b5d7a0e975e98e97d6be..776af8367b056aead63068bafccc74b3069297e0 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -61,6 +61,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -61,6 +61,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
  | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
  | `TF_GLM_OVN_SPARSE_ONEPASS` | Exactly `0` or `1`; default off (a prompt's rows take production's one-pass sparse attention) |
 +| `TF_GLM_OVN_ONEPASS_PIPE` | Exactly `0` or `1`; default off (the DSA block's prompt rows take the one-pass pipeline) |
-+| `TF_GLM_OVN_ONEPASS_EXACT` | Exactly `0` or `1`; default off (the one-pass pipeline keeps the chunk programs' accumulation order) |
 +| `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
 +| `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
 +| `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
@@ -660,20 +660,16 @@ index da8737c75a51f7d5de1e0554fa9dc713b4ecc866..1806ac440d50b9f92b58f0d161e5288a
  pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
  pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
-index eeb86a7bc5aa0fa47acfe6dd6c3a2627987cb5f7..2f34752aba5876bef9e47195332a1139dcea6a99 100644
+index eeb86a7bc5aa0fa47acfe6dd6c3a2627987cb5f7..b25a352cc67862e5468130bd7ada25ba175590f7 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -152,6 +152,18 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
+@@ -152,6 +152,14 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
          try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
          const stamp = prof.span(k.prof, stream, .mla);
          defer stamp.end();
 +        // TF_GLM_OVN_ONEPASS_PIPE: the one-pass pipeline with the default's bits, bit-identical to the chunk programs
 +        if (k.set.onepass_pipe) |fp| {
 +            if (onepass.takesExact(k.set.prompt, c.ls, l.heads, l.lw, rows)) return onepass.runPipe(fp, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, rows, l.heads, scale);
-+        }
-+        // TF_GLM_OVN_ONEPASS_EXACT: the same shapes in one pass a row, bit-identical to the chunk programs and merge
-+        if (k.set.onepass_exact) |fe| {
-+            if (onepass.takesExact(k.set.prompt, c.ls, l.heads, l.lw, rows)) return onepass.runExact(fe, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, rows, l.heads, scale);
 +        }
 +        // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows in one pass a row (production's kernel and bits), no partials or merge
 +        if (k.set.onepass) |f| {
@@ -682,7 +678,7 @@ index eeb86a7bc5aa0fa47acfe6dd6c3a2627987cb5f7..2f34752aba5876bef9e47195332a1139
          if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
              const slots = try g.gather(k.ops, stream, ix.gate, c.lc, c.pt, t.page_rows, pos, v.tokens, v.counts, rows, sparse.width);
              return latent.sparseAttentionFormat(set, stream, v.qa, slots, 0, .{}, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
-@@ -209,12 +221,10 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -209,12 +217,10 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
          try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
          var stamp = prof.span(k.prof, stream, .mla);
          defer stamp.end();
@@ -750,7 +746,7 @@ index 9eabf319f3761f332def42141324952833fa1ff8..c23c3fad25d606c35a672cda3c6f6321
  
      /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 1c2c4b8acf34a518470ff48ecfaad98014a3a744..354b1de991681644e404966a30b46f3d46df24ca 100644
+index 1c2c4b8acf34a518470ff48ecfaad98014a3a744..cf6031060614e826ab400f8e6dd7f9e04220a6b0 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
 @@ -5,8 +5,26 @@ const cuda = @import("cuda");
@@ -760,7 +756,7 @@ index 1c2c4b8acf34a518470ff48ecfaad98014a3a744..354b1de991681644e404966a30b46f3d
 -/// What the forward's kernels launch from; `onepass`: TF_GLM_OVN_SPARSE_ONEPASS's kernel, null with it off.
 -pub const Set = struct { glue: *const Kernels, index: ?*const index_mod.Kernels = null, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false, linear: cuda.qlinear.Linear = .{}, copy_rows: ?cuda.Function = null, onepass: ?cuda.Function = null };
 +/// What the forward's kernels launch from: our glue's, glm_mm's when tiled, qlinear's lane for FP8 kinds, copy_rows.
-+pub const Set = struct { glue: *const Kernels, index: ?*const index_mod.Kernels = null, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false, linear: cuda.qlinear.Linear = .{}, copy_rows: ?cuda.Function = null, pdl_early: bool = false, mla: Mla = .{}, onepass: ?cuda.Function = null, onepass_exact: ?cuda.Function = null, onepass_pipe: ?cuda.Function = null };
++pub const Set = struct { glue: *const Kernels, index: ?*const index_mod.Kernels = null, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false, linear: cuda.qlinear.Linear = .{}, copy_rows: ?cuda.Function = null, pdl_early: bool = false, mla: Mla = .{}, onepass: ?cuda.Function = null, onepass_pipe: ?cuda.Function = null };
 +
 +/// The MLA launch choices (TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC); the defaults launch today's.
 +pub const Mla = struct {
@@ -783,15 +779,10 @@ index 1c2c4b8acf34a518470ff48ecfaad98014a3a744..354b1de991681644e404966a30b46f3d
  /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.
  pub const Norm = union(enum) { bf16: u64, f32: u64 };
 diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
-index 8ecbaebfaee47578e6e1df06fe855192cfc30529..36a7d66d875f7e83505d2bfa0ebda193386c76a9 100644
+index 8ecbaebfaee47578e6e1df06fe855192cfc30529..f81a7b3d7696150cae09ce2692b7f110fb6d4486 100644
 --- a/zig/src/families/glm/cuda_onepass.zig
 +++ b/zig/src/families/glm/cuda_onepass.zig
-@@ -3,10 +3,13 @@
- const std = @import("std");
- const cuda = @import("cuda");
- const latent = @import("cuda_latent.zig");
-+const glue = @import("cuda_glue.zig");
- 
+@@ -7,6 +7,8 @@ const latent = @import("cuda_latent.zig");
  /// glm_onepass.cu's block (12 warps) and its Smem: three bf16 32-key tiles, P [24][32] bf16, scales, alphas, sums.
  pub const threads = 384;
  pub const smem: u32 = 3 * 32 * 512 * 2 + 24 * 32 * 2 + 3 * 32 * 4 + 24 * 4 + 24 * 4;
@@ -800,15 +791,10 @@ index 8ecbaebfaee47578e6e1df06fe855192cfc30529..36a7d66d875f7e83505d2bfa0ebda193
  /// The heads a rank carries for the kernel: production's 16 < H <= 24 (TP=3's 22 / 21).
  pub const min_heads = 17;
  pub const max_heads = 24;
-@@ -36,11 +39,73 @@ pub fn wanted() bool {
+@@ -36,11 +38,68 @@ pub fn wanted() bool {
      return cuda.ovn.on("SPARSE_ONEPASS");
  }
  
-+/// TF_GLM_OVN_ONEPASS_EXACT, read at load: the bit-identical one-pass path (tf_glm_onepass_exact), default off.
-+pub fn wantedExact() bool {
-+    return cuda.ovn.on("ONEPASS_EXACT");
-+}
-+
 +/// TF_GLM_OVN_ONEPASS_PIPE, read at load: the one-pass pipeline whose exact variant equals the fused kernel.
 +pub fn wantedPipe() bool {
 +    return cuda.ovn.on("ONEPASS_PIPE");
@@ -874,20 +860,10 @@ index 8ecbaebfaee47578e6e1df06fe855192cfc30529..36a7d66d875f7e83505d2bfa0ebda193
  /// latent.sparse_onepass: rows with counts > 0 over their `w`-wide token lists (as `t` maps them) into out bf16.
  pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: latent.Table, tokens: u64, counts: u64, w: usize, out: u64, rows: usize, heads: usize, scale: f32) !void {
      if (rows == 0) return;
-@@ -51,6 +116,26 @@ pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u
+@@ -51,6 +110,16 @@ pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u
      try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads }, .shared = smem }, stream, &a);
  }
  
-+/// The exact one-pass path (tf_glm_onepass_exact): glm_attn_ovn::chunks<32,true,true> in registers, one block a row.
-+pub fn runExact(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: latent.Table, tokens: u64, counts: u64, w: usize, out: u64, rows: usize, heads: usize, scale: f32) !void {
-+    if (rows == 0) return;
-+    if (heads < min_heads or heads > max_heads) return error.OnepassHeads;
-+    const nch: c_int = @intCast(latent.chunksFor(w));
-+    var a: cuda.Args = .{};
-+    inline for (.{ qa, cache, scales, tokens, counts, out, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(w)), scale, t.pt, @as(i64, @intCast(t.ps)), nch }) |v| a.add(v);
-+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1 }, .block = .{ .x = 256 }, .shared = glue.chunksSmem(32) }, stream, &a);
-+}
-+
 +/// A pipeline variant (tf_glm_onepass_pipe_*): the same arguments and launch as `run`, SmemPipe's shared size.
 +pub fn runPipe(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: latent.Table, tokens: u64, counts: u64, w: usize, out: u64, rows: usize, heads: usize, scale: f32) !void {
 +    if (rows == 0) return;
@@ -901,18 +877,12 @@ index 8ecbaebfaee47578e6e1df06fe855192cfc30529..36a7d66d875f7e83505d2bfa0ebda193
  test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
      try std.testing.expect(takes(true, 0x1000, 22, 512));
      try std.testing.expect(takes(true, 0x1000, 21, 512));
-@@ -60,3 +145,33 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
+@@ -60,3 +129,26 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
      try std.testing.expect(!takes(true, 0x1000, 16, 512));
      try std.testing.expectEqual(@as(u32, 100416), smem); // glm_onepass.cu's static_assert
  }
 +
-+test "onepass exact: the knob gates the path and the 32-head-block shapes take it" {
-+    cuda.ovn.fake("ONEPASS_EXACT", null);
-+    try std.testing.expect(!wantedExact());
-+    cuda.ovn.fake("ONEPASS_EXACT", "0");
-+    try std.testing.expect(!wantedExact());
-+    cuda.ovn.fake("ONEPASS_EXACT", "1");
-+    try std.testing.expect(wantedExact());
++test "onepass pipe: its exact variant takes the onepass shapes where the default uses 32-head blocks" {
 +    // the exact path takes the onepass shapes only where the default uses 32-head blocks (64 rows on this base))
 +    try std.testing.expect(takesExact(true, 0x1000, 22, 512, 64)); // a prompt chunk
 +    try std.testing.expect(!takesExact(true, 0x1000, 21, 512, 5)); // this base's wide tile starts at 64 rows
@@ -921,7 +891,6 @@ index 8ecbaebfaee47578e6e1df06fe855192cfc30529..36a7d66d875f7e83505d2bfa0ebda193
 +    try std.testing.expect(!takesExact(true, 0, 22, 512, 64)); // a BF16 cache keeps the chunk programs
 +    try std.testing.expect(!takesExact(false, 0x1000, 22, 512, 64)); // decode windows too
 +    try std.testing.expect(!takesExact(true, 0x1000, 32, 512, 64)); // TP=2's 32 heads
-+    cuda.ovn.fake("ONEPASS_EXACT", null);
 +}
 +
 +test "onepass pipe: the knob gates the pipeline and its smem matches SmemPipe" {
@@ -930,7 +899,7 @@ index 8ecbaebfaee47578e6e1df06fe855192cfc30529..36a7d66d875f7e83505d2bfa0ebda193
 +    cuda.ovn.fake("ONEPASS_PIPE", "1");
 +    try std.testing.expect(wantedPipe());
 +    try std.testing.expectEqual(@as(u32, 100512), pipe_smem); // glm_onepass_pipe.cuh's SmemPipe static_assert
-+    // the pipeline takes the same 32-head-block shapes the exact path does, bit-identical to the chunk programs
++    // the pipeline takes takesExact's shapes, the 32-head-block ones, bit-identical to the chunk programs
 +    try std.testing.expect(takesExact(true, 0x1000, 22, 512, 64));
 +    try std.testing.expect(!takesExact(true, 0x1000, 22, 512, 4));
 +    cuda.ovn.fake("ONEPASS_PIPE", null);
@@ -1196,15 +1165,14 @@ index 0000000000000000000000000000000000000000..d04a79e1ff7b1ce70effa0bf4fe47fe0
 +    }
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 363e9bd07861d60d09812f2c1088f1e7a6d0ee33..b9ceb649a6c4375e5d07a7467e042e944403e39c 100644
+index 363e9bd07861d60d09812f2c1088f1e7a6d0ee33..6c64479fce42b52aaab1d4d0d3d39b6c9232fcc7 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -95,6 +95,11 @@ pub const rules = [_]Rule{
+@@ -95,6 +95,10 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
      .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_SPARSE_ONEPASS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_ONEPASS_PIPE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-+    .{ .name = "TF_GLM_OVN_ONEPASS_EXACT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
 +    .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

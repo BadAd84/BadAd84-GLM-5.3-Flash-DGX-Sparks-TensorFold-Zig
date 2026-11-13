@@ -99,7 +99,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0033-exl3-dec-order.patch
 
 diff --git a/docs/environment.md b/docs/environment.md
-index f95a03189a116c31800ba7dd4886d86144f9efd5..b21a273b78acfba062eee6b3ab0ecc2b9957119e 100644
+index c6092bf0a562b9a90acb7a2c11f7e4dfaa56d84e..cd9ed8fa42027940bee2bb6c1f8f72ac54a2bd84 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
 @@ -28,6 +28,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
@@ -197,7 +197,7 @@ index b907b3a3044a400ff9447895e0dc5efb796bcff3..95bb251bb5ab9a8b4056c619ac7aeffe
          var cb: launch_.Args = .{};
          cb.add(sc.z);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 5bb0f54c5a7abb858620c3dac5d3fcd8a272b778..7d7121dd9256bc084f7a8424b27818724cf3a7f8 100644
+index a68c2ca3576b4f0696dcb5a9596fb24ab4268495..8afdd7faff7b0b554704e0ded67ef7431a5a4708 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
 @@ -48,6 +48,7 @@ pub const rules = [_]Rule{

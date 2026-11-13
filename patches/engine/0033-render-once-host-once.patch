@@ -119,10 +119,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0035-render-once-host-once.patch
 
 diff --git a/docs/environment.md b/docs/environment.md
-index b21a273b78acfba062eee6b3ab0ecc2b9957119e..23d30a9cf512b047059d6f6ae88641146a4885e6 100644
+index cd9ed8fa42027940bee2bb6c1f8f72ac54a2bd84..affd37c012b6e01b05e0128f4c83e787796d4b39 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -76,6 +76,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -75,6 +75,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_FUSE` | Whole row count; a decode window of at most this many rows runs each hc_post with the next site's hc_pre in one kernel; default 0 (off) |
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
@@ -1022,10 +1022,10 @@ index 45e0dcded9f0c59df209f699f8895e1ba5286d61..58d7db0b3ba8fe8e6919501a384fbeb3
  }
  
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 7d7121dd9256bc084f7a8424b27818724cf3a7f8..b70396004300b31645c9e37655b56efedb3b08fd 100644
+index 8afdd7faff7b0b554704e0ded67ef7431a5a4708..54a947b54e7c41a416d4c89957a10708d286a710 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -110,6 +110,7 @@ pub const rules = [_]Rule{
+@@ -109,6 +109,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_FUSE", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the most rows a decode window glues in one fused kernel" },
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
