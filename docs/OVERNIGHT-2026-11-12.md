@@ -373,7 +373,7 @@ the first control `rs2-ctl` having been taken at the start of the window; replie
 | `rs2-s8-b` (`=8`) | 70.32 | 78.86 | 99.28 | 136.20 | 167.60 | 38.5 |
 | mean of the two `=8` cells against the two `=4` cells | +0.9% | +0.3% | -0.4% | +1.0% | +1.3% | |
 
-The two `=4` cells differ from each other by 3.1 / 3.6 / 2.8 / 2.7 / 3.1% and the two `=8` cells by 0.1 / 1.3 / 2.2 / 3.2 / 3.4%, so
+The two `=4` cells differ from each other by 3.1 / 3.6 / 2.8 / 2.7 / 3.1% and the two `=8` cells by 0.1 / 1.3 / 2.2 / 3.2 / 3.5%, so
 the split's stream count is neutral inside the run-to-run spread and `=4` stays. The section 18 figures of +3.1% and +4.0% at six
 and eight streams were one pair of cells inside that spread. On this box one identical arm repeated can read 3% low, so a single
 cell, and a gap under about 3%, decides nothing; a claim at that size needs the arm in both orders.
