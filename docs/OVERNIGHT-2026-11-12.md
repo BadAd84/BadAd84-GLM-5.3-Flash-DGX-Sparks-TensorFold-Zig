@@ -447,3 +447,49 @@ single cell at this size says nothing about the wire.
 
 Against production (81.73 / 89.22 / 117.98 tok/s) the wire's mean cells of 71.54 / 79.65 / 101.00 are -12.5 / -10.7 / -14.4% at one,
 two and four streams; at six and eight streams the series is unchanged at +17.0 and +25.9%.
+
+## 22. Production's DFlash2 chain rule on our series: +1.3 to +4.5% at every stream count; the recipe with it
+
+Why: the profile (section 20) leaves tokens kept a round as the largest gap, 2.77 against production's 3.01 at one stream, and the
+acceptance analysis (`work/accept-gap`, summarised here) finds a third of it in the draft chain's rule. Production serves `fnc7:0.3`
+(`DepthPolicy(7, fixed, 0.3, beta 2.0)`, edge weight 0.6: each draft is scored logits + 0.6 x edge, picked from softmax(score/2), and the
+chain stops below 0.3 past the first draft); ours defaults to edge 1.0, temperature 1 and a 0.7 cut. The series already carries the
+knobs (`TF_GLM_OVN_DRAFT_EDGE`, `_BETA`, `_CUTS`, patch 0007), so no patch was needed. The same analysis found the two serves do not
+get the same prompt for `enable_thinking: false`: production renders 33 tokens (it drops the `Reasoning Effort: Max` line and closes the
+think block), ours 40 (it keeps the line), so no earlier cell compared the same text; aligning our rendering would change our reply
+digests, and that is not done.
+
+Image `rs2`, the seven knobs and the pad on every arm, order ctl, prod, prod, ctl, replies equal, tok/s (change against the first
+control; each test cell sits next to a control cell, `cr-ctl` then `cr-prod`, and `cr-prod-b` then `cr-ctl-b`):
+
+| arm | 1 | 2 | 4 | 6 | 8 | tokens/round | accept |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `cr-ctl` | 68.33 | 76.66 | 99.60 | 135.10 | 164.83 | 2.77 | 0.651 |
+| `cr-prod` (`EDGE=0.6 BETA=2 CUTS=1:0.3`) | 70.72 (+3.5%) | 80.10 (+4.5%) | 101.84 (+2.3%) | 137.23 (+1.6%) | 167.94 (+1.9%) | 2.81 | 0.671 |
+| `cr-prod-b` | 69.11 (+1.1%) | 78.43 (+2.3%) | 99.66 (+0.1%) | 133.64 (-1.1%) | 163.39 (-0.9%) | 2.81 | 0.671 |
+| `cr-ctl-b` | 68.25 (-0.1%) | 76.64 (0.0%) | 97.46 (-2.2%) | 131.20 (-2.9%) | 161.08 (-2.3%) | 2.77 | 0.651 |
+| `cr-e2` (`EDGE=0.2`, a single cell) | 70.21 (+2.7%) | 79.16 (+3.3%) | 100.31 (+0.7%) | 134.57 (-0.4%) | 164.68 (-0.1%) | 2.77 | 0.722 |
+
+The window's second half read low (both `-b` cells sit 2 to 3% under their first cells), so the comparison is each test cell against the
+control next to it: `cr-prod` over `cr-ctl` +3.5 / +4.5 / +2.3 / +1.6 / +1.9% and `cr-prod-b` over `cr-ctl-b` +1.3 / +2.3 / +2.3 /
++1.9 / +1.4% at 1/2/4/6/8 streams, every one positive. The counters agree and are exact: tokens a round 2.77 to 2.81 (+1.4%) and
+acceptance 0.651 to 0.671 with the same replies. The fork's loss with this rule at 4 to 8 streams did not reproduce here, so it needs
+no stream gate. `EDGE=0.2` (production's own refit) is one cell and is not adopted.
+
+The recipe as `scripts/serve.sh` now defines it (`KNOBS=measured`: the seven knobs, this chain rule, and the RoCE wire of section 21 at
+4 streams or fewer), run through the launcher, order ctl, rec, rec, ctl (`cm-ctl` is the seven-knob arm); the boot logs show the wire at
+1 and 4 streams and not at 8:
+
+| arm | 1 | 2 | 4 | 6 | 8 | tokens/round | accept |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `cm-ctl` | 70.37 | 78.38 | 100.31 | 131.62 | 160.43 | 2.77 | 0.651 |
+| `cm-rec` | 70.95 (+0.8%) | 80.29 (+2.4%) | 100.79 (+0.5%) | 134.09 (+1.9%) | 163.69 (+2.0%) | 2.81 | 0.671 |
+| `cm-rec-b` | 71.22 (+1.2%) | 80.41 (+2.6%) | 101.09 (+0.8%) | 134.30 (+2.0%) | 163.02 (+1.6%) | 2.81 | 0.671 |
+| `cm-ctl-b` | 68.53 (-2.6%) | 77.09 (-1.6%) | 96.78 (-3.5%) | 132.04 (+0.3%) | 164.97 (+2.8%) | 2.77 | 0.651 |
+
+The mean of the two recipe cells against the two control cells is +2.4 / +3.4 / +2.4 / +1.8 / +0.4% at 1/2/4/6/8 streams; at eight
+streams the two pairs split (+2.0% and -1.2%), so that +0.4% is inside the spread and not a gain. These are not the sum of the two
+effects (the chain rule +2.4 / +3.4 / +2.3 / +1.7 / +1.7%, the wire +1.8 / +1.4 / +1.6 / +0.1 / -0.5%): this box's spread is about 2 to
+3% a cell, so the combination is shown to be no worse than either, not shown to add. Cells from different windows are not comparable
+(a control cell reads 68.3 to 70.9 tok/s at one stream across them); the recipe's means are 71.09 / 80.35 / 100.94 / 134.20 / 163.36 tok/s,
+-13.0 / -9.9 / -14.4% against production at 1/2/4 streams and +16.9 / +24.4% at 6 and 8.
