@@ -57,6 +57,11 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 - **A patch enters `patches/engine/` with its receipts.** A default-path change needs its GPU cells (digests and the
   five levels); a knob needs the knob-off digests and, before anyone relies on it, the knob-on check. The header
   names the fork or upstream commit, what was left out, and the cells.
+- **A comparison with production uses its deployed shape (2026-11-14).** Production runs one `--parallel 4` serve with `--context 1048576`
+  at every level of its benchmark, so its 6 and 8 stream cells are four slots with requests queued. `scripts/serve.sh` boots a fresh
+  `--parallel` equal to the stream count with a smaller default context, so a 6 or 8 stream cell of ours is a different serve. A table set
+  beside production's names each side's `--parallel` and `--context`, and a 6 or 8 stream comparison drives a `--parallel 4` boot with 6 or 8
+  client streams.
 - **A comparison with production sends it the same prompt tokens (2026-11-14).** `scripts/streams.py` sends chat requests, and for
   `enable_thinking: false` our server renders the bench's prose prompt in 40 tokens (it keeps the `Reasoning Effort: Max` system line)
   where production renders 33 (it drops the line and closes the think block). The two serves then answer different text, tokens a round

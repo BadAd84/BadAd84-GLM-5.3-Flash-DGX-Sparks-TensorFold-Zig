@@ -670,3 +670,15 @@ drafter pass reads 328.5 MB a rank (it splits attention across ranks) against ou
 bytes with kernel efficiency. Nothing was built; the report specifies the keep fold (default off, bit-identical drafts) and the
 same-bytes drafter timing that would settle the linears. With sections 20 to 26, the round-time levers the profile named are now measured
 or bounded below the cut-off, and what remains of the gap at two and four streams (-6.5%, -7.2%) is not in one of them.
+
+## 28. Correction: what the six and eight stream cells compare
+
+Production's decode table (its `SPEED-TARGET.md`, cells of 2026-11-11) was taken against one `--parallel 4` serve at every level, so at
+six and eight streams two or four requests wait for a slot; its 114.78 and 131.28 tok/s are a four-slot serve with a queue. Every
+cell of ours is a fresh boot with `--parallel` equal to the stream count (`scripts/serve.sh` takes it as an argument), so our 6 and 8
+stream cells are true six and eight slot decodes, and the +25.7% and +35.9% of section 25 are not a like-for-like lead and should not be
+read as one. The same script defaults `--context` to 262,144 at two, four and six streams (196,608 at eight, 1,048,576 at one) where
+production runs `--context 1048576` at `--parallel 4`, so our four-stream boot is not production's deployed shape. The one, two and
+four stream cells compare similar concurrency and prompts and are the decode comparison this document stands on, with one more caveat:
+production's cells are from 2026-11-11 and 2026-11-12 and were not re-measured beside ours. A like-for-like six and eight stream
+measurement is a `--parallel 4` boot driven by six and eight client streams; the long-context harness is being extended to run it.
