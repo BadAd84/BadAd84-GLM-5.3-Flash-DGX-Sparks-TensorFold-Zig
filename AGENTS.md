@@ -18,7 +18,7 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
   re-tested. When `main` matches or beats `production/SPEED-TARGET.md` at 1, 2, 4, 6 and 8 streams, it replaces
   production. The numbers this repo measured on the production serve are in `docs/speed_target.md`.
 - **No private engine fork.** The series was ported from `ots/tensorfold-gb10` (branch `ovn-up`, 595e28743944) and
-  `ots/ai-engine`; both are being retired (owner 2026-11-12) and are kept whole under `archive/` as git bundles
+  `ots/ai-engine`; both were retired (owner 2026-11-12) and deleted from Gitea on 2026-11-14 after a last check that every live ref was in the archive; they are kept whole under `archive/` as git bundles
   with a restore check. The plain fork `BadAd84/TensorFold` is for upstream PR branches only.
 
 ## Layout

@@ -1,5 +1,7 @@
 # The old engine fork `ots/ai-engine`, kept whole
 
+**The repository `ots/ai-engine` was deleted from Gitea on 2026-11-14** (owner-approved) after a last comparison of its live refs with this archive: every live branch and sha is in it, and the only refs not listed are symbolic `HEAD`s and, in `tensorfold-gb10`, `upstream-main`, whose commit is in upstream's own history. This bundle is now the only copy.
+
 `ai-engine.bundle` is a git bundle of everything that fork, its working clone on this laptop and that
 clone's worktrees held that upstream `ashhart/TensorFold` does not: 458 refs, 1,410 commits, 25,289
 objects, 27,701,344 bytes, sha256 `177a5bbc561945b8851db90e5a160171b3856388368ccbf1ebaf9f15fd3738c2`.

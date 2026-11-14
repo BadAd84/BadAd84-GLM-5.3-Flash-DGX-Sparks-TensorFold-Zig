@@ -1,5 +1,7 @@
 # The old engine fork `ots/tensorfold-gb10`, kept whole
 
+**The repository `ots/tensorfold-gb10` was deleted from Gitea on 2026-11-14** (owner-approved) after a last comparison of its live refs with this archive: every live branch and sha is in it, and the only refs not listed are symbolic `HEAD`s and, in `tensorfold-gb10`, `upstream-main`, whose commit is in upstream's own history. This bundle is now the only copy.
+
 `tensorfold-gb10.bundle` is a git bundle of everything that fork and the five working clones of it on this
 laptop held that upstream `ashhart/TensorFold` does not: 341 refs, 871 commits, 12,317 objects,
 11,346,795 bytes, sha256 `017e3ee2b6bbf2bd21b1f2226a7ef9a4dec888c9612bbe884e316ed3642dd424`. Taken

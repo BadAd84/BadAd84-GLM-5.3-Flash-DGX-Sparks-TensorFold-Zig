@@ -30,7 +30,7 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
 - `scripts/` - apply, build, boot, the gates (`gates.sh`, `lean.sh`, `gate-names.sh`) and the measurement tools
   (`streams.py`, `bench-arm.sh`, `abba.sh`, `rounds.py`).
 - `docs/` - measurements and audits, dated: `docs/OVERNIGHT-2026-11-12.md` is the running record of what was measured.
-- `archive/` - the two retired forks this work came from (`ots/ai-engine`, `ots/tensorfold-gb10`) as git bundles
+- `archive/` - the two retired forks this work came from (`ots/ai-engine`, `ots/tensorfold-gb10`, both deleted from Gitea on 2026-11-14) as git bundles
   with their ref lists and check scripts.
 - `AGENTS.md` - the rules of this repo: how a patch is cut, gated, measured and landed, what a version bump of
   upstream requires, and how a change goes upstream. `.omp/RULES.md` carries the hard order for upstream work.
