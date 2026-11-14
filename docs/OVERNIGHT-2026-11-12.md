@@ -682,3 +682,43 @@ production runs `--context 1048576` at `--parallel 4`, so our four-stream boot i
 four stream cells compare similar concurrency and prompts and are the decode comparison this document stands on, with one more caveat:
 production's cells are from 2026-11-11 and 2026-11-12 and were not re-measured beside ours. A like-for-like six and eight stream
 measurement is a `--parallel 4` boot driven by six and eight client streams; the long-context harness is being extended to run it.
+
+## 29. Long prompts, resuming a long conversation, and the deployed shape: this is where we trail production
+
+Everything above compared decode. The long-context harness (`scripts/queue-longctx.sh`, `scripts/longctx.py`, `scripts/longctx_table.py`,
+tested on stubs with planted mutants) boots the deployed shape, `--parallel 4 --context 1048576`, image `rs2x3`, `KNOBS=measured`, and
+runs production's own cases (`SPEED-TARGET.md` sections 3 to 5). Rows: `docs/audit-2026-11-12/longctx-lc1-rows.jsonl`, 75 rows, 0
+rejected by the table's checks; prompt lengths are the server's own token counts. Production's numbers are from notes of 2026-11-10.
+
+**What the engine supports** (`docs/audit-2026-11-12/longctx-audit.md` is the lane's file:line audit): the deployed shape boots in 116 to
+120 s; a 1,047,377-token prompt ran (the largest that fits). GLM has **no disk tier**: `--spill-gib`, `--snapshot-dir` (other than
+`none`) and `--learn-conversations` are refused at open, so no conversation survives a crash or restart. `/health` has no `pool_tokens`;
+kept prompt states are full copies of the prefix on every rank (6,380 bytes a token a rank) in a separate budget, not production's shared
+pool. Prompt passes are 2,048 rows against production's 4,096.
+
+| case | ours | production | ours / production |
+|---|---:|---:|---:|
+| cold 1k prompt, idle, first token | 0.654 s | 0.54 s | 1.21x |
+| cold 8k | 4.606 s | 2.82 s | 1.63x |
+| cold 32k | 18.099 s | 10.93 s | 1.66x |
+| cold 120k | 67.220 s | 42.86 s | 1.57x |
+| conversation turn 1, cold at ~596k tokens | 346.06 s | 224.68 s | 1.54x |
+| turn 2, resumed from the pool / kept states | 14.79 s | 12.54 s | 1.18x |
+| turn 3 after every rank was SIGKILLed | 377.78 s (a cold refill, 0 tokens cached) | 12.80 s (from the spill tier) | 29.5x |
+| warm turn (+1,978 tokens on a 98k kept conversation) beside three decoding streams | 2.702 s | 1.217 s | 2.22x |
+
+With `TF_GLM_REQUEST_STARTS=1` the same warm turn is 1.305 s idle and 1.871 s loaded (1.54x), with different numerics; with
+`TF_GLM_CHUNK_SOLO=4096` cold prompts read 4.733 / 18.398 / 68.701 s at 8k / 32k / 120k, no gain. A cold 32k prompt beside three decoding
+streams is 19.659 s against 18.099 idle (production not measured).
+
+**Decode at the deployed shape**, N client streams against the `--parallel 4` boot (production's cells are N clients against its own
+`--parallel 4`, requests queued past four), production's prompts as ids, tok/s: 4 clients 100.94 against 117.98 (0.86x), 6 clients 102.74
+against 114.78 (0.90x), 8 clients 114.31 against 131.28 (0.87x). Our `--context 262144` four-stream boot read 109.46 in section 25's
+whole-recipe runs, so the 1M-token context costs this recipe about 8% of its four-stream decode (not yet explained), and the earlier -7.2%
+at four streams was a 262,144-token serve, not the deployed shape. The first-token times of the requests that wait for a slot are 13.6 to
+18.3 s against production's 9.6 to 14.9 s.
+
+**What this says.** At the shape production runs, the recipe is behind on decode (-14% at four streams), on cold prompts (1.6x slower
+first token), on a loaded warm turn (2.2x), and has no crash-surviving tier (29.5x on the 600k conversation after a kill). The decode
+cells at one to four streams in sections 25 and 28 were a real comparison of decode only, at a smaller context. By the repo's own rule the
+Zig serve does not replace production: it fails every long-context row and the deployed-shape decode.
