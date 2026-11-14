@@ -44,7 +44,7 @@ one group.
 
 | serve | 1 | 2 | 4 | 6 | 8 |
 |---|---:|---:|---:|---:|---:|
-| production (Python engine) | 81.73 | 89.22 | 117.98 | 114.78 | 131.28 |
+| production (Python engine; its own rendering of the bench prompts) | 81.73 | 89.22 | 117.98 | 114.78 | 131.28 |
 | upstream v1.2.7, no pad | 50.16 | 58.57 | 79.23 | 106.37 | 129.66 |
 | this series, switches off | 51.55 | 60.88 | 83.11 | 111.63 | 137.43 |
 | this series, pad | 64.57 | 73.71 | 93.66 | 126.18 | 153.75 |
@@ -52,8 +52,10 @@ one group.
 | this series, pad + the seven-knob set (`KNOBS=measured`) | 70.17 | 78.71 | 99.40 | 134.31 | 165.26 |
 | the same plus the RoCE wire at 4 streams or fewer (mean of two cells; 6 and 8 as the row above) | 71.54 | 79.65 | 101.00 | 134.31 | 165.26 |
 | the recipe as `serve.sh` defines it (`KNOBS=measured`: those seven, production's chain rule, the wire at 4 streams or fewer; mean of two cells) | 71.09 | 80.35 | 100.94 | 134.20 | 163.36 |
+| **the same recipe on production's prompts** (`scripts/bench-client.sh`: its rendering of the four bench prompts as ids; mean of two cells) | 78.71 | 80.81 | 105.47 | 139.26 | 172.67 |
 
-With production's pad, the recipe as `serve.sh` defines it leads production at 6 and 8 streams (+16.9%, +24.4%) and trails at 1, 2 and 4
-(-13.0%, -9.9%, -14.4%); cells from different measuring windows differ by up to 3%, so these are about, not exact. Production's one-stream
-round is 35.6 ms against our 37.7 to 38.7 ms; the rest of the gap is in `docs/OVERNIGHT-2026-11-12.md` sections 11 to 22 and
-`docs/audit-2026-11-12/round-structure.md`.
+The rows above the last one send our server's own rendering of the bench prompts, which is 40 tokens for the first prose prompt where
+production renders 33, so the two serves answer different text and the comparison is not like for like (`docs/OVERNIGHT-2026-11-12.md`
+section 23). On production's own prompt tokens the recipe is -3.7% at one stream and -9.4%, -10.6% at two and four, and leads at six and
+eight (+21.3%, +31.5%); cells from different measuring windows differ by up to 3%, so these are about, not exact. The rest of the gap is in
+`docs/OVERNIGHT-2026-11-12.md` sections 11 to 23 and `docs/audit-2026-11-12/round-structure.md`.

@@ -57,6 +57,12 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 - **A patch enters `patches/engine/` with its receipts.** A default-path change needs its GPU cells (digests and the
   five levels); a knob needs the knob-off digests and, before anyone relies on it, the knob-on check. The header
   names the fork or upstream commit, what was left out, and the cells.
+- **A comparison with production sends it the same prompt tokens (2026-11-14).** `scripts/streams.py` sends chat requests, and for
+  `enable_thinking: false` our server renders the bench's prose prompt in 40 tokens (it keeps the `Reasoning Effort: Max` system line)
+  where production renders 33 (it drops the line and closes the think block). The two serves then answer different text, tokens a round
+  and acceptance depend on the text, and a table built that way showed a one-stream gap of -13% that is -3.7% on the same prompt.
+  `scripts/bench-client.sh` runs `scripts/streams_ids.py`, which sends production's rendering of the four bench prompts
+  (`scripts/prose33.json`) as ids to `/v1/completions`; use it for any table set beside production's, and say which instrument a table used.
 - **Every speed result is measured at 1, 2, 4, 6 and 8 streams, a fresh boot a level; a change ships only with no
   regression at any level** (fleet rule, `~/.omp/agent/AGENTS.md`). A cell that reads low is rerun A B B A
   (`scripts/abba.sh`) before it is called a loss: eight-stream rounds on this serve spread about 3% between boots.

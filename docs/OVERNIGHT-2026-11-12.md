@@ -493,3 +493,48 @@ effects (the chain rule +2.4 / +3.4 / +2.3 / +1.7 / +1.7%, the wire +1.8 / +1.4 
 3% a cell, so the combination is shown to be no worse than either, not shown to add. Cells from different windows are not comparable
 (a control cell reads 68.3 to 70.9 tok/s at one stream across them); the recipe's means are 71.09 / 80.35 / 100.94 / 134.20 / 163.36 tok/s,
 -13.0 / -9.9 / -14.4% against production at 1/2/4 streams and +16.9 / +24.4% at 6 and 8.
+
+## 23. The one-stream gap was mostly the prompt: production's own prompts through our engine
+
+The acceptance analysis (`docs/audit-2026-11-12/accept-gap.md`) found that `scripts/streams.py` sends chat requests with
+`enable_thinking: false`, and the two serves render that differently: production drops the `Reasoning Effort: Max` system line and
+closes the think block (the bench's first prose prompt is 33 tokens), ours keeps the line (40 tokens). The replies then differ, and
+tokens kept a round and acceptance depend on the reply, so the 2.77 against 3.01 tokens a round and the gap built on it compared
+different text.
+
+**M-a, one stream, production's 33 prompt tokens sent as ids to our serve** (`scripts/streams_ids.py`, `scripts/prose33.json`, the
+instrument otherwise unchanged; 3 rounds; the reply digest is `9eb3186f9480` in both arms, neither ours on our prompt nor production's
+`8347edfe4ee6`, so the text is still not identical, only the prompt):
+
+| arm | draft rounds | drafted | accepted | tokens a round | acceptance | agg tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| seven-knob control (`ids-ctl`) | 128 | 390 | 271 | 3.12 | 0.695 | 76.7 to 76.9 |
+| production's chain rule (`ids-prod`) | 127 | 394 | 272 | 3.14 | 0.690 | 77.1 to 77.3 |
+
+Against production's 3.000 tokens a round on its own reply, our engine keeps 3.12 to 3.14 on this prompt: the tokens-a-round gap is
+gone. The round time is not: 3.12 tokens at 78.7 tok/s decode is about 39.7 ms a round against production's 35.6 ms.
+
+**M-b, our drafter on production's reply** (teacher-forced: each position's prompt is production's prompt plus its reply's first p
+tokens, so every drafter sees production's text; `docs/audit-2026-11-12/accept-gap.md` has the method): the share of drafts equal to
+production's next tokens at depth 1 to 7 is 0.807 / 0.615 / 0.455 / 0.326 / 0.230 / 0.152 / 0.102 (control) and 0.807 / 0.623 / 0.463 /
+0.345 / 0.246 / 0.163 / 0.107 under production's rule. Verifying every correct draft would keep 3.02 (control) and 3.07 tokens a
+round against production's 3.000, so our drafter's arithmetic is not behind production's. The replayed rule-limited chains (2.32 and
+2.31 tokens a round, with 54 of 399 positions flagged because our target leaves production's text there) sit well under that ceiling;
+drafting deeper was measured to lose on tok/s (section 15), so no lever follows.
+
+**The like-for-like table.** `scripts/bench-client.sh` at 1/2/4/6/8 streams, production's rendering of all four bench prompts as
+ids, image `rs2`, order recipe, seven-knob control, recipe (`ids-rec`, `ids-c7`, `ids-rec-b`; replies equal across the three):
+
+| arm | 1 | 2 | 4 | 6 | 8 | tokens/round | accept |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `ids-c7` (seven knobs) | 76.66 | 79.08 | 103.54 | 140.45 | 172.83 | 3.12 | 0.695 |
+| `ids-rec` (recipe) | 78.75 (+2.7%) | 80.78 (+2.1%) | 105.37 (+1.8%) | 139.53 (-0.7%) | 172.85 (0.0%) | 3.14 | 0.690 |
+| `ids-rec-b` | 78.66 (+2.6%) | 80.83 (+2.2%) | 105.57 (+2.0%) | 138.99 (-1.0%) | 172.49 (-0.2%) | 3.14 | 0.690 |
+| production (its own prompts, the table at the top) | 81.73 | 89.22 | 117.98 | 114.78 | 131.28 | 3.00 | 0.686 |
+
+The two recipe cells agree to 0.1 to 1.0%. Against the control they are +2.6 / +2.2 / +1.9% at one, two and four streams in both
+repeats, and -0.7 / -1.0% at six streams (one control cell, inside the box's spread, so neutral) and 0 at eight. Against production, the
+mean of the two recipe cells (78.71 / 80.81 / 105.47 / 139.26 / 172.67 tok/s) is **-3.7 / -9.4 / -10.6% at one, two and four streams and
++21.3 / +31.5% at six and eight**. The earlier -13.0 / -9.9 / -14.4% at one, two and four came from the unequal prompts. What remains at
+two and four streams is the verify step and its round time (section 20), not the draft chain or the drafter. The instrument is now in
+`scripts/` and `AGENTS.md` says to use it for any table set beside production's.
