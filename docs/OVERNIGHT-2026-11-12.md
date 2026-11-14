@@ -604,5 +604,11 @@ and the three switches), order ctl, set, set, ctl, replies equal (tok/s; each te
 positive, +1.2 to +3.5% at 1 to 8 streams, the round 38.4 to 38.5 ms against 38.8 to 39.7, so no level regresses and the three
 switches join `scripts/serve.sh`'s `DEFS`. The window's control read 1.5% lower in its first cell than the recipe of section 24, so the
 absolute cells are about, not exact: the mean of the two set cells is 79.72 / 83.02 / 108.85 / 142.80 / 175.93 tok/s, -2.5 / -7.0 /
--7.7% against production at one, two and four streams and +24.4 / +34.0% at six and eight, on production's own prompts. The recipe
-launched through `serve.sh` with these switches was not run as a whole; the arms passed them as the arm's `-e` list.
+-7.7% against production at one, two and four streams and +24.4 / +34.0% at six and eight, on production's own prompts.
+
+The whole recipe launched through `serve.sh` (`KNOBS=measured` on image `rs2x3`: the seven knobs, the chain rule, the block order, the three
+X3 switches, and the RoCE wire, whose boot line `gathers up to 256 KiB a rank on the wire` is in the 1- and 4-stream boots and not in the
+8-stream one), run twice, replies equal: 79.95 / 83.49 / 109.63 / 144.72 / 178.51 and 80.98 / 83.37 / 109.29 / 143.92 / 178.18 tok/s at
+1/2/4/6/8 streams, the two runs within 1.3% of each other and a round of 37.8 to 38.3 ms. The mean, 80.47 / 83.43 / 109.46 / 144.32 /
+178.35 tok/s, is -1.5 / -6.5 / -7.2% against production at one, two and four streams and +25.7 / +35.9% at six and eight, on
+production's own prompts.
