@@ -415,3 +415,35 @@ ingest split is 253 added lines for a gain no cell can show, and it stays as `do
 (sha256 `773988ed1c05`, applies to the series' tree `4ed20ea3d175`, with a bit-exact check of its share matmuls on an RTX 5070:
 0 of 671,744 fc words and 0 of 1,679,360 k and v words differ). The levers the profile leaves are the all-gathers (v1.2.7's own RoCE
 path with `TF_GLM_ROCE_MULTI=1`, never measured here) and the tokens kept a round.
+
+## 21. v1.2.7's three-rank RoCE wire (`TF_GLM_ROCE_MULTI=1`): +1.4 to +1.8% at one to four streams, none at six, -0.5% at eight
+
+Image `rs2`, the seven knobs and the pad. The wire (`fabric/tp`, ports paired by shared subnet; boot lines `tp roce: rank 0 -> rank 1:
+HCA pairs { 0 } from ours { 0 }` and `rank 0 -> rank 2: ... from ours { 1 }`, then `gathers up to 256 KiB a rank on the wire`) needs the
+mailbox kernel image on every host (`scripts/mailbox-fatbin.sh`, built with CUDA 13.3, sha256 `c3f526171160`, placed at
+`~/.cache/huggingface/tp_mailbox.fatbin`), `TF_TP_MASTER` (rank 0's address) and `TF_TP_KERNEL_IMAGE`. Order ctl, roce, roce, ctl;
+replies equal and acceptance equal in every cell (tok/s; change against the first control):
+
+| arm | 1 | 2 | 4 | 6 | 8 | ms/round |
+|---|---:|---:|---:|---:|---:|---:|
+| `env-ctl` | 70.41 | 78.69 | 99.60 | 135.26 | 165.21 | 38.5 |
+| `env-roce` | 71.71 (+1.8%) | 80.37 (+2.1%) | 101.26 (+1.7%) | 135.52 (+0.2%) | 163.77 (-0.9%) | 37.7 |
+| `env-roce-b` | 71.37 (+1.4%) | 78.92 (+0.3%) | 100.73 (+1.1%) | 134.85 (-0.3%) | 164.45 (-0.5%) | 37.9 |
+| `env-ctl-b` | 70.03 (-0.5%) | 78.25 (-0.6%) | 99.44 (-0.2%) | 134.79 (-0.3%) | 165.26 (0.0%) | 38.6 |
+| `rc-ctl` (a third control, taken in the next window) | 70.34 (-0.1%) | 78.73 (+0.1%) | 99.20 (-0.4%) | 134.28 (-0.7%) | 164.66 (-0.3%) | 38.5 |
+
+The mean of the two wire cells against the three control cells is +1.8 / +1.4 / +1.6% at one, two and four streams, +0.1% at six and
+-0.5% at eight. The round time is the clearest signal: 37.7 and 37.9 ms with the wire against 38.5, 38.6 and 38.5 without, about
+0.7 ms a round, which is what the profile's gather gap predicted (section 20).
+
+A size cap does not keep the gain and lose the loss: `TF_TP_MAILBOX_MAX_KB=64` reads +0.2 / -0.5 / -0.7 / -1.2 / -1.4% and
+`=32` reads -0.8 / -0.7 / -0.6 / -1.2 / -0.5% (first cells, against `env-ctl`; the repeats read +0.5 / -0.7 / -1.4 / -0.9 / -1.3% and
+-0.3 / -2.8 / -2.9 / -3.1 / -2.7%), so what the wire saves is in the gathers between 64 and 256 KiB. The stream count is a boot-time
+`--parallel`, so the gate is the launcher's: `scripts/serve.sh` adds the wire with `KNOBS=measured` only at 4 streams or fewer, and only
+when the kernel image is on the host (otherwise it prints that it boots on NCCL). Checked through the launcher on `rs2`: the 4-stream
+boot logged `gathers up to 256 KiB a rank on the wire`, the 8-stream boot did not. Those two cells read 99.45 tok/s (-0.2%) and 161.28
+tok/s (-2.4%); the 8-stream cell has no wire and the control's configuration, so it shows the box reading 2.4% low at that time, and a
+single cell at this size says nothing about the wire.
+
+Against production (81.73 / 89.22 / 117.98 tok/s) the wire's mean cells of 71.54 / 79.65 / 101.00 are -12.5 / -10.7 / -14.4% at one,
+two and four streams; at six and eight streams the series is unchanged at +17.0 and +25.9%.

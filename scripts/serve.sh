@@ -80,6 +80,17 @@ case "${KNOBS:-off}" in
   off) ;;
   *) echo "KNOBS must be off, measured or all" >&2; exit 2 ;;
 esac
+# TF_GLM_ROCE_MULTI: v1.2.7's own three-rank RoCE wire for the small all-gathers (ports paired by shared subnet). Measured against the
+# same image without it, order ctl, on, on, ctl: +1.8 / +1.4 / +1.6% at 1 / 2 / 4 streams, +0.1% at 6, -0.5% at 8
+# (docs/OVERNIGHT-2026-11-12.md section 21), so it comes with the measured set only up to 4 streams, which is a boot-time setting.
+# It needs the mailbox kernel image on every host (scripts/mailbox-fatbin.sh builds it); without it the boot stays on NCCL.
+if [[ "${KNOBS:-off}" != off && $WORLD -gt 1 && $P -le 4 && " ${XENV:-} " != *" -e TF_GLM_ROCE_MULTI="* ]]; then
+  if [[ -f "$HOME/.cache/huggingface/tp_mailbox.fatbin" ]]; then
+    XENV="${XENV:-} -e TF_GLM_ROCE_MULTI=1 -e TF_TP_MASTER=${COMM_ID%%:*} -e TF_TP_KERNEL_IMAGE=/root/.cache/huggingface/tp_mailbox.fatbin"
+  else
+    echo "serve.sh: no ~/.cache/huggingface/tp_mailbox.fatbin on this host (scripts/mailbox-fatbin.sh builds it): booting on NCCL" >&2
+  fi
+fi
 read -r -a XE <<< "${XENV:-}"; ENV+=("${XE[@]}")
 
 RUN=(--gpus all --ipc=host --network host --shm-size 16g --cap-add IPC_LOCK
