@@ -67,9 +67,10 @@ ENV+=(-e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_MIN_NCHANNELS=4 -e NCC
 DEFS="TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_KEPT_WALK=1
  TF_GLM_OVN_DRAFT_ONEPASS=1 TF_GLM_OVN_DRAFT_DOWN4=1 TF_GLM_OVN_DRAFT_MLPSPLIT=4
  TF_GLM_OVN_MLA_FUSEMERGE=1
- TF_GLM_OVN_DRAFT_EDGE=0.6 TF_GLM_OVN_DRAFT_BETA=2 TF_GLM_OVN_DRAFT_CUTS=1:0.3"
+ TF_GLM_OVN_DRAFT_EDGE=0.6 TF_GLM_OVN_DRAFT_BETA=2 TF_GLM_OVN_DRAFT_CUTS=1:0.3
+ TF_EXL3_DEC_ORDER=1"
 # The first seven are the arm measured together (docs/OVERNIGHT-2026-11-12.md section 17); the last three are production's DFlash2
-# chain rule (fnc7:0.3), measured against that arm in section 22. GLUE_FUSE, INDEX_SCHED, POOLS32,
+# chain rule (fnc7:0.3), measured against that arm in section 22; TF_EXL3_DEC_ORDER is production's routed-expert block order (section 24). GLUE_FUSE, INDEX_SCHED, POOLS32,
 # INDEX_REGROUP, MM_WIDE, SPARSE_ONEPASS and ROUTER_WARM were measured one at a time, within the noise, so they stay out.
 # Off by default: a knob is default-off until it has been A/B'd at 1/2/4/6/8 streams on this series
 # (docs/OVERNIGHT-2026-11-12.md has the cells). KNOBS=measured opts into the set above; KNOBS=all is the same

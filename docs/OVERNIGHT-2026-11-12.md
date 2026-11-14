@@ -538,3 +538,42 @@ mean of the two recipe cells (78.71 / 80.81 / 105.47 / 139.26 / 172.67 tok/s) is
 +21.3 / +31.5% at six and eight**. The earlier -13.0 / -9.9 / -14.4% at one, two and four came from the unequal prompts. What remains at
 two and four streams is the verify step and its round time (section 20), not the draft chain or the drafter. The instrument is now in
 `scripts/` and `AGENTS.md` says to use it for any table set beside production's.
+
+## 24. Where the 2 and 4 stream round goes, and production's routed-expert block order
+
+A fresh capture of the current recipe (rank 0 under nsys, 1/2/4 streams, `docs/audit-2026-11-12/verify-gap.md`) gives the round in ms:
+
+| stage | 1 stream | 2 streams | 4 streams |
+|---|---:|---:|---:|
+| rows in the verify | 3.76 | 6.05 | 11.74 |
+| round | 37.73 | 52.74 | 80.51 |
+| verify step | 34.10 | 48.31 | 75.06 |
+| routed experts (`tf_exl3_grouped_1` alone) | 19.50 (18.54) | 31.47 (30.20) | 53.91 (52.35) |
+| KDA chain and MLA attention, one launch set per stream | 1.42 | 2.40 | 4.26 |
+| all-gathers (90 a verify) | 1.85 | 2.42 | 3.33 |
+| GPU idle inside the verify | 0.94 | 0.87 | 0.92 |
+| keep steps | 0.23 | 0.41 | 0.75 |
+| drafter step | 3.40 | 4.03 | 4.71 |
+
+The routed experts are 57% of the round at two streams and 65% at four, and they cost 3.9 / 3.9 / 3.2 ms a row. Production's round at the
+same rows is 50.4-50.8 ms at two streams (ours 55.2, +8.9%) and 80.3-80.5 ms at four (ours 88.6-88.9 at equal rows, +10%); its stage
+split at two and four streams was never measured, so that bound assumes a stream keeps the same tokens a round in a shared round as
+alone. Production runs its routed-expert kernel with settings ours did not: `TF_GLM_EXL3_DEC_ORDER=1` is in its launch environment, and
+its load width, row rotation and fused down epilogue are in its speed-target notes. Our series carries only the block order
+(`TF_EXL3_DEC_ORDER`, patch 0030), which had never been measured.
+
+`TF_EXL3_DEC_ORDER=1` through the like-for-like instrument (`scripts/arms-client.sh`, production's prompts as ids, the recipe as the
+control), order ctl, ord, ord, ctl, replies equal (tok/s; change against the first control):
+
+| arm | 1 | 2 | 4 | 6 | 8 | ms/round |
+|---|---:|---:|---:|---:|---:|---:|
+| `x3o-ctl` | 78.49 | 81.41 | 105.97 | 139.15 | 171.57 | 39.1 |
+| `x3o-ord` | 78.81 (+0.4%) | 81.24 (-0.2%) | 107.20 (+1.2%) | 140.94 (+1.3%) | 173.95 (+1.4%) | 38.9 |
+| `x3o-ord-b` | 78.55 (+0.1%) | 80.11 (-1.6%) | 107.40 (+1.3%) | 141.23 (+1.5%) | 173.08 (+0.9%) | 39.0 |
+| `x3o-ctl-b` | 77.56 (-1.2%) | 79.74 (-2.1%) | 105.77 (-0.2%) | 139.82 (+0.5%) | 171.78 (+0.1%) | 39.5 |
+
+Each test cell against the control next to it: `x3o-ord` over `x3o-ctl` +0.4 / -0.2 / +1.2 / +1.3 / +1.4% and `x3o-ord-b` over
+`x3o-ctl-b` +1.3 / +0.5 / +1.5 / +1.0 / +0.8% at 1/2/4/6/8 streams. No level is negative outside the spread (the one -0.2% is a
+pair whose other half is +0.5%), so it joins the recipe: `serve.sh`'s `DEFS` gains `TF_EXL3_DEC_ORDER=1`. About +1% at four streams and
+up is far under the +2 to +4% the fork measured for the whole set (16-byte loads, input rotated once per expert pair, fused down
+epilogue), which is a CUDA port, not a switch.
