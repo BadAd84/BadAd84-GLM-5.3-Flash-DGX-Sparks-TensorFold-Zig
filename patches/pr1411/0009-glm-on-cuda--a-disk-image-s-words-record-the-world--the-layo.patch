@@ -1,0 +1,230 @@
+From 4f4da8e250b48dbf2e88038ee8f7b47865b1260c Mon Sep 17 00:00:00 2001
+From: Robert Wojciechowski <24755+wojo@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 20:45:30 -0500
+Subject: [PATCH] GLM on CUDA: a disk image's words record the world, the layout and the owner, and a read refuses another by name
+
+The image's words gain three: the ranks that wrote it, its layout and the rank that owns its latent rows.
+Every image is unsplit so far (every rank holds every row): it records this server's world, layout 0 and
+no owner. A read refuses words of another world (DiskWorld) or another layout, or an owner its layout
+does not have (DiskLayout), before the blank state is sealed. The words are 72 bytes, the seal step 18
+words. #1431's split states fill the layout and owner without another format.
+
+A disk read forgets a state's file refused as DiskWorld or DiskLayout after one recall, as it does one
+refused as DiskWords (rows_read.refused); rows_refusal_test.zig's cases include both.
+---
+
+diff --git a/zig/src/core/rows_read.zig b/zig/src/core/rows_read.zig
+index 87ba18efd71126e7ec81a4392399f783d65604d8..129a86b22029b8343a2ad6915084971f3c02b3bb 100644
+--- a/zig/src/core/rows_read.zig
++++ b/zig/src/core/rows_read.zig
+@@ -51,10 +51,10 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges:
+     return o.trailer.payload + o.trailer.meta + @sizeOf(file.Trailer);
+ }
+ 
+-/// Whether a family refused what a file holds (words that differ, a size or a range that does not fit its blank).
++/// Whether a family refused what a file holds (words that differ, of another world or layout; a size or range unfit).
+ fn refused(err: anyerror) bool {
+     return switch (err) {
+-        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer => true,
++        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer, error.DiskWorld, error.DiskLayout => true,
+         else => false,
+     };
+ }
+diff --git a/zig/src/core/rows_refusal_test.zig b/zig/src/core/rows_refusal_test.zig
+index 5b298996e9be4f591141a9e5002334da358cec32..668a9884ceeacb5133b848d0a634284c3bd63674 100644
+--- a/zig/src/core/rows_refusal_test.zig
++++ b/zig/src/core/rows_refusal_test.zig
+@@ -84,6 +84,8 @@ const cases = [_]Case{
+     .{ .piece = .shared, .err = error.BadKeptRange, .mine = false, .other = false },
+     .{ .piece = .own, .err = error.DiskWords, .mine = false, .other = true }, // the state's own file
+     .{ .piece = .own, .err = error.KeptWordsDiffer, .mine = false, .other = true },
++    .{ .piece = .own, .err = error.DiskWorld, .mine = false, .other = true }, // written by another number of ranks
++    .{ .piece = .own, .err = error.DiskLayout, .mine = false, .other = true }, // or in another layout
+     .{ .piece = .own, .err = error.ScatterFailed, .mine = true, .other = true }, // a link failing: the disk is fine
+     .{ .piece = .shared, .err = error.OutOfMemory, .mine = true, .other = true },
+ };
+diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
+index 706a224b161b0190ed25ad97da821bfa69455fbe..491d6d754c6ff885e8d536d9c154e7e6c5711055 100644
+--- a/zig/src/families/glm/cuda_disk_image.zig
++++ b/zig/src/families/glm/cuda_disk_image.zig
+@@ -8,25 +8,37 @@ const pages = @import("cuda_snapshot_pages.zig");
+ const State = st_mod.State;
+ const window_rows = st_mod.window_rows;
+ 
+-/// The image's first bytes: the format, the position, the head's rows, both ring bases and the KDA copy bits.
++/// The image's first bytes: the format, the position, the head's rows, both ring bases, the KDA copy bits, the layout.
+ pub const Words = struct {
+     at: u64,
+     mtp_len: u64,
+     base: u64,
+     mtp_base: u64,
+     cur: u64,
++    world: u64, // the ranks that wrote it
++    layout: Layout = .unsplit,
++    owner: u64 = no_owner, // the rank holding its latent rows alone (split layouts); unsplit: no_owner
+ 
+-    pub const bytes: u64 = 48;
++    pub const count = 9;
++    pub const bytes: u64 = count * 8;
+     const format: u64 = 1;
+ 
+-    pub fn encode(w: Words) [6]u64 {
+-        return .{ format, w.at, w.mtp_len, w.base, w.mtp_base, w.cur };
++    /// Which rows each rank's image holds: unsplit, every rank every row (the only layout written so far).
++    pub const Layout = enum(u64) { unsplit = 0, _ };
++    pub const no_owner: u64 = std.math.maxInt(u64);
++
++    pub fn encode(w: Words) [count]u64 {
++        return .{ format, w.at, w.mtp_len, w.base, w.mtp_base, w.cur, w.world, @backingInt(w.layout), w.owner };
+     }
+ 
+-    /// Words read back: refused unless the format is this one and the state stands at `at`.
+-    pub fn decode(x: [6]u64, at: u32) !Words {
++    /// Words read back, refused by name unless this format at `at`, written by `world` ranks in this server's `layout`.
++    pub fn decode(x: [count]u64, at: u32, world: u32, layout: Layout) !Words {
+         if (x[0] != format or x[1] != at) return error.DiskWords;
+-        return .{ .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5] };
++        if (x[6] != world) return error.DiskWorld;
++        const l: Layout = @fromBackingInt(@intCast(x[7]));
++        if (l != layout) return error.DiskLayout;
++        if (if (l == .unsplit) x[8] != no_owner else x[8] >= world) return error.DiskLayout;
++        return .{ .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5], .world = x[6], .layout = l, .owner = x[8] };
+     }
+ };
+ 
+@@ -237,7 +249,7 @@ pub const Copy = struct {
+     pool: *const pages.Pool,
+     lease: *const pages.Lease,
+     segs: []const Seg,
+-    words: *[6]u64,
++    words: *[Words.count]u64,
+ 
+     pub fn run(c: Copy, off: u64, host: []u8, out: bool) !void {
+         const end = off + host.len;
+diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
+index 77a5c3e3b232322cdf580ab070b14e2437b0c8c3..b6c04680380bc07b28b4a692a3f6419a77cb4698 100644
+--- a/zig/src/families/glm/cuda_disk_image_test.zig
++++ b/zig/src/families/glm/cuda_disk_image_test.zig
+@@ -168,7 +168,7 @@ test "GLM disk image: a kept state's image read out of its lease restores every
+     const last = segs.items[segs.items.len - 1];
+     const img = try a.alloc(u8, @intCast(last.img + last.len));
+     defer a.free(img);
+-    var words = (image.Words{ .at = at, .mtp_len = mtp, .base = 0, .mtp_base = 0, .cur = 0b10 }).encode();
++    var words = (image.Words{ .at = at, .mtp_len = mtp, .base = 0, .mtp_base = 0, .cur = 0b10, .world = 2 }).encode();
+     const out: image.Copy = .{ .d = &d, .pool = &pool, .lease = &kept, .segs = segs.items, .words = &words };
+     const cut = [_]u64{ 0, 1000, plan.len / 2, img.len }; // the store asks for ranges, not the whole image
+     for (cut[0..3], cut[1..]) |lo, hi| try out.run(lo, img[@intCast(lo)..@intCast(hi)], true);
+@@ -176,13 +176,13 @@ test "GLM disk image: a kept state's image read out of its lease restores every
+     // a blank state as a disk read takes it (room for the head's whole window), filled from the image
+     var blank = try pool.take(@intCast(image.leaseBytes(sh, at, sh.headRows(at))));
+     defer pool.give(&blank);
+-    var back: [6]u64 = undefined;
++    var back: [image.Words.count]u64 = undefined;
+     const in: image.Copy = .{ .d = &d, .pool = &pool, .lease = &blank, .segs = segs.items, .words = &back };
+     try in.run(0, img, false);
+-    const w = try image.Words.decode(back, at);
++    const w = try image.Words.decode(back, at, 2, .unsplit);
+     try expectEqual(mtp, w.mtp_len);
+     try expectEqual(@as(u64, 0b10), w.cur);
+-    try expectError(error.DiskWords, image.Words.decode(back, at + 2048));
++    try expectError(error.DiskWords, image.Words.decode(back, at + 2048, 2, .unsplit));
+     var fresh = try State.initFormat(a, &d, &m.w, capacity, false);
+     defer fresh.deinit();
+     const into = try Plan.init(&fresh, c, at, w.mtp_len, 0);
+@@ -298,6 +298,34 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
+     try snaps.seal(&e, 9, 0, .{ back, 0 }, 0); // no head rows yet (as without drafts): the main ring holds the state's rows
+ }
+ 
++test "GLM disk image: the words record the world, the layout and the owner, and a read refuses another by name" {
++    const at: u32 = 4096;
++    const w: image.Words = .{ .at = at, .mtp_len = 7, .base = 1, .mtp_base = 2, .cur = 0b1, .world = 3 };
++    const x = w.encode();
++    try expectEqual(@as(u64, 72), image.Words.bytes);
++    try expectEqual(@as(usize, image.Words.bytes), @sizeOf(@TypeOf(x)));
++    // an unsplit state: every rank holds every row, so no rank owns it
++    try std.testing.expectEqualSlices(u64, &.{ 3, 0, image.Words.no_owner }, x[6..]);
++    try expectEqual(w, try image.Words.decode(x, at, 3, .unsplit));
++    try expectError(error.DiskWorld, image.Words.decode(x, at, 2, .unsplit)); // written by three ranks, read by two
++    try expectError(error.DiskWorld, image.Words.decode(x, at, 4, .unsplit));
++    const split: image.Words.Layout = @fromBackingInt(@intCast(1));
++    try expectError(error.DiskLayout, image.Words.decode(x, at, 3, split)); // this server splits, the image does not
++    var y = x;
++    y[7] = 1; // an image of a split layout read unsplit
++    try expectError(error.DiskLayout, image.Words.decode(y, at, 3, .unsplit));
++    const owned = try image.Words.decode(y[0..8].* ++ [1]u64{2}, at, 3, split);
++    try expectEqual(@as(u64, 2), owned.owner);
++    try expectError(error.DiskLayout, image.Words.decode(y, at, 3, split)); // a split image names an owner rank
++    try expectError(error.DiskLayout, image.Words.decode(y[0..8].* ++ [1]u64{3}, at, 3, split));
++    y = x;
++    y[8] = 0; // an unsplit image that names an owner
++    try expectError(error.DiskLayout, image.Words.decode(y, at, 3, .unsplit));
++    y = x;
++    y[0] = 2; // the format comes first: a format this server does not read is DiskWords, whatever its layout
++    try expectError(error.DiskWords, image.Words.decode(y, at, 2, .unsplit));
++}
++
+ /// A state's store image at `at` for two ranks, rank 1's prefix a copy of rank 0's: what the load's probe gathers.
+ fn storeImage(a: std.mem.Allocator, d: *const cuda.Driver, pool: *pages.Pool, st: *const State, c: *const @import("config.zig").Config, sh: image.Shape, at: u32, mtp: u64) ![]u8 {
+     const plan = try Plan.init(st, c, at, mtp, 0);
+diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cuda_disk_ranks.zig
+index 5e217f4a251a48539a34d1a999e9c68ac5583b7f..43698e35fc9a8eef498fd7b9c7225be9025d7a9f 100644
+--- a/zig/src/families/glm/cuda_disk_ranks.zig
++++ b/zig/src/families/glm/cuda_disk_ranks.zig
+@@ -17,13 +17,13 @@ pub fn shape(e: *const Engine) !image.Shape {
+     return image.Shape.of(&e.cur.st, &e.c, e.capacity, e.mtp);
+ }
+ 
+-/// The words of a kept state on this rank: its position, head rows, ring bases and KDA copy bits.
++/// The words of a kept state on this rank: its position, head rows, ring bases, KDA copy bits and layout (unsplit).
+ pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
+     const s = e.snaps.get(id) orelse return error.NoKeptState;
+     if (s.cur.len > 64) return error.SnapshotShape;
+     var cur: u64 = 0;
+     for (s.cur, 0..) |b, i| cur |= @as(u64, b) << @intCast(i);
+-    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur };
++    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world };
+ }
+ 
+ /// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
+@@ -105,6 +105,11 @@ pub fn same(e: *Engine, id: u64, each: []const u64, shared: []const u8, loose: [
+     }
+ }
+ 
++/// Words read back for a state at `at`: refused by name unless this server's world and layout (unsplit) wrote them.
++pub fn decode(e: *const Engine, x: [image.Words.count]u64, at: u32) !image.Words {
++    return image.Words.decode(x, at, @intCast(e.share.world), .unsplit);
++}
++
+ /// Rank 0: every rank's blank `id` sealed with `w` (its head's rows, ring bases and KDA copy bits).
+ pub fn seal(e: *Engine, id: u64, w: image.Words) !void {
+     try snapshots.seal(e, id, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
+@@ -141,10 +146,10 @@ pub fn step(e: *Engine, l: *follow.Link, h: follow.Header, ids: []const u32) !vo
+     switch (op) {
+         .blank => try snapshots.blankAs(e, h.a, @intCast(h.seed)),
+         .seal => {
+-            if (ids.len != 12) return error.BadStep;
+-            var x: [6]u64 = undefined;
++            if (ids.len != image.Words.count * 2) return error.BadStep;
++            var x: [image.Words.count]u64 = undefined;
+             @memcpy(std.mem.sliceAsBytes(&x), std.mem.sliceAsBytes(ids));
+-            const w = try image.Words.decode(x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
++            const w = try decode(e, x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
+             try snapshots.seal(e, h.a, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
+         },
+         .put => if (h.top_k == rank) {
+diff --git a/zig/src/native/cuda_glm_disk.zig b/zig/src/native/cuda_glm_disk.zig
+index 4798d2f80a0d68b631559f70ae914e7f8c74400e..8cca4349bf052e7478f96d660ae769cc56422137 100644
+--- a/zig/src/native/cuda_glm_disk.zig
++++ b/zig/src/native/cuda_glm_disk.zig
+@@ -84,9 +84,9 @@ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.
+     defer rest.done();
+     if (ranges.len > 0 and ranges[0].off == 0) {
+         if (ranges[0].len < img.Words.bytes) return error.DiskWords;
+-        var x: [6]u64 = undefined;
++        var x: [img.Words.count]u64 = undefined;
+         @memcpy(std.mem.sliceAsBytes(&x), in[0..img.Words.bytes]);
+-        try ranks.seal(e, k.id, try img.Words.decode(x, k.at));
++        try ranks.seal(e, k.id, try ranks.decode(e, x, k.at));
+     }
+     var pieces: std.ArrayList(img.Piece) = .empty;
+     defer pieces.deinit(e.gpa);

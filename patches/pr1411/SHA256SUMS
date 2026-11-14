@@ -1,0 +1,11 @@
+746800e7ecf018a418f30f957370eca96a1c93afa398b6742975c60276c56f5f  0001-glm-on-cuda--a-kept-state-s-disk-image-on-one-rank--its-part.patch
+89f993c9f28175467b039aeee07475a5a3927dd0933a5c09c828167396db057c  0002-glm-on-cuda----learn-conversations-keeps-every-rank-s-part-o.patch
+61db1b616706b0a3c86ea91578326f54dece5855631fa6af7c295cafcc6f5336  0003-rows--a-pool-that-reuses-spare-storage-without-trimming-it-r.patch
+da6e206af3d9fce703b3324b5aa8e08692d9930ac5d62f1c29e5f7fe406c20e5  0004-rows--a-pool-that-also-trims-reads-a-disk-state-only-within.patch
+530bd971c4279a7064cd124c989359da4e5a98662acf08a5592f50a6977b6767  0005-glm-on-cuda--a-disk-read-s-seal-refuses-ring-bases-that-do-n.patch
+1fde366842208a2e618769b8ac361f81ef4cdbd111ba54991933358878f7672a  0007-glm-on-cuda----spill-gib-and---checkpoint-slots-are-refused.patch
+3e4956faa9f61ad39c86a3bba1466e351ddca2d527d235955c2553afefb5e125  0008-glm-on-cuda--the-disk-image-downloads-through-cuda-memory-do.patch
+54a6fb339ed716afe81b7d1c4605e90a44bb40589b006a8b7abddc7e2169b544  0009-glm-on-cuda--a-disk-image-s-words-record-the-world--the-layo.patch
+3e768e9eb307ce93317fb8cdb26adae0b0c90948130ddc834ab7ee425901af67  0010-glm-on-cuda----learn-conversations-opens-its-store-through-t.patch
+44857f68da8c1e86a87b27d2c97046b24de7d95d2b751213556d4c680247ae89  0011-glm-tests-the-disk-image-fake-has-the-head-flag.patch
+b1fe193f3603bd9b36e53976e02ba7494b50af41b7c8655950f45a16d8333301  0012-glm-tests-the-disk-ranks-rig-sets-the-head-flag.patch

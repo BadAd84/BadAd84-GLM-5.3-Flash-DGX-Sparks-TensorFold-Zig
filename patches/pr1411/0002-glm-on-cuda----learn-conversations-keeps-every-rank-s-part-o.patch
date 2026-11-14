@@ -1,0 +1,1264 @@
+From 1e957fbe5789b6ac4a3e8c00657d2699c4b61e15 Mon Sep 17 00:00:00 2001
+From: Robert Wojciechowski <24755+wojo@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 11:03:01 -0400
+Subject: [PATCH] GLM on CUDA: --learn-conversations keeps every rank's part of a kept state on disk
+
+Rank 0's engine thread leases, fills, reads and seals each rank's copy through the follow link
+(cuda_disk_ranks: blank, put, take, seal, prefixes). The store's image is rank 0's image followed by
+each other rank's prefix, the one part a rank holds alone; the rest are the same bytes on every rank,
+checked at start by the identity probe. A blank state is refused by restore until its seal.
+
+A blank whose disk step fails on the link gives rank 0's lease back, and its id goes on the dropped
+list, so the next step drops it on any rank the step reached; the id is not used again. An NCCL failure
+there already ends every rank (the liveness lines), but a CUDA error in the step's launch or upload
+returns to the disk read, which tries one shorter state and then prefills while the server goes on.
+cuda_disk_ranks_test.zig runs the steps on host memory with a fake link: that failed blank, a blank state
+refusing bytes past its words and front until sealed (DiskOrder), each BadStep a follower refuses before
+its states or the link, and each other rank's shared bytes taken past its prefix and compared to rank 0's
+(RanksDiffer, in ranks.same, which the probe calls). attach's refusals of the shared store and of more
+ranks than prefix_buf holds (KvShareWithLearnConversations, TooManyRanks) have their own test in
+cuda_glm_disk.zig. link and prefix_buf stay process-wide: the process serves one model.
+With TF_GLM_KV_LIVE_HALF=1 a keep holds one KDA half and the disk image both, so GLM refuses
+--learn-conversations with it by name at startup (cuda_refusal.zig); the test that pinned GLM refusing
+--learn-conversations outright now pins that it takes the flag alone and refuses it beside live-half keeps.
+
+Rank 0's link becomes the disk steps' link in `follow.Link.lead` (which also sets whether the other ranks begin
+asleep), at TP only, and `Link.deinit` clears it, so cuda_native.zig stays at its 600 lines. cuda_disk_ranks_test.zig:
+one rank leaves the steps local, two set the link, another link's deinit leaves it, its own clears it; the test fails
+with the clear removed.
+---
+
+diff --git a/docs/api.md b/docs/api.md
+index 3474a58a08ab7e9e55aaf0dc081407f8a2de8b73..f1399e71cc941cf2952615c07ea98a973fdcdfae 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -945,7 +945,9 @@ store for each model and build. That store takes the place of `--learn`'s store
+ with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
+ cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
+ instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
+-one Mac, and Nemotron, the Qwen3.5 hybrids and Flash Next on CUDA, keep them; other engines refuse the flag at startup.
++one Mac, and Nemotron, the Qwen3.5 hybrids, Flash Next and GLM-5.3-Flash on CUDA keep them; other engines refuse the
++flag at startup. GLM-5.3-Flash on CUDA across ranks writes every rank's part to rank 0's disk, so a state is read back
++on every rank or on none.
+ 
+ The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
+ and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index 4769d8eafe6a3785916e05dda2b36950c87977a3..cbee8561b0ec5add69ff38910162f88dc74e1179 100644
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -45,6 +45,8 @@ pub const lane_costs = @import("cuda_lane_costs.zig");
+ pub const native = @import("cuda_native.zig");
+ pub const snapshots = @import("cuda_snapshots.zig");
+ pub const kv_host = @import("cuda_kv_host.zig");
++pub const disk_image = @import("cuda_disk_image.zig");
++pub const disk_ranks = @import("cuda_disk_ranks.zig");
+ 
+ test {
+     _ = lane_costs;
+@@ -73,6 +75,7 @@ test {
+     _ = @import("cuda_l2pf.zig");
+     _ = prompt_pair;
+     _ = @import("cuda_disk_image.zig");
++    _ = @import("cuda_disk_ranks_test.zig");
+     _ = experts;
+     _ = exl3;
+     _ = vision;
+diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
+index e362987a556ff8ff4654eae354a386cfd8d06eae..20edee5139c523ad88ea284f90289d97232c0ea1 100644
+--- a/zig/src/families/glm/cuda_disk_image.zig
++++ b/zig/src/families/glm/cuda_disk_image.zig
+@@ -49,6 +49,8 @@ pub const Shape = struct {
+     pooled_row: u32,
+     capacity: u32,
+     head: bool, // the MTP head's caches are kept (drafting)
++    window: u64, // the prefix's bytes before a verify window's rows (its KDA projections and saves, read by its keep)
++    draft: u64, // the tail's bytes before the first-draft row (written at a prompt pass's end)
+ 
+     pub fn of(st: *const State, c: *const Config, capacity: usize, head: bool) !Shape {
+         if (st.rings.len == 0) return error.SnapshotShape;
+@@ -56,8 +58,11 @@ pub const Shape = struct {
+         const first = if (st.table != 0) st.rings[0] else if (st.caches.len > 0) st.caches[0].lc else st.mtp_caches.lc;
+         const end = if (st.table != 0) st.table else base + st.arena.buf.len;
+         if (first < base or st.mtp_pos_dev < first or end < st.mtp_pos_dev) return error.SnapshotShape;
++        if (st.proj < base or first < st.proj or st.prompt_hidden < st.mtp_pos_dev or end < st.prompt_hidden) return error.SnapshotShape;
+         const fp8 = st.mtp_caches.ls != 0;
+         return .{
++            .window = st.proj - base,
++            .draft = st.prompt_hidden - st.mtp_pos_dev,
+             .prefix = first - base,
+             .tail = end - st.mtp_pos_dev,
+             .layers = @intCast(st.caches.len),
+@@ -112,13 +117,10 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
+     var img: u64 = Words.bytes;
+     var lease: u64 = 0;
+     try out.append(a, .{ .img = 0, .len = Words.bytes, .from = .words });
+-    var front: u64 = sh.prefix; // the prefix and every DSA layer's parts sit in the lease as in the image
+-    for (0..sh.layers) |_| for (cache(sh, at)) |n| {
+-        front += n;
+-    };
+-    try out.append(a, .{ .img = img, .len = front, .from = .{ .lease = 0 } });
+-    img += front;
+-    lease += front;
++    const f = front(sh, at);
++    try out.append(a, .{ .img = img, .len = f, .from = .{ .lease = 0 } });
++    img += f;
++    lease += f;
+     if (sh.head) for (cache(sh, sh.headRows(at)), cache(sh, mtp_len)) |full, held| {
+         if (held > 0) try out.append(a, .{ .img = img, .len = held, .from = .{ .lease = lease } });
+         if (full > held) try out.append(a, .{ .img = img + held, .len = full - held, .from = .zeros });
+@@ -128,6 +130,15 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
+     if (sh.tail > 0) try out.append(a, .{ .img = img, .len = sh.tail, .from = .{ .lease = lease } });
+ }
+ 
++/// The image bytes after the words that sit in the lease as in the image: the prefix and every DSA layer's parts.
++pub fn front(sh: Shape, at: u32) u64 {
++    var n: u64 = sh.prefix;
++    for (0..sh.layers) |_| for (cache(sh, at)) |x| {
++        n += x;
++    };
++    return n;
++}
++
+ /// The lease bytes of a state at `at` whose head holds `mtp_len` rows (layout.Plan's length for it).
+ pub fn leaseBytes(sh: Shape, at: u32, mtp_len: u64) u64 {
+     var n: u64 = sh.prefix + sh.tail;
+@@ -140,6 +151,86 @@ pub fn leaseBytes(sh: Shape, at: u32, mtp_len: u64) u64 {
+     return n;
+ }
+ 
++/// Rank 0's image bytes at `at` (its head counted at a verify window past `at`).
++pub fn imageBytes(sh: Shape, at: u32) u64 {
++    var n: u64 = Words.bytes + front(sh, at) + sh.tail;
++    if (sh.head) for (cache(sh, sh.headRows(at))) |x| {
++        n += x;
++    };
++    return n;
++}
++
++/// `len` bytes at `off` of rank `rank`'s image; `shared`: past rank 0's prefix, the same bytes every rank holds.
++pub const Piece = struct { rank: u32, off: u64, len: u64, shared: bool };
++
++/// The store's image at `at`: rank 0's, then each other rank's prefix (rank 0's bytes stand for all the rest).
++pub fn storeParts(sh: Shape, prefixes: []const u64, at: u32, out: *std.ArrayList(Part), a: std.mem.Allocator) !void {
++    try parts(sh, at, out, a);
++    for (prefixes[1..]) |p| try out.append(a, .{ .bytes = p });
++}
++
++/// Store image bytes [off, off + len) split by rank: rank 0's image, then rank r's prefix after its words.
++pub fn route(sh: Shape, prefixes: []const u64, at: u32, off: u64, len: u64, out: *std.ArrayList(Piece), a: std.mem.Allocator) !void {
++    const own = Words.bytes + sh.prefix; // rank 0's bytes no other rank holds
++    var start: u64 = 0; // the section's first store byte
++    for (prefixes, 0..) |p, r| {
++        const size = if (r == 0) imageBytes(sh, at) else p;
++        defer start += size;
++        const lo = @max(off, start);
++        const hi = @min(off + len, start + size);
++        if (lo >= hi) continue;
++        if (r > 0) {
++            try out.append(a, .{ .rank = @intCast(r), .off = Words.bytes + lo - start, .len = hi - lo, .shared = false });
++            continue;
++        }
++        if (lo < own) try out.append(a, .{ .rank = 0, .off = lo, .len = @min(hi, own) - lo, .shared = false });
++        if (hi > own) try out.append(a, .{ .rank = 0, .off = @max(lo, own), .len = hi - @max(lo, own), .shared = true });
++    }
++    if (off + len > start) return error.SnapshotShape;
++}
++
++/// `len` store image bytes at `off`.
++pub const Span = struct { off: u64, len: u64 };
++
++/// Store image bytes no prompt pass to `at` writes: each rank's window rows, pools past the whole ones, the draft row.
++pub fn unwritten(sh: Shape, prefixes: []const u64, windows: []const u64, at: u32, mtp_len: u64, out: *std.ArrayList(Span), a: std.mem.Allocator) !void {
++    if (windows.len != prefixes.len or windows.len == 0 or windows[0] != sh.window) return error.SnapshotShape;
++    if (sh.head and mtp_len > sh.headRows(at)) return error.SnapshotShape;
++    var img: u64 = Words.bytes + sh.prefix;
++    try out.append(a, .{ .off = Words.bytes + sh.window, .len = sh.prefix - sh.window });
++    for (0..sh.layers) |_| {
++        const c = cache(sh, at);
++        const whole = at / sparse.pool * sh.pooled_row;
++        img += c[0] + c[1] + c[2] + c[3];
++        try out.append(a, .{ .off = img + whole, .len = c[4] - whole });
++        img += c[4];
++    }
++    if (sh.head) {
++        const full = cache(sh, sh.headRows(at));
++        const held = cache(sh, mtp_len)[4];
++        const whole = mtp_len / sparse.pool * sh.pooled_row;
++        img += full[0] + full[1] + full[2] + full[3];
++        try out.append(a, .{ .off = img + whole, .len = held - whole }); // past `held`, the image's zeros
++        img += full[4];
++    }
++    try out.append(a, .{ .off = img + sh.draft, .len = sh.tail - sh.draft });
++    img += sh.tail;
++    for (prefixes[1..], windows[1..]) |p, w| {
++        if (w > p) return error.SnapshotShape;
++        try out.append(a, .{ .off = img + w, .len = p - w }); // a rank's section is its prefix alone
++        img += p;
++    }
++}
++
++/// Zeros `spans` of `bytes`, store image bytes from `from`, where they overlap.
++pub fn clear(spans: []const Span, from: u64, bytes: []u8) void {
++    for (spans) |s| {
++        const lo = @max(s.off, from);
++        const hi = @min(s.off + s.len, from + bytes.len);
++        if (lo < hi) @memset(bytes[@intCast(lo - from)..@intCast(hi - from)], 0);
++    }
++}
++
+ /// Copies between `host` and image bytes [off, off + host.len) of a lease: out (lease to host) or in.
+ pub const Copy = struct {
+     d: *const cuda.Driver,
+diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
+index 0231352c168405fdbe908528ce10c3c54af80be4..cf959b98d7233cbe98d9ca178a7ff9e549ca8079 100644
+--- a/zig/src/families/glm/cuda_disk_image_test.zig
++++ b/zig/src/families/glm/cuda_disk_image_test.zig
+@@ -12,7 +12,7 @@ const expectEqual = std.testing.expectEqual;
+ const expectError = std.testing.expectError;
+ 
+ /// Device addresses are host addresses: allocations from the page allocator, copies and fills as memcpy and memset.
+-const H = struct {
++pub const H = struct {
+     var held: [16]struct { ptr: u64 = 0, len: usize = 0 } = @splat(.{});
+     fn bytes(p: u64, n: usize) []u8 {
+         return @as([*]u8, @ptrFromInt(p))[0..n];
+@@ -54,7 +54,7 @@ const H = struct {
+     fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+         return 0;
+     }
+-    fn driver() cuda.Driver {
++    pub fn driver() cuda.Driver {
+         var d: cuda.Driver = undefined;
+         d.api.cuMemAlloc_v2 = alloc;
+         d.api.cuMemFree_v2 = free;
+@@ -67,14 +67,14 @@ const H = struct {
+     }
+ };
+ 
+-const capacity = 6144; // past the index rings' 4,096 rows, so a state at the end holds a full ring
++pub const capacity = 6144; // past the index rings' 4,096 rows, so a state at the end holds a full ring
+ 
+ /// TP=2 rank 0's shapes on KDA, DSA, KDA, DSA layers.
+-const Model = struct {
++pub const Model = struct {
+     layers: [4]weights.Layer,
+     w: weights.Weights,
+ 
+-    fn init(m: *Model) !void {
++    pub fn init(m: *Model) !void {
+         for (&m.layers, [_]bool{ false, true, false, true }) |*l, mla| l.mixer = if (mla) .{ .mla = undefined } else .{ .kda = undefined };
+         m.w = undefined;
+         m.w.config = .{};
+@@ -182,3 +182,154 @@ test "GLM disk image: a kept state's image read out of its lease restores every
+         try std.testing.expectEqualSlices(u8, H.bytes(x.live, x.len), H.bytes(y.live, y.len));
+     }
+ }
++
++test "GLM disk image: the store's image is rank 0's then each other rank's prefix, and routes every byte once" {
++    var m: Model = undefined;
++    try m.init();
++    var d = H.driver();
++    const a = std.testing.allocator;
++    var st = try State.initFormat(a, &d, &m.w, capacity, true);
++    defer st.deinit();
++    const sh = try image.Shape.of(&st, &m.w.config, capacity, true);
++    const at: u32 = 4096;
++    const prefixes = [_]u64{ sh.prefix, sh.prefix - 4096, sh.prefix + 512 }; // TP=3: heads one by one
++    var list: std.ArrayList(image.Part) = .empty;
++    defer list.deinit(a);
++    try image.storeParts(sh, &prefixes, at, &list, a);
++    var total: u64 = 0;
++    for (list.items) |p| total += p.bytes;
++    try expectEqual(image.imageBytes(sh, at) + prefixes[1] + prefixes[2], total);
++    var pieces: std.ArrayList(image.Piece) = .empty;
++    defer pieces.deinit(a);
++    var seen: [3]u64 = .{ 0, 0, 0 };
++    var shared: u64 = 0;
++    const cuts = [_]u64{ 0, 40, image.Words.bytes + sh.prefix - 8, image.imageBytes(sh, at) + 100, total }; // ranges across the seams
++    for (cuts[0 .. cuts.len - 1], cuts[1..]) |lo, hi| {
++        pieces.clearRetainingCapacity();
++        try image.route(sh, &prefixes, at, lo, hi - lo, &pieces, a);
++        var n: u64 = 0;
++        for (pieces.items) |p| {
++            n += p.len;
++            seen[p.rank] += p.len;
++            if (p.shared) shared += p.len;
++            if (p.rank > 0) try expect(p.off >= image.Words.bytes and p.off + p.len <= image.Words.bytes + prefixes[p.rank] and !p.shared);
++            if (p.shared) try expect(p.rank == 0 and p.off >= image.Words.bytes + sh.prefix);
++        }
++        try expectEqual(hi - lo, n);
++    }
++    try expectEqual(image.imageBytes(sh, at), seen[0]);
++    try expectEqual(prefixes[1], seen[1]);
++    try expectEqual(prefixes[2], seen[2]);
++    try expectEqual(image.imageBytes(sh, at) - image.Words.bytes - sh.prefix, shared);
++    try expectError(error.SnapshotShape, image.route(sh, &prefixes, at, total - 4, 8, &pieces, a));
++}
++
++/// The fields of an engine the kept-state functions read, over a host-memory driver.
++const Fake = struct {
++    gpa: std.mem.Allocator,
++    d: *const cuda.Driver,
++    stream: cuda.Stream,
++    c: @import("config.zig").Config,
++    cur: struct { st: State, in_head: usize = 0 },
++    capacity: usize = capacity,
++    mtp: bool = true,
++    snaps: std.AutoHashMapUnmanaged(u64, @import("cuda_engine_types.zig").Snap) = .empty,
++    snap_pages: ?pages.Pool = null,
++    share_pages: bool = false,
++};
++
++test "GLM disk image: a disk read's blank state is refused until sealed, and its seal checks the words" {
++    const snaps = @import("cuda_snapshots.zig");
++    var m: Model = undefined;
++    try m.init();
++    var d = H.driver();
++    const a = std.testing.allocator;
++    var e: Fake = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .c = m.w.config, .cur = .{ .st = try State.initFormat(a, &d, &m.w, capacity, false) } };
++    defer e.cur.st.deinit();
++    e.snap_pages = try pages.Pool.init(a, &d, 256 << 20, false);
++    defer e.snap_pages.?.deinit();
++    try e.snaps.ensureTotalCapacity(a, 8);
++    defer e.snaps.deinit(a);
++    const at: u32 = 2048;
++    try snaps.blankAs(&e, 7, at);
++    defer {
++        var s = e.snaps.get(7).?;
++        snaps.free(&e, &s);
++    }
++    try expectError(error.StateKept, snaps.blankAs(&e, 7, at));
++    try expectError(error.UnsealedState, snaps.restore(&e, 7));
++    try expectError(error.DiskWords, snaps.seal(&e, 7, at + @import("cuda_state.zig").window_rows + 1, .{ 0, 0 }, 0)); // a head past its verify window
++    try expectError(error.DiskWords, snaps.seal(&e, 7, at, .{ 0, 0 }, @as(u64, 1) << @intCast(e.cur.st.cur.len))); // a copy bit no layer has
++    try snaps.seal(&e, 7, at - 1, .{ 3, 5 }, 0b01);
++    const s = e.snaps.get(7).?;
++    const sh = try image.Shape.of(&e.cur.st, &e.c, capacity, true);
++    try expectEqual(image.leaseBytes(sh, at, at - 1), @as(u64, s.len));
++    try expectEqual(@as(usize, at - 1), s.mtp_len);
++    try expectEqual([2]usize{ 3, 5 }, s.bases);
++    try std.testing.expectEqualSlices(u1, &.{ 1, 0 }, s.cur);
++    try expectError(error.StateKept, snaps.seal(&e, 7, at, .{ 0, 0 }, 0));
++}
++
++/// A state's store image at `at` for two ranks, rank 1's prefix a copy of rank 0's: what the load's probe gathers.
++fn storeImage(a: std.mem.Allocator, d: *const cuda.Driver, pool: *pages.Pool, st: *const State, c: *const @import("config.zig").Config, sh: image.Shape, at: u32, mtp: u64) ![]u8 {
++    const plan = try Plan.init(st, c, at, mtp, 0);
++    var kept = try pool.take(plan.len);
++    defer pool.give(&kept);
++    try pool.move(.{ .d = d, .handle = null }, &kept, &plan, true);
++    var segs: std.ArrayList(image.Seg) = .empty;
++    defer segs.deinit(a);
++    try image.segments(sh, at, mtp, &segs, a);
++    const own = image.imageBytes(sh, at);
++    const out = try a.alloc(u8, @intCast(own + sh.prefix));
++    errdefer a.free(out);
++    @memset(out[0..image.Words.bytes], 0); // the words are not the probe's question
++    const copy: image.Copy = .{ .d = d, .pool = pool, .lease = &kept, .segs = segs.items, .words = undefined };
++    try copy.run(image.Words.bytes, out[image.Words.bytes..@intCast(own)], true);
++    @memcpy(out[@intCast(own)..], out[image.Words.bytes..][0..@intCast(sh.prefix)]);
++    return out;
++}
++
++test "GLM disk image: the probe's hash leaves out what a prompt pass does not write, whatever the slot ran before" {
++    var m: Model = undefined;
++    try m.init();
++    var d = H.driver();
++    const a = std.testing.allocator;
++    const c = &m.w.config;
++    var st = try State.initFormat(a, &d, &m.w, capacity, false);
++    defer st.deinit();
++    for (H.bytes(st.arena.buf.ptr, st.arena.buf.len), 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
++    var pool = try pages.Pool.init(a, &d, 64 << 20, false);
++    defer pool.deinit();
++    const at: u32 = 2048;
++    const mtp: u64 = at - 1; // the head a row behind: its last pool unfinished
++    const sh = try image.Shape.of(&st, c, capacity, true);
++    const prefixes = [_]u64{ sh.prefix, sh.prefix };
++    var loose: std.ArrayList(image.Span) = .empty;
++    defer loose.deinit(a);
++    try image.unwritten(sh, &prefixes, &.{ sh.window, sh.window }, at, mtp, &loose, a);
++    try expectError(error.SnapshotShape, image.unwritten(sh, &prefixes, &.{ sh.window + 1, sh.window }, at, mtp, &loose, a));
++    const before = try storeImage(a, &d, &pool, &st, c, sh, at, mtp);
++    defer a.free(before);
++    // what load's timed windows leave in the slot: a window's rows, keys past `at`'s whole pools, the first-draft row
++    const row = c.i_dim * 2;
++    const pool_rows = @import("cuda_sparse.zig").pool;
++    @memset(H.bytes(st.proj, st.caches[0].lc - st.proj), 0xa5);
++    for (st.caches) |x| @memset(H.bytes(x.pk + at / pool_rows * row, 2 * row), 0xa5);
++    @memset(H.bytes(st.mtp_caches.pk + mtp / pool_rows * row, 2 * row), 0xa5);
++    @memset(H.bytes(st.prompt_hidden, c.hidden * 2), 0xa5);
++    const after = try storeImage(a, &d, &pool, &st, c, sh, at, mtp);
++    defer a.free(after);
++    try expect(!std.mem.eql(u8, before, after)); // the image carries them: hashed whole, two loads named two stores
++    image.clear(loose.items, 0, before);
++    image.clear(loose.items, 0, after);
++    try std.testing.expectEqualSlices(u8, before, after);
++    // what the prompt writes still names the store: a KDA state, a whole pool's keys
++    for ([_]u64{ st.conv, st.caches[1].pk }) |p| {
++        H.bytes(p, 1)[0] ^= 1;
++        defer H.bytes(p, 1)[0] ^= 1;
++        const changed = try storeImage(a, &d, &pool, &st, c, sh, at, mtp);
++        defer a.free(changed);
++        image.clear(loose.items, 0, changed);
++        try expect(!std.mem.eql(u8, before, changed));
++    }
++}
+diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cuda_disk_ranks.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e217f4a251a48539a34d1a999e9c68ac5583b7f
+--- /dev/null
++++ b/zig/src/families/glm/cuda_disk_ranks.zig
+@@ -0,0 +1,171 @@
++//! A GLM kept state's disk image across ranks: rank 0's engine thread leases, fills, reads and seals each rank's copy.
++const std = @import("std");
++const follow = @import("cuda_follow.zig");
++const image = @import("cuda_disk_image.zig");
++const snapshots = @import("cuda_snapshots.zig");
++const Engine = @import("cuda_engine.zig").Engine;
++
++/// Rank 0 at TP: its follow link, set by Link.lead, cleared by its deinit; null: one rank, every op local.
++pub var link: ?*follow.Link = null;
++
++/// A disk step's op (Header.flags); its id is `a`, its image offset `seed`, its bytes `depth`, its rank `top_k`.
++pub const Op = enum(u32) { blank = 1, put, take, seal, prefixes };
++const kind = @backingInt(follow.Kind.disk); // each op crosses the follow link as a disk step, its bytes as the ids
++
++/// This rank's image shape (every sequence of the engine has the same).
++pub fn shape(e: *const Engine) !image.Shape {
++    return image.Shape.of(&e.cur.st, &e.c, e.capacity, e.mtp);
++}
++
++/// The words of a kept state on this rank: its position, head rows, ring bases and KDA copy bits.
++pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
++    const s = e.snaps.get(id) orelse return error.NoKeptState;
++    if (s.cur.len > 64) return error.SnapshotShape;
++    var cur: u64 = 0;
++    for (s.cur, 0..) |b, i| cur |= @as(u64, b) << @intCast(i);
++    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur };
++}
++
++/// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
++pub fn copy(e: *Engine, id: u64, off: u64, host: []u8, out: bool) !void {
++    const s = e.snaps.get(id) orelse return error.NoKeptState;
++    const sh = try shape(e);
++    const at: u32 = @intCast(s.pos);
++    if (s.len == 0 and off + host.len > image.Words.bytes + image.front(sh, at)) return error.DiskOrder;
++    var segs: std.ArrayList(image.Seg) = .empty;
++    defer segs.deinit(e.gpa);
++    try image.segments(sh, at, s.mtp_len, &segs, e.gpa);
++    var w = (try wordsOf(e, id)).encode();
++    const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
++    try (image.Copy{ .d = e.d, .pool = pool, .lease = &s.lease, .segs = segs.items, .words = &w }).run(off, host, out);
++}
++
++/// Rank 0's link at TP, else null (one rank: every op is local).
++fn leader(e: *Engine) ?follow.Leader {
++    return .{ .e = e, .link = link orelse return null };
++}
++
++/// Rank 0: whether the other ranks sleep on their lines (no stream), and putting them back to sleep after disk steps.
++pub fn asleep(e: *Engine) bool {
++    return if (leader(e)) |x| x.link.asleep else false;
++}
++
++pub fn rest(e: *Engine) !void {
++    if (leader(e)) |x| try x.idle();
++}
++
++/// Rank 0: a new id leased at `at` on every rank (rank 0 first: the ranks' pools match, so theirs cannot fail apart).
++pub fn blank(e: *Engine, at: u32) !u64 {
++    if (e.next_snap > std.math.maxInt(u32)) return error.SnapshotIdLimit;
++    const id = e.next_snap;
++    try snapshots.blankAs(e, id, at);
++    e.next_snap += 1;
++    // a failed step: rank 0's lease goes back, and its id is dropped at the next step (another rank may hold it)
++    errdefer snapshots.drop(e, id);
++    if (leader(e)) |x| try x.disk(.{ .kind = kind, .flags = @backingInt(Op.blank), .a = id, .seed = at }, &.{});
++    return id;
++}
++
++/// Rank 0: `bytes` into rank `rank`'s image of `id` at `off` (rank 0's own lease, or through the link in pieces).
++pub fn put(e: *Engine, rank: u32, id: u64, off: u64, bytes: []const u8) !void {
++    if (rank == 0) return copy(e, id, off, @constCast(bytes), false);
++    const x = leader(e) orelse return error.NoRank;
++    const room = x.link.ids.len * 4;
++    var done: usize = 0;
++    while (done < bytes.len) {
++        const n = @min(room, bytes.len - done);
++        const words = (n + 3) / 4;
++        @memcpy(std.mem.sliceAsBytes(x.link.ids[0..words])[0..n], bytes[done..][0..n]);
++        try x.disk(.{ .kind = kind, .flags = @backingInt(Op.put), .a = id, .seed = off + done, .depth = @intCast(n), .top_k = rank }, x.link.ids[0..words]);
++        done += n;
++    }
++}
++
++/// Rank 0: rank `rank`'s image bytes of `id` from `off` into `out`.
++pub fn take(e: *Engine, rank: u32, id: u64, off: u64, out: []u8) !void {
++    if (rank == 0) return copy(e, id, off, out, true);
++    const x = leader(e) orelse return error.NoRank;
++    const room = x.link.ids.len * 4;
++    var done: usize = 0;
++    while (done < out.len) {
++        const n = @min(room, out.len - done);
++        try x.disk(.{ .kind = kind, .flags = @backingInt(Op.take), .a = id, .seed = off + done, .depth = @intCast(n), .top_k = rank }, &.{});
++        try x.link.from(rank, n);
++        try x.link.buf.download(64, out[done..][0..n]);
++        done += n;
++    }
++}
++
++/// Rank 0: each other rank's bytes of `id` past its prefix (`each`) equal to `shared`, but for `loose` (zeros there).
++pub fn same(e: *Engine, id: u64, each: []const u64, shared: []const u8, loose: []const image.Span, theirs: []u8) !void {
++    for (each[1..], 1..) |q, r| {
++        try take(e, @intCast(r), id, image.Words.bytes + q, theirs);
++        image.clear(loose, 0, theirs);
++        if (!std.mem.eql(u8, shared, theirs)) return error.RanksDiffer;
++    }
++}
++
++/// Rank 0: every rank's blank `id` sealed with `w` (its head's rows, ring bases and KDA copy bits).
++pub fn seal(e: *Engine, id: u64, w: image.Words) !void {
++    try snapshots.seal(e, id, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
++    if (leader(e)) |x| {
++        const words = w.encode();
++        try x.disk(.{ .kind = kind, .flags = @backingInt(Op.seal), .a = id }, std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(&words)));
++    }
++}
++
++/// Rank 0: every rank's prefix bytes in rank order (what it holds alone), and where its window rows begin in it.
++pub fn prefixes(e: *Engine, out: []u64, windows: []u64) !void {
++    const sh = try shape(e);
++    if (windows.len != out.len) return error.NoRank;
++    const x = leader(e) orelse {
++        if (out.len != 1) return error.NoRank;
++        out[0] = sh.prefix;
++        windows[0] = sh.window;
++        return;
++    };
++    try x.disk(.{ .kind = kind, .flags = @backingInt(Op.prefixes) }, &.{});
++    try gather(x.link, e, sh.prefix, out);
++    try gather(x.link, e, sh.window, windows);
++}
++
++fn gather(l: *follow.Link, e: *const Engine, mine: u64, out: []u64) !void {
++    try @import("cuda_ranks.zig").gather(u64, l.d, l.lib, l.comm, l.stream, e.share.rank, mine, out);
++}
++
++/// A rank other than 0: rank 0's disk step on this rank's copy of its state.
++pub fn step(e: *Engine, l: *follow.Link, h: follow.Header, ids: []const u32) !void {
++    if (h.flags < @backingInt(Op.blank) or h.flags > @backingInt(Op.prefixes)) return error.BadStep;
++    const op: Op = @fromBackingInt(h.flags);
++    const rank: u32 = @intCast(e.share.rank);
++    switch (op) {
++        .blank => try snapshots.blankAs(e, h.a, @intCast(h.seed)),
++        .seal => {
++            if (ids.len != 12) return error.BadStep;
++            var x: [6]u64 = undefined;
++            @memcpy(std.mem.sliceAsBytes(&x), std.mem.sliceAsBytes(ids));
++            const w = try image.Words.decode(x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
++            try snapshots.seal(e, h.a, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
++        },
++        .put => if (h.top_k == rank) {
++            if (h.depth > ids.len * 4) return error.BadStep;
++            try copy(e, h.a, h.seed, @constCast(std.mem.sliceAsBytes(ids))[0..h.depth], false);
++        },
++        .take => {
++            if (h.depth > l.ids.len * 4) return error.BadStep;
++            if (h.top_k == rank) {
++                const host = std.mem.sliceAsBytes(l.ids)[0..h.depth];
++                try copy(e, h.a, h.seed, host, true);
++                try l.buf.uploadAsync(64, host, l.stream.handle);
++            }
++            try l.from(h.top_k, h.depth);
++        },
++        .prefixes => {
++            var out: [64]u64 = undefined;
++            if (e.share.world > out.len) return error.BadStep;
++            const sh = try shape(e);
++            try gather(l, e, sh.prefix, out[0..e.share.world]);
++            try gather(l, e, sh.window, out[0..e.share.world]);
++        },
++    }
++}
+diff --git a/zig/src/families/glm/cuda_disk_ranks_test.zig b/zig/src/families/glm/cuda_disk_ranks_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..08ac674e864626e81f06989ae15d22d12b0798ad
+--- /dev/null
++++ b/zig/src/families/glm/cuda_disk_ranks_test.zig
+@@ -0,0 +1,232 @@
++//! GLM disk steps across ranks on host memory and a fake link: a failed blank, byte order, refusals, shared bytes.
++const std = @import("std");
++const cuda = @import("cuda");
++const ranks = @import("cuda_disk_ranks.zig");
++const image = @import("cuda_disk_image.zig");
++const follow = @import("cuda_follow.zig");
++const snapshots = @import("cuda_snapshots.zig");
++const pages = @import("cuda_snapshot_pages.zig");
++const fixture = @import("cuda_disk_image_test.zig");
++const State = @import("cuda_state.zig").State;
++const Seq = @import("cuda_engine_types.zig").Seq;
++const Engine = @import("cuda_engine.zig").Engine;
++const t = std.testing;
++
++/// The link's kernel and NCCL: the put kernel records each step's header; a broadcast fails, or brings a rank's bytes.
++const Wire = struct {
++    var fail = false;
++    var odd: c_int = 0; // a rank whose bytes differ from rank 0's (0: none)
++    var sent: [8]follow.Header = undefined;
++    var steps: usize = 0;
++    var casts: usize = 0;
++
++    fn reset() void {
++        fail = false;
++        odd = 0;
++        steps = 0;
++        casts = 0;
++    }
++    fn byte(i: usize) u8 {
++        return @truncate(i *% 13 +% 5);
++    }
++    fn put(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, params: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
++        const w: *align(1) const follow.Words = @ptrCast(params.?[2].?);
++        if (steps < sent.len) @memcpy(std.mem.asBytes(&sent[steps]), std.mem.sliceAsBytes(w.w[0..16]));
++        steps += 1;
++        return 0;
++    }
++    fn broadcast(_: cuda.abi.DevicePtr, dst: cuda.abi.DevicePtr, n: usize, _: cuda.nccl.DataType, root: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
++        if (fail) return 1;
++        casts += 1;
++        if (root != 0) for (@as([*]u8, @ptrFromInt(dst))[0..n], 0..) |*b, i| {
++            b.* = byte(i) ^ @intFromBool(root == odd);
++        };
++        return 0;
++    }
++    fn device(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
++        out.* = 0;
++        return 0;
++    }
++    fn attribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
++        out.* = 0; // a discrete card: a download copies straight to the host
++        return 0;
++    }
++};
++
++/// A TP=2 engine's rank 0 over host memory (the fields the disk steps read), its snapshot pool and its link.
++const Rig = struct {
++    m: fixture.Model,
++    d: cuda.Driver,
++    lib: cuda.nccl.Library,
++    seq: Seq,
++    e: *Engine,
++    buf: [64 + 64 * 4]u8 align(8), // the link's device buffer: header, then ids
++    ids: [64]u32,
++    link: follow.Link,
++
++    fn init(x: *Rig) !void {
++        const a = t.allocator;
++        Wire.reset();
++        try x.m.init();
++        x.d = fixture.H.driver();
++        x.d.api.cuLaunchKernel = Wire.put;
++        x.d.api.cuCtxGetDevice = Wire.device;
++        x.d.api.cuDeviceGetAttribute = Wire.attribute;
++        x.lib = .{ .lib = undefined, .api = undefined };
++        x.lib.api.ncclBroadcast = Wire.broadcast;
++        x.seq = .{ .st = try State.initFormat(a, &x.d, &x.m.w, fixture.capacity, false) };
++        errdefer x.seq.st.deinit();
++        const e = try a.create(Engine);
++        e.gpa = a;
++        e.d = &x.d;
++        e.c = x.m.w.config;
++        e.share = x.m.w.share;
++        e.cur = &x.seq;
++        e.capacity = fixture.capacity;
++        e.mtp = true;
++        e.slot = 0;
++        e.stream = .{ .d = &x.d, .handle = null };
++        e.m.glue.put_words = .{ .d = &x.d, .handle = null };
++        e.share_pages = false;
++        e.next_snap = 1;
++        e.announce = 0;
++        e.snaps = .empty;
++        e.dropped = .empty;
++        e.snap_pages = null;
++        x.e = e;
++        errdefer x.free();
++        try e.snaps.ensureTotalCapacity(a, 8);
++        try e.dropped.ensureTotalCapacity(a, 9);
++        e.snap_pages = try pages.Pool.init(a, &x.d, 256 << 20, false);
++        x.link = .{ .d = &x.d, .lib = &x.lib, .comm = null, .stream = e.stream, .buf = .{ .d = &x.d, .ptr = @intFromPtr(&x.buf), .len = x.buf.len, .borrowed = true }, .ids = &x.ids, .gpa = a, .wait = false };
++    }
++
++    fn free(x: *Rig) void {
++        const e = x.e;
++        var it = e.snaps.valueIterator();
++        while (it.next()) |s| snapshots.free(e, s);
++        e.snaps.deinit(e.gpa);
++        e.dropped.deinit(e.gpa);
++        if (e.snap_pages) |*p| p.deinit();
++        e.gpa.destroy(e);
++    }
++
++    fn deinit(x: *Rig) void {
++        ranks.link = null;
++        x.free();
++        x.seq.st.deinit();
++    }
++};
++
++const disk = @backingInt(follow.Kind.disk);
++
++fn op(o: ranks.Op) u32 {
++    return @backingInt(o);
++}
++
++test "GLM disk ranks: a blank whose step fails on the link gives rank 0's lease back, and the next step drops it" {
++    var x: Rig = undefined;
++    try x.init();
++    defer x.deinit();
++    ranks.link = &x.link;
++    const pool = &x.e.snap_pages.?;
++    const all = pool.spare();
++    Wire.fail = true;
++    try t.expectError(error.NcclFailed, ranks.blank(x.e, 2048));
++    try t.expectEqual(@as(u32, 0), x.e.snaps.count());
++    try t.expectEqual(all, pool.spare());
++    try t.expectEqualSlices(u32, &.{1}, x.e.dropped.items); // the step may have reached the others: they drop it
++    Wire.reset();
++    const id = try ranks.blank(x.e, 2048);
++    try t.expectEqual(@as(u64, 2), id); // the dropped id is not used again
++    try t.expectEqual(@as(usize, 2), Wire.steps);
++    try t.expectEqual(@backingInt(follow.Kind.drop), Wire.sent[0].kind);
++    try t.expectEqual(@as(u32, 1), Wire.sent[0].n);
++    try t.expectEqual(disk, Wire.sent[1].kind);
++    try t.expectEqual(op(.blank), Wire.sent[1].flags);
++    try t.expectEqual(id, Wire.sent[1].a);
++    try t.expect(pool.spare() < all);
++}
++
++test "GLM disk ranks: rank 0's link carries the disk steps at TP only, and its deinit leaves none behind" {
++    var x: Rig = undefined;
++    try x.init();
++    defer x.deinit();
++    var l = x.link;
++    l.ids = try t.allocator.alloc(u32, 4);
++    l.lead(true, 1); // one rank: every op stays local
++    try t.expect(l.asleep and ranks.link == null);
++    l.lead(false, 2);
++    try t.expect(!l.asleep and ranks.link == &l);
++    var other = x.link;
++    other.ids = try t.allocator.alloc(u32, 4);
++    other.deinit(); // another link's end leaves rank 0's
++    try t.expect(ranks.link == &l);
++    l.deinit();
++    try t.expect(ranks.link == null);
++}
++
++test "GLM disk ranks: a blank state takes bytes past its words and front only once sealed" {
++    var x: Rig = undefined;
++    try x.init();
++    defer x.deinit();
++    const at: u32 = 2048;
++    const id = try ranks.blank(x.e, at); // one rank: no link
++    const front: usize = @intCast(image.Words.bytes + image.front(try ranks.shape(x.e), at));
++    const buf = try t.allocator.alloc(u8, front + 64);
++    defer t.allocator.free(buf);
++    @memset(buf, 0);
++    try ranks.copy(x.e, id, 0, buf[0..front], false);
++    try t.expectError(error.DiskOrder, ranks.copy(x.e, id, front - 8, buf[0..16], false)); // across the front
++    try t.expectError(error.DiskOrder, ranks.copy(x.e, id, front, buf[0..1], true)); // read out, too
++    try snapshots.seal(x.e, id, at - 1, .{ 0, 0 }, 0);
++    try ranks.copy(x.e, id, front - 8, buf[0..16], false);
++    try ranks.copy(x.e, id, front, buf[0..1], true);
++}
++
++test "GLM disk ranks: a follower refuses a disk step rank 0 does not send, before its states or the link" {
++    var x: Rig = undefined;
++    try x.init();
++    defer x.deinit();
++    x.e.share.rank = 1;
++    const room = x.link.ids.len * 4;
++    const bad = [_]struct { h: follow.Header, n: usize }{
++        .{ .h = .{ .kind = disk, .flags = 0 }, .n = 0 }, // no op
++        .{ .h = .{ .kind = disk, .flags = op(.prefixes) + 1 }, .n = 0 }, // past the last op
++        .{ .h = .{ .kind = disk, .flags = op(.seal), .a = 1 }, .n = 1 }, // words of another length
++        .{ .h = .{ .kind = disk, .flags = op(.put), .a = 1, .depth = 4 * 4 + 1, .top_k = 1 }, .n = 4 }, // past its ids
++        .{ .h = .{ .kind = disk, .flags = op(.take), .a = 1, .depth = @intCast(room + 1), .top_k = 0 }, .n = 0 }, // past the link
++    };
++    for (bad) |b| try t.expectError(error.BadStep, ranks.step(x.e, &x.link, b.h, x.ids[0..b.n]));
++    x.e.share.world = 65; // more ranks than a gather holds
++    try t.expectError(error.BadStep, ranks.step(x.e, &x.link, .{ .kind = disk, .flags = op(.prefixes) }, &.{}));
++    try t.expectEqual(@as(u32, 0), x.e.snaps.count());
++    try t.expectEqual(@as(usize, 0), Wire.casts);
++}
++
++test "GLM disk ranks: each other rank's shared bytes come from past its own prefix and must equal rank 0's" {
++    var x: Rig = undefined;
++    try x.init();
++    defer x.deinit();
++    ranks.link = &x.link;
++    const prefixes = [_]u64{ 4096, 1024, 2048 }; // TP=3: each rank's own bytes first
++    var shared: [100]u8 = undefined;
++    for (&shared, 0..) |*b, i| b.* = Wire.byte(i);
++    var theirs: [100]u8 = undefined;
++    try ranks.same(x.e, 7, &prefixes, &shared, &.{}, &theirs);
++    try t.expectEqual(@as(usize, 2), Wire.steps);
++    for (Wire.sent[0..2], 1..) |h, r| {
++        try t.expectEqual(op(.take), h.flags);
++        try t.expectEqual(@as(u64, 7), h.a);
++        try t.expectEqual(@as(u32, @intCast(r)), h.top_k);
++        try t.expectEqual(image.Words.bytes + prefixes[r], h.seed);
++        try t.expectEqual(@as(u32, theirs.len), h.depth);
++    }
++    // bytes a prompt pass does not write are left out: rank 0's as zeros, each other rank's whatever it holds there
++    const loose = [_]image.Span{.{ .off = 10, .len = 20 }};
++    image.clear(&loose, 0, &shared);
++    try t.expectError(error.RanksDiffer, ranks.same(x.e, 7, &prefixes, &shared, &.{}, &theirs));
++    try ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs);
++    Wire.odd = 2;
++    try t.expectError(error.RanksDiffer, ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs));
++}
+diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
+index 25ef795ed98cdffacf8aeeba030e69aeb3abf777..2f3bada8fb9b705c4ce83fbc92a3c76e9336e88c 100644
+--- a/zig/src/families/glm/cuda_follow.zig
++++ b/zig/src/families/glm/cuda_follow.zig
+@@ -15,7 +15,7 @@ const sparse = @import("cuda_sparse.zig");
+ const prompt_pair = @import("cuda_prompt_pair.zig");
+ const Engine = engine.Engine;
+ 
+-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts };
++pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts, disk };
+ 
+ /// One step as it crosses: 64 bytes, then `n` u32 ids.
+ pub const Header = extern struct {
+@@ -66,7 +66,14 @@ pub const Link = struct {
+         return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
+     }
+ 
++    /// Rank 0, before it serves: whether the other ranks begin asleep; at TP its kept states' disk steps cross here.
++    pub fn lead(l: *Link, asleep: bool, world: usize) void {
++        l.asleep = asleep;
++        if (world > 1) @import("cuda_disk_ranks.zig").link = l;
++    }
++
+     pub fn deinit(l: *Link) void {
++        if (@import("cuda_disk_ranks.zig").link == l) @import("cuda_disk_ranks.zig").link = null;
+         l.gpa.free(l.ids);
+         l.buf.free();
+     }
+@@ -113,6 +120,14 @@ pub const Link = struct {
+         try l.lib.check(l.lib.api.ncclBroadcast(ptr, ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
+     }
+ 
++    /// `bytes` after the header from rank `root` into every rank's buffer (a disk step's take: cuda_disk_ranks).
++    pub fn from(l: *Link, root: u32, bytes: usize) !void {
++        if (bytes == 0) return;
++        if (64 + bytes > l.buf.len) return error.TooManyIds;
++        try l.lib.check(l.lib.api.ncclBroadcast(l.buf.ptr + 64, l.buf.ptr + 64, bytes, .u8, @intCast(root), l.comm, l.stream.handle), "ncclBroadcast");
++        try l.stream.synchronize();
++    }
++
+     /// Other ranks: the next step and its ids (valid until the next receive).
+     pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
+         try l.bcast(first_bytes);
+@@ -321,6 +336,14 @@ pub const Leader = struct {
+         x.e.m.experts.fact = fact;
+     }
+ 
++    /// A kept state's disk step (cuda_disk_ranks): its op and ids to every rank.
++    pub fn disk(x: Leader, h: Header, ids: []const u32) !void {
++        try x.flush();
++        var hh = h;
++        hh.kind = @backingInt(Kind.disk);
++        try x.send(hh, ids);
++    }
++
+     /// The other ranks leave their loops.
+     pub fn end(x: Leader) !void {
+         try x.send(.{ .kind = @backingInt(Kind.end) }, &.{});
+@@ -355,7 +378,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
+         const step = try link.receive();
+         const h = step.h;
+         const kind: Kind = @fromBackingInt(@intCast(h.kind));
+-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form) try e.bind(h.slot);
++        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form and kind != .disk) try e.bind(h.slot);
+         e.prompt_logprobs = if (promptRows(h)) .{} else null;
+         e.structured = structuredStep(h); // rank 0 alone masks them
+         switch (kind) {
+@@ -434,6 +457,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
+                 e.share_pages = h.flags & 1 != 0; // TF_KV_SHARE on rank 0: a kept state leaves the shared store's pages out
+                 try @import("cuda_snapshots.zig").agree(e, h.a);
+             },
++            .disk => try @import("cuda_disk_ranks.zig").step(e, link, h, step.ids),
+             .drop => for (step.ids) |id| e.dropState(id),
+             .release => e.release(h.slot),
+             .idle => cuda.tp_watch.sleep(e.io),
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+index 15bc8d6c9d6b3b9ca6add9ac321fd1d862f51b0e..d9325f06ca5aab7447ea12451685d93c2a440d30 100644
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -364,7 +364,7 @@ fn finishRank(a: OpenArgs) !Loaded {
+     // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_SHARED=0 runs windows alone.
+     const steps = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_STEPS", ranks.environment("TF_GLM_PROMPT_STEPS"), true);
+     const shared = try @import("sys").environment.value(bool, "TF_GLM_SHARED", ranks.environment("TF_GLM_SHARED"), true);
+-    own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
++    own.link.lead(cuda.tp_watch.open(), p.world); // the other ranks begin asleep (follow): the first step wakes them
+     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared, .mtp_confidence = o.mtp_confidence };
+     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
+     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
+diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
+index 51e146ea86238ff6ded340bb1d468f345e1ea93c..bc6d314ed3844ff9a149020868994588853f0fe4 100644
+--- a/zig/src/families/glm/cuda_snapshots.zig
++++ b/zig/src/families/glm/cuda_snapshots.zig
+@@ -120,8 +120,35 @@ pub fn keepAs(e: anytype, id: u64) !void {
+     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .win_from = if (win) |w| w.from else null });
+ }
+ 
++/// A disk read's state: `at`'s pages leased under rank 0's id on each rank, refused by `restore` until `seal`.
++pub fn blankAs(e: anytype, id: u64, at: usize) !void {
++    if (e.snaps.contains(id)) return error.StateKept;
++    const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
++    var lease = try pool.take(bytes(e, at));
++    errdefer pool.give(&lease);
++    const cur = try e.gpa.alloc(u1, e.cur.st.cur.len);
++    @memset(cur, 0);
++    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 } });
++}
++
++/// A blank state made whole from its image's words (its bytes are in or follow): a restore takes it from here.
++pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !void {
++    const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
++    if (s.len != 0) return error.StateKept;
++    if (s.cur.len > 64 or (s.cur.len < 64 and cur >> @intCast(s.cur.len) != 0)) return error.DiskWords;
++    const head = if (e.mtp) @min(e.capacity, s.pos + @import("cuda_state.zig").window_rows) else 0;
++    if (mtp_len > head) return error.DiskWords;
++    const n = try layout.Plan.size(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null, s.shared);
++    if (n == 0 or n > s.lease.ids.items.len * pages.page) return error.SnapshotSize;
++    for (s.cur, 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);
++    s.len = n;
++    s.mtp_len = mtp_len;
++    s.bases = bases;
++}
++
+ pub fn restore(e: anytype, id: u64) !void {
+     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
++    if (s.len == 0) return error.UnsealedState;
+     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
+     const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index 1426ac47322b8ea8494ea799f77a0ec4e59b7961..0ca2a4a4ccccf8119e5cc0d0cdea39b175c709a6 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -6,6 +6,7 @@ const cuda = @import("cuda");
+ const api = @import("engine_api");
+ const lanes = @import("lanes");
+ const nemotron = @import("nemotron");
++const glm = @import("glm_cuda");
+ const family_memory = @import("cuda_family_memory.zig");
+ const pool = family_memory.pool;
+ const family_options = @import("cuda_options.zig");
+@@ -386,7 +387,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+         const store = try gpa.create(pc.Store);
+         errdefer gpa.destroy(store);
+         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
+-        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
++        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (F == glm.native) &@import("cuda_glm_disk.zig").image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
+         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
+         store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
+         errdefer {
+@@ -398,7 +399,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+         try kv_pages.store(F, store, loaded, kept); // its snapshot slots, before a disk probe takes one
+         h.store = store;
+         if (o.learn_conversations) if (o.learn) |root| {
+-            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
++            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store) else if (F == glm.native) try @import("cuda_glm_disk.zig").attach(a, io, &g.ctx, o, root, kernels, loaded, store);
+             if (comptime cuda_disk.keptDisk(F)) |K| try cuda_disk.attachKept(K, F.model_type, a, io, &g.ctx, o, root, kernels, loaded, store);
+         };
+     }
+@@ -560,6 +561,7 @@ test {
+     _ = kv_pages;
+     _ = drafted;
+     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
++    _ = @import("cuda_glm_disk.zig");
+     _ = @import("cuda_disk_identity_test.zig");
+ }
+ test "Learner ownership: actual native close drains Nemotron before any source, trainer or parent free" {
+diff --git a/zig/src/native/cuda_glm_disk.zig b/zig/src/native/cuda_glm_disk.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f49b465372c3446dd78d2cdffc2c0a1a5da577e
+--- /dev/null
++++ b/zig/src/native/cuda_glm_disk.zig
+@@ -0,0 +1,212 @@
++//! GLM-5.3-Flash's CUDA kept states on disk (--learn-conversations): every rank's part in rank 0's files.
++const std = @import("std");
++const cuda = @import("cuda");
++const api = @import("engine_api");
++const lanes = @import("lanes");
++const glm = @import("glm_cuda");
++const cuda_disk = @import("cuda_disk.zig");
++const img = glm.disk_image;
++const ranks = glm.disk_ranks;
++const rows = api.prompt_cache.rows;
++const Engine = glm.engine.Engine;
++const Kept = glm.engine.Kept;
++const Allocator = std.mem.Allocator;
++
++pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
++
++/// Every rank's prefix bytes, read at attach (the process serves one model; rank 0 alone serves).
++var prefix_buf: [8]u64 = undefined;
++var prefixes: []const u64 = &.{};
++/// Where each rank's verify window rows begin in its prefix (the probe's hash leaves them out).
++var window_buf: [prefix_buf.len]u64 = undefined;
++
++fn engineOf(ptr: *anyopaque) *Engine {
++    return @ptrCast(@alignCast(ptr));
++}
++
++fn parts(ptr: *anyopaque, at: u32, out: *std.ArrayList(rows.image.Part), a: Allocator) anyerror!void {
++    var list: std.ArrayList(img.Part) = .empty;
++    defer list.deinit(a);
++    try img.storeParts(try ranks.shape(engineOf(ptr)), prefixes, at, &list, a);
++    for (list.items) |p| try out.append(a, .{ .bytes = p.bytes, .row = p.row, .per = p.per });
++}
++
++/// The other ranks asleep before a disk call go back to sleep after it (their lines, not NCCL, wait meanwhile).
++const Rest = struct {
++    e: *Engine,
++    asleep: bool,
++
++    fn of(e: *Engine) Rest {
++        return .{ .e = e, .asleep = ranks.asleep(e) };
++    }
++
++    fn done(r: Rest) void {
++        if (r.asleep) ranks.rest(r.e) catch |err| std.log.warn("glm: the ranks did not sleep after a disk step ({s})", .{@errorName(err)});
++    }
++};
++
++fn gather(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, out: []u8) anyerror!void {
++    const e = engineOf(ptr);
++    const k: *Kept = @ptrCast(@alignCast(saved));
++    const rest = Rest.of(e);
++    defer rest.done();
++    var pieces: std.ArrayList(img.Piece) = .empty;
++    defer pieces.deinit(e.gpa);
++    const sh = try ranks.shape(e);
++    var o: usize = 0;
++    for (ranges) |g| {
++        pieces.clearRetainingCapacity();
++        try img.route(sh, prefixes, k.at, g.off, g.len, &pieces, e.gpa);
++        for (pieces.items) |p| {
++            const n: usize = @intCast(p.len);
++            try ranks.take(e, p.rank, k.id, p.off, out[o..][0..n]);
++            o += n;
++        }
++    }
++}
++
++/// A new id leased at `at` on every rank, filled by `scatter` and sealed by the words in its last one.
++fn blank(ptr: *anyopaque, at: u32) anyerror!api.prompt_cache.Saved {
++    const e = engineOf(ptr);
++    const rest = Rest.of(e);
++    defer rest.done();
++    const k = try e.gpa.create(Kept);
++    errdefer e.gpa.destroy(k);
++    k.* = .{ .id = try ranks.blank(e, at), .at = at };
++    return @ptrCast(k);
++}
++
++/// The last scatter brings the state's own file, words first: every rank seals it then (the words place the head).
++fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, in: []const u8) anyerror!void {
++    const e = engineOf(ptr);
++    const k: *Kept = @ptrCast(@alignCast(saved));
++    const rest = Rest.of(e);
++    defer rest.done();
++    if (ranges.len > 0 and ranges[0].off == 0) {
++        if (ranges[0].len < img.Words.bytes) return error.DiskWords;
++        var x: [6]u64 = undefined;
++        @memcpy(std.mem.sliceAsBytes(&x), in[0..img.Words.bytes]);
++        try ranks.seal(e, k.id, try img.Words.decode(x, k.at));
++    }
++    var pieces: std.ArrayList(img.Piece) = .empty;
++    defer pieces.deinit(e.gpa);
++    const sh = try ranks.shape(e);
++    var o: usize = 0;
++    for (ranges) |g| {
++        pieces.clearRetainingCapacity();
++        try img.route(sh, prefixes, k.at, g.off, g.len, &pieces, e.gpa);
++        for (pieces.items) |p| {
++            const n: usize = @intCast(p.len);
++            const bytes = in[o..][0..n];
++            o += n;
++            if (p.rank == 0 and p.off < img.Words.bytes) continue; // the words went with the seal
++            try ranks.put(e, p.rank, k.id, p.off, bytes);
++            if (p.shared) for (prefixes[1..], 1..) |q, r| try ranks.put(e, @intCast(r), k.id, p.off - prefixes[0] + q, bytes);
++        }
++    }
++}
++
++fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
++    const k: *Kept = @ptrCast(@alignCast(saved));
++    const s = engineOf(ptr).snaps.get(k.id) orelse return false;
++    return s.len != 0;
++}
++
++/// A fixed prompt's store image hashed, other ranks' shared bytes checked equal: both but the bytes it never writes.
++fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, e: *Engine) !struct { hash: u64, rate: f64 } {
++    const mark: u32 = glm.native.prompt_rows;
++    var toks: [glm.native.prompt_rows + 40]u32 = undefined;
++    for (&toks, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
++    const Hook = struct {
++        e: *Engine,
++        saved: ?*anyopaque = null,
++        failed: ?anyerror = null,
++        fn at(p: *anyopaque, _: *lanes.Stream, m: u32) void {
++            const h: *@This() = @ptrCast(@alignCast(p));
++            h.saved = glm.native.snap_save(h.e, null, m) catch |err| {
++                h.failed = err;
++                return;
++            };
++        }
++    };
++    var hook: Hook = .{ .e = e };
++    const marks = [_]u32{mark};
++    var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .drafts = e.mtp, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
++    defer s.deinit(a);
++    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
++    backend.vtable.prefill(backend.ptr, &s) catch |err| {
++        backend.vtable.release(backend.ptr, &s);
++        return err;
++    };
++    const ns = std.Io.Clock.awake.now(io).toNanoseconds() - t0;
++    backend.vtable.release(backend.ptr, &s);
++    const saved = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
++    defer glm.native.snap_drop(e, saved);
++    const k: *Kept = @ptrCast(@alignCast(saved));
++    const sh = try ranks.shape(e);
++    const own = img.imageBytes(sh, mark);
++    var total = own;
++    for (prefixes[1..]) |p| total += p;
++    const bytes = try a.alloc(u8, @intCast(total));
++    try gather(e, saved, &.{.{ .off = 0, .len = total }}, bytes);
++    var loose: std.ArrayList(img.Span) = .empty;
++    try img.unwritten(sh, prefixes, window_buf[0..prefixes.len], mark, (try ranks.wordsOf(e, k.id)).mtp_len, &loose, a);
++    img.clear(loose.items, 0, bytes);
++    const from = img.Words.bytes + sh.prefix;
++    const shared = bytes[@intCast(from)..@intCast(own)];
++    var past: std.ArrayList(img.Span) = .empty; // the spans past rank 0's prefix, as spans of `shared`
++    for (loose.items) |x| if (x.off >= from) try past.append(a, .{ .off = x.off - from, .len = x.len });
++    try ranks.same(e, k.id, prefixes, shared, past.items, try a.alloc(u8, shared.len));
++    try ranks.rest(e);
++    return .{ .hash = std.hash.Wyhash.hash(0x676c6d, bytes), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
++}
++
++/// What --learn-conversations refuses before it reads a rank: TF_GLM_KV_SHARE, and more ranks than `prefix_buf` holds.
++fn refusal(e: *const Engine) !void {
++    // TF_GLM_KV_SHARE leaves a kept state's prefix pages in the pool's prompt cache, outside the lease the image reads
++    if (e.share_pages) return error.KvShareWithLearnConversations;
++    if (e.share.world > prefix_buf.len) return error.TooManyRanks;
++}
++
++/// --learn-conversations: every rank's prefix read, the identity probed on this thread, the store attached.
++pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
++    const e: *Engine = loaded.target;
++    refusal(e) catch |err| {
++        if (err == error.KvShareWithLearnConversations) std.log.err("--learn-conversations: GLM-5.3-Flash's disk images read a kept state's whole lease, and TF_GLM_KV_SHARE leaves its prefix pages out of it; serve without one of them", .{});
++        return err;
++    };
++    try ranks.prefixes(e, prefix_buf[0..e.share.world], window_buf[0..e.share.world]);
++    prefixes = prefix_buf[0..e.share.world];
++    const sh = try ranks.shape(e);
++    var facts: std.ArrayList(u64) = .empty;
++    try facts.appendSlice(a, &.{ e.share.world, sh.capacity, sh.ring_rows, sh.tail, @intFromBool(sh.head), @intFromBool(sh.scales), @intFromBool(e.drafter != null) });
++    try facts.appendSlice(a, prefixes);
++    const p = try probe(a, io, loaded.backend, e);
++    const id = try cuda_disk.identityOf(a, io, ctx, o.dir, kernels, facts.items, p.hash, .{ .family = o.model_type, .backend = "cuda" });
++    const gibs = struct {
++        fn bytes(g: f64) u64 {
++            return @intFromFloat(g * (1 << 30));
++        }
++    }.bytes;
++    const r = try rows.Rows.open(store.gpa, store.family, .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid });
++    r.prefill_rate = p.rate;
++    store.disk = r;
++    std.log.info("glm: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB; {d} ranks' parts)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20, prefixes.len });
++}
++
++test "GLM disk attach: TF_GLM_KV_SHARE and more ranks than the prefixes hold are refused by name" {
++    const e = try std.testing.allocator.create(Engine);
++    defer std.testing.allocator.destroy(e);
++    e.share_pages = false;
++    e.share.world = prefix_buf.len;
++    try refusal(e);
++    e.share.world = prefix_buf.len + 1;
++    try std.testing.expectError(error.TooManyRanks, refusal(e));
++    e.share.world = 2;
++    e.share_pages = true;
++    try std.testing.expectError(error.KvShareWithLearnConversations, refusal(e));
++}
++
++test {
++    std.testing.refAllDecls(@This());
++}
+diff --git a/zig/src/native/cuda_refusal.zig b/zig/src/native/cuda_refusal.zig
+index a0623f46a4b4b8e7bdf5797868a9c2d1d876baa1..3ffb242b32a29afbf83208fdfecf246f009d4314 100644
+--- a/zig/src/native/cuda_refusal.zig
++++ b/zig/src/native/cuda_refusal.zig
+@@ -55,11 +55,14 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+     if (o.tp != 1 and !ranked) return no_ranks;
+     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
+     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
++    // a live-half keep holds one KDA half, and GLM's disk image holds both (cuda_disk_image.zig)
++    if (F == @import("glm_cuda").native and o.learn_conversations and @import("glm_cuda").snapshots.layout.liveHalfEnabled())
++        return "--learn-conversations and TF_GLM_KV_LIVE_HALF=1: GLM-5.3-Flash's disk image holds both KDA halves and a live-half keep one; serve without one of them";
+     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
+         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
+         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
+     }
+-    if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
++    if (o.learn_conversations and F != nemotron.native and F != @import("glm_cuda").native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, GLM-5.3-Flash, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+     if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
+     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
+     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
+@@ -180,7 +183,7 @@ test "a family with no head of its own words its --drafter refusal" {
+     try std.testing.expectEqualStrings("--drafter: none yet", family(Headless, .{ .dir = "d", .model_type = "m", .drafter = "x" }) orelse "");
+ }
+ 
+-test "--learn-conversations opens Nemotron and a family whose states declare a disk image, no other" {
++test "--learn-conversations opens Nemotron, GLM-5.3-Flash and a family whose states declare a disk image, no other" {
+     const Other = struct {};
+     const Imaged = struct {
+         pub const kept_disk = struct {};
+@@ -205,6 +208,7 @@ test "--learn-conversations opens Nemotron and a family whose states declare a d
+     try std.testing.expect(family(AllRanks, .{ .dir = "d", .model_type = "m", .tp = 2, .learn_conversations = true }) == null);
+     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
+     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
++    try std.testing.expect(family(@import("glm_cuda").native, .{ .dir = "d", .model_type = "glm5_next", .learn_conversations = true }) == null);
+ }
+ 
+ test "CUDA MTP controls respect window and probability bounds" {
+@@ -273,14 +277,18 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; th
+     try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
+ }
+ 
+-test "GLM keeps its prompt states in the process: no disk image, so --spill-gib and --learn-conversations refuse" {
++test "GLM keeps its prompt states on disk with --learn-conversations alone, and refuses it with TF_GLM_KV_LIVE_HALF=1" {
+     // TF_GLM_KV_LIVE_HALF's keeps omit the dead KDA half; they must never reach a store a server without the flag reads
+     const glm = @import("glm_cuda").native;
+     try std.testing.expect(@import("cuda_disk.zig").keptDisk(glm) == null);
+     const spill: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .spill = .evicted };
+     try std.testing.expectStringStartsWith(family(glm, spill) orelse "", "--spill-gib keeps evicted states");
+     const learn: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true };
+-    try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations keeps");
++    try std.testing.expect(family(glm, learn) == null);
++    const env = @import("sys").env;
++    try std.testing.expectEqual(@as(c_int, 0), env.setenv("TF_GLM_KV_LIVE_HALF", "1", 1));
++    defer _ = env.unsetenv("TF_GLM_KV_LIVE_HALF");
++    try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations and TF_GLM_KV_LIVE_HALF=1");
+ }
+ 
+ /// Validate CUDA settings and residency support before checkpoint or driver work at direct entry points.

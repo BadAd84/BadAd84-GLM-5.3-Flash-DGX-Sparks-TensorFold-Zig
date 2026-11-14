@@ -1,0 +1,97 @@
+From 8cf55dc16f68a7874063ae2b9f84dfd29617cb20 Mon Sep 17 00:00:00 2001
+From: Robert Wojciechowski <24755+wojo@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:06:24 -0400
+Subject: [PATCH] rows: a pool that also trims reads a disk state only within its budget, as before
+
+The disk read's early admission for a family whose spare storage takes the state now applies only
+to a family without trim, as the selection's capacity already does. A family with trim, such as
+Flash Next's or Qwen3.8-27B's pools on Metal, makes room for a read by trimming its spare storage
+and evicting, exactly as it did before, and a new test pins that its read stays within the budget
+when its reuses answers yes.
+---
+
+diff --git a/zig/src/core/rows_pool_select_test.zig b/zig/src/core/rows_pool_select_test.zig
+index 499c69976f3c7e91d687c0ba6a444665cb9b54d3..beab09be119b9963e0f9024c8a872e4c79b440b6 100644
+--- a/zig/src/core/rows_pool_select_test.zig
++++ b/zig/src/core/rows_pool_select_test.zig
+@@ -136,3 +136,65 @@ test "restore selection: a pool without trim reads into the spare storage an evi
+     try t.expectEqual(fresh(&prompt), f.pass(&s, &prompt, .{ .from = restored.at }));
+     s.release(borrowed);
+ }
++
++/// A disk read into new storage, whatever spare storage the pool holds.
++const Fresh = struct {
++    const api: rows.Image = .{ .parts = Image.parts, .gather = Image.gather, .blank = blank, .scatter = Image.scatter };
++    fn blank(ptr: *anyopaque, at: u32) !pc.Saved {
++        const f: *Fake = @ptrCast(@alignCast(ptr));
++        const previous = f.at;
++        f.at = at;
++        defer f.at = previous;
++        return f.snapshots().vtable.save(ptr, null, at);
++    }
++};
++
++test "restore selection: a pool that also trims reads a disk state only within its budget, whatever it reuses" {
++    var tmp = t.tmpDir(.{});
++    defer tmp.cleanup();
++    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
++    defer a.free(dir);
++    var prompt: [64]u32 = undefined;
++    for (&prompt, 0..) |*token, i| token.* = @intCast(100 + i);
++    const rules: pc.Rules = .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 };
++    {
++        var f: Fake = .{ .gpa = a, .at = 20, .sum = fresh(prompt[0..20]) };
++        var table = f.pooled().vtable.*;
++        table.rows = &Image.api;
++        const family: pc.Snapshots = .{ .ptr = &f, .vtable = &table };
++        const r = try rows.Rows.open(a, family, options(dir));
++        defer r.deinit();
++        var s = pc.Store.init(a, family, rules, 1000);
++        defer s.deinit();
++        s.disk = r;
++        try t.expect(s.keep(&prompt, 20, null, &.{}, &.{}));
++        while (rows.write.step(r)) {}
++    }
++    var f: Fake = .{ .gpa = a, .at = 5, .sum = fresh(prompt[0..5]) };
++    var table = f.pooled().vtable.*;
++    table.rows = &Fresh.api;
++    try t.expect(table.reuses != null and table.trim != null);
++    const family: pc.Snapshots = .{ .ptr = &f, .vtable = &table };
++    const r = try rows.Rows.open(a, family, options(dir));
++    defer r.deinit();
++    var s = pc.Store.init(a, family, rules, 240);
++    defer s.deinit();
++    try t.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
++    const borrowed = s.entries.items[0];
++    borrowed.borrowers = 1;
++    prompt[0] = 999;
++    f.at = 30; // another conversation's state: once evicted, its spare storage is one the family says takes the read
++    f.sum = fresh(prompt[0..30]);
++    try t.expect(s.keep(&prompt, 30, null, &.{}, &.{}));
++    prompt[0] = 100;
++    s.disk = r;
++    try t.expectEqual(.disk, rows.read.resumable(&s, &prompt, &.{}, &.{}).from);
++    const restored = rows.read.recall(&s, &prompt, 64, &.{}, &.{}, borrowed).?;
++    try t.expectEqual(@as(u32, 20), restored.at);
++    try t.expectEqual(@as(u64, 1), r.counts.reads);
++    try t.expectEqual(@as(u64, 1), s.counts.evicted);
++    try t.expect(s.held + s.spare() <= s.budget); // the spare storage was trimmed for the new storage, not left over it
++    try family.vtable.restore(family.ptr, null, restored.saved);
++    try t.expectEqual(fresh(&prompt), f.pass(&s, &prompt, .{ .from = restored.at }));
++    s.release(borrowed);
++}
+diff --git a/zig/src/core/rows_read.zig b/zig/src/core/rows_read.zig
+index bb02f9ac3a73213b7a8fd26c79a89bb58150d5de..87ba18efd71126e7ec81a4392399f783d65604d8 100644
+--- a/zig/src/core/rows_read.zig
++++ b/zig/src/core/rows_read.zig
+@@ -167,7 +167,9 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
+ 
+ fn ready(s: *const pc.Store, at: u32, bytes: u64) bool {
+     if (s.held > s.budget or s.entries.items.len >= s.most) return false;
+-    if (s.family.vtable.reuses) |f| if (f(s.family.ptr, at)) return true; // spare storage takes it, as a keep's would
++    const f = s.family.vtable;
++    // a pool without trim reads into spare storage that takes the state, as a keep would
++    if (f.trim == null) if (f.reuses) |reuses| if (reuses(s.family.ptr, at)) return true;
+     const room = s.budget - s.held;
+     const spare = s.spare();
+     return spare <= room and bytes <= room - spare;
