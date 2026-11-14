@@ -37,7 +37,7 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
 
 ## State (2026-11-12)
 
-Base: upstream v1.2.7 (`93a2e93e`) plus the 33 patches of `patches/engine/`. Decode in tok/s at 1, 2, 4, 6 and 8
+Base: upstream v1.2.7 (`93a2e93e`) plus the 34 patches of `patches/engine/`. Decode in tok/s at 1, 2, 4, 6 and 8
 streams, one fresh boot a level, 400 tokens a stream. `TF_GLM_KDA_PAD=1` is the setting production runs and it changes
 numerics, so the pad rows are the like-for-like ones against production; replies are byte-identical between the rows of
 one group.
@@ -54,9 +54,10 @@ one group.
 | the recipe as `serve.sh` defines it (`KNOBS=measured`: those seven, production's chain rule, the wire at 4 streams or fewer; mean of two cells) | 71.09 | 80.35 | 100.94 | 134.20 | 163.36 |
 | **the same recipe on production's prompts** (`scripts/bench-client.sh`: its rendering of the four bench prompts as ids; mean of two cells) | 78.71 | 80.81 | 105.47 | 139.26 | 172.67 |
 | **that recipe plus production's routed-expert block order** (`TF_EXL3_DEC_ORDER=1`, now in `DEFS`; mean of two cells) | 78.68 | 80.68 | 107.30 | 141.09 | 173.52 |
+| **the recipe with production's routed-expert kernel set** (patch 0034's `TF_GLM_OVN_X3_*` and the block order, all in `DEFS`; mean of two cells) | 79.72 | 83.02 | 108.85 | 142.80 | 175.93 |
 
-The rows above the last two send our server's own rendering of the bench prompts, which is 40 tokens for the first prose prompt where
+The rows above the last three send our server's own rendering of the bench prompts, which is 40 tokens for the first prose prompt where
 production renders 33, so the two serves answer different text and the comparison is not like for like (`docs/OVERNIGHT-2026-11-12.md`
-section 23). On production's own prompt tokens the recipe as `serve.sh` defines it is -3.7% at one stream and -9.6%, -9.1% at two and
-four, and leads at six and eight (+22.9%, +32.2%); cells from different measuring windows differ by up to 3%, so these are about, not
-exact. The rest of the gap is in `docs/OVERNIGHT-2026-11-12.md` sections 11 to 24 and `docs/audit-2026-11-12/round-structure.md`.
+section 23). On production's own prompt tokens the recipe as `serve.sh` defines it is -2.5% at one stream, -7.0% and -7.7% at two and four, and leads
+at six and eight (+24.4%, +34.0%); cells from different measuring windows differ by up to 3%, so these are about, not exact. The rest of
+the gap is in `docs/OVERNIGHT-2026-11-12.md` sections 11 to 25 and `docs/audit-2026-11-12/round-structure.md`.

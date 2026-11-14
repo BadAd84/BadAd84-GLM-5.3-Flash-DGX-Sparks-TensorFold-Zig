@@ -123,48 +123,51 @@ the high ends the serve ABBA less 0.7 points. Floor from our own kernel times, X
 row ~3 us, the fused epilogue a fifth of its launch): 0.6 / 0.9 ms. Against production that is -9.4 -> -5.9 to -7.5% at
 2 streams and -10.6 -> -6.8 to -8.5% at 4. It also applies at 1, 6 and 8 streams (the stage is 52-67% of every round)
 and frees per-row cost, which our window planner prices: at P4 it now verifies ~2.0 drafts a stream against
-production's ~2.5. Bits: unchanged by construction (same chains, tiles and sums; the fork's GPU check compares every
-variant with the plain decode, 0 of 3,984 values differ).
+production's ~2.5. Bits: unchanged by construction (same chains, tiles and sums), and checked: section 5.
 
-**Not built here**: a CUDA port (new `exl3_ovn.cuh`, its entry points, the launcher) whose only gates are the image
-build on spark1 and a GPU check, so it is not a contained host-tested change. Design:
+**Built**: `work/verify-gap/0035-glm-exl3-x3-decode.patch` (numbered after the drafter lane's proposed 0034; it applies
+on v1.2.7 + 0001..0033 alone). Contents:
 
-- Source: the archived fork's `7d41fa9b7` (X3_NC 1|2|w, X3_FUSEDOWN, X3_XROW; 552 lines), `ca8479639` (X3_NC=w on the
-  plain walker), and the item-plan plumbing of `ovn-items` (`769c8cfca`: the decode arena sized for the 9-slot layout;
-  the X3 variants on items in `b099d3ce8`). Not `95a3e51cb` (ROTEXPERT, a numerics trade). One numbered patch,
-  `0034-exl3-x3-decode.patch`, `RECORD.md` naming the commits and the Apache-2.0 source of the 16-byte staged loads
-  (TensorFold glm5_next `exl3.cu` dec_kernel LD 1, jayleaton 0580).
-- `zig/kernels/cuda/exl3_ovn.cuh` (new): `OvnTail`/`OvnArgs`, `ldg_nc_v4`, the staged walker, the fused down epilogue,
-  the row-rotation read. `zig/kernels/cuda/exl3_experts.cu`: the `tf_exl3_ovn_*` entry points beside today's, keeping
-  `GROUPED_LOAD` (AHEAD) on the plain path and the `ord` swap on both.
-- `zig/src/cuda/exl3_experts.zig`: `Ovn` (loads off|nc1|nc2|word, fuse_down, xrow) and `runWith` on items launching the
-  variants (`rot_in` a row under XROW, the down launch writing ey's slot rows under FUSEDOWN, no `down_combine`).
-  `zig/src/families/glm/cuda_exl3.zig`: the per-matrix trellis bases (gb, ub, db) and the knobs read at load.
-  `zig/src/families/glm/cuda_state.zig`: the 9-slot decode arena.
-- Knobs through the series' OVN registry (`zig/src/cuda/ovn.zig`, patch 0005), so the fork's `cuda.ovn.text("X3_NC")`
-  and `cuda.ovn.on(...)` calls stand as written: three `.glm` rows of `zig/src/platform/environment.zig`,
-  `TF_GLM_OVN_X3_NC` (text, forms 0, 1, 2 or w), `TF_GLM_OVN_X3_XROW` and `TF_GLM_OVN_X3_FUSEDOWN` (flags), all default
-  off, with `cuda_env_test.zig`'s row check and the OVN check table (0011). `TF_EXL3_DEC_ORDER` stays as 0030 has it.
-- Checks: `zig/tests/cuda/glm_exl3_ovn_tests.zig` (every variant against the plain decode's ey, items on, widths 640
-  and 768, lockstep and distinct windows) registered in `zig/tests/cuda/main.zig`, with the fork's planted control
-  (members one slot off) shown failing; host tests for the knob forms and the arena sizes, with mutants (X3_NC=2 read
-  as 1, the arena one slot short); `scripts/gates.sh`, `scripts/gate-names.sh` against `rs2`'s tree, `scripts/lean.sh`
-  base against head (`exl3_experts.zig` is 387 lines today, the 600 limit holds).
+- Source: the archived fork's `7d41fa9b7` (X3_NC 1|2|w, X3_FUSEDOWN, X3_XROW), `ca8479639` (the walker's variants as
+  flags of the plain switch) and the item-plan plumbing of `e95d31f81` / `769c8cfca` (standard-mode members in
+  `nc_body`; the 9-slot decode arena, which 0012 already has here). Left out: `95a3e51cb` (ROTEXPERT, a numerics
+  trade), X3_NC=w (production does not run it), and the two pieces upstream v1.2.7 already has
+  (`upstream-overlap.sh`, `git grep` at `93a2e93ec`): the row rotation is `tf_exl3_prompt_rotate`
+  (`exl3_experts.cu`, the prompt path's shared_input rotation, rot_in's bf16 expression), and the 16-byte load is
+  `tf_common::ld_nc` (`common/cp_async.cuh:33`). Upstream has no 16-byte loads, fused down or row rotation in the
+  routed decode, no trellis base per projection and no X3 knob.
+- `zig/kernels/cuda/exl3_grouped.cuh`: `OvnTail`, `fused_down` (down_combine's per-slot expression at sk 1),
+  `grouped_body` gains `OVN` (row index p / slots, the fused epilogue). `zig/kernels/cuda/exl3_ovn.cuh` (new, 143
+  lines): `OvnArgs`, `words_of`, `nc_body<PD>` (16-byte loads PD k steps ahead, staged in the warp's `red`).
+  `zig/kernels/cuda/exl3_experts.cu`: `tf_exl3_ovn_walk` (GROUPED_LOAD), `tf_exl3_ovn_nc1`, `tf_exl3_ovn_nc2`; rot_in
+  untouched.
+- `zig/src/cuda/exl3_experts.zig`: `Ovn` {nc, xrow, fuse_down} carried in `Items`; `variant()` (the loads where they
+  apply, else the walker for row inputs or the fused down, else the plain kernel), `fusable()`, `rowsIn()`, the
+  trellis bases on `Layer`, `addTail()`; `runWith` launches them on the item plan only (the plain path passes `.{}`).
+  `zig/src/families/glm/cuda_exl3.zig`: the loader keeps the three trellis bases and reads the knobs at load.
+- Knobs: `.glm` rows of `zig/src/platform/environment.zig` read through `cuda/ovn.zig`: `TF_GLM_OVN_X3_NC` (u64, at
+  most 2), `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN` (flags), all default off, lines in `docs/environment.md`;
+  `cuda_env_test.zig`'s every-OVN-row test covers them unchanged. `TF_EXL3_DEC_ORDER` stays as 0030 has it.
+- Checks: `glm-exl3-items` (GPU) now also runs 6 X3 variants on a per-expert-rotation layer and 5 on a shared one
+  against the plain decode, every shape and window it had; host step `test-glm-exl3-x3-host` (filter `EXL3 X3:`,
+  `zig/build/glm_family_host.zig`), whose tests also run in `test-cuda-host`.
 
 **Arms** (`arms-client.sh`: `arms-file.sh`'s line format run through `bench-client.sh` / `streams_ids.py` on top of
 `KNOBS=measured`; its stub test passes and kills both planted mutants, `test-arms-client.sh`, `mutant-arms-client.sh`):
 
-    # rung 1, image glm53-zig:rs2, nothing to build (arms-x3-r1.txt): bash arms-client.sh /dev/null "" arms-x3-r1.txt glm53-zig:rs2
-    x3o-ctl|||1 2 4 6 8|1
-    x3o-ord|-e TF_EXL3_DEC_ORDER=1||1 2 4 6 8|1
-    x3o-ord-b|-e TF_EXL3_DEC_ORDER=1||1 2 4 6 8|1
-    x3o-ctl-b|||1 2 4 6 8|1
-    # rung 2, image glm53-zig:rs2x3 = the series + 0034, built and on all three hosts (arms-x3-r2.txt);
-    # add -e TF_EXL3_DEC_ORDER=1 to both test lines only if rung 1 held at every level
+    # the lever, image glm53-zig:rs2x3 = v1.2.7 + 0001..0033 + 0035, control the recipe (arms-x3-r2.txt):
+    # bash arms-client.sh /dev/null "" arms-x3-r2.txt glm53-zig:rs2x3
     x3-ctl|||1 2 4 6 8|1
-    x3-on|-e TF_GLM_OVN_X3_NC=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1||1 2 4 6 8|1
-    x3-on-b|-e TF_GLM_OVN_X3_NC=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1||1 2 4 6 8|1
+    x3-set|-e TF_EXL3_DEC_ORDER=1 -e TF_GLM_OVN_X3_NC=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1||1 2 4 6 8|1
+    x3-set-b|-e TF_EXL3_DEC_ORDER=1 -e TF_GLM_OVN_X3_NC=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1||1 2 4 6 8|1
     x3-ctl-b|||1 2 4 6 8|1
+    # attribution, only if x3-set wins at 1-2 streams but not at 4 (the fork's X3_NC alone was -1.4% at 4 before
+    # ITEMS, SPEEDUPS.md:131): bash arms-client.sh /dev/null "" arms-x3-r3.txt glm53-zig:rs2x3
+    x3-ctl|||1 2 4 6 8|1
+    x3-nonc|-e TF_EXL3_DEC_ORDER=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1||1 2 4 6 8|1
+    x3-nonc-b|-e TF_EXL3_DEC_ORDER=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1||1 2 4 6 8|1
+    x3-ctl-b|||1 2 4 6 8|1
+    # block order alone needs no build (patch 0030 is in rs2): arms-x3-r1.txt on glm53-zig:rs2, the same shape
 
 Each test cell is read against the control beside it; replies equal to the control's at every level; `x3-ctl` equal
 to rs2's recipe cells and digests. Then the frame itself: `IMAGE=<image> KNOBS=measured XENV="<test -e list>" bash
@@ -180,9 +183,30 @@ nsys-rank0.sh x3-p4 4`, the export as `queue17.sh` does it, and `python routed.p
 | drafter linears at production's efficiency (and its attention split) | ~0.6 | ~0.7 | linears + head 2.21 / 2.52 ms against ~1.65-1.75 |
 | prompt admission: waiting prompts in one fill (bench cells only) | 0.16 s a cell | 0.48 s a cell | `timeline.out` |
 
-## 5. Status
+## 5. The patch and its receipts
 
-No patch built (section 3). Written here: the probes (`stages.py`, `table.py`, `evidence2.py`, `routed.py`,
-`segspan.py`, `gathers.py`, `waits.py`, `hostrt.py`, `launchbound.py`, `timeline.py`, `kdastep.py`, `keepgaps.py`,
-`steps.py`, `seq.py`, `explore.py`, `prodround.py`), their outputs (`*.out`, `spark1/nsys/*.rounds.json`), the arms
-runner and its test and mutants, the arms files. The read tree (`setup.sh` rebuilds it) and the WSL scratch are removed.
+`work/verify-gap/0035-glm-exl3-x3-decode.patch` (9 files, 37 hunks, LF only; sha256
+`c3294dd8371588cf654dd979fb77de36a4ef8d41b4df08d7c19f21797878208f`), on
+v1.2.7 + 0001..0033; it also applies after the drafter lane's proposed 0034 (`stack-check.sh`). Base = the series,
+head = base + 0035; every command below ran on head, and the gates also on base.
+
+- `scripts/gates.sh` (WSL): check-native-cuda-host rc 0 (7/7 steps), test-cuda-host rc 0 (383/383 steps; head 6279
+  of 6309 tests, base 6273 of 6303, 30 skipped each: the six new tests), compile-cuda-tests rc 0 (10/10), the four
+  standalone host steps rc 0, `zig fmt --check` rc 0; `scripts/gate-names.sh x3base x3head2` rc 0, no failing name.
+- `scripts/lean.sh` base against head: 6254 files / 386 problems against 6255 / 386, 0 new; `git apply --check` on
+  the base rc 0 and base + patch identical to head (`lean-apply.sh`). Largest touched file `exl3_experts.zig`, 539.
+- Host: `test-glm-exl3-x3-host` 31/31; `mutants.sh` 14 of 14 killed, each by a named test (`mutants.txt`).
+- GPU, workstation RTX 5070 Laptop (sm_120, CUDA 13.3.1, `gpu/run.sh`): `tf-cuda-test glm-exl3-items` 0 of 308
+  comparisons differ; `gpu/mutants.sh` 7 of 7 planted controls fail it by exit code, each only on its own variants
+  (`gpu/mutants.txt`). nvcc for sm_121 of `exl3_experts.cu` and `contract_controls.cu` clean, no spills
+  (`gpu/nvcc-check.sh`, `gpu/nvcc-ctl.sh`). What only the spark1 image build covers: running sm_121 SASS, every
+  other kernel image, and the served model end to end (the arms' digests).
+- Upstream overlap (`upstream-overlap.sh`): the row rotation and the 16-byte load are upstream's own
+  (`tf_exl3_prompt_rotate`, `tf_common::ld_nc`), reused rather than ported; nothing else of X3 exists at the pin.
+
+Also here: the probes (`stages.py`, `table.py`, `evidence2.py`, `routed.py`, `segspan.py`, `gathers.py`, `waits.py`,
+`hostrt.py`, `launchbound.py`, `timeline.py`, `kdastep.py`, `keepgaps.py`, `steps.py`, `seq.py`, `explore.py`,
+`prodround.py`) and their outputs (`*.out`, `spark1/nsys/*.rounds.json`), the arms runner with its test and mutants
+(`test-arms-client.sh` PASS on all three arm files: image, `KNOBS=measured`, levels and the exact `-e` list per line,
+A B B A order; `mutant-arms-client.sh` kills both planted defects),
+the arms files. The lane tree (`setup.sh` rebuilds it, then `git apply` the patch) and the WSL scratch are removed.

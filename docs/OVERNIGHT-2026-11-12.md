@@ -577,3 +577,32 @@ Each test cell against the control next to it: `x3o-ord` over `x3o-ctl` +0.4 / -
 pair whose other half is +0.5%), so it joins the recipe: `serve.sh`'s `DEFS` gains `TF_EXL3_DEC_ORDER=1`. About +1% at four streams and
 up is far under the +2 to +4% the fork measured for the whole set (16-byte loads, input rotated once per expert pair, fused down
 epilogue), which is a CUDA port, not a switch.
+
+## 25. Production's routed-expert kernel set on the item plan (patch 0034): +1.2 to +3.5% at every stream count
+
+The routed experts' decode kernel is 57% of the two-stream round and 65% of the four-stream round (section 24). The fork's X3 set
+(16-byte staged trellis loads, the input rotated once per expert pair, a fused down epilogue) was ported by the `VerifyGap` lane as
+`patches/engine/0034-glm-exl3-x3-decode.patch` (sha256 `c3294dd83715`): three default-off switches, `TF_GLM_OVN_X3_NC`,
+`TF_GLM_OVN_X3_XROW` and `TF_GLM_OVN_X3_FUSEDOWN`, on the item plan only. Upstream already has the row rotation and the 16-byte load
+(`tf_exl3_prompt_rotate`, `tf_common::ld_nc`), so the patch wires those and carries the fused epilogue and the walker variants. Receipts
+(`docs/audit-2026-11-12/verify-gap.md` section 5): `glm-exl3-items` on the workstation's RTX 5070 (sm_120) 0 of 308 comparisons differ and
+7 of 7 planted controls fail it, each on its own variants; host step `test-glm-exl3-x3-host` 31 of 31 and 14 of 14 mutants killed;
+`scripts/gates.sh` rc 0 (test-cuda-host 383 of 383 steps), gate-names no failing name, lean 386 against 386, 0 new; nvcc for sm_121 clean
+with no spills. The series' tree is now `f5495931b233`, rebuilt from the tag by `scripts/apply.sh` with 0 differing paths.
+
+Image `rs2x3` (the 34-patch series), through the like-for-like instrument, the recipe as control against the set (`TF_EXL3_DEC_ORDER=1`
+and the three switches), order ctl, set, set, ctl, replies equal (tok/s; each test cell against the control next to it):
+
+| arm | 1 | 2 | 4 | 6 | 8 | ms/round |
+|---|---:|---:|---:|---:|---:|---:|
+| `x3-ctl` | 77.11 | 79.71 | 105.31 | 138.42 | 170.12 | 39.7 |
+| `x3-set` | 79.54 (+3.2%) | 82.52 (+3.5%) | 107.98 (+2.5%) | 141.11 (+1.9%) | 173.75 (+2.1%) | 38.5 |
+| `x3-set-b` | 79.89 (+1.2%) | 83.51 (+2.3%) | 109.71 (+3.0%) | 144.49 (+2.6%) | 178.11 (+2.3%) | 38.4 |
+| `x3-ctl-b` | 78.94 | 81.61 | 106.49 | 140.86 | 174.15 | 38.8 |
+
+(`x3-set` is read against `x3-ctl`, `x3-set-b` against `x3-ctl-b`, the control next to each.) Every one of the ten pair readings is
+positive, +1.2 to +3.5% at 1 to 8 streams, the round 38.4 to 38.5 ms against 38.8 to 39.7, so no level regresses and the three
+switches join `scripts/serve.sh`'s `DEFS`. The window's control read 1.5% lower in its first cell than the recipe of section 24, so the
+absolute cells are about, not exact: the mean of the two set cells is 79.72 / 83.02 / 108.85 / 142.80 / 175.93 tok/s, -2.5 / -7.0 /
+-7.7% against production at one, two and four streams and +24.4 / +34.0% at six and eight, on production's own prompts. The recipe
+launched through `serve.sh` with these switches was not run as a whole; the arms passed them as the arm's `-e` list.
