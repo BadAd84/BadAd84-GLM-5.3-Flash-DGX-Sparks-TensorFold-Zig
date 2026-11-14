@@ -56,6 +56,12 @@ one group.
 | **that recipe plus production's routed-expert block order** (`TF_EXL3_DEC_ORDER=1`, now in `DEFS`; mean of two cells) | 78.68 | 80.68 | 107.30 | 141.09 | 173.52 |
 | **the whole recipe launched through `serve.sh`** (`KNOBS=measured` on the 34-patch series: patch 0034's `TF_GLM_OVN_X3_*`, the block order, the chain rule, the wire at 4 streams or fewer; mean of two runs) | 80.47 | 83.43 | 109.46 | 144.32 | 178.35 |
 
+**Read this first (2026-11-14): the rows below are decode at a smaller context, and the Zig serve does not yet replace production.** At the
+shape production runs (`--parallel 4 --context 1048576`) the recipe's decode with 4, 6 and 8 clients is 0.86x, 0.90x and 0.87x of
+production's; cold first token on long prompts is 1.2x to 1.7x slower (8k 4.6 s against 2.8 s, 120k 67 s against 43 s); the 600k-token
+conversation takes 346 s cold against 225 s; and a conversation does not survive a restart (GLM refuses `--spill-gib` and
+`--snapshot-dir`), refilling in 378 s where production resumes in 12.8 s. `docs/OVERNIGHT-2026-11-12.md` section 29 has the table.
+
 The rows above the last three send our server's own rendering of the bench prompts, which is 40 tokens for the first prose prompt where
 production renders 33, so the two serves answer different text and the comparison is not like for like (`docs/OVERNIGHT-2026-11-12.md`
 section 23). On production's own prompt tokens the recipe as `serve.sh` defines it is -1.5% at one stream, -6.5% and -7.2% at two and four, and shows +25.7% and +35.9% at six and eight, which is not a like-for-like win; cells from different measuring windows differ by up to 3%, so these are about, not exact. The six and eight stream cells compare unequal serves: our rows are fresh boots with `--parallel` equal to the stream count (true 6 and 8 slots), production's are one `--parallel 4` serve with two or four requests queued; and our boots default to `--context` 262144 at two to six streams where production runs 1048576 at `--parallel 4`, so only the one, two and four stream cells are comparable, and only for decode. The rest of
