@@ -646,3 +646,27 @@ At eight streams both test cells read about 4.6% under their controls and the ro
 cells are negative. It does not ship: it regresses at one level and shows no gain at the levels it was for. The measurement cannot say
 whether the side streams fail to overlap on the GB10 or the forks and joins cost more than the bound assumed, and the test arm's second
 change (the connection count) was not run alone, so a lower stream count or a scoped use is not excluded. The patch stays archived.
+
+## 27. The drafter's round structure at two and four streams: two bounds under the cut-off, nothing built
+
+The `DrafterRound` lane bounded the profile's two remaining drafter-side items from the three rank-0 captures
+(`docs/audit-2026-11-12/drafter-round.md`), after each item's own costs; a bound under about 0.5 ms a round at four streams is not
+built (section 26's lever bounded 1.6 ms and measured negative).
+
+| ms a round | 2 streams | 4 streams |
+|---|---:|---:|
+| keep steps folded into the block step, header first: the ceiling (the drafter's whole first-gather wait above its transfer time) | 0.53 | 0.57 |
+| the same fold, fitted | 0.18 to 0.40 | 0.29 to 0.38 |
+| MIA 0031 (production's keep fold) as written | -0.05 | -0.03 |
+| drafter linears and head against bytes / 273 GB/s | 0.65 | 0.94 |
+| the same at production's measured 239 GB/s | 0.44 | 0.73 |
+| the same at production's measured efficiency on our bytes | 0.25 | 0.35 to 0.48 |
+| the one bit-exact mechanism that can be built (upstream's 32/64-row tiles) | 0 | 0.29 |
+
+The first-gather wait averages 209 / 532 / 566 us at 1 / 2 / 4 streams over 572 rounds and fits 224 + 130 x keeps - 92 x replays us.
+Production's keep fold (MIA 0031) sends the keep after rank 0's own replay, so the followers' replays run after it instead of beside it,
+and is a small loss here; folding every keep into the block step with the header sent first saves one follower receive a keep. Production's
+drafter pass reads 328.5 MB a rank (it splits attention across ranks) against our 402.3 MB, so its 1.55 ms against our 2.2 to 2.5 mixes
+bytes with kernel efficiency. Nothing was built; the report specifies the keep fold (default off, bit-identical drafts) and the
+same-bytes drafter timing that would settle the linears. With sections 20 to 26, the round-time levers the profile named are now measured
+or bounded below the cut-off, and what remains of the gap at two and four streams (-6.5%, -7.2%) is not in one of them.
