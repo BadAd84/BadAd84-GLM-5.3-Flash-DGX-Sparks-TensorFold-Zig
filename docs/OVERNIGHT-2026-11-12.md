@@ -612,3 +612,37 @@ X3 switches, and the RoCE wire, whose boot line `gathers up to 256 KiB a rank on
 1/2/4/6/8 streams, the two runs within 1.3% of each other and a round of 37.8 to 38.3 ms. The mean, 80.47 / 83.43 / 109.46 / 144.32 /
 178.35 tok/s, is -1.5 / -6.5 / -7.2% against production at one, two and four streams and +25.7 / +35.9% at six and eight, on
 production's own prompts.
+
+## 26. Per-stream KDA chains and MLA attention on side streams (a patch that measured negative at six and eight streams, neutral below)
+
+Section 24's profile has the verify launch each stream's KDA chain and MLA attention in turn on the main stream (KDA 1.05 / 1.75 / 2.97 ms
+and MLA 0.37 / 0.65 / 1.29 ms a round at 1 / 2 / 4 streams), where production runs one launch per kernel over all streams. The
+`KdaConcurrency` lane bounded what running them concurrently could hide, from the same captures. KDA's steps are byte-bound (a step
+reads and writes the 2.88 MB state in 12.6 us, 229 of the GB10's 273 GB/s), so only the copies, prep, out and gaps can overlap: 14.1 and
+27.0 us a layer at two and four streams, 0.48 and 0.92 ms a round over 34 layers; MLA attention is latency-bound (6 to 66 blocks a
+kernel), so the floor is its longest segment: 0.32 and 0.98 ms a round over 11 layers. A side-stream fork measured 3.0 us on the GB10
+(0.3 to 0.5 us between kernels on one stream), about 0.24 ms a round over 45 layers if a join costs the same. The bound after that cost
+was about 0.55 ms at two streams and 1.6 ms at four, 1 to 2% of the round.
+
+The patch (`docs/audit-2026-11-12/0035-glm-seg-streams.patch.txt`, sha256 `b54a7166f061`, applies to the 34-patch series' tree
+`f5495931b233`) adds `TF_GLM_OVN_SEG_STREAMS=N`: N-1 side streams, segment k on stream k % N with a fork after the projections and a
+join before o_proj, each segment with its own chain scratch and its own MLA partials. Receipts: `glm-seg-streams-check` on the
+workstation's RTX 5070 0 of 70 comparisons differ and 6 of 6 planted controls fail; host step 8 tests with 30 of 30 mutants killed;
+gates rc 0, lean 386 against 386, 0 new. No kernel source changes.
+
+Image `rs2x4` (series plus the patch), through the like-for-like instrument, the recipe as control against `SEG_STREAMS=8` with
+`CUDA_DEVICE_MAX_CONNECTIONS=32` (the driver's default eight queues would otherwise serialise the extra streams, so the test arm is two
+changes), order ctl, on, on, ctl, replies equal (tok/s; each test cell against the control next to it):
+
+| arm | 1 | 2 | 4 | 6 | 8 | ms/round |
+|---|---:|---:|---:|---:|---:|---:|
+| `sg-ctl` | 81.43 | 83.93 | 109.53 | 145.41 | 178.28 | 37.6 |
+| `sg-on` | 80.16 (-1.6%) | 84.18 (+0.3%) | 109.90 (+0.3%) | 142.28 (-2.2%) | 169.95 (-4.7%) | 38.2 |
+| `sg-on-b` | 80.87 (+0.7%) | 84.41 (+1.0%) | 107.99 (-1.2%) | 143.01 (-0.6%) | 170.32 (-4.5%) | 37.9 |
+| `sg-ctl-b` | 80.30 | 83.61 | 109.32 | 143.83 | 178.33 | 38.2 |
+
+At eight streams both test cells read about 4.6% under their controls and the round is longer; at two and four streams the readings
+(+0.3 / +1.0 and +0.3 / -1.2%) sit inside the box's spread, so the 0.55 and 1.6 ms the bound allowed are not there; at six streams both
+cells are negative. It does not ship: it regresses at one level and shows no gain at the levels it was for. The measurement cannot say
+whether the side streams fail to overlap on the GB10 or the forks and joins cost more than the bound assumed, and the test arm's second
+change (the connection count) was not run alone, so a lower stream count or a scoped use is not excluded. The patch stays archived.

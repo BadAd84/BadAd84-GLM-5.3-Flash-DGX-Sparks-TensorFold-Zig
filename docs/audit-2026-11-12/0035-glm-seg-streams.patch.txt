@@ -1,0 +1,1331 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: TF_GLM_OVN_SEG_STREAMS, a shared decode window's KDA chains and MLA attention on side streams
+
+Written for this series (lane KdaConcurrency, 2026-11-14); not a port. Upstream v1.2.7 runs a shared window's
+per-stream work in order on the forward's stream (cuda_shared.zig: for each segment the projection-row copy and the
+KDA chain, then for each segment the MLA attention); production's Python engine gets the overlap from segment kernels
+(work/accept-gap/prod/forward.py 790-812 kda_segments, 1181-1233 dsa_segments). This keeps every kernel and its
+arguments and moves only the stream each segment runs on.
+
+TF_GLM_OVN_SEG_STREAMS=N (u64, a .glm row of platform/environment.zig, at most 8; 0 or 1 off, default off): with N >= 2
+the engine makes N - 1 non-blocking side streams and N events at open (cuda_seg_streams.zig Streams, only with the MTP
+head, which is when shared windows exist). In a shared decode window of two or more segments, after the projections
+the caller's stream records a fork that each used side stream waits for; segment k runs on stream k % N (0 the
+caller's); afterwards the caller waits on a join event recorded on each used side stream, before o_proj.
+- KDA (cuda_seg_streams.kdaChains): each segment's copy into its state and its chain (prep, step, out, or the fused
+  chain) as before, on its stream, with the three-kernel chain's q and y scratch at the segment's own rows
+  (wideAt: q + row0 n 4, y + row0 n 2; Buffers already hold every row of the window).
+- MLA (mlaAttends): each segment's latent write, index write, pooled keys, chunks and merge on its stream, its chunk
+  partials laid after the earlier segments' (partialsAt), when mlaApart holds: every row dense, a segment within one
+  attention call, no host KV pages (pks), and the partials within Buffers.partial_rows (new field, the size make()
+  already computed). Otherwise, and for prompt buffers and lone segments (forWindow), the loop stays in order.
+Bits: the same kernels with the same arguments on the same data in the same order within each stream; the only
+changed arguments are the scratch addresses (q, y, partials), which no other segment reads. Knob off is today's launch
+sequence: the in-order path passes the old scratch and the caller's stream.
+
+Why: the profile of the recipe (docs/audit-2026-11-12/verify-gap.md, rank 0, ~/nsys/rec-p{2,4}.sqlite) launches the
+KDA chain and MLA attention once per stream in order: 1.75 / 2.97 ms and 0.65 / 1.29 ms a round at 2 / 4 streams.
+Bound, re-measured here from those exports (work/kda-concurrency/chainfloor.py, chainfloor.out; KDA steps are bound by
+state bytes, 2 x 22 x 128 x 128 x 4 = 2.88 MB a step, 12.6 us alone = 229 GB/s of the GB10's 273, so the floor keeps
+every step's measured time back to back; MLA kernels are latency bound, 6 to 66 blocks each, floor the longest
+segment): KDA span 61.1 -> 47.0 us a layer at 2 streams, 102.3 -> 75.3 at 4 (x34 layers: 0.48 / 0.92 ms a round); MLA
+63.2 -> 33.9, 125.3 -> 36.0 (x11: 0.32 / 0.98 ms). The GB10's own cross-stream fork, from the L2 prefetch's events in
+the same captures (forklat.py), is 3.0 us median (p90 4.0) against 0.3-0.5 us between kernels on one stream: about
+2 x 2.7 us a layer for a fork and a join, 45 layers 0.24 ms. Expected: up to ~0.55 ms a round at 2 streams (~1%) and
+~1.6 ms at 4 (~2%), more at 6 and 8, none at 1 (a lone segment takes no stream).
+
+Receipts (lane KdaConcurrency, 2026-11-14; base = v1.2.7 + 0001..0034, tree f5495931b233; head = base + this patch):
+- scripts/gates.sh (WSL, ~/gates/seghead-*, segbase-*): check-native-cuda-host rc 0 (7/7 steps both),
+  test-cuda-host rc 0 (383/383 steps; head 6293 of 6323 tests, 30 skipped; base 6279 of 6309, 30 skipped),
+  compile-cuda-tests rc 0 (10/10), test-glm-ring-host, test-glm-logprobs-host, test-glm-onepass-order-host and
+  test-rows-host rc 0, zig fmt --check rc 0 on both; scripts/gate-names.sh segbase seghead rc 0 (no failing name).
+- scripts/lean.sh base against head: base 6255 files 386 problems, head 6258 files 386 problems, 0 new.
+- Host step test-glm-seg-streams-host (filter SEG STREAMS:, also in test-cuda-host): 8 tests through recording CUDA
+  calls on the engine's own Buffers and States, including shared.mixer itself; 30 host mutants, each anchored once and
+  each killed by a named test (the knob's 1, Streams.init's bounds, the lane, the side-stream count, fork record and
+  wait, join record and wait, forWindow's prompt and lone checks, q and y offsets and offsets in order, the copy's and
+  the chain's stream, the out and state_out rows, the partial offset and its pm/pl, attention's stream, mlaApart's
+  sparse, rows, pages and room clauses, the apart gate, Buffers.partial_rows, and shared.mixer's three call sites).
+- GPU check on the workstation's RTX 5070 Laptop (sm_120, CUDA 13.3.1 nvcc, driver 616.92; tf-cuda-test built with the
+  three images it loads, glm_kda.cu, glm_glue.cu, glm_ops.cu): `glm-seg-streams-check` 0 of 70 comparisons differ:
+  KDA at layers 0/17/33/9 with 2/3/4/8 segments of 1 to 8 rows, three-kernel and fused, and MLA (bf16 and fp8 caches,
+  layers 0/5/10, 2/4/8 segments at chunk edges up to 2049 keys), each arm on 2, 4 and 8 streams and in order against
+  the series' loop written out in the check (out rows plus a digest of every sequence's whole arena), inputs staged
+  behind a 256 MiB copy so a missing fork reads 0xff rows; each case's red control (a moved state word or query byte)
+  differs. Planted controls, 6 of 6 failing it by exit code: shared q/y scratch (2 of 70), shared partials (5),
+  no fork (42), no join (15), the copy on the caller's stream (1), the chain on the caller's stream (23); the shared
+  scratch and wrong-stream ones depend on a race, so they are caught by a few comparisons, and deterministically by
+  the host tests. No kernel source changes; what only the spark1 image build covers: the served model end to end on
+  GB10 (the arms' digests), the side streams' real overlap and its fork/join cost there.
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -79,6 +79,7 @@
+ | `TF_GLM_OVN_X3_NC` | Whole level `0`, `1` or `2`: a decode window's routed-expert GEMMs load each warp's trellis in 16-byte reads that many k steps ahead (4-bit mcg layers with whole steps), the same bits; default 0 (off) |
+ | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
+ | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
++| `TF_GLM_OVN_SEG_STREAMS` | Whole count `0` to `8`; default 0 (off), as is 1. N >= 2 runs a shared decode window's per-stream KDA chains (each on its own rows of the chain scratch) and dense MLA attention (each on its own chunk partials) on up to N CUDA streams, the caller's and N - 1 side streams, forked after the projections and joined before o_proj: the same kernels and bits, each stream's chain in its order; prompt buffers and sparse or host-paged attention stay in order |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -101,6 +101,7 @@
+     b.step("test-exl3-prompt-host", "Actual common prompt dispatch and scratch with recording CUDA calls").dependOn(&prompt_run.step);
+     const x3 = b.step("test-glm-exl3-x3-host", "TF_GLM_OVN_X3_*: knobs, each grouped launch's kernel and its tail, without a GPU");
+     for ([_]*std.Build.Module{ cuda, glm }) |m| x3.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"EXL3 X3:"} })).step);
++    b.step("test-glm-seg-streams-host", "TF_GLM_OVN_SEG_STREAMS: the knob, forks, joins and each segment's stream and rows, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"SEG STREAMS:"} })).step);
+ }
+ 
+ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -45,6 +45,7 @@
+ pub const native = @import("cuda_native.zig");
+ pub const snapshots = @import("cuda_snapshots.zig");
+ pub const kv_host = @import("cuda_kv_host.zig");
++pub const seg_streams = @import("cuda_seg_streams.zig");
+ 
+ test {
+     _ = lane_costs;
+@@ -110,6 +111,7 @@
+     _ = @import("cuda_tile.zig");
+     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them
+     _ = @import("dflash_ovn.zig");
++    _ = seg_streams;
+ }
+ 
+ pub const dflash = @import("dflash.zig");
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -19,6 +19,7 @@
+ const prof_mod = @import("cuda_prof.zig");
+ const pages_mod = @import("cuda_pages.zig");
+ const l2pf_mod = @import("cuda_l2pf.zig");
++const seg_streams = @import("cuda_seg_streams.zig");
+ const prompt_pair = @import("cuda_prompt_pair.zig");
+ pub const Options = @import("cuda_engine_types.zig").Options;
+ 
+@@ -103,6 +104,7 @@
+     index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
+     share_pages: bool = false, // TF_KV_SHARE: a kept state leaves its prefix's pages to the shared store that holds them
+     l2pf: ?l2pf_mod.L2pf = null, // TF_GLM_L2PF: the prefetch's side stream, kernels and table, made after the weights tile
++    seg: ?seg_streams.Streams = null, // TF_GLM_OVN_SEG_STREAMS: a shared window's segment streams (with the MTP head)
+ 
+     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
+     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
+@@ -200,6 +202,8 @@
+         errdefer e.bm.deinit();
+         if (o.mtp) e.bs = try fw.Buffers.initShared(d, &e.w, shared_rows, o.capacity);
+         errdefer if (e.bs) |*b| b.deinit();
++        if (o.mtp) e.seg = try seg_streams.open(d, rank);
++        errdefer if (e.seg) |*s| s.deinit();
+         e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world * pick_rows);
+         errdefer e.pairs.free();
+         try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
+@@ -242,6 +246,7 @@
+         e.smp.deinit();
+         e.pairs.free();
+         if (e.bs) |*b| b.deinit();
++        if (e.seg) |*s| s.deinit();
+         e.bm.deinit();
+         e.bd.deinit();
+         if (e.pair) |*p| p.deinit();
+@@ -466,7 +471,7 @@
+             rows += p.ids.len;
+         }
+         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
+-        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null };
++        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null, .seg = if (e.seg) |*s| s else null };
+         try f.run(@ptrCast(ids[0..rows]));
+         if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
+         for (parts, segs[0..parts.len]) |p, g| {
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -29,6 +29,7 @@
+ const onepass_mod = @import("cuda_onepass.zig");
+ const kda_chunk = @import("cuda_kda_chunk.zig");
+ const hc_glue = @import("cuda_forward_glue.zig");
++const seg_mod = @import("cuda_seg_streams.zig");
+ pub const prefill_rows = state.prefill_rows;
+ pub const solo_rows = state.solo_rows;
+ pub const window_rows = state.window_rows;
+@@ -176,6 +177,7 @@
+     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
+     index_split: bool = false, // TF_GLM_INDEX_SPLIT: this prompt chunk's indexer rows split across the ranks (rank 0's choice)
+     l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
++    seg: ?*const seg_mod.Streams = null, // TF_GLM_OVN_SEG_STREAMS: a shared decode window's segments on these streams
+ 
+     /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
+     pub fn l2pfFor(f: *const Forward) ?*const l2pf_mod.L2pf {
+diff --git a/zig/src/families/glm/cuda_seg_streams.zig b/zig/src/families/glm/cuda_seg_streams.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_seg_streams.zig
+@@ -0,0 +1,187 @@
++//! TF_GLM_OVN_SEG_STREAMS: a shared decode window's per-segment KDA chains and MLA attention on concurrent streams.
++
++const std = @import("std");
++const cuda = @import("cuda");
++const kda = cuda.kda;
++const fw = @import("cuda_forward.zig");
++const state = @import("cuda_state.zig");
++const kda_block = @import("cuda_kda_block.zig");
++const dsa_block = @import("cuda_dsa_block.zig");
++const latent = @import("cuda_latent.zig");
++
++/// The most streams one window's segments run on at once: the caller's and seven side streams (the row's max).
++pub const most = 8;
++
++/// The knob's stream count: 0 unset, 0 or 1 (every segment on the caller's stream, as without it).
++pub fn wanted() error{BadOvnKnob}!usize {
++    const n = try cuda.ovn.int("SEG_STREAMS", 0);
++    return if (n < 2) 0 else @intCast(n);
++}
++
++/// The engine's streams for the knob, made once at open (null: off); rank 0 logs how many a window takes.
++pub fn open(d: *const cuda.Driver, rank: usize) !?Streams {
++    const n = try wanted();
++    if (n == 0) return null;
++    if (rank == 0) std.log.info("TF_GLM_OVN_SEG_STREAMS: a shared decode window's segments on up to {d} streams", .{n});
++    return try Streams.init(d, n);
++}
++
++/// Side streams and their events; segment k of a window runs on stream k % n, stream 0 the caller's.
++pub const Streams = struct {
++    n: usize,
++    side: [most - 1]cuda.Stream = undefined,
++    joins: [most - 1]cuda.Event = undefined,
++    fork_ev: cuda.Event,
++
++    pub fn init(d: *const cuda.Driver, n: usize) !Streams {
++        if (n < 2 or n > most) return error.SegStreams;
++        var s: Streams = .{ .n = 1, .fork_ev = try cuda.Event.init(d, false) };
++        errdefer s.deinit();
++        while (s.n < n) : (s.n += 1) {
++            s.side[s.n - 1] = try cuda.Stream.init(d, true);
++            s.joins[s.n - 1] = cuda.Event.init(d, false) catch |err| {
++                s.side[s.n - 1].deinit();
++                return err;
++            };
++        }
++        return s;
++    }
++
++    /// The side streams drain first (Stream.deinit synchronizes).
++    pub fn deinit(s: *Streams) void {
++        for (s.side[0 .. s.n - 1], s.joins[0 .. s.n - 1]) |*x, *e| {
++            x.deinit();
++            e.deinit();
++        }
++        s.fork_ev.deinit();
++        s.* = undefined;
++    }
++
++    /// The stream segment k of a window runs on.
++    pub fn stream(s: *const Streams, caller: cuda.Stream, k: usize) cuda.Stream {
++        const j = k % s.n;
++        return if (j == 0) caller else s.side[j - 1];
++    }
++
++    /// The side streams a window of `segs` segments puts work on.
++    fn sides(s: *const Streams, segs: usize) usize {
++        return @min(segs, s.n) -| 1;
++    }
++
++    /// Each side stream a window uses waits for the caller's work so far: the rows its segments read.
++    pub fn fork(s: *const Streams, caller: cuda.Stream, segs: usize) !void {
++        if (s.sides(segs) == 0) return;
++        try s.fork_ev.record(caller);
++        for (s.side[0..s.sides(segs)]) |x| try x.wait(s.fork_ev);
++    }
++
++    /// The caller waits for each side stream the window used, then `res` (the segments' launches) is returned.
++    pub fn join(s: *const Streams, caller: cuda.Stream, segs: usize, res: anyerror!void) anyerror!void {
++        for (s.side[0..s.sides(segs)], s.joins[0..s.sides(segs)]) |x, e| {
++            try e.record(x);
++            try caller.wait(e);
++        }
++        return res;
++    }
++};
++
++/// The streams a window's segments take: none for a prompt buffer or a lone segment.
++pub fn forWindow(ss: ?*const Streams, prefill: bool, segs: usize) ?*const Streams {
++    if (prefill or segs < 2) return null;
++    return ss;
++}
++
++/// Segment g's rows of the window's KDA scratch at layer li: decay, gate and out rows, and the state copy it writes.
++pub fn kdaRows(s: kda_block.Scratch, g: fw.Seg, li: usize, n: usize) kda_block.Scratch {
++    var v = s;
++    v.ka += g.row0 * n * 2;
++    v.kg += g.row0 * n * 2;
++    v.saves.out += g.row0 * n * 2;
++    v.saves.state_out = g.st.recAt(1 - g.st.cur[li], li);
++    return v;
++}
++
++/// A sequence's conv window of KDA layer li.
++pub fn convAt(st: *const state.State, li: usize) u64 {
++    return st.conv + li * 3 * st.conv_c * 2;
++}
++
++/// A segment's wide q and y (the three-kernel chain's scratch) at its own rows, so no two segments share them.
++pub fn wideAt(w: kda.Wide, row0: usize, n: usize) kda.Wide {
++    return .{ .q = w.q + row0 * n * 4, .y = w.y + row0 * n * 2 };
++}
++
++/// A decode window's KDA chains at layer li: with `ss`, segment k on stream k % n at its own wide rows, else in order.
++pub fn kdaChains(d: *const cuda.Driver, ks: *const kda.Kernels, caller: cuda.Stream, ss: ?*const Streams, l: kda_block.Layer, b: *const state.Buffers, segs: []const fw.Seg, li: usize, wide: bool) !void {
++    if (ss) |x| try x.fork(caller, segs.len);
++    const res = kdaLaunch(d, ks, caller, ss, l, b, segs, li, wide);
++    if (ss) |x| return x.join(caller, segs.len, res);
++    return res;
++}
++
++fn kdaLaunch(d: *const cuda.Driver, ks: *const kda.Kernels, caller: cuda.Stream, ss: ?*const Streams, l: kda_block.Layer, b: *const state.Buffers, segs: []const fw.Seg, li: usize, wide: bool) !void {
++    const n = l.heads * kda.dk;
++    const w = l.matWidth();
++    for (segs, 0..) |g, k| {
++        const st = g.st;
++        const on = if (ss) |x| x.stream(caller, k) else caller;
++        var v = kdaRows(b.kda, g, li, n);
++        if (ss != null) v.wide = wideAt(b.kda.wide, g.row0, n);
++        v.p = st.proj + li * st.proj_layer * 2; // the window's rows stay with the layer until its commit
++        try d.check(d.api.cuMemcpyDtoDAsync_v2(v.p, b.kproj + g.row0 * w * 2, g.rows * w * 2, on.handle), "cuMemcpyDtoDAsync");
++        const kv = li * state.window_rows * st.heads * kda.dk;
++        v.saves.k = st.save_k + kv * 4;
++        v.saves.v = st.save_v + kv * 2;
++        v.saves.g = st.save_g + kv * 4;
++        v.saves.b = st.save_b + li * state.window_rows * st.heads * 4;
++        try kda_block.chainRows(ks, on, l, v, g.rows, convAt(st, li), st.recAt(st.cur[li], li), wide, null);
++    }
++}
++
++/// A segment's chunk partials after `at` partial rows of the segments before it: heads x lw floats a row, heads m, l.
++pub fn partialsAt(p: latent.Partials, at: usize, heads: usize, lw: usize) latent.Partials {
++    return .{ .po = p.po + at * heads * lw * 4, .pm = p.pm + at * heads * 4, .pl = p.pl + at * heads * 4 };
++}
++
++/// A segment's 512-key chunks: those its last row reaches, at most the buffer's.
++pub fn chunksOf(g: fw.Seg, nch: usize) usize {
++    return @min(latent.chunksFor(g.st.pos + g.rows), nch);
++}
++
++/// Whether MLA layer di's segments attend apart: dense rows in one call each, no host KV pages, partials in the room.
++pub fn mlaApart(l: dsa_block.Layer, b: *const state.Buffers, segs: []const fw.Seg, di: usize) bool {
++    var at: usize = 0;
++    for (segs) |g| {
++        if (dsa_block.sparseRows(l, g.st.pos, g.rows) or g.rows > b.part_rows or g.st.caches[di].pks != 0) return false;
++        at += chunksOf(g, b.nch) * g.rows;
++    }
++    return at <= b.partial_rows;
++}
++
++/// A window's MLA attention at layer di; with `ss` and mlaApart, segment k on stream k % n with its own partials.
++pub fn mlaAttends(k: dsa_block.Kernels, caller: cuda.Stream, ss: ?*const Streams, l: dsa_block.Layer, b: *const state.Buffers, segs: []const fw.Seg, di: usize) !void {
++    const apart = if (ss) |x| (if (mlaApart(l, b, segs, di)) x else null) else null;
++    if (apart) |x| try x.fork(caller, segs.len);
++    const res = mlaLaunch(k, caller, apart, l, b, segs, di);
++    if (apart) |x| return x.join(caller, segs.len, res);
++    return res;
++}
++
++fn mlaLaunch(k: dsa_block.Kernels, caller: cuda.Stream, ss: ?*const Streams, l: dsa_block.Layer, b: *const state.Buffers, segs: []const fw.Seg, di: usize) !void {
++    var at: usize = 0;
++    for (segs, 0..) |g, i| {
++        const nch = chunksOf(g, b.nch);
++        var v = b.dsa;
++        var on = caller;
++        if (ss) |x| {
++            v.partials = partialsAt(b.dsa.partials, at, l.heads, l.lw);
++            at += nch * g.rows;
++            on = x.stream(caller, i);
++        }
++        try dsa_block.attend(k, on, l, g.st.caches[di], v, g.row0, g.rows, g.st.pos_dev, g.st.pos, nch, b.part_rows);
++    }
++}
++
++test {
++    _ = @import("cuda_seg_streams_test.zig");
++}
+diff --git a/zig/src/families/glm/cuda_seg_streams_test.zig b/zig/src/families/glm/cuda_seg_streams_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_seg_streams_test.zig
+@@ -0,0 +1,461 @@
++//! TF_GLM_OVN_SEG_STREAMS through recording CUDA calls: the knob, the forks and joins, each segment's stream and rows.
++const std = @import("std");
++const cuda = @import("cuda");
++const seg = @import("cuda_seg_streams.zig");
++const fw = @import("cuda_forward.zig");
++const state = @import("cuda_state.zig");
++const weights = @import("cuda_weights.zig");
++const shard = @import("cuda_shard.zig");
++const glue = @import("cuda_glue.zig");
++const kda_block = @import("cuda_kda_block.zig");
++const dsa_block = @import("cuda_dsa_block.zig");
++const shared = @import("cuda_shared.zig");
++const kda = cuda.kda;
++const t = std.testing;
++
++/// One recorded call: a launch (kernel id, the arguments `Rec.picks` names for it), a copy, an event record or a wait.
++const Op = struct {
++    kind: enum { launch, copy, record, wait },
++    stream: usize,
++    id: usize = 0,
++    args: [4]u64 = @splat(0),
++    dst: u64 = 0,
++    src: u64 = 0,
++    bytes: usize = 0,
++};
++
++const Rec = struct {
++    var ops: [256]Op = undefined;
++    var n: usize = 0;
++    var next: u64 = 0x100000000;
++
++    /// The u64 arguments kept by kernel id: prep q; step state_in, q, y, state_out; out y, out; chain out, state_out.
++    fn picks(id: usize) []const usize {
++        return switch (id) {
++            4 => &.{11},
++            5 => &.{ 1, 2, 8, 9 },
++            6 => &.{ 1, 6 },
++            1 => &.{ 17, 18 },
++            21 => &.{2}, // lat_write's cache
++            22 => &.{5}, // index_write's ik
++            23 => &.{3}, // pool_keys' pk
++            24, 25 => &.{ 5, 6, 7 }, // chunks' po, pm, pl
++            26 => &.{ 0, 1, 2, 3 }, // merge's po, pm, pl, out
++            else => &.{},
++        };
++    }
++    fn put(o: Op) void {
++        ops[n] = o;
++        n += 1;
++    }
++    fn alloc(out: *u64, bytes: usize) callconv(.c) c_int {
++        out.* = next;
++        next += std.mem.alignForward(u64, bytes, 256);
++        return 0;
++    }
++    fn free(_: u64) callconv(.c) c_int {
++        return 0;
++    }
++    fn fill(_: u64, _: u8, _: usize) callconv(.c) c_int {
++        return 0;
++    }
++    fn launch(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, s: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
++        const id = @intFromPtr(f);
++        var o: Op = .{ .kind = .launch, .stream = @intFromPtr(s), .id = id };
++        for (picks(id), 0..) |at, i| o.args[i] = @as(*const u64, @ptrCast(@alignCast(args.?[at].?))).*;
++        put(o);
++        return 0;
++    }
++    fn copy(dst: u64, src: u64, bytes: usize, s: cuda.abi.Stream) callconv(.c) c_int {
++        put(.{ .kind = .copy, .stream = @intFromPtr(s), .dst = dst, .src = src, .bytes = bytes });
++        return 0;
++    }
++    fn record(e: cuda.abi.Event, s: cuda.abi.Stream) callconv(.c) c_int {
++        put(.{ .kind = .record, .stream = @intFromPtr(s), .id = @intFromPtr(e) });
++        return 0;
++    }
++    fn wait(s: cuda.abi.Stream, e: cuda.abi.Event, _: c_uint) callconv(.c) c_int {
++        put(.{ .kind = .wait, .stream = @intFromPtr(s), .id = @intFromPtr(e) });
++        return 0;
++    }
++    fn driver() cuda.Driver {
++        var d: cuda.Driver = undefined;
++        d.api.cuMemAlloc_v2 = alloc;
++        d.api.cuMemFree_v2 = free;
++        d.api.cuMemsetD8_v2 = fill;
++        d.api.cuLaunchKernel = launch;
++        d.api.cuMemcpyDtoDAsync_v2 = copy;
++        d.api.cuEventRecord = record;
++        d.api.cuStreamWaitEvent = wait;
++        return d;
++    }
++};
++
++/// Handles: the caller's stream 100, side streams 101 on; the fork event 200, the join events 201 on.
++const caller_id = 100;
++const fork_id = 200;
++
++/// TP=3 rank 0's shares of the default config, the shared window's buffers and four sequences, every call recorded.
++const Rig = struct {
++    d: cuda.Driver,
++    layers: [45]weights.Layer = undefined,
++    w: weights.Weights = undefined,
++    b: state.Buffers = undefined,
++    st: [4]state.State = undefined,
++
++    fn init(r: *Rig) !void {
++        r.d = Rec.driver();
++        r.w.config = .{};
++        r.w.share = try shard.Share.of(&r.w.config, 0, 3);
++        for (&r.layers, 0..) |*l, i| if (r.w.config.kind(@intCast(i)) == .mla) {
++            l.mixer = .{ .mla = undefined };
++        } else {
++            l.mixer = .{ .kda = undefined };
++        };
++        r.w.layers = &r.layers;
++        r.b = try state.Buffers.initShared(&r.d, &r.w, 32, 8192);
++        for (&r.st) |*s| s.* = try state.State.init(t.allocator, &r.d, &r.w, 8192);
++    }
++    fn deinit(r: *Rig) void {
++        for (&r.st) |*s| s.deinit();
++        r.b.deinit();
++    }
++    fn caller(r: *const Rig) cuda.Stream {
++        return .{ .d = &r.d, .handle = @ptrFromInt(caller_id) };
++    }
++    fn streams(r: *const Rig, n: usize) seg.Streams {
++        var s: seg.Streams = .{ .n = n, .fork_ev = .{ .d = &r.d, .handle = @ptrFromInt(fork_id) } };
++        for (0..n - 1) |j| {
++            s.side[j] = .{ .d = &r.d, .handle = @ptrFromInt(caller_id + 1 + j) };
++            s.joins[j] = .{ .d = &r.d, .handle = @ptrFromInt(fork_id + 1 + j) };
++        }
++        return s;
++    }
++    fn fun(r: *const Rig, id: usize) cuda.Function {
++        return .{ .d = &r.d, .handle = @ptrFromInt(id) };
++    }
++    fn kdaKernels(r: *const Rig) kda.Kernels {
++        return .{ .chain = r.fun(1), .replay = r.fun(2), .replay_layers = r.fun(3), .prep = r.fun(4), .step = r.fun(5), .out = r.fun(6) };
++    }
++    /// The glue kernels attention launches on a BF16 cache: lat_write, index_write, pool_keys, chunks 16 and 32, merge.
++    fn mlaKernels(r: *const Rig) glue.Kernels {
++        var ks: glue.Kernels = undefined;
++        ks.lat_write = r.fun(21);
++        ks.index_write = r.fun(22);
++        ks.pool_keys = r.fun(23);
++        ks.chunks_16 = r.fun(24);
++        ks.chunks_32 = r.fun(25);
++        ks.merge = r.fun(26);
++        return ks;
++    }
++    /// Segments of `rows` rows each on the rig's sequences, in row order.
++    fn segments(r: *Rig, rows: []const usize, out: []fw.Seg) []fw.Seg {
++        var at: usize = 0;
++        for (rows, 0..) |n, i| {
++            out[i] = .{ .st = &r.st[i], .row0 = at, .rows = n };
++            at += n;
++        }
++        return out[0..rows.len];
++    }
++};
++
++fn kdaLayer() kda_block.Layer {
++    var l: kda_block.Layer = undefined;
++    l.heads = 22;
++    l.conv_w = 0x10;
++    l.a_log = 0x20;
++    l.dt_bias = 0x30;
++    l.norm_w = 0x40;
++    l.eps = 1e-6;
++    l.lower = -5;
++    return l;
++}
++
++fn mlaLayer() dsa_block.Layer {
++    var l: dsa_block.Layer = undefined;
++    l.heads = 22;
++    l.lw = 512;
++    l.qk = 256;
++    l.dense_limit = 2048;
++    l.index = .{ .kw = undefined, .gate = 0, .ln_w = 0x50, .ln_b = 0x60, .ape = 0x70, .qb = undefined, .heads = 32, .d = 128 };
++    return l;
++}
++
++/// The ops recorded from index `from` on stream `s`, in order.
++fn on(from: usize, s: usize, out: []Op) []Op {
++    var k: usize = 0;
++    for (Rec.ops[from..Rec.n]) |o| if (o.stream == s) {
++        out[k] = o;
++        k += 1;
++    };
++    return out[0..k];
++}
++
++test "SEG STREAMS: the knob reads 0 and 1 as off and 2 to 8 as streams, and its row refuses 9" {
++    defer cuda.ovn.fake("SEG_STREAMS", null);
++    cuda.ovn.fake("SEG_STREAMS", null);
++    try t.expectEqual(@as(usize, 0), try seg.wanted());
++    for ([_][]const u8{ "0", "1" }) |v| {
++        cuda.ovn.fake("SEG_STREAMS", v);
++        try t.expectEqual(@as(usize, 0), try seg.wanted());
++    }
++    for ([_][]const u8{ "2", "5", "8" }, [_]usize{ 2, 5, 8 }) |v, n| {
++        cuda.ovn.fake("SEG_STREAMS", v);
++        try t.expectEqual(n, try seg.wanted());
++    }
++    cuda.ovn.fake("SEG_STREAMS", "9");
++    try t.expectError(error.BadOvnKnob, seg.wanted());
++    var d: cuda.Driver = undefined;
++    for ([_]usize{ 0, 1, 9 }) |n| try t.expectError(error.SegStreams, seg.Streams.init(&d, n));
++}
++
++test "SEG STREAMS: segment k on stream k % n, 0 the caller's; prompt buffers and lone segments stay in order" {
++    var r: Rig = undefined;
++    r.d = Rec.driver();
++    const ss = r.streams(3);
++    for (0..7) |k| {
++        const want: usize = if (k % 3 == 0) caller_id else caller_id + k % 3;
++        try t.expectEqual(want, @intFromPtr(ss.stream(r.caller(), k).handle));
++    }
++    try t.expect(seg.forWindow(&ss, false, 2) == &ss);
++    try t.expect(seg.forWindow(&ss, true, 2) == null);
++    try t.expect(seg.forWindow(&ss, false, 1) == null);
++    try t.expect(seg.forWindow(null, false, 4) == null);
++}
++
++test "SEG STREAMS: in order (no streams) a window's KDA chains are the loop's: the caller's stream, one wide scratch" {
++    var r: Rig = .{ .d = undefined };
++    try r.init();
++    defer r.deinit();
++    const ks = r.kdaKernels();
++    const l = kdaLayer();
++    const n = 22 * kda.dk;
++    const li = 7;
++    r.st[1].cur[li] = 1;
++    var buf: [4]fw.Seg = undefined;
++    const segs = r.segments(&.{ 3, 1, 4 }, &buf);
++    Rec.n = 0;
++    try seg.kdaChains(&r.d, &ks, r.caller(), null, l, &r.b, segs, li, true);
++    try t.expectEqual(@as(usize, 12), Rec.n);
++    for (segs, 0..) |g, k| {
++        const o = Rec.ops[4 * k ..][0..4];
++        for (o) |x| try t.expectEqual(@as(usize, caller_id), x.stream);
++        try t.expectEqual(g.st.proj + li * g.st.proj_layer * 2, o[0].dst);
++        try t.expectEqual(r.b.kproj + g.row0 * l.matWidth() * 2, o[0].src);
++        try t.expectEqual(g.rows * l.matWidth() * 2, o[0].bytes);
++        try t.expectEqual([_]usize{ 4, 5, 6 }, [_]usize{ o[1].id, o[2].id, o[3].id });
++        try t.expectEqual(r.b.kda.wide.q, o[1].args[0]);
++        const cur = g.st.cur[li];
++        try t.expectEqual([4]u64{ g.st.recAt(cur, li), r.b.kda.wide.q, r.b.kda.wide.y, g.st.recAt(1 - cur, li) }, o[2].args);
++        try t.expectEqual([2]u64{ r.b.kda.wide.y, r.b.kda.saves.out + g.row0 * n * 2 }, o[3].args[0..2].*);
++    }
++}
++
++test "SEG STREAMS: a window's KDA chains fork, run on stream k % n at their own wide rows, and join" {
++    var r: Rig = .{ .d = undefined };
++    try r.init();
++    defer r.deinit();
++    const ks = r.kdaKernels();
++    const l = kdaLayer();
++    const n = 22 * kda.dk;
++    const li = 33;
++    var buf: [4]fw.Seg = undefined;
++    const segs = r.segments(&.{ 2, 5, 1, 3 }, &buf);
++    const ss = r.streams(3);
++    Rec.n = 0;
++    try seg.kdaChains(&r.d, &ks, r.caller(), &ss, l, &r.b, segs, li, true);
++    try t.expectEqual(@as(usize, 3 + 16 + 4), Rec.n);
++    try t.expectEqual(Op{ .kind = .record, .stream = caller_id, .id = fork_id }, Rec.ops[0]);
++    for (1..3) |j| try t.expectEqual(Op{ .kind = .wait, .stream = caller_id + j, .id = fork_id }, Rec.ops[j]);
++    for (0..2) |j| {
++        try t.expectEqual(Op{ .kind = .record, .stream = caller_id + 1 + j, .id = fork_id + 1 + j }, Rec.ops[19 + 2 * j]);
++        try t.expectEqual(Op{ .kind = .wait, .stream = caller_id, .id = fork_id + 1 + j }, Rec.ops[20 + 2 * j]);
++    }
++    var mine: [16]Op = undefined;
++    var spans: [4][2]u64 = undefined;
++    for (segs, 0..) |g, k| {
++        const s = if (k % 3 == 0) caller_id else caller_id + k % 3;
++        const o = on(3, s, &mine);
++        const at: usize = if (k == 3) 4 else 0; // segment 3 follows segment 0 on the caller's stream
++        try t.expect(o.len >= at + 4);
++        try t.expectEqual(g.st.proj + li * g.st.proj_layer * 2, o[at].dst);
++        const q = r.b.kda.wide.q + g.row0 * n * 4;
++        const y = r.b.kda.wide.y + g.row0 * n * 2;
++        try t.expectEqual(q, o[at + 1].args[0]);
++        try t.expectEqual([4]u64{ g.st.recAt(g.st.cur[li], li), q, y, g.st.recAt(1 - g.st.cur[li], li) }, o[at + 2].args);
++        try t.expectEqual([2]u64{ y, r.b.kda.saves.out + g.row0 * n * 2 }, o[at + 3].args[0..2].*);
++        spans[k] = .{ q, q + g.rows * n * 4 };
++    }
++    for (spans, 0..) |a, i| {
++        try t.expect(a[0] >= r.b.kda.wide.q and a[1] <= r.b.kda.wide.q + r.b.rows * n * 4);
++        for (spans[i + 1 ..]) |c| try t.expect(a[1] <= c[0] or c[1] <= a[0]);
++    }
++}
++
++test "SEG STREAMS: a window with fewer segments than streams forks and joins only the side streams it uses" {
++    var r: Rig = .{ .d = undefined };
++    try r.init();
++    defer r.deinit();
++    const ks = r.kdaKernels();
++    const w = kdaLayer().matWidth();
++    var buf: [4]fw.Seg = undefined;
++    const segs = r.segments(&.{ 2, 2 }, &buf);
++    const ss = r.streams(8);
++    Rec.n = 0;
++    try seg.kdaChains(&r.d, &ks, r.caller(), &ss, kdaLayer(), &r.b, segs, 0, false);
++    try t.expectEqual(@as(usize, 2 + 4 + 2), Rec.n);
++    try t.expectEqual(Op{ .kind = .wait, .stream = caller_id + 1, .id = fork_id }, Rec.ops[1]);
++    try t.expectEqual(Op{ .kind = .copy, .stream = caller_id + 1, .dst = segs[1].st.proj, .src = r.b.kproj + 2 * w * 2, .bytes = 2 * w * 2 }, Rec.ops[4]);
++    try t.expect(Rec.ops[5].kind == .launch and Rec.ops[5].id == 1 and Rec.ops[5].stream == caller_id + 1); // the fused chain
++    try t.expectEqual(Op{ .kind = .record, .stream = caller_id + 1, .id = fork_id + 1 }, Rec.ops[6]);
++    try t.expectEqual(Op{ .kind = .wait, .stream = caller_id, .id = fork_id + 1 }, Rec.ops[7]);
++}
++
++test "SEG STREAMS: dense MLA attention runs segment k on stream k % n with its partials laid end to end" {
++    var r: Rig = .{ .d = undefined };
++    try r.init();
++    defer r.deinit();
++    const ks = r.mlaKernels();
++    const k: dsa_block.Kernels = .{ .set = .{ .glue = &ks }, .ops = undefined };
++    const l = mlaLayer();
++    var buf: [4]fw.Seg = undefined;
++    const segs = r.segments(&.{ 3, 1, 6 }, &buf);
++    for (segs, [_]usize{ 100, 700, 1500 }) |g, p| g.st.pos = p;
++    const ss = r.streams(4);
++    try t.expect(seg.mlaApart(l, &r.b, segs, 2));
++    Rec.n = 0;
++    try seg.mlaAttends(k, r.caller(), &ss, l, &r.b, segs, 2);
++    try t.expectEqual(@as(usize, 3 + 15 + 4), Rec.n);
++    try t.expectEqual(Op{ .kind = .record, .stream = caller_id, .id = fork_id }, Rec.ops[0]);
++    var mine: [8]Op = undefined;
++    const chunks = [_]usize{ 1, 2, 3 }; // the 512-key chunks each segment's last row reaches: 103, 701 and 1506 keys
++    const base = r.b.dsa.partials;
++    var at: usize = 0;
++    for (segs, 0..) |g, i| {
++        const o = on(3, if (i == 0) caller_id else caller_id + i, &mine);
++        try t.expect(o.len >= 5);
++        try t.expectEqual([_]usize{ 21, 22, 23 }, [_]usize{ o[0].id, o[1].id, o[2].id });
++        try t.expectEqual(g.st.caches[2].lc, o[0].args[0]);
++        const p = [3]u64{ base.po + at * 22 * 512 * 4, base.pm + at * 22 * 4, base.pl + at * 22 * 4 };
++        try t.expectEqual(p, o[3].args[0..3].*);
++        try t.expectEqual([4]u64{ p[0], p[1], p[2], r.b.dsa.ol + g.row0 * 22 * 512 * 2 }, o[4].args);
++        try t.expectEqual(chunks[i], seg.chunksOf(g, r.b.nch));
++        at += chunks[i] * g.rows;
++    }
++    try t.expect(at <= r.b.partial_rows and at == 1 * 3 + 2 * 1 + 3 * 6);
++    try t.expectEqual(Op{ .kind = .wait, .stream = caller_id, .id = fork_id + 2 }, Rec.ops[Rec.n - 1]);
++}
++
++test "SEG STREAMS: MLA attention stays in order for sparse rows, long segments, host KV pages or partials past the room" {
++    var r: Rig = .{ .d = undefined };
++    try r.init();
++    defer r.deinit();
++    const ks = r.mlaKernels();
++    const k: dsa_block.Kernels = .{ .set = .{ .glue = &ks }, .ops = undefined };
++    const l = mlaLayer();
++    var buf: [4]fw.Seg = undefined;
++    const segs = r.segments(&.{ 2, 2 }, &buf);
++    segs[0].st.pos = 10;
++    segs[1].st.pos = 2046;
++    try t.expect(seg.mlaApart(l, &r.b, segs, 0)); // dense, two rows each, no host pages, 10 partial rows
++    segs[1].st.pos = 2047; // its last row passes the dense limit: a sparse row
++    try t.expect(!seg.mlaApart(l, &r.b, segs, 0));
++    segs[1].st.pos = 100;
++    var long = buf;
++    long[1].rows = r.b.part_rows + 1; // dense still, but more rows than one attention call takes
++    try t.expect(!seg.mlaApart(l, &r.b, long[0..2], 0));
++    long[1].rows = r.b.part_rows;
++    try t.expect(seg.mlaApart(l, &r.b, long[0..2], 0));
++    segs[1].st.pos = 2046;
++    segs[1].st.caches[0].pks = 0x1000;
++    try t.expect(!seg.mlaApart(l, &r.b, segs, 0));
++    segs[1].st.caches[0].pks = 0;
++    var small = r.b;
++    small.partial_rows = 1 * 2 + 4 * 2 - 1;
++    try t.expect(!seg.mlaApart(l, &small, segs, 0));
++    small.partial_rows += 1;
++    try t.expect(seg.mlaApart(l, &small, segs, 0));
++    small.partial_rows -= 1;
++    const ss = r.streams(2);
++    Rec.n = 0;
++    try seg.mlaAttends(k, r.caller(), &ss, l, &small, segs, 0);
++    try t.expectEqual(@as(usize, 10), Rec.n);
++    for (Rec.ops[0..Rec.n]) |o| try t.expect(o.kind == .launch and o.stream == caller_id);
++    try t.expectEqual(r.b.dsa.partials.po, Rec.ops[8].args[0]); // the second segment's chunks: today's partials
++}
++
++/// The modules a shared mixer reads: every glue kernel recorded (attention's by the ids `Rec.picks` knows), no options.
++fn modules(r: *const Rig) fw.Modules {
++    var m: fw.Modules = undefined;
++    inline for (@typeInfo(glue.Kernels).@"struct".field_names, 0..) |name, i| {
++        const F = @FieldType(glue.Kernels, name);
++        if (F == cuda.Function) @field(m.glue, name) = r.fun(1000 + i);
++        if (F == ?cuda.Function) @field(m.glue, name) = null;
++    }
++    const mla = r.mlaKernels();
++    inline for (.{ "lat_write", "index_write", "pool_keys", "chunks_16", "chunks_32", "merge" }) |name| @field(m.glue, name) = @field(mla, name);
++    m.kda = r.kdaKernels();
++    m.index = null;
++    m.tiled = false;
++    m.packs = null;
++    m.copy_rows = r.fun(900);
++    m.pdl_early = 0;
++    m.mla = .{};
++    m.onepass = null;
++    m.onepass_pipe = null;
++    m.chunked = null;
++    return m;
++}
++
++/// A KDA and an MLA layer of rank 0's shares, every weight a placeholder address.
++fn mixers() [2]weights.Layer {
++    var k = kdaLayer();
++    k.proj = .{ .bf16 = 0x80000 };
++    k.fb = 0x81000;
++    k.gb = 0x82000;
++    k.o = .{ .bf16 = 0x83000 };
++    k.dims = 4096;
++    var a = mlaLayer();
++    a.proj = .{ .bf16 = 0x90000 };
++    a.q_b = .{ .bf16 = 0x91000 };
++    a.o = .{ .bf16 = 0x92000 };
++    a.index.kw = .{ .bf16 = 0x93000 };
++    a.index.qb = .{ .bf16 = 0x94000 };
++    a.q_norm = 0x95000;
++    a.kv_norm = 0x96000;
++    a.wk = 0x97000;
++    a.wv = 0x98000;
++    a.sk = 0;
++    a.sv = 0;
++    a.dv = 256;
++    a.q_lora = 1536;
++    a.dims = 4096;
++    a.eps = 1e-6;
++    var out: [2]weights.Layer = undefined;
++    out[0].mixer = .{ .kda = k };
++    out[1].mixer = .{ .mla = a };
++    return out;
++}
++
++test "SEG STREAMS: the shared mixer forks a decode window's KDA chains and MLA attention, never a prompt buffer's" {
++    var r: Rig = .{ .d = undefined };
++    try r.init();
++    defer r.deinit();
++    const m = modules(&r);
++    const ss = r.streams(4);
++    var buf: [4]fw.Seg = undefined;
++    const segs = r.segments(&.{ 2, 3, 1 }, &buf);
++    for (segs, [_]usize{ 50, 600, 1200 }) |g, p| g.st.pos = p;
++    var prompt = try state.Buffers.init(&r.d, &r.w, 64, true, 8192);
++    defer prompt.deinit();
++    for ([_]*state.Buffers{ &r.b, &prompt }) |b| for ([_]?*const seg.Streams{ &ss, null }) |want| for (mixers()) |wl| {
++        const one = [_]fw.Rank{.{ .w = &r.w, .st = segs[0].st, .b = b, .segs = segs }};
++        const f: fw.Forward = .{ .d = &r.d, .m = &m, .stream = r.caller(), .ranks = &one, .exchange = .local, .seg = want };
++        Rec.n = 0;
++        try shared.mixer(&f, one[0], wl, 4, 3, 6, null);
++        var events: usize = 0;
++        for (Rec.ops[0..Rec.n]) |o| events += @intFromBool(o.kind == .record or o.kind == .wait);
++        const forked = want != null and !b.prefill; // a fork, two waits; a record and a wait a side stream
++        try t.expectEqual(@as(usize, if (forked) 1 + 2 + 2 * 2 else 0), events);
++    };
++}
+diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
+--- a/zig/src/families/glm/cuda_shared.zig
++++ b/zig/src/families/glm/cuda_shared.zig
+@@ -11,6 +11,7 @@
+ const glue = @import("cuda_glue.zig");
+ const projection = @import("cuda_proj.zig");
+ const kda_chunk = @import("cuda_kda_chunk.zig");
++const seg = @import("cuda_seg_streams.zig");
+ 
+ /// Checks a shared window's segments (a prompt buffer's: whole prompts) against its `rows` rows; each holds its own.
+ pub fn begin(r: fw.Rank, rows: usize, stream: cuda.Stream) !void {
+@@ -41,6 +42,7 @@
+ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di: usize, rows: usize, out: ?u64) !void {
+     const c = &r.w.config;
+     const b = r.b;
++    const ss = seg.forWindow(f.seg, b.prefill, r.segs.len); // TF_GLM_OVN_SEG_STREAMS: a decode window's segments apart
+     switch (l.mixer) {
+         .kda => |k| {
+             const n = k.heads * kda.dk;
+@@ -49,41 +51,25 @@
+             s.p = b.kproj;
+             try kda_block.project(f.set(), f.stream, k, s, b.normed, c.hidden, rows);
+             if (f.l2pfFor()) |p| try p.fork(f.stream, l.index, .o); // TF_GLM_L2PF: o read into L2 while the chains run
+-            for (r.segs) |g| {
+-                const st = g.st;
+-                const cur = st.cur[li];
+-                var v = s;
+-                v.ka += g.row0 * n * 2;
+-                v.kg += g.row0 * n * 2;
+-                v.saves.out += g.row0 * n * 2;
+-                v.saves.state_out = st.recAt(1 - cur, li);
+-                const conv = st.conv + li * 3 * st.conv_c * 2;
+-                if (b.prefill) { // a whole prompt: its rows in place, the layer committed now (as Forward.mixer)
++            if (b.prefill) {
++                for (r.segs) |g| { // a whole prompt: its rows in place, the layer committed now (as Forward.mixer)
++                    const st = g.st;
++                    const cur = st.cur[li];
++                    var v = seg.kdaRows(s, g, li, n);
++                    const conv = seg.convAt(st, li);
+                     v.p = b.kproj + g.row0 * w * 2;
+                     try kda_block.chainRows(&f.m.kda, f.stream, k, v, g.rows, conv, st.recAt(cur, li), false, kda_chunk.prompt(&f.m.chunked, st.pos));
+                     try glue.convShift(f.set(), f.stream, conv, v.p, g.rows, g.rows * w, w, 1, 3 * n);
+                     st.cur[li] = 1 - cur;
+-                    continue;
+                 }
+-                v.p = st.proj + li * st.proj_layer * 2; // the window's rows stay with the layer until its commit
+-                try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(v.p, b.kproj + g.row0 * w * 2, g.rows * w * 2, f.stream.handle), "cuMemcpyDtoDAsync");
+-                const kv = li * fw.window_rows * st.heads * kda.dk;
+-                v.saves.k = st.save_k + kv * 4;
+-                v.saves.v = st.save_v + kv * 2;
+-                v.saves.g = st.save_g + kv * 4;
+-                v.saves.b = st.save_b + li * fw.window_rows * st.heads * 4;
+-                try kda_block.chainRows(&f.m.kda, f.stream, k, v, g.rows, conv, st.recAt(cur, li), f.kda_wide, null);
+-            }
++            } else try seg.kdaChains(f.d, &f.m.kda, f.stream, ss, k, b, r.segs, li, f.kda_wide);
+             if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
+         },
+         .mla => |a| {
+             var sparse_any = false;
+             for (r.segs) |g| sparse_any = sparse_any or dsa_block.sparseRows(a, g.st.pos, g.rows);
+             try dsa_block.prepare(f.set(), f.stream, a, b.dsa, b.normed, c.hidden, rows, sparse_any);
+-            for (r.segs) |g| {
+-                const nch = @min(latent.chunksFor(g.st.pos + g.rows), b.nch);
+-                try dsa_block.attend(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, a, g.st.caches[di], b.dsa, g.row0, g.rows, g.st.pos_dev, g.st.pos, nch, b.part_rows);
+-            }
++            try seg.mlaAttends(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, ss, a, b, r.segs, di);
+             try latent.expandV(f.set(), f.stream, b.dsa.ol, a.wv, a.sv, b.dsa.vn, rows, a.heads, a.dv, a.lw);
+             if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
+         },
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -152,6 +152,7 @@
+     prefill: bool,
+     part_rows: usize, // rows one dense attention call takes
+     nch: usize, // the dense pass's most 512-key chunks
++    partial_rows: usize, // chunk partial rows the attention partials hold
+     ids: u64,
+     x: u64,
+     normed: u64,
+@@ -286,6 +287,7 @@
+             .rows = rows,
+             .prefill = prefill,
+             .part_rows = part_rows,
++            .partial_rows = partial_rows,
+             .nch = nch,
+             .ids = p[twin_at.ids],
+             .x = p[twin_at.x],
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -113,6 +113,7 @@
+     .{ .name = "TF_GLM_OVN_X3_NC", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 or 2 (the routed experts' decode trellis loads, 16 bytes, that many k steps ahead)" },
+     .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_SEG_STREAMS", .scope = .glm, .kind = .u64, .max = 8, .forms = "0 or 1 (off) or the CUDA streams, at most 8, a shared decode window's per-stream KDA chains and MLA attention run on" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -6,6 +6,7 @@
+ const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
+ const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
+ const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
++const glm_seg_streams_check = @import("glm_seg_streams_check.zig");
+ 
+ /// The lines these commands add to `main.zig`'s usage, after its own.
+ pub const usage =
+@@ -14,6 +15,7 @@
+     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
+     \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
+     \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
++    \\  glm-seg-streams-check     TF_GLM_OVN_SEG_STREAMS: KDA chains and MLA attention on side streams against the loop, byte for byte
+     \\
+ ;
+ 
+@@ -30,6 +32,8 @@
+         try glm_mla_skip_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-onepass-exact-check")) {
+         try glm_onepass_exact_check.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-seg-streams-check")) {
++        try glm_seg_streams_check.run(gpu);
+     } else return false;
+     return true;
+ }
+diff --git a/zig/tests/cuda/glm_seg_streams_check.zig b/zig/tests/cuda/glm_seg_streams_check.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/glm_seg_streams_check.zig
+@@ -0,0 +1,377 @@
++//! glm-seg-streams-check (GPU): TF_GLM_OVN_SEG_STREAMS's segments on side streams against the in-order loop, bytes.
++const std = @import("std");
++const cuda = @import("cuda");
++const check = @import("check.zig");
++const qr = @import("quant_ref_tests.zig");
++const glm = @import("glm_cuda");
++const seg = glm.seg_streams;
++const fw = glm.forward;
++const kda = cuda.kda;
++const Rig = qr.RigT;
++
++const capacity = 2304; // past the dense limit (2051) and a window
++const delay_bytes = 256 << 20; // a copy ahead of the staged inputs: side streams that skip the fork read 0xff rows
++
++/// One arm: the loop as the series wrote it, the patched loop in order, or on `n` streams (2 to 8).
++const Arm = union(enum) { loop, in_order, streams: usize };
++
++/// The device side every case reuses: rank 0's shares at TP=3, the shared window's buffers, eight sequences.
++const Bench = struct {
++    r: *Rig,
++    layers: [45]glm.weights.Layer = undefined,
++    w: glm.weights.Weights = undefined,
++    b: fw.Buffers = undefined,
++    st: [8]fw.State = undefined,
++    image: [8]cuda.DeviceBuffer = undefined, // each sequence's arena as the case starts
++    made: usize = 0,
++    ks: kda.Kernels,
++    set: glm.glue.Set,
++    ops: cuda.Module,
++    streams: [3]seg.Streams, // 2, 4 and 8 streams
++    delay: [2]u64 = undefined,
++    chunk: []u8 = &.{}, // the arenas' reads, a piece at a time
++    stage: std.ArrayList([3]u64) = .empty, // the case's inputs: device staging, device destination, bytes
++
++    fn open(x: *Bench, kv8: bool) !void {
++        const c = &x.w.config;
++        x.w.config = .{};
++        x.w.share = try glm.shard.Share.of(c, 0, 3);
++        for (&x.layers, 0..) |*l, i| if (c.kind(@intCast(i)) == .mla) {
++            l.mixer = .{ .mla = undefined };
++        } else {
++            l.mixer = .{ .kda = undefined };
++        };
++        x.w.layers = &x.layers;
++        x.b = try fw.Buffers.initShared(x.r.gpu.d, &x.w, 32, capacity);
++        while (x.made < x.st.len) : (x.made += 1) {
++            x.st[x.made] = try fw.State.initFormat(x.r.gpu.gpa, x.r.gpu.d, &x.w, capacity, kv8);
++            x.image[x.made] = try cuda.DeviceBuffer.alloc(x.r.gpu.d, x.st[x.made].arena.buf.len);
++        }
++    }
++
++    fn close(x: *Bench) void {
++        for (x.st[0..x.made], x.image[0..x.made]) |*s, *m| {
++            s.deinit();
++            m.free();
++        }
++        x.made = 0;
++        x.b.deinit();
++    }
++
++    /// Sequence i's arena: 0xff, then `fill` writes its inputs; kept on the device as the case's image.
++    fn start(x: *Bench, i: usize, fill: anytype) !void {
++        const st = &x.st[i];
++        const img = try x.r.gpu.gpa.alloc(u8, st.arena.buf.len);
++        defer x.r.gpu.gpa.free(img);
++        @memset(img, 0xff);
++        try fill.host(x, st, img);
++        try st.arena.buf.upload(0, img);
++        try fill.device(x, st);
++        try x.r.s.synchronize();
++        try x.image[i].copyFrom(0, st.arena.buf.ptr, img.len, null);
++    }
++
++    /// `bytes` staged on the device for destination `dst`, written there behind the delay copy each arm.
++    fn stageAt(x: *Bench, dst: u64, bytes: []const u8) !void {
++        try x.stage.append(x.r.a, .{ try x.r.dev(bytes), dst, bytes.len });
++    }
++
++    /// Every stream idle, the sequences and outputs restored, then on the caller's stream the delay and the inputs.
++    fn reset(x: *Bench, segs: usize, out: u64, out_bytes: usize) !void {
++        const d = x.r.gpu.d;
++        try d.check(d.api.cuCtxSynchronize(), "cuCtxSynchronize");
++        for (x.st[0..segs], x.image[0..segs]) |*s, m| try s.arena.buf.copyFrom(0, m.ptr, m.len, null);
++        for (x.stage.items) |s| try d.check(d.api.cuMemsetD8_v2(s[1], 0xff, s[2]), "cuMemsetD8");
++        try d.check(d.api.cuMemsetD8_v2(out, 0xff, out_bytes), "cuMemsetD8");
++        try d.check(d.api.cuCtxSynchronize(), "cuCtxSynchronize");
++        try d.check(d.api.cuMemcpyDtoDAsync_v2(x.delay[1], x.delay[0], delay_bytes, x.r.s.handle), "cuMemcpyDtoDAsync");
++        for (x.stage.items) |s| try d.check(d.api.cuMemcpyDtoDAsync_v2(s[1], s[0], s[2], x.r.s.handle), "cuMemcpyDtoDAsync");
++    }
++
++    /// The arm's output rows, then a digest of each sequence's arena, read once the caller's stream alone is done.
++    fn result(x: *Bench, segs: usize, out: u64, out_bytes: usize) ![]u8 {
++        const rows = try x.r.back(out, out_bytes);
++        const all = try x.r.a.alloc(u8, out_bytes + 8 * segs);
++        @memcpy(all[0..out_bytes], rows);
++        for (x.st[0..segs], 0..) |*s, i| {
++            var h = std.hash.Wyhash.init(0);
++            var at: usize = 0;
++            while (at < s.arena.buf.len) : (at += x.chunk.len) {
++                const n = @min(x.chunk.len, s.arena.buf.len - at);
++                try s.arena.buf.download(at, x.chunk[0..n]);
++                h.update(x.chunk[0..n]);
++            }
++            std.mem.writeInt(u64, all[out_bytes + 8 * i ..][0..8], h.final(), .little);
++        }
++        return all;
++    }
++
++    fn streamsOf(x: *const Bench, n: usize) *const seg.Streams {
++        for (&x.streams) |*s| if (s.n == n) return s;
++        unreachable;
++    }
++
++    /// Flips one byte of sequence i's image `at` bytes into its arena (a red control's input).
++    fn poke(x: *Bench, i: usize, at: usize) !void {
++        var one: [1]u8 = undefined;
++        try x.image[i].download(at, &one);
++        one[0] ^= 0x40;
++        try x.image[i].upload(at, &one);
++    }
++};
++
++fn bf16s(r: *Rig, n: usize, scale: f32) ![]const u8 {
++    return std.mem.sliceAsBytes(try r.bfs(n, scale));
++}
++
++fn f32s(r: *Rig, n: usize, scale: f32) ![]const u8 {
++    const out = try r.a.alloc(f32, n);
++    for (out) |*v| v.* = (r.rng.float(f32) * 2 - 1) * scale;
++    return std.mem.sliceAsBytes(out);
++}
++
++fn put(img: []u8, st: *const fw.State, at: u64, bytes: []const u8) void {
++    @memcpy(img[at - st.arena.buf.ptr ..][0..bytes.len], bytes);
++}
++
++/// Segments of `rows` rows each on the bench's sequences, in row order.
++fn segments(x: *Bench, rows: []const usize, out: []fw.Seg) []fw.Seg {
++    var at: usize = 0;
++    for (rows, 0..) |n, i| {
++        out[i] = .{ .st = &x.st[i], .row0 = at, .rows = n };
++        at += n;
++    }
++    return out[0..rows.len];
++}
++
++/// KDA inputs of layer li: the conv window and the state copy the chain reads.
++const KdaFill = struct {
++    li: usize,
++
++    fn host(f: KdaFill, x: *Bench, st: *fw.State, img: []u8) !void {
++        st.cur[f.li] = x.r.rng.int(u1);
++        put(img, st, seg.convAt(st, f.li), try bf16s(x.r, 3 * st.conv_c, 0.5));
++        put(img, st, st.recAt(st.cur[f.li], f.li), try f32s(x.r, st.rec_layer / 4, 0.05));
++    }
++    fn device(_: KdaFill, _: *Bench, _: *fw.State) !void {}
++};
++
++/// The KDA loop as the series wrote it before the knob (cuda_shared.zig's decode branch), on the caller's stream.
++fn kdaLoop(x: *Bench, l: glm.kda_block.Layer, segs: []const fw.Seg, li: usize, wide: bool) !void {
++    const d = x.r.gpu.d;
++    const n = l.heads * kda.dk;
++    const w = l.matWidth();
++    for (segs) |g| {
++        const st = g.st;
++        const cur = st.cur[li];
++        var v = x.b.kda;
++        v.ka += g.row0 * n * 2;
++        v.kg += g.row0 * n * 2;
++        v.saves.out += g.row0 * n * 2;
++        v.saves.state_out = st.recAt(1 - cur, li);
++        const conv = st.conv + li * 3 * st.conv_c * 2;
++        v.p = st.proj + li * st.proj_layer * 2;
++        try d.check(d.api.cuMemcpyDtoDAsync_v2(v.p, x.b.kproj + g.row0 * w * 2, g.rows * w * 2, x.r.s.handle), "cuMemcpyDtoDAsync");
++        const kv = li * fw.window_rows * st.heads * kda.dk;
++        v.saves.k = st.save_k + kv * 4;
++        v.saves.v = st.save_v + kv * 2;
++        v.saves.g = st.save_g + kv * 4;
++        v.saves.b = st.save_b + li * fw.window_rows * st.heads * 4;
++        try glm.kda_block.chainRows(&x.ks, x.r.s, l, v, g.rows, conv, st.recAt(cur, li), wide, null);
++    }
++}
++
++const Tally = struct { cases: usize = 0, failed: usize = 0 };
++
++fn same(t: *Tally, what: []const u8, got: []const u8, want: []const u8) void {
++    t.cases += 1;
++    check.sameBytes(what, got, want) catch {
++        t.failed += 1;
++    };
++}
++
++/// A red control: the arm on 4 streams after a moved input must not give `want`'s bytes.
++fn differs(t: *Tally, got: []const u8, want: []const u8, what: []const u8) void {
++    t.cases += 1;
++    if (!std.mem.eql(u8, got, want)) return;
++    t.failed += 1;
++    std.debug.print("FAIL glm-seg-streams-check {s}: the moved input left the bytes alone (the red control must differ)\n", .{what});
++}
++
++/// One KDA case: every arm against the series' loop, then the red control (one word of sequence 1's state moved).
++fn kdaCase(x: *Bench, t: *Tally, rows: []const usize, li: usize, wide: bool) !void {
++    var l: glm.kda_block.Layer = undefined;
++    l.heads = x.w.share.kda.len();
++    l.conv_w = try x.r.dev(try f32s(x.r, 3 * l.heads * kda.dk * kda.taps, 0.5));
++    l.a_log = try x.r.dev(try f32s(x.r, l.heads, 1.0));
++    l.dt_bias = try x.r.dev(try f32s(x.r, l.heads * kda.dk, 1.0));
++    l.norm_w = try x.r.dev(try bf16s(x.r, kda.dv, 1.0));
++    l.eps = 1e-6;
++    l.lower = -5;
++    var buf: [8]fw.Seg = undefined;
++    const segs = segments(x, rows, &buf);
++    var total: usize = 0;
++    for (rows) |m| total += m;
++    const n = l.heads * kda.dk;
++    for (segs, 0..) |_, i| try x.start(i, KdaFill{ .li = li });
++    x.stage.clearRetainingCapacity();
++    try x.stageAt(x.b.kproj, try bf16s(x.r, total * l.matWidth(), 1.0));
++    try x.stageAt(x.b.kda.ka, try bf16s(x.r, total * n, 1.0));
++    try x.stageAt(x.b.kda.kg, try bf16s(x.r, total * n, 1.0));
++    const out_bytes = total * n * 2;
++    var want: []u8 = &.{};
++    var name: [200]u8 = undefined;
++    for ([_]Arm{ .loop, .in_order, .{ .streams = 2 }, .{ .streams = 4 }, .{ .streams = 8 } }) |arm| {
++        try x.reset(segs.len, x.b.kda.saves.out, out_bytes);
++        switch (arm) {
++            .loop => try kdaLoop(x, l, segs, li, wide),
++            .in_order => try seg.kdaChains(x.r.gpu.d, &x.ks, x.r.s, null, l, &x.b, segs, li, wide),
++            .streams => |k| try seg.kdaChains(x.r.gpu.d, &x.ks, x.r.s, x.streamsOf(k), l, &x.b, segs, li, wide),
++        }
++        const got = try x.result(segs.len, x.b.kda.saves.out, out_bytes);
++        if (arm == .loop) {
++            want = got;
++            continue;
++        }
++        const what = try std.fmt.bufPrint(&name, "glm-seg-streams-check kda layer {d}, rows {any}, {s}, {s} {d}", .{ li, rows, if (wide) "three kernels" else "fused", @tagName(arm), if (arm == .streams) arm.streams else 1 });
++        same(t, what, got, want);
++    }
++    const st1 = &x.st[1];
++    try x.poke(1, st1.recAt(st1.cur[li], li) - st1.arena.buf.ptr + 401);
++    try x.reset(segs.len, x.b.kda.saves.out, out_bytes);
++    try seg.kdaChains(x.r.gpu.d, &x.ks, x.r.s, x.streamsOf(4), l, &x.b, segs, li, wide);
++    differs(t, try x.result(segs.len, x.b.kda.saves.out, out_bytes), want, try std.fmt.bufPrint(&name, "kda layer {d}, rows {any}", .{ li, rows }));
++}
++
++/// MLA inputs of layer di at `pos`: the latent rows, index keys and gates before it, the pools they complete.
++const MlaFill = struct {
++    di: usize,
++    pos: usize,
++
++    fn host(f: MlaFill, x: *Bench, st: *fw.State, img: []u8) !void {
++        st.pos = f.pos;
++        const p: i32 = @intCast(f.pos);
++        put(img, st, st.pos_dev, std.mem.asBytes(&p));
++        const c = st.caches[f.di];
++        if (c.ls == 0) put(img, st, c.lc, try bf16s(x.r, f.pos * 512, 1.0));
++        put(img, st, c.ik, try bf16s(x.r, f.pos * 128, 1.0));
++        put(img, st, c.ig, try bf16s(x.r, f.pos * 128, 2.0));
++        put(img, st, c.pk, try bf16s(x.r, f.pos / 4 * 128, 1.0));
++    }
++    /// An FP8 cache's rows through the writer itself: E4M3 codes and their scales.
++    fn device(f: MlaFill, x: *Bench, st: *fw.State) !void {
++        const c = st.caches[f.di];
++        if (c.ls == 0) return;
++        const zero: i32 = 0;
++        const rows = try x.r.dev(try bf16s(x.r, f.pos * 512, 1.0));
++        try glm.latent.latentWriteFormat(x.set, x.r.s, rows, 512, c.lc, c.ls, .{}, try x.r.dev(std.mem.asBytes(&zero)), f.pos, 512);
++    }
++};
++
++/// The MLA loop as the series wrote it before the knob, on the caller's stream.
++fn mlaLoop(x: *Bench, k: glm.dsa_block.Kernels, l: glm.dsa_block.Layer, segs: []const fw.Seg, di: usize) !void {
++    for (segs) |g| {
++        const nch = @min(glm.latent.chunksFor(g.st.pos + g.rows), x.b.nch);
++        try glm.dsa_block.attend(k, x.r.s, l, g.st.caches[di], x.b.dsa, g.row0, g.rows, g.st.pos_dev, g.st.pos, nch, x.b.part_rows);
++    }
++}
++
++/// One MLA case: every arm against the series' loop, then the red control (segment 1's first query row moved).
++fn mlaCase(x: *Bench, t: *Tally, rows: []const usize, at: []const usize, di: usize) !void {
++    const heads = x.w.share.mla.len();
++    var l: glm.dsa_block.Layer = undefined;
++    l.heads = heads;
++    l.lw = 512;
++    l.qk = 256;
++    l.dense_limit = x.w.config.keyWidth();
++    l.index = .{ .kw = undefined, .gate = 0, .ln_w = try x.r.dev(try bf16s(x.r, 128, 1.0)), .ln_b = try x.r.dev(try bf16s(x.r, 128, 0.1)), .ape = try x.r.dev(try bf16s(x.r, 4 * 128, 0.5)), .qb = undefined, .heads = 32, .d = 128 };
++    const k: glm.dsa_block.Kernels = .{ .set = x.set, .ops = x.ops };
++    var buf: [8]fw.Seg = undefined;
++    const segs = segments(x, rows, &buf);
++    var total: usize = 0;
++    for (rows) |m| total += m;
++    for (segs, at, 0..) |_, p, i| try x.start(i, MlaFill{ .di = di, .pos = p });
++    x.stage.clearRetainingCapacity();
++    try x.stageAt(x.b.dsa.lat, try bf16s(x.r, total * 512, 1.0));
++    try x.stageAt(x.b.dsa.ikr, try bf16s(x.r, total * 160, 1.0));
++    try x.stageAt(x.b.dsa.igr, try f32s(x.r, total * 128, 2.0));
++    try x.stageAt(x.b.dsa.qa, try bf16s(x.r, total * heads * 512, 0.5));
++    const out_bytes = total * heads * 512 * 2;
++    var want: []u8 = &.{};
++    var name: [200]u8 = undefined;
++    const fp8 = x.st[0].caches[di].ls != 0;
++    for ([_]Arm{ .loop, .in_order, .{ .streams = 2 }, .{ .streams = 4 }, .{ .streams = 8 } }) |arm| {
++        try x.reset(segs.len, x.b.dsa.ol, out_bytes);
++        switch (arm) {
++            .loop => try mlaLoop(x, k, l, segs, di),
++            .in_order => try seg.mlaAttends(k, x.r.s, null, l, &x.b, segs, di),
++            .streams => |n| try seg.mlaAttends(k, x.r.s, x.streamsOf(n), l, &x.b, segs, di),
++        }
++        const got = try x.result(segs.len, x.b.dsa.ol, out_bytes);
++        if (arm == .loop) {
++            want = got;
++            continue;
++        }
++        const what = try std.fmt.bufPrint(&name, "glm-seg-streams-check mla layer {d} ({s}), rows {any} at {any}, {s} {d}", .{ di, if (fp8) "fp8" else "bf16", rows, at, @tagName(arm), if (arm == .streams) arm.streams else 1 });
++        same(t, what, got, want);
++    }
++    const qa = x.stage.items[3]; // segment 1's first query row, one byte
++    const staged: cuda.DeviceBuffer = .{ .d = x.r.gpu.d, .ptr = qa[0], .len = qa[2] };
++    var one: [1]u8 = undefined;
++    try staged.download(rows[0] * heads * 512 * 2 + 7, &one);
++    one[0] ^= 0x40;
++    try staged.upload(rows[0] * heads * 512 * 2 + 7, &one);
++    try x.reset(segs.len, x.b.dsa.ol, out_bytes);
++    try seg.mlaAttends(k, x.r.s, x.streamsOf(4), l, &x.b, segs, di);
++    differs(t, try x.result(segs.len, x.b.dsa.ol, out_bytes), want, try std.fmt.bufPrint(&name, "mla layer {d}, rows {any}", .{ di, rows }));
++}
++
++pub fn run(gpu: check.Gpu) !void {
++    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
++    defer arena.deinit();
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var prng = std.Random.DefaultPrng.init(0x5e95);
++    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = s, .rng = prng.random() };
++    defer {
++        for (r.bufs.items) |*b| b.free();
++        r.bufs.deinit(gpu.gpa);
++    }
++    var mods: [3]cuda.Module = .{ try cuda.Module.load(gpu.d, cuda.kernels.glm_kda), try cuda.Module.load(gpu.d, cuda.kernels.glm_glue), try cuda.Module.load(gpu.d, cuda.kernels.glm_ops) };
++    defer for (&mods) |*m| m.unload();
++    const gks = try glm.glue.Kernels.loadOvn(mods[1], true);
++    var x: Bench = .{ .r = &r, .ks = try kda.Kernels.load(mods[0]), .set = .{ .glue = &gks, .mla = .{ .fuse_rows = glm.latent.prompt_rows, .skip = true } }, .ops = mods[2], .streams = undefined };
++    x.chunk = try r.a.alloc(u8, 16 << 20);
++    var made: usize = 0;
++    defer for (x.streams[0..made]) |*q| q.deinit();
++    for ([_]usize{ 2, 4, 8 }, 0..) |n, i| {
++        x.streams[i] = try seg.Streams.init(gpu.d, n);
++        made += 1;
++    }
++    for (&x.delay) |*p| p.* = try r.zeros(delay_bytes);
++    glm.kda_block.pad_to = glm.kda_block.padWidth(64, 3); // TF_GLM_KDA_PAD, as the recipe serves
++    defer glm.kda_block.pad_to = 0;
++    var t: Tally = .{};
++    // the bench's shapes: 2 to 8 streams' windows of 1 to 8 rows, the first, a middle and the last KDA layer
++    const kda_cases = [_]struct { rows: []const usize, li: usize }{
++        .{ .rows = &.{ 3, 4 }, .li = 0 },
++        .{ .rows = &.{ 2, 1, 4 }, .li = 17 },
++        .{ .rows = &.{ 3, 3, 2, 4 }, .li = 33 },
++        .{ .rows = &.{ 2, 5, 1, 3, 8, 2, 4, 3 }, .li = 9 },
++    };
++    // MLA at chunk edges and up to the dense limit (2051 keys), in the first, a middle and the last DSA layer
++    const mla_cases = [_]struct { rows: []const usize, at: []const usize, di: usize }{
++        .{ .rows = &.{ 2, 3 }, .at = &.{ 37, 509 }, .di = 0 },
++        .{ .rows = &.{ 4, 1, 3, 2 }, .at = &.{ 511, 1023, 1500, 2040 }, .di = 5 },
++        .{ .rows = &.{ 1, 2, 5, 3, 4, 2, 6, 1 }, .at = &.{ 5, 300, 512, 777, 1024, 1300, 1999, 2049 }, .di = 10 },
++    };
++    for ([_]bool{ false, true }) |kv8| {
++        try x.open(kv8);
++        defer x.close();
++        if (!kv8) for (kda_cases) |cs| for ([_]bool{ true, false }) |wide| try kdaCase(&x, &t, cs.rows, cs.li, wide);
++        for (mla_cases) |cs| try mlaCase(&x, &t, cs.rows, cs.at, cs.di);
++    }
++    std.debug.print("RESULT glm-seg-streams-check: {d} of {d} comparisons differ\n", .{ t.failed, t.cases });
++    try check.expect(t.failed == 0, "glm-seg-streams-check: {d} of {d} comparisons differ", .{ t.failed, t.cases });
++    check.pass("glm-seg-streams-check: KDA chains and MLA attention on 2, 4 and 8 streams == the in-order loop on {d} comparisons, red controls included", .{t.cases});
++}
