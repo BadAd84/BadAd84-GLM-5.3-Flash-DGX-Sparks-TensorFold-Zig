@@ -837,3 +837,17 @@ control, both, control: controls 81.23, 79.86, 81.71 (mean 80.93), both 81.51, 7
 so the first one-stream reading was the box's spread and neither knob regresses one stream. At 2 to 8 streams the knobs together read +2.6% to +5.0% against
 controls that agree within 1.3%. Both are now in `serve.sh`'s `DEFS`. Measured at the deployed shape earlier: four-stream decode +10.4% at 1M (section 30) and cold first token
 -8.5% at 8k, -8.2% at 32k (section 33).
+
+## 35. `cache_salt` on the triangle: patches/cache-salt (upstream PR #3222) closes the gap section 32 found
+
+Section 32's window showed `cache_salt` ignored (another salt resumed a conversation's state). `patches/cache-salt` carries ashhart's PR #3222 after `patches/pr1411` (four patches; RECORD.md
+names the source, the edits and the trees: after the series and pr1411 `e567d98959661da15d756103cc2d59051cacb78b`, after the package `25cefd706dc3741584b0cab4d6b216ed24d752bc`). Gates, a head tree
+against a base tree of series plus pr1411: `test-cuda-host`, `compile-cuda-tests`, the standalone host steps and fmt rc 0, 0 failing test names on either side, lean 386 problems against 386 with
+0 new, `apply.sh --check` writes nothing. The package adds 14 test blocks and renames one; two earlier step summaries that differed by 5 tests (1314 against 1319) differed because one run step
+was replayed from the cache, not because tests were missing (both `server_tests` binaries list the same 1319 names before the package).
+
+Window (`scripts/queue-disk-tier.sh`, image `rs2x3ds` = series + pr1411 + cache-salt, `KNOBS=measured`, P=4 / 1M, `--learn-conversations`; rows and table
+`docs/audit-2026-11-12/disktier-rs2x3dsa-*`): the salt probe sent the 32k conversation with another salt and got cached 0 of 32,213 tokens, while the same turn without a salt resumed 30,720; every
+one of the 17 resumed replies equals a cold server's reply to the same messages; the 596k conversation's prefill after a SIGKILL of every rank is 15.14 s (cached 618,496), after a clean restart
+17.62 s (cached 641,024), turn 2 from RAM 15.13 s, turn 1 cold 374.54 s. Not checked: that a salted state is never written to disk (the PR's own host test covers it; this window's probe runs in the
+first boot only and records no disk counters), and decode at 1, 2, 4, 6 and 8 streams with the package.
