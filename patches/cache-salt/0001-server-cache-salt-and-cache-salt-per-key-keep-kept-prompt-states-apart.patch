@@ -21,10 +21,18 @@ request with 400 and refuse to start with --cache-salt-per-key. The request
 log redacts the salt, and /v1/models publishes capabilities.cache_salt.
 
 Fixes #3196
+
+Edited by us (lane V129B, the v1.2.9 gate): server/openai.zig is 599 lines on v1.2.9 and this commit adds
+two, past the lean limit of 600. The comment above `var asked: cancel_ids.Entry = .{};` moves onto that line,
+reworded to fit 120 columns (`held to the reply's end: the cancel route finds it by each id its client gets`);
+no code changes.
+
+Re-seated on the v1.2.9 engine series by work/V129B/recut_combined.py: applies to tree 3b06d167fd742683f210ffc7f69eef5199640664 (the series and
+patches/pr1411); it adds and removes exactly the lines of lane V129B's pristine-v1.2.9 0001.
 ---
 
 diff --git a/docs/api.md b/docs/api.md
-index f03f78238709b404709625fcbe8823751e220648..668277de0fbf2c9d4028c48da890cb61257cc69f 100644
+index 11b796ceed800bd8d47b100469dbf3036e0c9da5..083ab78fb7b097c86d2f2a8609d273d556072d34 100644
 --- a/docs/api.md
 +++ b/docs/api.md
 @@ -140,12 +140,12 @@ Unsupported image input, audio, video and non-text output requests receive HTTP
@@ -45,9 +53,9 @@ index f03f78238709b404709625fcbe8823751e220648..668277de0fbf2c9d4028c48da890cb61
  
  Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
  Flags describe the engine; request combinations, context, template and format constraints still apply.
-@@ -922,6 +922,28 @@ A retryable refusal on an inference route answers 503 and names its wait in the
- 
- A capacity refusal keeps the frozen Python engine's shape (`type` `invalid_request_error` and its message) and still carries no `Retry-After`; the code is native's addition. The Messages routes keep their Anthropic envelope, which has no code field, and the Sliding Weights learn/delete and imprint routes keep their own 503 bodies.
+@@ -1117,6 +1117,28 @@ default a quarter of the limit; 0 turns it off). An IPv6 address counts by its /
+ bridge gateway) are never counted. A refused connection gets 503 with `Retry-After: 1`. Only with every slot taken does
+ a connection waiting for its next request give its slot up, after 5 seconds; a request in progress is never cut.
  
 +## Prompt cache salts
 +
@@ -75,7 +83,7 @@ index f03f78238709b404709625fcbe8823751e220648..668277de0fbf2c9d4028c48da890cb61
  
  Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
 diff --git a/docs/environment.md b/docs/environment.md
-index 583c615cecb69dca7e67d0de6530ac1ad586718c..df7e879b7733ee0e9679fc2710561bb38e63951a 100644
+index c5fcd771e9a48a2e4c424512d7adafdf58602114..2f2b39ee66adb85724b0884e29b2b322bb2495fa 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
 @@ -14,7 +14,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
@@ -203,7 +211,7 @@ index 0000000000000000000000000000000000000000..397588a9d1c2cf2dce0d8163c46b3c28
 +    _ = @import("cache_salt_disk_test.zig");
 +}
 diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
-index 27e9551333b0a4f7787301e76d1739d63baa2919..db49455dde6a51379b582a945e23d558fa1c3068 100644
+index 86c9a6b8bc8d73d467095b0171518367dabdfc4a..4b9958e986c4c4915ad5ec77b879b6a30be18380 100644
 --- a/zig/src/core/engine_api.zig
 +++ b/zig/src/core/engine_api.zig
 @@ -89,6 +89,8 @@ pub const Request = struct {
@@ -215,7 +223,7 @@ index 27e9551333b0a4f7787301e76d1739d63baa2919..db49455dde6a51379b582a945e23d558
  
      /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
      pub fn cacheKey(r: *const Request) []const u32 {
-@@ -199,6 +201,8 @@ pub const Info = struct {
+@@ -201,6 +203,8 @@ pub const Info = struct {
      prefill_min_chunk: u32 = 256,
      /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
      prompt_cache: bool = false,
@@ -224,7 +232,7 @@ index 27e9551333b0a4f7787301e76d1739d63baa2919..db49455dde6a51379b582a945e23d558
      /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
      prompt_cache_capacity: ?PromptCacheCapacity = null,
      /// The policy the engine runs under, one line (`/health` shows it); empty: none.
-@@ -570,6 +574,7 @@ pub const Rounds = @import("lane_host.zig").Rounds;
+@@ -560,6 +564,7 @@ pub const Rounds = @import("lane_host.zig").Rounds;
  
  /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
  pub const prompt_cache = @import("prompt_cache.zig");
@@ -245,7 +253,7 @@ index e1a3c6f858bda6f4893036769b95a000ce3b1bb0..53a546a071d0ed512ffcd1f6ab448670
      plain_only,
      decides,
 diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
-index d883f1d8acbb0231ead6bd09ed36bfb3ab2875b3..e451ea14834001318dd61f1f648876908fa2cd9f 100644
+index c4088df7a67a3e78cc00e7aab7a2910ab5f5227f..644accabbfa476725b45ff750d41b874669e2055 100644
 --- a/zig/src/core/lane_host.zig
 +++ b/zig/src/core/lane_host.zig
 @@ -196,7 +196,9 @@ pub const LaneHost = struct {
@@ -344,10 +352,10 @@ index baaed26045e1aad516735da9b346f28f4a10c37d..3baf0b5cbd3f13ef58d2c6038f56167d
 +    try std.testing.expect(plain.rounds < first.rounds); // the record serves an unsalted repeat, as before
 +}
 diff --git a/zig/src/core/rows_all_test.zig b/zig/src/core/rows_all_test.zig
-index c972955cbcf2ea559b22134b9f00c895218a7c22..a28fc870963857f988d632a4d86c6cc1fae16355 100644
+index 742646228d51c86cd8454a64db32a1b97634c2ba..156a14ad9774154236304a1cfa2e4e72ecfedb0b 100644
 --- a/zig/src/core/rows_all_test.zig
 +++ b/zig/src/core/rows_all_test.zig
-@@ -20,5 +20,6 @@ test {
+@@ -21,5 +21,6 @@ test {
      _ = @import("rows_refusal_test.zig");
      _ = @import("rows_startup_fault_test.zig");
      _ = @import("rows_drop_test.zig");
@@ -817,10 +825,10 @@ index 0000000000000000000000000000000000000000..e7d3c67acb41c3201365e700f110bb71
 +    try std.testing.expectEqualStrings("tenant-a", t.chat.strField("cache_salt").?);
 +}
 diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
-index c64f523b47aeb1756c892ff129573db9fb394b44..8db3c4357c52962fa65b4f647b2cd12c7b0fd839 100644
+index 24fa9d58c845f881dbbee1dfb21aec2345f5806d..b069dda404ecdd0afd5384b794f5a72d91297ffd 100644
 --- a/zig/src/server/chat.zig
 +++ b/zig/src/server/chat.zig
-@@ -41,6 +41,8 @@ pub const Input = struct {
+@@ -44,6 +44,8 @@ pub const Input = struct {
      logprobs: ?u8 = null,
      /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
      prompt_logprobs: ?u8 = null,
@@ -828,8 +836,8 @@ index c64f523b47aeb1756c892ff129573db9fb394b44..8db3c4357c52962fa65b4f647b2cd12c
 +    cache_salt: u64 = 0,
      /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
      format: ?[]const u8 = null,
- };
-@@ -192,6 +194,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+     /// The encoded image bytes the request may send; chat's limits unless a route (OCR) sets its own.
+@@ -207,6 +209,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
          .images = rendered.images,
          .cache_key = rendered.cache_key,
      };
@@ -840,10 +848,10 @@ index c64f523b47aeb1756c892ff129573db9fb394b44..8db3c4357c52962fa65b4f647b2cd12c
      server_mod.nameStructure(input.format, &request);
      errdefer srv.release(false, request);
 diff --git a/zig/src/server/cli.zig b/zig/src/server/cli.zig
-index ceadd0d689d66f115946292716351157d1664830..aed48240611a8b810cfa80a4a2973deed1f8ff26 100644
+index 4090aac18cf51db90729635d3c87a5cac336b388..8c143a4d025b0957dda24b47cbd8981ab84c806c 100644
 --- a/zig/src/server/cli.zig
 +++ b/zig/src/server/cli.zig
-@@ -70,6 +70,7 @@ pub const flags = [_]Flag{
+@@ -73,6 +73,7 @@ pub const flags = [_]Flag{
      .{ .name = "--max-tokens", .native = true },
      .{ .name = "--temperature", .native = true },
      .{ .name = "--prompt-seed", .kind = .store_true, .native = true },
@@ -851,7 +859,7 @@ index ceadd0d689d66f115946292716351157d1664830..aed48240611a8b810cfa80a4a2973dee
      .{ .name = "--top-p", .native = true },
      .{ .name = "--top-k", .native = true },
      .{ .name = "--min-p", .native = true },
-@@ -209,6 +210,7 @@ pub const Args = struct {
+@@ -213,6 +214,7 @@ pub const Args = struct {
      max_tokens: i64 = 4096,
      temperature: ?f64 = null,
      prompt_seed: bool = false,
@@ -859,15 +867,15 @@ index ceadd0d689d66f115946292716351157d1664830..aed48240611a8b810cfa80a4a2973dee
      top_p: ?f64 = null,
      top_k: ?i64 = null,
      min_p: ?f64 = null,
-@@ -466,7 +468,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
+@@ -471,7 +473,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
      } else if (is(name, "--decode-share")) {
          out.decode_share = try float(u, a, name, v);
          if (!(out.decode_share.? >= 0 and out.decode_share.? < 1)) return fail(u, a, "argument --decode-share: expected a share from 0 to under 1: '{s}'", .{v});
 -    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
 +    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--cache-salt-per-key")) out.cache_salt_per_key = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
-         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
-             const f = try float(u, a, name, v);
-             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
+         out.compact_auto = std.mem.eql(u8, v, "auto"); // each occurrence replaces both fields, so the last one wins
+         out.compact_fraction = null;
+         if (!out.compact_auto) {
 diff --git a/zig/src/server/compact.zig b/zig/src/server/compact.zig
 index 6461cfc0caa086f0eec27ac0f282e2bc5a7807ce..9fd7e30e6e51ed15138cf867dd0811afc5a6a8d9 100644
 --- a/zig/src/server/compact.zig
@@ -899,10 +907,10 @@ index 6461cfc0caa086f0eec27ac0f282e2bc5a7807ce..9fd7e30e6e51ed15138cf867dd0811af
                  .prepared = prepared,
                  .stamp = .{
 diff --git a/zig/src/server/compact_mem.zig b/zig/src/server/compact_mem.zig
-index b45513bad66d7ea04fad027da4e90c7f1f0e6f1b..f731d050379e13f53723b6dd2efe38957d7d25ff 100644
+index 943f9cc32f9af5e0493c0c71ff34db5a7c8af851..3161c29748d43f3daf218131d10c9120e5dcda2b 100644
 --- a/zig/src/server/compact_mem.zig
 +++ b/zig/src/server/compact_mem.zig
-@@ -24,7 +24,9 @@ pub fn hashes(a: Allocator, msgs: []const Value, mem: Mem) bool {
+@@ -25,7 +25,9 @@ pub fn hashes(a: Allocator, msgs: []const Value, mem: Mem) bool {
      return std.mem.eql(u8, got, mem.hash);
  }
  
@@ -913,7 +921,7 @@ index b45513bad66d7ea04fad027da4e90c7f1f0e6f1b..f731d050379e13f53723b6dd2efe3895
      const dir = srv.config.compact_memory orelse return null;
      const key = conversationKey(a, msgs) catch return null;
      const note = readNamed(srv, a, dir, &key, ".md") orelse return null;
-@@ -39,7 +41,9 @@ pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value) ?Mem {
+@@ -40,7 +42,9 @@ pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value) ?Mem {
      return .{ .note = note, .covered = covered, .hash = hash };
  }
  
@@ -922,8 +930,8 @@ index b45513bad66d7ea04fad027da4e90c7f1f0e6f1b..f731d050379e13f53723b6dd2efe3895
 +pub fn storeMem(srv: *Server, a: Allocator, msgs: []const Value, covered: usize, note: []const u8, salt: u64) void {
 +    if (salt != 0) return;
      const dir = srv.config.compact_memory orelse return;
-     std.Io.Dir.cwd().createDirPath(srv.io, dir) catch return;
-     const key = conversationKey(a, msgs) catch return;
+     // a folder made here is the owner's alone; one that already exists keeps the mode its owner gave it
+     const Permissions = std.Io.File.Permissions;
 diff --git a/zig/src/server/cortheon/cortheon.zig b/zig/src/server/cortheon/cortheon.zig
 index 28c7e7b2e569817a05fb31fc2be7d3790e704d23..c09eaec7c3c3191ecfe5f2fd6b4d713a0f9c8add 100644
 --- a/zig/src/server/cortheon/cortheon.zig
@@ -1068,13 +1076,13 @@ index bf460c6c22267016af3363fa29fde8ed19c8adb0..71472bfa9ce268ca65368aa70cee6b59
          error.OutOfMemory => return error.OutOfMemory,
          else => return fallback(a, t.goal),
 diff --git a/zig/src/server/errors.zig b/zig/src/server/errors.zig
-index 2622f5d6586b19006a8a82f4cf1a654d7c86cb26..b371b9b5867edc0d99766876cdc2e34da13d6199 100644
+index ff1a7ca2e9c6766226293ce786327e96770d57a8..39045b9bb36bcf1b463161217fc6685b02093d3b 100644
 --- a/zig/src/server/errors.zig
 +++ b/zig/src/server/errors.zig
-@@ -34,6 +34,8 @@ pub const Cx = struct {
-     clear_thinking: ?bool = null,
-     /// The request controls a native prompt renderer must retain in every prefix probe.
+@@ -38,6 +38,8 @@ pub const Cx = struct {
      template_fields: @import("json").Value = .null,
+     /// Set by a route that has already planned the same body (its first plan writes the request log).
+     skip_request_log: bool = false,
 +    /// The request prompt-cache salt, retained by server-created compaction requests; 0: none.
 +    cache_salt: u64 = 0,
  
@@ -1114,12 +1122,12 @@ index ad08b0d5fc477305bb73478d84b73fa23d340627..d40419fdfd7fd192a132a9f6d17f4e14
      srv.gpa.free(ask.prompt);
      srv.gpa.free(ask.starts);
 diff --git a/zig/src/server/main.zig b/zig/src/server/main.zig
-index 0cbc71c8564df1ede29a5c6afc7dfa42db63f91c..f659a531c5046345569e4c00f56c4ecd3d12592d 100644
+index 20f029cf7533188d1aee923b59f650394b0d9acc..3ddd91bf9ed28717e291b25d1243668f70b519f6 100644
 --- a/zig/src/server/main.zig
 +++ b/zig/src/server/main.zig
-@@ -21,7 +21,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
-     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+@@ -23,7 +23,7 @@ const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HO
      " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
+     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
      " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
 -    " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
 +    " [--prompt-cache-over-cap] [--cache-salt-per-key] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
@@ -1127,25 +1135,68 @@ index 0cbc71c8564df1ede29a5c6afc7dfa42db63f91c..f659a531c5046345569e4c00f56c4ecd
      " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
      " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--prompt-seed]" ++
 diff --git a/zig/src/server/openai.zig b/zig/src/server/openai.zig
-index c3c7218ea13cd6eda5dd5a362c0f262834b8a3af..49c13a0bb90a40bb25497eedae667f203c1c2104 100644
+index 51546486d787af2fed9c630b003a8eb72b3f5ecf..26b778b88cbefd511ff61d7a6c7406889714fa1c 100644
 --- a/zig/src/server/openai.zig
 +++ b/zig/src/server/openai.zig
-@@ -174,6 +174,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
-             return cx.refuse("logprobs support chat without tools, stop strings, structured output or a thinking budget");
-     }
+@@ -169,6 +169,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
+     const streamed = if (body.get("stream")) |s| s.truthy() else false;
+     input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
      input.logprobs = logprobs;
 +    input.cache_salt = try @import("cache_salt.zig").field(&srv.tool_ids, cx, body);
      var policy: tool_stream.Policy = .{};
      if (body.field("parallel_tool_calls")) |p| {
          if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
-@@ -250,6 +251,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
+@@ -246,12 +247,12 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
          return;
      };
      p.input.id = id;
+-    // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
+-    var asked: cancel_ids.Entry = .{};
++    var asked: cancel_ids.Entry = .{}; // held to the reply's end: the cancel route finds it by each id its client gets
+     const names = [_][]const u8{ id, cancel_ids.alias orelse "" };
+     cancel_ids.registry.add(srv.io, &names, &asked);
+     defer cancel_ids.registry.remove(srv.io, &names, &asked);
+     p.input.cancel = &asked.asked;
 +    p.input.cache_salt = @import("cache_salt.zig").ofRequest(srv, p.input.cache_salt, gone.conn.key_digest);
      const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
      var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
      if (p.stream) r.stream(gone, field) else r.whole(gone, field);
+diff --git a/zig/src/server/private_files_test.zig b/zig/src/server/private_files_test.zig
+index 67d1c6c80715c3a2fc66f92ac72a72c1488d69c6..2b4b65b15fdf9e9a978901fe446d5c94b8693ca5 100644
+--- a/zig/src/server/private_files_test.zig
++++ b/zig/src/server/private_files_test.zig
+@@ -43,7 +43,7 @@ test "security: a conversation note is owner-only and is not written through a p
+         const link = try std.fmt.allocPrint(a, "notes/{s}{s}", .{ key, ext });
+         try tmp.dir.symLink(io, victim, link, .{});
+     }
+-    compact_mem.storeMem(&srv, a, msgs, 1, "a private summary");
++    compact_mem.storeMem(&srv, a, msgs, 1, "a private summary", 0);
+ 
+     try testing.expectEqualStrings("untouched", try tmp.dir.readFileAlloc(io, "victim.txt", a, .limited(64)));
+     for ([_][]const u8{ ".md", ".json" }) |ext| {
+@@ -52,7 +52,12 @@ test "security: a conversation note is owner-only and is not written through a p
+     }
+     const note = try std.fmt.allocPrint(a, "notes/{s}.md", .{key});
+     try testing.expectEqualStrings("a private summary", try tmp.dir.readFileAlloc(io, note, a, .limited(64)));
+-    try testing.expectEqualStrings("a private summary", compact_mem.loadMem(&srv, a, msgs).?.note);
++    try testing.expectEqualStrings("a private summary", compact_mem.loadMem(&srv, a, msgs, 0).?.note);
++    try testing.expect(compact_mem.loadMem(&srv, a, msgs, 0x5a17) == null); // a salted request reads no shared note
++    const other = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"salted\"}]")).ok.items().?;
++    compact_mem.storeMem(&srv, a, other, 1, "a salted summary", 0x5a17); // nor writes one another salt would read
++    const salted = try std.fmt.allocPrint(a, "notes/{s}.md", .{try compact_mem.conversationKey(a, other)});
++    try testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(io, salted, a, .limited(64)));
+ }
+ 
+ test "security: a folder the note writer makes is the owner's alone" {
+@@ -67,7 +72,7 @@ test "security: a folder the note writer makes is the owner's alone" {
+     srv.config = .{ .served_name = "test", .model_ids = &.{"test"}, .compact_memory = dir };
+     srv.io = io;
+     const msgs = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"hello\"}]")).ok.items().?;
+-    compact_mem.storeMem(&srv, a, msgs, 1, "note");
++    compact_mem.storeMem(&srv, a, msgs, 1, "note", 0);
+     const st = try std.Io.Dir.cwd().statFile(io, dir, .{});
+     try testing.expectEqual(@as(u32, 0), @as(u32, @intCast(st.permissions.toMode() & 0o077)));
+ }
 diff --git a/zig/src/server/request_log.zig b/zig/src/server/request_log.zig
 index 9ce6ed35895dfe8f19e7d19b7c3486ca6e96127e..cc5d3bf788b57273691539f2fba6cb418fa52119 100644
 --- a/zig/src/server/request_log.zig
@@ -1200,7 +1251,7 @@ index 9ce6ed35895dfe8f19e7d19b7c3486ca6e96127e..cc5d3bf788b57273691539f2fba6cb41
  }
  
 diff --git a/zig/src/server/responses_translate.zig b/zig/src/server/responses_translate.zig
-index b112a8ccc32274069976ce920f4d4e7a6bbed276..605dd269b1b7056a2ba0f40b0dbfb3991f79d2de 100644
+index 43a73f5299ef70c3654b1c4b014abe698f4ceed3..68709895045a2f25f4d04e857a4eed0c496a0a26 100644
 --- a/zig/src/server/responses_translate.zig
 +++ b/zig/src/server/responses_translate.zig
 @@ -10,7 +10,7 @@ const Cx = errors.Cx;
@@ -1213,10 +1264,10 @@ index b112a8ccc32274069976ce920f4d4e7a6bbed276..605dd269b1b7056a2ba0f40b0dbfb399
      .{ "background", "background responses are not supported: send the request and wait for it" },
      .{ "conversation", "conversations are not supported: send previous_response_id or the items" },
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index 0e57049a68c5cf4827491503873a5c3e92fdb48f..f9b00c0dcc5d5fd8efcd77b9c451fa45c736a0e1 100644
+index 4a5a6f4de5c79c132fce6488677293c793717a9d..a82285d9890d3a35c955c614771c57f39180b34c 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
-@@ -71,6 +71,8 @@ test {
+@@ -73,6 +73,8 @@ test {
      _ = @import("tool_required_test.zig");
      _ = @import("structure_field_test.zig");
      _ = @import("grammar.zig");
@@ -1226,10 +1277,10 @@ index 0e57049a68c5cf4827491503873a5c3e92fdb48f..f9b00c0dcc5d5fd8efcd77b9c451fa45
      _ = @import("metrics.zig");
      _ = @import("load_metrics.zig");
 diff --git a/zig/src/server/serve.zig b/zig/src/server/serve.zig
-index 3ceda496e527bc3e994a50b3653eaa5a5053589c..f6d5667535b72a79db19a3d7db10aa9e12294691 100644
+index b2cba36bf4788d26d4ebe749375ecc81ba38481a..5c48bb15d85a6d168fe8393d9dc904d7f1983dc6 100644
 --- a/zig/src/server/serve.zig
 +++ b/zig/src/server/serve.zig
-@@ -208,6 +208,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+@@ -210,6 +210,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
          .silence_guard = args.silence.enabled(),
          .cfg = args.cfg.options(),
          .prompt_seed = args.prompt_seed,
@@ -1237,7 +1288,7 @@ index 3ceda496e527bc3e994a50b3653eaa5a5053589c..f6d5667535b72a79db19a3d7db10aa9e
          .sse_keepalive_s = keepalive_s,
          .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
          .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
-@@ -246,6 +247,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+@@ -248,6 +249,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
          std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
          return 2;
      }
@@ -1250,10 +1301,10 @@ index 3ceda496e527bc3e994a50b3653eaa5a5053589c..f6d5667535b72a79db19a3d7db10aa9e
      const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
      installSignals(store.enabled());
 diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
-index 39925cdf03f1207089e995c0047fb5c05cf40258..0a12f0c0521fb0cb674888813dfc4dce1a3232ba 100644
+index 508c13d7bba8432c29ef320f2cd405749352ddfe..95cb2cad809b70cb5f40ca342028a66bea8c8021 100644
 --- a/zig/src/server/server.zig
 +++ b/zig/src/server/server.zig
-@@ -77,8 +77,8 @@ pub const Config = struct {
+@@ -78,8 +78,8 @@ pub const Config = struct {
      silence_mid: bool = false,
      silence_guard: bool = false,
      cfg: ?@import("drama_cfg.zig").Options = null,
@@ -1264,7 +1315,7 @@ index 39925cdf03f1207089e995c0047fb5c05cf40258..0a12f0c0521fb0cb674888813dfc4dce
      /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
      request_log: ?[]const u8 = null,
      /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
-@@ -157,7 +157,7 @@ pub const Server = struct {
+@@ -161,7 +161,7 @@ pub const Server = struct {
      store: responses.Store,
      /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
      ws_cache_bytes: std.atomic.Value(usize) = .init(0),
@@ -1274,10 +1325,10 @@ index 39925cdf03f1207089e995c0047fb5c05cf40258..0a12f0c0521fb0cb674888813dfc4dce
      /// Connections open now; a stop waits for them before freeing what they read.
      open_connections: std.atomic.Value(u32) = .init(0),
 diff --git a/zig/src/server/warm.zig b/zig/src/server/warm.zig
-index fdd7a5436186b32f010fdc74eaa0a26612c9f48b..377172e36439b1e2257fe9dccb50cbfef39c7443 100644
+index 6f63b9ae36564cafc06199dda104b8288aac07e0..cdae2a1f212a9795dc4136393f2d3451510771a9 100644
 --- a/zig/src/server/warm.zig
 +++ b/zig/src/server/warm.zig
-@@ -54,6 +54,9 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
+@@ -56,6 +56,9 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
          p.request.images = x.images;
          p.request.cache_key = x.cache_key;
      }

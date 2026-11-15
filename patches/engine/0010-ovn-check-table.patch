@@ -1,0 +1,91 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm checks: the OVN check commands in their own table beside main.zig's
+
+zig/tests/cuda/main.zig is 595 lines at v1.2.7 and 598 after draft-knobs; the item-plan check and the
+index checks would take it past the lean rule's 600. The GLM OVN check commands move to
+zig/tests/cuda/glm_ovn_checks.zig (the fold's own file, from its reply-prefill patch, which this re-seat
+defers), and main.zig asks that table first: one import and one dispatch line, its usage string ends with the
+table's. glm-draft-onepass is the first command in it; the index and one-pass checks join it later.
+Same commands, same output, the check binary only.
+
+Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542) by the 2026-11-12 re-seat:
+- Moves draft-knobs' glm-draft-onepass registration out of main.zig (598 -> 597 lines), so the item-plan patch's three lines fit (600).
+Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9; main.zig at v1.2.9 is 600 lines: the table is reached through runOr at main's fallback, no import line
+
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -0,0 +1,26 @@
++//! The GLM OVN check commands, each a TF_GLM_OVN_* path against today's kernels, run from main.zig's table.
++const std = @import("std");
++const check = @import("check.zig");
++const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
++
++/// The lines these commands add to `main.zig`'s usage, after its own.
++pub const usage =
++    \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
++    \\
++;
++
++/// True when `cmd` is one of these commands, having run it; false when main.zig's own table should go on.
++pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
++    _ = rest;
++    if (std.mem.eql(u8, cmd, "glm-draft-onepass")) {
++        try glm_draft_onepass.run(gpu);
++    } else return false;
++    return true;
++}
++
++/// `cmd` from this table, or main.zig's `usage` printed and error.UnknownCommand when it is not one of these.
++pub fn runOr(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8, main_usage: []const u8) !void {
++    if (try run(gpu, cmd, rest)) return;
++    std.debug.print("{s}", .{main_usage});
++    return error.UnknownCommand;
++}
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -37,7 +37,6 @@ const glm_exl3_tests = @import("glm_exl3_tests.zig");
+ const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
+ const glm_vision_tests = @import("glm_vision_tests.zig");
+ const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
+-const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
+ const glm_mm_bench = @import("glm_mm_bench.zig");
+ const glm_index_check = @import("glm_index_check.zig");
+ const carveout_tests = @import("carveout_tests.zig");
+@@ -278,7 +277,6 @@ const usage =
+     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
+     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
+     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
+-    \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
+     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
+     \\  glm-index-check           GLM's indexer with glm_index against tf_glm_scores and tf_glm_select_rows, byte for byte (one GPU)
+     \\  glm-kv-host-slots         TF_GLM_KV_HOST's gather past its slots is refused as error.GlmKvHostSlots, then one within (one GPU)
+@@ -314,7 +312,7 @@ const usage =
+     \\  glm-fp8g-shares          block-FP8 TP shares packed as GLM's loader packs them, on the lane, against FP64 of the cut
+     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
+     \\
+-;
++++ @import("glm_ovn_checks.zig").usage;
+ 
+ pub fn main(init: std.process.Init) !u8 {
+     const args = try init.minimal.args.toSlice(init.arena.allocator());
+@@ -446,7 +444,6 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
+     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
+-    if (std.mem.eql(u8, cmd, "glm-draft-onepass")) return glm_draft_onepass.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
+@@ -581,8 +578,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+     if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);
+     if (std.mem.eql(u8, cmd, "aot-fallback")) return aot_fallback_tests.run(gpu, try arg(rest, 0));
+     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+-    std.debug.print("{s}", .{usage});
+-    return error.UnknownCommand;
++    return @import("glm_ovn_checks.zig").runOr(gpu, cmd, rest, usage);
+ }
+ 
+ fn info(gpu: check.Gpu) !void {

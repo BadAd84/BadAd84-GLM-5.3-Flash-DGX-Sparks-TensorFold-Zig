@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# apply.sh [--check] TREE - apply this package (upstream PR #1411 re-seated, and patch 0011) to TREE, a checkout that
-# scripts/apply.sh made (v1.2.7 plus patches/engine 0001-0034, uncommitted in its working tree).
+# apply.sh [--check] TREE - apply this package to TREE; RECORD.md names the tree TREE must hold and the tree it makes.
 # --check: every patch is checked and applied to a temporary index built from TREE's working tree; the working tree
-# and TREE's own index are not touched. It prints the tree id the package would make; RECORD.md names the expected one.
+# and TREE's own index are not touched. It prints the tree id the package would make.
 set -euo pipefail
 CHECK=0; [ "${1:-}" = "--check" ] && { CHECK=1; shift; }
 TREE=${1:?usage: apply.sh [--check] TREE}
 HERE=$(cd "$(dirname "$0")" && pwd)
-[ -d "$TREE/.git" ] || { echo "no git checkout at $TREE" >&2; exit 2; }
+git -C "$TREE" rev-parse --git-dir > /dev/null 2>&1 || { echo "no git checkout at $TREE" >&2; exit 2; }
 idx=$(mktemp); rm -f "$idx"; trap 'rm -f "$idx"' EXIT  # git wants no file or a real index, not an empty one
 GIT_INDEX_FILE=$idx git -C "$TREE" read-tree HEAD  # tracked files .gitignore matches (receipt logs) stay in the tree
 GIT_INDEX_FILE=$idx git -C "$TREE" add -A

@@ -1,15 +1,15 @@
 # The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-15)
 
-`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.7, 36 patches).
+`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 32 patches; the cells below were measured on the v1.2.7 stack of 36 patches, the v1.2.9 stack has not been measured on a GPU, see OVERNIGHT section 37).
 Production on the Sparks is the Python stack and takes none of it. A knob is set only when its cells show no regression at 1, 2, 4, 6 and 8
 streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT below). Every name is a row of the `.glm` scope of
 `zig/src/platform/environment.zig`; an unregistered `TF_GLM_*` name is refused at boot, so `DEFS` must follow the patch set it runs on.
 
-## Set by `DEFS` (16 knobs) and added by `serve.sh`
+## Set by `DEFS` (15 knobs) and added by `serve.sh`
 
-`TF_GLM_KDA_PAD`, `TF_GLM_INDEX_CUDA`, `TF_GLM_OVN_KEPT_WALK`, `TF_GLM_OVN_DRAFT_ONEPASS`, `TF_GLM_OVN_DRAFT_DOWN4`, `TF_GLM_OVN_DRAFT_MLPSPLIT=4`,
-`TF_GLM_OVN_MLA_FUSEMERGE`, `TF_GLM_OVN_DRAFT_EDGE=0.6`, `TF_GLM_OVN_DRAFT_BETA=2`, `TF_GLM_OVN_DRAFT_CUTS=1:0.3`, `TF_EXL3_DEC_ORDER`, `TF_GLM_OVN_X3_NC`,
-`TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN`, `TF_GLM_OVN_KEEP_SEQS` (patch 0035, OVERNIGHT sections 30 and 34), `TF_GLM_OVN_EY_DIRECT` (patch 0036, sections 31, 33, 34).
+`TF_GLM_KDA_PAD`, `TF_GLM_OVN_KEPT_WALK`, `TF_GLM_OVN_DRAFT_ONEPASS`, `TF_GLM_OVN_DRAFT_DOWN4`, `TF_GLM_OVN_DRAFT_MLPSPLIT=4`, `TF_GLM_OVN_MLA_FUSEMERGE`, `TF_GLM_OVN_DRAFT_EDGE=0.6`,
+`TF_GLM_OVN_DRAFT_BETA=2`, `TF_GLM_OVN_DRAFT_CUTS=1:0.3`, `TF_EXL3_DEC_ORDER`, `TF_GLM_OVN_EXL3_ITEMS` (decode windows on our 16-pair item plan: on v1.2.7 the default path, on v1.2.9 a switch because upstream's
+default is its compact 1024-row calls), `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN`, `TF_GLM_OVN_KEEP_SEQS` (OVERNIGHT sections 30 and 34).
 The three-rank RoCE wire (`TF_GLM_ROCE_MULTI`, `TF_TP_MASTER`, `TF_TP_KERNEL_IMAGE`) is added when `--parallel` is at most 4, the world is above 1 and the fatbin exists.
 
 ## Registered, not set, measured: no regression and no gain (stays out)
@@ -42,7 +42,9 @@ Each is untested here, not known neutral. `TF_GLM_OVN_KDA_CHUNKED` changes numer
 | `patches/pr1411` 0013 | `TF_GLM_OVN_DISK_SLICE_MIB=N`, default 0 | a trade, not a default (OVERNIGHT section 36): the other streams' worst gap during a 4.7 GiB restore and the restoring turn's first token are 9,874 ms and 28.2 s off, 2,061 ms and 41.8 s at 32 MiB, 1,982 ms and 35.8 s at 64 MiB, 4,602 ms and 32.9 s at 128 MiB, 3,397 ms and 31.7 s at 256 MiB (one run each) |
 | `patches/cache-salt` | `cache_salt` on a request; `--cache-salt-per-key` | salt honoured without the option (OVERNIGHT section 35); the option is unset |
 
-## Absorbed by upstream v1.2.9 (the re-seat in progress)
+## Absorbed by upstream v1.2.9 (landed 2026-11-15; OVERNIGHT section 37)
 
-On v1.2.9 `TF_GLM_INDEX_CUDA` is upstream's default (`8fe15871c`) and `TF_GLM_OVN_EY_DIRECT` is retired with its patch (upstream `8978c4357`, `dc4aef0ec`: the prompt chunk writes the slot rows
-itself), so both leave `DEFS` with the bump (`work/V129A/serve.sh.diff` is the proposal). Upstream's own defaults there (`TF_GLM_DSEL`, 4,096-row prompt passes) need no setting.
+Four patches of ours are retired because v1.2.9 has the behaviour: the logit gather (upstream `5cd52c7a8`, `5b927e2bf`), the forward pieces split (`1ba369792`), the 2,048-row expert chunk
+(`8978c4357`) and `EY_DIRECT` (`8978c4357`, `dc4aef0ec`: the prompt chunk writes the slot rows itself, so its knob left `DEFS`). `TF_GLM_INDEX_CUDA` is upstream's default (`8fe15871c`) and also left `DEFS`.
+Upstream's own defaults on v1.2.9 (`TF_GLM_DSEL`, 4,096-row prompt passes) need no setting. Overlaps kept for with/without windows instead of dropped on text: our decode-window index patches against
+`TF_GLM_DSEL`, the item plan against compact decode, `MLPSPLIT` against upstream's drafter split, `SPARSE_ONEPASS` against the new prompt plan, the X3 decode knobs, and the glue gather on the collective path.

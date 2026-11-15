@@ -874,3 +874,28 @@ extra delay for the restoring request, each turn also carrying N MiB of copy. At
 128 and 256 MiB the restoring turn waits 4.7 and 3.5 s longer but the other streams' worst gap is 3.4 to 4.6 s (a single run each, so the 128/256 maxima may be one outlier). This is a trade of
 the other streams' worst stall against the restoring request's first token, not a win at every cell: per the repo rule it ships off, with 64 MiB the measured balance point, until the owner accepts it
 or a variant removes the loss (an adaptive N that grows while no other request is waiting is the next piece to try).
+
+## 37. The pin moves to v1.2.9: four patches retired, the packages re-seated, gated on a Spark
+
+Upstream's latest release is v1.2.9 (`6b9de695`, 2026-11-14); main is 557 commits past v1.2.7 and was left alone. A text survey of the 36 + 13 + 4 patches against v1.2.9 read 20 clean, 30 partial, 2 refused
+(no whole patch "absorbed"). Two lanes re-seated them (a three-way merge of each patch's own delta, every conflict settled by reading the upstream commit that moved the code):
+
+| result | patches |
+|---|---|
+| retired, upstream has the behaviour | logit gather (`5cd52c7a8`, `5b927e2bf`); forward pieces split (`1ba369792`); the 2,048-row expert chunk (`8978c4357`); `EY_DIRECT` (`8978c4357`, `dc4aef0ec`) |
+| clean | 18 |
+| re-seated by hand | 14 (knob rows after `TF_GLM_CONTEXT_CEILING`, the drafter MLP split generalised upstream as `df.mlpSplit`, the index kernels' default flip, the checkpoint ladder, the prompt arena, `glue.Set` unions, the Engine initialiser, the render-once pieces, the X3 decode) |
+| kept, listed for a with/without window | decode-window index patches against `TF_GLM_DSEL`; the 16-pair decode item plan against upstream's compact 1024-row calls (now `TF_GLM_OVN_EXL3_ITEMS`, default off, set by `DEFS`; upstream's test is unchanged); `MLPSPLIT` against `df.mlpSplit`; `SPARSE_ONEPASS` against the new prompt plan; the three `X3_*` decode knobs; the glue gather on the collective path |
+
+Upstream PRs: #1411 (head `d730aff64`) and #3222 (head `2a870a8b0508`) are unchanged and still open, so both packages stay. pr1411 0001-0013 became one net patch on the series (0011/0012 were test
+fixes for a patch that is now in the series' own text); cache-salt 0003 is retired (v1.2.9 already has `private_files_test.zig`) and 0004 is not needed (`core/engine_api.zig` is 595 lines).
+
+**Gates run on a Spark (spark5, aarch64), because compiling on the workstation is banned.** The first pass found real defects the lanes had missed: the series did not compile (a function between
+container fields in `eval.zig`, undeclared `ek` in `cuda_exl3.zig`, a missing `decode` field in `cuda_index.zig`) and two packages broke lean and a knob-count test. `gate-names.sh` had reported "0 failing names"
+for the broken trees because a build that stops before any test has none; it now exits 1 with BUILD FAILED. All were fixed inside the patch that owns them. Final: series tree `e02b8a89c2cc`, with pr1411
+`3b06d167fd74`, with cache-salt `27a87244e7dc` (rebuilt exactly from the landed files by the repo's own `apply.sh` scripts). Each of the 32 prefixes passes `check-native-cuda-host`; on the full stack
+`check-native-cuda-host`, `compile-cuda-tests`, the standalone host steps and `fmt` are rc 0, `test-cuda-host` fails only the two tests the pristine v1.2.9 also fails on aarch64 (`cli_config_test`
+"serve --config: expand reads the file..." and `listener` "accepted IPv4 and IPv6 TCP streams disable Nagle..."), `gate-names` has no new failing name and lean has 0 new problems.
+
+Not done on v1.2.9: no image was built and nothing ran on a GPU, so every speed and resume cell above this section is a v1.2.7 number. The GPU bit-exact checks (`glm-exl3-items`, `glm-keep-seqs-check`) are
+inherited from v1.2.7 and need a Spark window. `serve.sh`'s `DEFS` now drops `TF_GLM_INDEX_CUDA` and `TF_GLM_OVN_EY_DIRECT` (upstream's default and a retired patch) and adds `TF_GLM_OVN_EXL3_ITEMS`.

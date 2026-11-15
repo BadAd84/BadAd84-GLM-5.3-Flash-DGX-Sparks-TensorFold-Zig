@@ -35,9 +35,9 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
 - `AGENTS.md` - the rules of this repo: how a patch is cut, gated, measured and landed, what a version bump of
   upstream requires, and how a change goes upstream. `.omp/RULES.md` carries the hard order for upstream work.
 
-## State (2026-11-12)
+## State (2026-11-15)
 
-Base: upstream v1.2.7 (`93a2e93e`) plus the 36 patches of `patches/engine/`. Decode in tok/s at 1, 2, 4, 6 and 8
+Base: upstream v1.2.9 (`6b9de695`) plus the 32 patches of `patches/engine/`, then `patches/pr1411/` (GLM disk tier, upstream PR #1411 re-seated on the series) and `patches/cache-salt/` (upstream PR #3222); trees `e02b8a89`, `3b06d167`, `27a87244`. Gated on a Spark: check, fmt, `test-cuda-host` (only the two aarch64-environment tests the pristine v1.2.9 fails too), lean 0 new. **The tables below were measured on the v1.2.7 stack** (36 patches, section 34 of `docs/OVERNIGHT-2026-11-12.md`); the v1.2.9 stack has not been measured on a GPU yet, and four of our patches are now upstream's (section 37). Decode in tok/s at 1, 2, 4, 6 and 8
 streams, one fresh boot a level, 400 tokens a stream. `TF_GLM_KDA_PAD=1` is the setting production runs and it changes
 numerics, so the pad rows are the like-for-like ones against production; replies are byte-identical between the rows of
 one group.

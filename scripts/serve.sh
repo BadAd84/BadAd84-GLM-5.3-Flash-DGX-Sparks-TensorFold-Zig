@@ -63,17 +63,21 @@ ENV+=(-e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_MIN_NCHANNELS=4 -e NCC
 # killed the boot (container created, then gone within 60s, twice) and L2PF already reports its own
 # sizing at boot, so each needs its own A/B before it can join. Every name below is a row of the .glm scope of
 # zig/src/platform/environment.zig on the re-seated tree (one-chunk and reply-prefill are not carried, see
-# docs/audit-2026-11-12/reseat-v127.md).
-DEFS="TF_GLM_KDA_PAD=1 TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_KEPT_WALK=1
+# docs/audit-2026-11-12/reseat-v127.md). On v1.2.9 TF_GLM_INDEX_CUDA's kernels are upstream's default (both, 0 off),
+# so it left this set; TF_GLM_INDEX_CUDA=all with TF_GLM_INDEX_DECODE_FROM=<positions> is the decode-window arm
+# (patch 0007 of the v1.2.9 series). TF_GLM_OVN_EY_DIRECT left the set with patch 0036: v1.2.9 writes a prompt
+# chunk's routed rows into the slot rows itself (upstream 8978c4357), so there is no knob to set. TF_GLM_OVN_EXL3_ITEMS=1 keeps
+# decode windows on our 16-pair item plan (the v1.2.7 default path; v1.2.9's default is its compact 1024-row calls).
+DEFS="TF_GLM_KDA_PAD=1 TF_GLM_OVN_KEPT_WALK=1
  TF_GLM_OVN_DRAFT_ONEPASS=1 TF_GLM_OVN_DRAFT_DOWN4=1 TF_GLM_OVN_DRAFT_MLPSPLIT=4
  TF_GLM_OVN_MLA_FUSEMERGE=1
  TF_GLM_OVN_DRAFT_EDGE=0.6 TF_GLM_OVN_DRAFT_BETA=2 TF_GLM_OVN_DRAFT_CUTS=1:0.3
- TF_EXL3_DEC_ORDER=1 TF_GLM_OVN_X3_NC=1 TF_GLM_OVN_X3_XROW=1 TF_GLM_OVN_X3_FUSEDOWN=1
- TF_GLM_OVN_KEEP_SEQS=1 TF_GLM_OVN_EY_DIRECT=1"
+ TF_EXL3_DEC_ORDER=1 TF_GLM_OVN_EXL3_ITEMS=1 TF_GLM_OVN_X3_NC=1 TF_GLM_OVN_X3_XROW=1 TF_GLM_OVN_X3_FUSEDOWN=1
+ TF_GLM_OVN_KEEP_SEQS=1"
 # The first seven are the arm measured together (docs/OVERNIGHT-2026-11-12.md section 17); EDGE, BETA and CUTS are production's DFlash2
 # chain rule (fnc7:0.3, section 22); TF_EXL3_DEC_ORDER and the three TF_GLM_OVN_X3_* switches are production's routed-expert decode
-# kernel set (section 24); KEEP_SEQS (patch 0035, section 30) and EY_DIRECT (patch 0036, sections 31 and 33) were measured together at
-# 1/2/4/6/8 streams, section 34. GLUE_FUSE, INDEX_SCHED, POOLS32,
+# kernel set (section 24); KEEP_SEQS (patch 0031 of the v1.2.9 series, section 30) was measured with EY_DIRECT at
+# 1/2/4/6/8 streams, section 34; EY_DIRECT's win is v1.2.9's own path now, so only KEEP_SEQS is left to set. GLUE_FUSE, INDEX_SCHED, POOLS32,
 # INDEX_REGROUP, MM_WIDE, SPARSE_ONEPASS and ROUTER_WARM were measured one at a time, within the noise, so they stay out.
 # Off by default: a knob is default-off until it has been A/B'd at 1/2/4/6/8 streams on this series
 # (docs/OVERNIGHT-2026-11-12.md has the cells). KNOBS=measured opts into the set above; KNOBS=all is the same
