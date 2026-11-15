@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# gates.sh TREE [NAME] - the README's gates on an applied tree, from WSL on the workstation (x86_64 host tests):
+# gates.sh TREE [NAME] - the README's gates on an applied tree, run ON A SPARK (aarch64 host tests; compiling on the workstation is banned):
 #   zig build check-native-cuda-host, zig build test-cuda-host, zig fmt --check zig/
 # and the steps those two do not reach:
 #   zig build compile-cuda-tests      compiles the GPU test binary (zig/tests/cuda): a check nothing imports from
 #                                     main.zig is otherwise never compiled at all
 #   the standalone host steps listed in STANDALONE below, each only if the tree's build defines it
-# The tree is first copied to ~/gt/NAME on the WSL filesystem and the gates run on the copy. Run in place on the
-# Windows mount (/mnt/c), 26 upstream tests that need POSIX file modes, symlinks or FIFOs fail on the pin itself, and
-# under load the test binary that spawns child processes hangs instead of failing (zombie children, then a debug-info
-# lookup on a socket; three gate runs sat there until killed). On the copy those 26 pass.
+# The tree is first copied to ~/gt/NAME on the box's own filesystem and the gates run on the copy. Run in place on a
+# mount with POSIX modes missing (a Windows share), 26 upstream tests that need POSIX file modes, symlinks or FIFOs fail on
+# the pin itself, and under load the test binary that spawns child processes hangs instead of failing. On the copy those pass.
 # Prints each step's exit code and the failing test names. Logs: ~/gates/NAME-<step>.log. Exit 1 if a step failed.
-# Needs ~/tools/zig-x86_64-linux-<.zig-version>. Each step has a 40-minute ceiling. The lean gate is scripts/lean.sh.
+# Needs ~/tools/zig-$(uname -m)-linux-<.zig-version> (x86_64 or aarch64). Each step has a 40-minute ceiling. The lean gate is
+# scripts/lean.sh. GATE_JOBS=N caps the jobs of every step.
 set -uo pipefail
 TREE=${1:?usage: gates.sh TREE [NAME]}; NAME=${2:-$(basename "$(dirname "$TREE")")}
 STANDALONE="test-glm-ring-host test-glm-logprobs-host test-glm-onepass-order-host test-rows-host"
 [ -f "$TREE/.zig-version" ] || { echo "no tree at $TREE"; exit 2; }
 V=$(cat "$TREE/.zig-version")
-Z="$HOME/tools/zig-x86_64-linux-$V/zig"
+Z="$HOME/tools/zig-$(uname -m)-linux-$V/zig"
 [ -x "$Z" ] || { echo "no zig at $Z"; exit 2; }
 COPY="$HOME/gt/$NAME"
 mkdir -p "$COPY" "$HOME/gates"
