@@ -7,8 +7,8 @@ our own series needs. Retire the package when the pin moves past #1411's landing
 Source: repository `wojo/TensorFold`, branch `up-glm-disk`, head `d730aff64a2daf4f8c10f8f737084edc5cc87326` (10 commits),
 on upstream main `3885dceb2bb60fe02e609066b75ec752baf51e38`; fetched as `pull/1411/head` on 2026-11-14.
 
-Base it applies to: `93a2e93ecebff8aa52b88e58c5dd222516e69c5f` (v1.2.7) plus `patches/engine/` 0001-0035, tree
-`685c6abbda5547f5e473d9c6a6a6be17b8e7bf69`, i.e. after `scripts/apply.sh`; final tree `321771fa88e050fa9ba9b00ff70ba6e56cd8ac69`. On 0001-0034 alone (the tree the gates and the images `rs2x3d` and `pr1411` were built from) the base tree was `f5495931b233` and the final `4156b5dd8708e1c423372a0bd4484608afad8bef` (the PR's ten alone: `886db39a209392dcf43123790aafb2bd060ba1c8`).
+Base it applies to: `93a2e93ecebff8aa52b88e58c5dd222516e69c5f` (v1.2.7) plus `patches/engine/` 0001-0036, tree
+`2a07e8cff17123a4fad350f5fb1213fcdb93e28e`, i.e. after `scripts/apply.sh`; final tree `e567d98959661da15d756103cc2d59051cacb78b`. On 0001-0035 the base tree was `685c6abbda55` and the final `321771fa88e0`. On 0001-0034 alone (the tree the gates and the images `rs2x3d` and `pr1411` were built from) the base tree was `f5495931b233` and the final `4156b5dd8708e1c423372a0bd4484608afad8bef` (the PR's ten alone: `886db39a209392dcf43123790aafb2bd060ba1c8`).
 
 How it was made (`work/disk-tier/package.py`): each commit merged onto the tree so far with its parent as the base,
 re-emitted as `git diff-tree -p --full-index` under its own author, date and message. Every patch adds and removes

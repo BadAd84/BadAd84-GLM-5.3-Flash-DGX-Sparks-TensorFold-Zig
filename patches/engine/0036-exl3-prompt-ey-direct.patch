@@ -1,0 +1,870 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm exl3: TF_GLM_OVN_EY_DIRECT, a prompt chunk's routed down kernel writes the slot rows itself
+
+Ported from our archived fork `ai-engine` (ref `fork-ssh/ovn-up`): the EY_DIRECT part of f9209395e "glm cuda: TF_GLM_OVN
+prompt expert switches for EXL3 prompts" (the fork's docs/research/overnight-2026-10-29/impl-x3prompt.md section 1;
+production does the same, exl3_mm.py routed(..., y = b.ey.view(-1, D))). Hand ported: the fork's kernel is odown<0> of a
+new exl3_prompt_ovn.cuh behind a switch struct read when the kernels load; here tf_exl3_ovn_down_0 sits beside
+tf_exl3_prompt_down in exl3_experts.cu with that kernel's body and one more line (the store row), the knob is read where
+the buffers are sized and travels on the family's Scratch, and the common prompt run takes an optional `Out`.
+
+Left out, and why:
+- X3_PROMPT_K64 (production's ots0106/ots0127 64-k stages), X3_PROMPT_ORDER and its order kernel: other levers of the
+  same commit, each its own patch with its own receipts.
+- X3_YBF16 (bf16 slot rows): a numerics trade.
+- The fork's Ovn struct in cuda/exl3_prompt.zig and its read at kernel load: one knob does not need it, and reading it
+  in Buffers.make gives the arena's size and the launch one source, so they cannot disagree.
+
+What the knob does (default off; a .glm row of platform/environment.zig read through cuda/ovn.zig): with
+TF_GLM_OVN_EY_DIRECT=1, Buffers.make sizes a prompt buffer's EXL3 arena without the 8-slot y
+(exl3.scratchBytes(..., true): common.prompt.directBytes, 268,435,456 bytes less a rank at 2,048 rows) and sets
+Scratch.ey_direct. cuda_exl3.run then gives each call's ey rows to the common prompt run as an `Out` (ey + at * 9 *
+dims * 4, 9 slot rows a row), which launches tf_exl3_ovn_down_0 in place of tf_exl3_prompt_down, and the copy of the
+call's routed slots (cuMemcpy2D, y to ey) is not issued. Decode windows are untouched (their item plan already writes
+ey). Off: the same launches with the same arguments and the same arena; the module load looks up one more function,
+which it never launches.
+
+Bits: tf_exl3_ovn_down_0 is tf_exl3_prompt_down's main loop, sums, rotation and scale; pair p (row * 8 + slot) is
+stored at row (p / 8) * 9 + p % 8 instead of p, where the copy put it (dst pitch 9 slot rows, src pitch 8). Slot 8 is
+put_slot's after either. The copy was the next operation on the stream after the down launch, so nothing reads ey's
+routed slots between the two in either form, and nothing but that copy reads y (its readers: tf_exl3_prompt_down's
+argument and the copy's source, both skipped with the knob; moe.x3 is read by cuda_exl3.run alone).
+tf_exl3_prompt_down is not changed.
+
+Why (lane PrefillGap's capture pf1, rank 0, cold prompts of 8,195 and 32,771 tokens, --parallel 4 --context 1048576):
+798 device copies of 268,435,456 bytes on the main stream, 42 in each full 2,048-row pass (one a MoE layer: the 8-slot
+y of 2,048 rows into ey), 2.200 ms each at 122.0 GB/s, 92 ms of a pass of about 1,150 ms. Expected with the knob: about
+-90 ms a full pass (-8%), -0.37 s at 8k and -1.47 s at 32k, to be measured A B B A.
+
+Receipts (lane EyDirect, 2026-11-15; base = v1.2.7 + 0001..0035, tree 685c6abb; head = base + this patch,
+tree 2a07e8cf):
+- scripts/gates.sh (WSL, ~/gates/ey-base-*, ey-head-*): check-native-cuda-host rc 0 (7/7 steps both), test-cuda-host
+  rc 0 (383/383 steps; head 6289 of 6319 tests, base 6283 of 6313, 30 skipped each), compile-cuda-tests rc 0 (10/10),
+  test-glm-ring-host, test-glm-logprobs-host, test-glm-onepass-order-host, test-rows-host rc 0, zig fmt --check rc 0;
+  scripts/gate-names.sh ey-base ey-head rc 0 (no failing name on either side). test-exl3-prompt-host (not a gates.sh
+  step) fails the same two names on base and head, inherited: "1024-row calls keep row and pick offsets..." and
+  "decode retains the existing split-K launches" (written before 0012's item plan and 0029's 2,048-row calls).
+- scripts/lean.sh base against head: base 6257 files 386 problems, head 6259 files 386 problems, 0 new; the largest
+  touched file is 558 lines. `git apply --check` on the base rc 0, and base + patch equal to head file by file.
+- test-glm-ey-direct-host (6 tests: the knob, the arena sizes, Buffers.make's prefill, twin and window buffers, every
+  launch and copy of a prompt chunk at 1 to 2,054 rows against the knob-off plan, decode windows unchanged, the run's
+  guards) and 17 host mutants, each anchored once and each killed by a named test.
+- GPU, RTX 5070 Laptop (sm_120, CUDA 13.3.1 nvcc, driver 616.92), tf-cuda-test with the images the checks load:
+  glm-ey-direct-check rc 0 (24 cases: widths 640 and 768, both rotation kinds, 1 / 8 / 17 / 255 / 2,048 / 2,054 rows;
+  ey and the MoE layer output after put_slot and combine equal the copy path's byte for byte, the freed arena bytes left
+  as filled, each case's control, the direct values one slot over, different); glm-exl3 and glm-exl3-items rc 0. Seven
+  planted controls fail it by exit code: the row stride, the slot index, the second half of an item's members, the scale
+  reassociated, ey one slot over, the second call's offset at 8 slots, the copy path run as well (the freed bytes).
+  The slot rows are fp32 in both paths (cuda_moe.fill's bf16_slots is false for an EXL3 layer); the cache format does
+  not reach the routed experts.
+- nvcc 13.3 SASS of exl3_experts.cu, base against head, sm_120 and sm_121: tf_exl3_prompt_down (1712 instructions),
+  tf_exl3_prompt_gu and tf_exl3_prompt_rotate identical; tf_exl3_ovn_down_0 127 registers, 44,288 bytes of shared
+  memory, no stack, as tf_exl3_prompt_down.
+- Not run: the Spark cells (cold first tokens at 8,192 and 32,768, knob off against on, A B B A, replies equal); no
+  speed result is claimed before they run.
+
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -80,6 +80,7 @@
+ | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
+ | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
+ | `TF_GLM_OVN_KEEP_SEQS` | Exactly `0` or `1`; default off (a released stream's sequence stays allocated for the next request on its slot, as slot 0's always does, so a request starts with no allocation, fill or free) |
++| `TF_GLM_OVN_EY_DIRECT` | Exactly `0` or `1`; default off (an EXL3 prompt chunk's routed-expert down kernel writes the slot rows itself, the same values, so the prompt arena holds no 8-slot output and no copy into the slot rows runs) |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -102,6 +102,7 @@
+     const x3 = b.step("test-glm-exl3-x3-host", "TF_GLM_OVN_X3_*: knobs, each grouped launch's kernel and its tail, without a GPU");
+     for ([_]*std.Build.Module{ cuda, glm }) |m| x3.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"EXL3 X3:"} })).step);
+     b.step("test-glm-keep-seqs-host", "TF_GLM_OVN_KEEP_SEQS: a released slot's sequence kept or freed, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM keep seqs:"} })).step);
++    b.step("test-glm-ey-direct-host", "TF_GLM_OVN_EY_DIRECT: the prompt arena without y and the down launch into ey, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM EY direct:"} })).step);
+ }
+ 
+ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+diff --git a/zig/exl3_prompt_host.zig b/zig/exl3_prompt_host.zig
+--- a/zig/exl3_prompt_host.zig
++++ b/zig/exl3_prompt_host.zig
+@@ -85,9 +85,9 @@
+ }
+ 
+ test "exl3 prompt: scratch omits global split partials and shared rotation storage is independent of pick count" {
+-    const shared = glm.exl3.scratchBytes(1024, 512, 256, true, true)[0];
+-    const separate = glm.exl3.scratchBytes(1024, 512, 256, true, false)[0];
+-    const decode = glm.exl3.scratchBytes(1024, 512, 256, false, false)[0];
++    const shared = glm.exl3.scratchBytes(1024, 512, 256, true, true, false)[0];
++    const separate = glm.exl3.scratchBytes(1024, 512, 256, true, false, false)[0];
++    const decode = glm.exl3.scratchBytes(1024, 512, 256, false, false, false)[0];
+     try std.testing.expect(shared < separate and separate < decode);
+     if (comptime @hasDecl(ex, "prompt")) {
+         const l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .dims = 512, .width = 256, .experts = 9, .codebook = .mcg, .uniform_k2 = 8, .shared_input = true };
+diff --git a/zig/kernels/cuda/exl3_experts.cu b/zig/kernels/cuda/exl3_experts.cu
+--- a/zig/kernels/cuda/exl3_experts.cu
++++ b/zig/kernels/cuda/exl3_experts.cu
+@@ -340,3 +340,40 @@
+         }
+     }
+ }
++
++// TF_GLM_OVN_EY_DIRECT: tf_exl3_prompt_down's sums, values and order; pair p's row is p / slots, slot p % slots of ys.
++extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_ovn_down_0(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
++        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
++        float* __restrict__ y, int K, int D, int slots, int ys) {
++    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes()];
++    __shared__ int rows_sh[TPM];
++    const int cb = blockIdx.x, item = blockIdx.y;
++    if (item >= counts[0]) return;
++    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
++    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
++    __syncthreads();
++    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
++    float acc[TMT][TNB][4];
++    tmain<1, TPM>(Xd, Xd, Td, Td, rows_sh, cnt, e, K, D >> 4, cb, 1, reinterpret_cast<half*>(smem_raw), acc);
++    float* Ed = reinterpret_cast<float*>(smem_raw);
++    for (int hf = 0; hf < 2 && hf * TPH < cnt; ++hf) {
++        if (hf) __syncthreads();
++        tspill(Ed, DN_ES, warp * TMT * 16, acc, hf);
++        __syncthreads();
++        for (int i = warp; i < TPH && hf * TPH + i < cnt; i += TNW) {
++            const int p = rows_sh[hf * TPH + i];
++            const size_t row = (size_t)(p / slots) * ys + p % slots;
++#pragma unroll
++            for (int blk = 0; blk < 2; ++blk) {
++                const int n = cb * 256 + blk * 128 + 4 * lane;
++                float v[4];
++#pragma unroll
++                for (int j = 0; j < 4; ++j) v[j] = Ed[(size_t)i * DN_ES + blk * 128 + 4 * lane + j];
++                fwht128(v, lane);
++                float* o = y + row * D + n;
++#pragma unroll
++                for (int j = 0; j < 4; ++j) o[j] = v[j] * HAD_SCALE * __half2float(svh_d[(size_t)e * D + n + j]);
++            }
++        }
++    }
++}
+diff --git a/zig/src/cuda/exl3_prompt.zig b/zig/src/cuda/exl3_prompt.zig
+--- a/zig/src/cuda/exl3_prompt.zig
++++ b/zig/src/cuda/exl3_prompt.zig
+@@ -9,6 +9,8 @@
+ 
+ pub const tile = 64;
+ pub const Scratch = struct { xg: u64, xu: u64, xd: u64, y: u64, rows: usize, slots: usize };
++/// Where the down kernel writes pair p instead of y: row p / slots, slot p % slots of `ys` fp32 slot rows a row at `y`.
++pub const Out = struct { y: u64, ys: usize };
+ pub fn eligible(l: ex.Layer) bool {
+     return l.codebook == .mcg and l.uniform_k2 == 8 and l.gu_stride == 0 and l.dims > 0 and l.width > 0 and l.dims % 256 == 0 and l.width % 128 == 0 and (l.act_mode == 0 or l.act_mode == 1);
+ }
+@@ -21,24 +23,37 @@
+ fn aligned(n: usize) !usize {
+     return (try add(n, 255)) / 256 * 256;
+ }
+-fn sizes(l: ex.Layer, rows: usize, slots: usize) ![4]usize {
++fn sizes(l: ex.Layer, rows: usize, slots: usize, own_y: bool) ![4]usize {
+     if (!eligible(l) or rows == 0 or slots == 0 or slots > 32 or l.experts == 0 or l.experts > grouped.max_experts) return error.Exl3Shape;
+     const pairs = try mul(rows, slots);
+     if (pairs > std.math.maxInt(i32) or l.dims > std.math.maxInt(i32) or l.width > std.math.maxInt(i32)) return error.Exl3Shape;
+     const rotated = try aligned(try mul(try mul(if (l.shared_input) rows else pairs, l.dims), 2));
+-    return .{ rotated, if (l.shared_input) 0 else rotated, try aligned(try mul(try mul(pairs, l.width), 2)), try aligned(try mul(try mul(pairs, l.dims), 4)) };
++    const y = if (own_y) try aligned(try mul(try mul(pairs, l.dims), 4)) else 0;
++    return .{ rotated, if (l.shared_input) 0 else rotated, try aligned(try mul(try mul(pairs, l.width), 2)), y };
+ }
+-pub fn bytes(l: ex.Layer, rows: usize, slots: usize) !usize {
+-    const ns = try sizes(l, rows, slots);
++fn total(ns: [4]usize) !usize {
+     var sum: usize = 0;
+     for (ns) |n| sum = try add(sum, n);
+     return sum;
+ }
++pub fn bytes(l: ex.Layer, rows: usize, slots: usize) !usize {
++    return total(try sizes(l, rows, slots, true));
++}
++/// bytes() without y: the scratch of a run whose down kernel writes an `Out`.
++pub fn directBytes(l: ex.Layer, rows: usize, slots: usize) !usize {
++    return total(try sizes(l, rows, slots, false));
++}
+ pub fn scratch(base: u64, l: ex.Layer, rows: usize, slots: usize) !Scratch {
+-    const ns = try sizes(l, rows, slots);
+-    const total = try bytes(l, rows, slots);
+-    _ = std.math.add(u64, base, total) catch return error.Exl3Shape;
+-    return .{ .xg = base, .xu = if (l.shared_input) base else base + ns[0], .xd = base + ns[0] + ns[1], .y = base + ns[0] + ns[1] + ns[2], .rows = rows, .slots = slots };
++    return carve(base, l, rows, slots, true);
++}
++/// scratch() in directBytes(): xg, xu and xd where scratch() puts them, y 0 (only a run with an `Out` takes it).
++pub fn directScratch(base: u64, l: ex.Layer, rows: usize, slots: usize) !Scratch {
++    return carve(base, l, rows, slots, false);
++}
++fn carve(base: u64, l: ex.Layer, rows: usize, slots: usize, own_y: bool) !Scratch {
++    const ns = try sizes(l, rows, slots, own_y);
++    _ = std.math.add(u64, base, try total(ns)) catch return error.Exl3Shape;
++    return .{ .xg = base, .xu = if (l.shared_input) base else base + ns[0], .xd = base + ns[0] + ns[1], .y = if (own_y) base + ns[0] + ns[1] + ns[2] else 0, .rows = rows, .slots = slots };
+ }
+ fn go(f: Function, s: Stream, grid: [3]usize, threads: u32, values: anytype) !void {
+     var args: launch.Args = .{};
+@@ -52,11 +67,14 @@
+     rotate: Function,
+     gateup: Function,
+     down: Function,
++    down_out: Function = undefined, // tf_exl3_ovn_down_0: the down kernel writing an `Out`'s slot rows
+     pub fn resolve(mod: Module) !Kernels {
+-        return .{ .rotate = try mod.function("tf_exl3_prompt_rotate"), .gateup = try mod.function("tf_exl3_prompt_gu"), .down = try mod.function("tf_exl3_prompt_down") };
++        return .{ .rotate = try mod.function("tf_exl3_prompt_rotate"), .gateup = try mod.function("tf_exl3_prompt_gu"), .down = try mod.function("tf_exl3_prompt_down"), .down_out = try mod.function("tf_exl3_ovn_down_0") };
+     }
+-    pub fn run(k: Kernels, e: *const ex.Experts, router: grouped.Router, s: Stream, l: ex.Layer, x: u64, stride: usize, picks: u64, rows: usize, sc: Scratch, p: grouped.Plan) !void {
++    /// `out`: the down kernel writes its slot rows (same values, same order) and sc.y is not touched; null: sc.y.
++    pub fn run(k: Kernels, e: *const ex.Experts, router: grouped.Router, s: Stream, l: ex.Layer, x: u64, stride: usize, picks: u64, rows: usize, sc: Scratch, p: grouped.Plan, out: ?Out) !void {
+         if (!eligible(l) or rows == 0 or rows > sc.rows or stride < l.dims or stride > std.math.maxInt(i32)) return error.Exl3Shape;
++        if (out) |o| if (o.ys < sc.slots or o.ys > std.math.maxInt(i32)) return error.Exl3Shape; // rows that overlap
+         _ = try bytes(l, rows, sc.slots);
+         const pairs = rows * sc.slots;
+         try router.route(s, picks, pairs, l.experts, tile, p);
+@@ -69,6 +87,7 @@
+         }
+         const items = grouped.maxItems(pairs, l.experts, tile);
+         try go(k.gateup, s, .{ l.width / 128, items, 1 }, 256, .{ sc.xg, sc.xu, l.gate, l.up, p.items, p.counts, p.members, l.svh_g, l.svh_u, l.suh_d, sc.xd, i(l.dims), i(l.width), i(if (l.shared_input) sc.slots else 1), l.limit, l.act_mode });
++        if (out) |o| return go(k.down_out, s, .{ l.dims / 256, items, 1 }, 256, .{ sc.xd, l.down, p.items, p.counts, p.members, l.svh_d, o.y, i(l.width), i(l.dims), i(sc.slots), i(o.ys) });
+         try go(k.down, s, .{ l.dims / 256, items, 1 }, 256, .{ sc.xd, l.down, p.items, p.counts, p.members, l.svh_d, sc.y, i(l.width), i(l.dims), i(sc.slots) });
+     }
+ };
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -60,6 +60,7 @@
+     _ = @import("cuda_images_interleave_test.zig");
+     _ = @import("cuda_pages_test.zig");
+     _ = @import("cuda_keep_seqs_test.zig");
++    _ = @import("cuda_exl3_ey_test.zig");
+     _ = @import("cuda_snapshot_layout_test.zig");
+     _ = @import("cuda_ranks_test.zig");
+     _ = @import("cuda_env.zig");
+diff --git a/zig/src/families/glm/cuda_exl3.zig b/zig/src/families/glm/cuda_exl3.zig
+--- a/zig/src/families/glm/cuda_exl3.zig
++++ b/zig/src/families/glm/cuda_exl3.zig
+@@ -135,7 +135,8 @@
+ /// The selected common EXL3 owner. This file adapts the family's checkpoint shard and slot layout only.
+ pub const Kernels = cuda.exl3_experts.Experts;
+ const common = cuda.exl3_experts;
+-pub const Scratch = struct { picks: u64, xg: u64, xu: u64, z: u64 };
++/// The family's arena; `ey_direct`, the flag scratchBytes sized it with: a prompt chunk's down kernel writes ey itself.
++pub const Scratch = struct { picks: u64, xg: u64, xu: u64, z: u64, ey_direct: bool = false };
+ pub const top_k = 8;
+ /// Rows a call to the common experts takes: each call reads every expert's weights, so a prompt chunk is one call.
+ pub const chunk_rows = 2048;
+@@ -155,11 +156,19 @@
+ fn decodeBytes(l: common.Layer, n: usize) !usize {
+     return @max(try common.scratchBytes(l, n, top_k), try common.fusedBytes(l, n, top_k + 1));
+ }
+-pub fn scratchBytes(rows: usize, dims: usize, width: usize, prefill: bool, shx: bool) [4]usize {
++/// TF_GLM_OVN_EY_DIRECT (default off): prompt chunks' down kernel writes ey's routed slots; their arena holds no y.
++pub fn eyDirect() bool {
++    return cuda.ovn.on("EY_DIRECT");
++}
++/// `ey_direct`: a prompt chunk's arena without y (Scratch.ey_direct); a decode window's is the same either way.
++pub fn scratchBytes(rows: usize, dims: usize, width: usize, prefill: bool, shx: bool, ey_direct: bool) [4]usize {
+     const n: usize = @min(rows, chunk_rows);
+     var l = shape(dims, width);
+     l.shared_input = shx;
+-    if (prefill and common.prompt.eligible(l)) return .{ picksBytes(rows) + (common.prompt.bytes(l, n, top_k) catch unreachable), 4, 4, 4 };
++    if (prefill and common.prompt.eligible(l)) {
++        const bytes = if (ey_direct) common.prompt.directBytes(l, n, top_k) else common.prompt.bytes(l, n, top_k);
++        return .{ picksBytes(rows) + (bytes catch unreachable), 4, 4, 4 };
++    }
+     return .{ picksBytes(rows) + (decodeBytes(shape(dims, width), n) catch unreachable), 4, 4, 4 };
+ }
+ /// `height` rows of `width` bytes, `spitch` apart at `src`, to `dpitch` apart at `dst`, in one call.
+@@ -183,16 +192,22 @@
+             continue;
+         }
+         try copyRows(stream, sc.picks, top_k * 4, picks + at * slots * 4, slots * 4, top_k * 4, n, "EXL3 compact route rows");
++        const ey_at = ey + at * slots * dims * 4; // this call's slot rows
++        if (fused and sc.ey_direct) { // the down kernel writes ey_at's routed slots: no y, nothing to copy
++            const scratch = try common.prompt.directScratch(arena, l, cap, top_k);
++            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, sc.picks, n, scratch, plan_buf, .{ .y = ey_at, .ys = slots });
++            continue;
++        }
+         const output = if (fused) blk: {
+             const scratch = try common.prompt.scratch(arena, l, cap, top_k);
+-            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, sc.picks, n, scratch, plan_buf);
++            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, sc.picks, n, scratch, plan_buf, null);
+             break :blk scratch.y;
+         } else blk: {
+             const scratch = try common.scratch(arena, l, cap, top_k);
+             try k.runSlots(stream, l, x + at * x_stride * 2, x_stride, .bf16, sc.picks, n, scratch);
+             break :blk scratch.y;
+         };
+-        try copyRows(stream, ey + at * slots * dims * 4, slots * dims * 4, output, top_k * dims * 4, top_k * dims * 4, n, "EXL3 routed output slots");
++        try copyRows(stream, ey_at, slots * dims * 4, output, top_k * dims * 4, top_k * dims * 4, n, "EXL3 routed output slots");
+     }
+ }
+ 
+@@ -236,7 +251,7 @@
+         const l = shape(4096, width);
+         const plain = try common.scratchBytes(l, rows, top_k);
+         try std.testing.expect(try common.fusedBytes(l, rows, top_k + 1) <= plain);
+-        try std.testing.expectEqual(picksBytes(rows) + plain, scratchBytes(rows, 4096, width, false, false)[0]);
++        try std.testing.expectEqual(picksBytes(rows) + plain, scratchBytes(rows, 4096, width, false, false, false)[0]);
+     };
+ }
+ 
+@@ -247,13 +262,13 @@
+         var l = shape(4096, width);
+         l.shared_input = shx;
+         const whole = try common.prompt.bytes(l, prefill_rows, top_k);
+-        try std.testing.expectEqual(picksBytes(prefill_rows) + whole, scratchBytes(prefill_rows, 4096, width, true, shx)[0]);
++        try std.testing.expectEqual(picksBytes(prefill_rows) + whole, scratchBytes(prefill_rows, 4096, width, true, shx, false)[0]);
+     };
+     // the arena at TP=3's two shares, so what this costs a rank is a number the gate holds, not one in a report
+-    try std.testing.expectEqual(@as(usize, 306_249_728), scratchBytes(prefill_rows, 4096, 640, true, true)[0]);
+-    try std.testing.expectEqual(@as(usize, 310_444_032), scratchBytes(prefill_rows, 4096, 768, true, true)[0]);
+-    try std.testing.expectEqual(@as(usize, 557_907_968), scratchBytes(prefill_rows, 4096, 640, true, false)[0]);
+-    try std.testing.expectEqual(@as(usize, 562_102_272), scratchBytes(prefill_rows, 4096, 768, true, false)[0]);
++    try std.testing.expectEqual(@as(usize, 306_249_728), scratchBytes(prefill_rows, 4096, 640, true, true, false)[0]);
++    try std.testing.expectEqual(@as(usize, 310_444_032), scratchBytes(prefill_rows, 4096, 768, true, true, false)[0]);
++    try std.testing.expectEqual(@as(usize, 557_907_968), scratchBytes(prefill_rows, 4096, 640, true, false, false)[0]);
++    try std.testing.expectEqual(@as(usize, 562_102_272), scratchBytes(prefill_rows, 4096, 768, true, false, false)[0]);
+ }
+ 
+ test "GLM EXL3 X3: the knobs are off unset, each reaches the decode options, and X3_NC refuses a third depth" {
+diff --git a/zig/src/families/glm/cuda_exl3_ey_test.zig b/zig/src/families/glm/cuda_exl3_ey_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_exl3_ey_test.zig
+@@ -0,0 +1,261 @@
++//! TF_GLM_OVN_EY_DIRECT: a prompt chunk's down kernel writes ey's routed slot rows, so no y is held and none copied.
++const std = @import("std");
++const cuda = @import("cuda");
++const exl3 = @import("cuda_exl3.zig");
++const experts = @import("cuda_experts.zig");
++const state = @import("cuda_state.zig");
++const weights = @import("cuda_weights.zig");
++const shard = @import("cuda_shard.zig");
++const ex = cuda.exl3_experts;
++const t = std.testing;
++
++const D = 4096; // GLM-5.3-Flash's hidden size
++const N = 768; // rank 0's routed-expert share at TP=3
++const count = 288; // routed experts
++const slots = exl3.top_k + 1;
++
++/// The function handles of the launches compared argument by argument.
++const id = struct {
++    const rot_in = 2;
++    const rotate = 11;
++    const gateup = 12;
++    const down = 13;
++    const down_out = 14;
++};
++
++/// Where the recorded dispatch's buffers are: the x3 arena (Scratch.picks), the rows, the picks and ey.
++const at = struct {
++    const arena: u64 = 0x1_0000_0000;
++    const x: u64 = 0x2_0000_0000;
++    const picks: u64 = 0x3_0000_0000;
++    const ey: u64 = 0x4_0000_0000;
++};
++
++/// One launch: its function, grid and block, and every argument of the prompt kernels and rot_in.
++const Call = struct { id: usize, grid: [3]u32, block: u32, args: [16]u64 = @splat(0) };
++
++/// The driver: launches and 2-D copies recorded in order, nothing executed.
++const Rec = struct {
++    var calls: [512]Call = undefined;
++    var n: usize = 0;
++    var copies: [16]cuda.abi.Memcpy2D = undefined;
++    var copied: usize = 0;
++
++    /// Each argument's bytes as the kernel declares them, for the launches compared argument by argument.
++    fn sizes(f: usize) []const u8 {
++        return switch (f) {
++            id.rot_in => &.{ 8, 4, 4, 8, 8, 8, 8, 8, 4, 4, 4 },
++            id.rotate => &.{ 8, 4, 8, 8, 4 },
++            id.gateup => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4 },
++            id.down => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
++            id.down_out => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4 },
++            else => &.{},
++        };
++    }
++
++    fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
++        var c: Call = .{ .id = @intFromPtr(f), .grid = .{ gx, gy, gz }, .block = bx };
++        for (sizes(c.id), 0..) |size, i| {
++            const b: [*]const u8 = @ptrCast(args.?[i].?);
++            c.args[i] = if (size == 8) std.mem.readInt(u64, b[0..8], .little) else std.mem.readInt(u32, b[0..4], .little);
++        }
++        if (n < calls.len) calls[n] = c;
++        n += 1;
++        return cuda.abi.success;
++    }
++
++    fn copy(m: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
++        if (copied < copies.len) copies[copied] = m.*;
++        copied += 1;
++        return cuda.abi.success;
++    }
++};
++
++/// A dispatch's record: its launches and its copies.
++const Plan = struct { calls: []const Call, copies: []const cuda.abi.Memcpy2D };
++
++fn fun(d: *const cuda.Driver, handle: usize) cuda.Function {
++    return .{ .d = d, .handle = @ptrFromInt(handle) };
++}
++
++/// The recorded kernels, each its own handle, and the family's router.
++const Fake = struct {
++    d: cuda.Driver,
++    k: ex.Experts,
++    ek: experts.Kernels,
++
++    fn init(f: *Fake) void {
++        Rec.n = 0;
++        Rec.copied = 0;
++        f.d = undefined;
++        f.d.api.cuLaunchKernel = Rec.launch;
++        f.d.api.cuMemcpy2DAsync_v2 = Rec.copy;
++        const d = &f.d;
++        f.k = .{ .mod = undefined, .group = fun(d, 1), .rot_in = fun(d, id.rot_in), .grouped = .{ fun(d, 3), fun(d, 6), fun(d, 7) }, .gateup = fun(d, 4), .down_combine = fun(d, 5) };
++        f.k.prompt = .{ .rotate = fun(d, id.rotate), .gateup = fun(d, id.gateup), .down = fun(d, id.down), .down_out = fun(d, id.down_out) };
++        f.k.plan_rotate = fun(d, 15);
++        f.k.plan_finish = fun(d, 16);
++        f.k.plan_finish_after = fun(d, 17);
++        f.k.ovn_walk = fun(d, 18);
++        f.k.ovn_nc = .{ fun(d, 19), fun(d, 27) };
++        f.ek = .{ .nvfp4 = undefined, .b32 = null, .router = .{ .plan_small = fun(d, 20), .plan_rank = fun(d, 21), .plan_offsets = fun(d, 22), .plan_scatter = fun(d, 23), .plan_rows = fun(d, 24), .plan_rank_rows = fun(d, 25), .plan_scatter_rows = fun(d, 26) } };
++    }
++
++    fn stream(f: *Fake) cuda.Stream {
++        return .{ .d = &f.d, .handle = null };
++    }
++};
++
++const plan_buf: cuda.grouped.Plan = .{ .items = 10000, .members = 20000, .counts = 30000, .rank = 40000, .hist = 50000 };
++
++/// exl3.run on `rows` rows through the recording driver; `direct`: the arena's Scratch.ey_direct.
++fn dispatch(a: std.mem.Allocator, rows: usize, prompt: bool, shx: bool, direct: bool) !Plan {
++    var f: Fake = undefined;
++    f.init();
++    const w: exl3.Experts = .{ .gt = 100, .ut = 200, .dt = 300, .k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .shx = shx };
++    const sc: exl3.Scratch = .{ .picks = at.arena, .xg = 0, .xu = 0, .z = 0, .ey_direct = direct };
++    try exl3.run(&f.k, &f.ek, f.stream(), w, sc, plan_buf, at.x, D, at.picks, slots, rows, count, D, N, 10, prompt, at.ey, 0);
++    try t.expect(Rec.n <= Rec.calls.len and Rec.copied <= Rec.copies.len);
++    return .{ .calls = try a.dupe(Call, Rec.calls[0..Rec.n]), .copies = try a.dupe(cuda.abi.Memcpy2D, Rec.copies[0..Rec.copied]) };
++}
++
++test "GLM EY direct: the knob reads off unset and at 0, on at 1" {
++    for ([_]?[]const u8{ null, "0", "1" }, [_]bool{ false, false, true }) |raw, on| {
++        cuda.ovn.fake("EY_DIRECT", raw);
++        try t.expectEqual(on, exl3.eyDirect());
++    }
++    cuda.ovn.fake("EY_DIRECT", null);
++}
++
++test "GLM EY direct: a prompt arena is the same bytes less y at every share, and a decode window's is unchanged" {
++    const rows = state.prefill_rows;
++    for ([_]usize{ 640, 768, 1024, 2048 }) |width| for ([_]bool{ false, true }) |shx| { // TP=3's two shares, TP=2, TP=1
++        const own = exl3.scratchBytes(rows, D, width, true, shx, false)[0];
++        try t.expectEqual(own - rows * exl3.top_k * D * 4, exl3.scratchBytes(rows, D, width, true, shx, true)[0]);
++        for ([_]usize{ 1, 17, 64 }) |r| try t.expectEqual(exl3.scratchBytes(r, D, width, false, shx, false), exl3.scratchBytes(r, D, width, false, shx, true));
++    };
++    // what the knob gives back a rank at TP=3's two shares, so it is a number the gate holds
++    try t.expectEqual(@as(usize, 37_814_272), exl3.scratchBytes(rows, D, 640, true, true, true)[0]);
++    try t.expectEqual(@as(usize, 42_008_576), exl3.scratchBytes(rows, D, 768, true, true, true)[0]);
++    var l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .dims = 512, .width = 256, .experts = 9, .codebook = .mcg, .uniform_k2 = 8 };
++    for ([_]usize{ 1, 7, 64, 1023 }) |r| for ([_]usize{ 1, 8, 32 }) |s| for ([_]bool{ false, true }) |shared| {
++        l.shared_input = shared;
++        const own = try ex.prompt.scratch(4096, l, r, s);
++        const direct = try ex.prompt.directScratch(4096, l, r, s);
++        try t.expect(direct.xg == own.xg and direct.xu == own.xu and direct.xd == own.xd and direct.y == 0);
++        try t.expectEqual(try ex.prompt.bytes(l, r, s) - std.mem.alignForward(usize, r * s * l.dims * 4, 256), try ex.prompt.directBytes(l, r, s));
++    };
++}
++
++test "GLM EY direct: prefill buffers made with the knob hold their prompt arena less y, and their scratch says so" {
++    const Driver = struct {
++        var next: u64 = 0x100000000;
++        fn alloc(out: *u64, bytes: usize) callconv(.c) c_int {
++            out.* = next;
++            next += std.mem.alignForward(u64, bytes, 256);
++            return 0;
++        }
++        fn free(_: u64) callconv(.c) c_int {
++            return 0;
++        }
++        fn fill(_: u64, _: u8, _: usize) callconv(.c) c_int {
++            return 0;
++        }
++    };
++    var d: cuda.Driver = undefined;
++    d.api.cuMemAlloc_v2 = Driver.alloc;
++    d.api.cuMemFree_v2 = Driver.free;
++    d.api.cuMemsetD8_v2 = Driver.fill;
++    var layers: [45]weights.Layer = undefined;
++    var w: weights.Weights = undefined;
++    w.config = .{};
++    w.config.exl3 = true;
++    w.share = try shard.Share.of(&w.config, 0, 3);
++    for (&layers, 0..) |*l, i| l.mixer = if (w.config.kind(@intCast(i)) == .mla) .{ .mla = undefined } else .{ .kda = undefined };
++    w.layers = &layers;
++    w.exl3_shx = true;
++    var prompt_bytes: [2]usize = undefined;
++    var window_bytes: [2]usize = undefined;
++    for ([_]?[]const u8{ null, "1" }, 0..) |raw, i| {
++        cuda.ovn.fake("EY_DIRECT", raw);
++        defer cuda.ovn.fake("EY_DIRECT", null);
++        var b = try state.Buffers.init(&d, &w, state.prefill_rows, true, 8256);
++        defer b.deinit();
++        var twin = try state.Buffers.initTwin(&d, &w, &b, 8256);
++        defer twin.deinit();
++        var window = try state.Buffers.init(&d, &w, state.window_rows, false, 8256);
++        defer window.deinit();
++        for ([_]bool{ b.moe.x3.ey_direct, twin.moe.x3.ey_direct, window.moe.x3.ey_direct }) |flag| try t.expectEqual(raw != null, flag);
++        prompt_bytes[i] = b.arena.buf.len;
++        window_bytes[i] = window.arena.buf.len;
++    }
++    try t.expectEqual(prompt_bytes[0] - state.prefill_rows * exl3.top_k * D * 4, prompt_bytes[1]);
++    try t.expectEqual(window_bytes[0], window_bytes[1]);
++}
++
++test "GLM EY direct: on, a prompt chunk's down launch writes ey's routed slots and nothing is copied; else the off plan" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    for ([_]usize{ 1, 8, 17, 255, exl3.chunk_rows, exl3.chunk_rows + 6 }) |rows| for ([_]bool{ true, false }) |shx| {
++        const off = try dispatch(a, rows, true, shx, false);
++        const on = try dispatch(a, rows, true, shx, true);
++        const calls = (rows + exl3.chunk_rows - 1) / exl3.chunk_rows;
++        try t.expectEqual(2 * calls, off.copies.len); // each call: its compact picks, then its routed slots
++        try t.expectEqual(calls, on.copies.len); // each call: its compact picks alone
++        try t.expectEqual(off.calls.len, on.calls.len);
++        const full = exl3.scratchBytes(rows, D, N, true, shx, false)[0];
++        const used = exl3.scratchBytes(rows, D, N, true, shx, true)[0];
++        var downs: usize = 0;
++        for (off.calls, on.calls) |was, now| {
++            try t.expectEqual(was.grid, now.grid);
++            try t.expectEqual(was.block, now.block);
++            for (now.args) |v| try t.expect(v < at.arena + used or v >= at.arena + full); // none in the bytes the knob frees
++            if (was.id != id.down) {
++                try t.expectEqual(was.id, now.id);
++                try t.expectEqualSlices(u64, &was.args, &now.args);
++                continue;
++            }
++            const first = downs * exl3.chunk_rows;
++            try t.expectEqual(@as(usize, id.down_out), now.id);
++            try t.expectEqualSlices(u64, was.args[0..6], now.args[0..6]); // xd, the trellis, the plan, svh
++            try t.expectEqual(at.ey + first * slots * D * 4, now.args[6]); // the call's ey rows, not y
++            try t.expectEqualSlices(u64, was.args[7..10], now.args[7..10]); // K, D and the 8 pairs a row
++            try t.expectEqual(@as(u64, slots), now.args[10]); // 9 slot rows a row: the shared slot left alone
++            try t.expectEqual(at.arena + used, was.args[6]); // off, y starts where the knob's arena ends
++            const c = off.copies[2 * downs + 1]; // off: the call's routed slots, y into ey's rows
++            try t.expect(c.src == was.args[6] and c.dst == now.args[6] and c.height == @min(exl3.chunk_rows, rows - first));
++            try t.expect(c.width == exl3.top_k * D * 4 and c.src_pitch == exl3.top_k * D * 4 and c.dst_pitch == slots * D * 4);
++            try t.expect(std.meta.eql(off.copies[2 * downs], on.copies[downs])); // the compact picks, the same copy
++            downs += 1;
++        }
++        try t.expectEqual(calls, downs);
++    };
++}
++
++test "GLM EY direct: a decode window's launches and copies are the same with the arena's flag set" {
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    for ([_]usize{ 1, 8, 17, 64 }) |rows| for ([_]bool{ true, false }) |shx| {
++        const off = try dispatch(a, rows, false, shx, false);
++        const on = try dispatch(a, rows, false, shx, true);
++        try t.expect(off.calls.len > 0 and off.calls.len == on.calls.len and off.copies.len == on.copies.len);
++        for (off.calls, on.calls) |was, now| try t.expect(std.meta.eql(was, now));
++        for (off.copies, on.copies) |was, now| try t.expect(std.meta.eql(was, now));
++    };
++}
++
++test "GLM EY direct: the common prompt run refuses slot rows that overlap or pass i32, and takes them a row apart" {
++    var f: Fake = undefined;
++    f.init();
++    const l: ex.Layer = .{ .gate = 100, .up = 200, .down = 300, .gate_k2 = 400, .up_k2 = 400, .down_k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .experts = count, .dims = D, .width = N, .codebook = .mcg, .uniform_k2 = 8, .shared_input = true };
++    const sc = try ex.prompt.directScratch(at.arena, l, 64, exl3.top_k);
++    for ([_]usize{ 0, exl3.top_k - 1, @as(usize, std.math.maxInt(i32)) + 1 }) |ys| {
++        try t.expectError(error.Exl3Shape, f.k.prompt.run(&f.k, f.ek.router, f.stream(), l, at.x, D, at.picks, 64, sc, plan_buf, .{ .y = at.ey, .ys = ys }));
++    }
++    try t.expectEqual(@as(usize, 0), Rec.n); // refused before any launch
++    try f.k.prompt.run(&f.k, f.ek.router, f.stream(), l, at.x, D, at.picks, 64, sc, plan_buf, .{ .y = at.ey, .ys = exl3.top_k });
++    const last = Rec.calls[Rec.n - 1];
++    try t.expect(last.id == id.down_out and last.args[6] == at.ey and last.args[9] == exl3.top_k and last.args[10] == exl3.top_k);
++}
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -232,7 +232,8 @@
+         var mm: usize = 4;
+         // windows under rows_from rows keep their K slices apart (a prompt's tail chunk on the prefill buffers too)
+         for (b16Shapes(w)) |sh_| mm = @max(mm, b16.partBytes(@min(rows, b16.rows_from - 1), sh_[0], sh_[1]));
+-        const x3: [4]usize = if (c.exl3) exl3.scratchBytes(rows, D, ew, prefill, w.exl3_shx) else @splat(4);
++        const ey_direct = exl3.eyDirect(); // TF_GLM_OVN_EY_DIRECT: prompt chunks' arena without y
++        const x3: [4]usize = if (c.exl3) exl3.scratchBytes(rows, D, ew, prefill, w.exl3_shx, ey_direct) else @splat(4);
+         var split = false; // a KDA stack in two parts moves each part's rows through one more buffer
+         for (w.layers) |l| split = split or (l.mixer == .kda and l.mixer.kda.proj == .split);
+         const hist_len = if (pairs > cuda.grouped.small) (pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
+@@ -331,7 +332,7 @@
+             .mx = p[69],
+             .part = p[twin_at.part],
+         };
+-        out.moe.x3 = .{ .picks = p[71], .xg = p[72], .xu = p[73], .z = p[74] };
++        out.moe.x3 = .{ .picks = p[71], .xg = p[72], .xu = p[73], .z = p[74], .ey_direct = ey_direct };
+         out.kda.tmp = p[75];
+         if (twin) |of| {
+             var t = of.*;
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -114,6 +114,7 @@
+     .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KEEP_SEQS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_EY_DIRECT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
+diff --git a/zig/tests/cuda/glm_exl3_items_tests.zig b/zig/tests/cuda/glm_exl3_items_tests.zig
+--- a/zig/tests/cuda/glm_exl3_items_tests.zig
++++ b/zig/tests/cuda/glm_exl3_items_tests.zig
+@@ -102,7 +102,7 @@
+         .rank = try r.zeros(P * 4),
+         .hist = try r.zeros(4),
+     };
+-    const sz = glm.exl3.scratchBytes(rows, dims, n, false, w.shx);
++    const sz = glm.exl3.scratchBytes(rows, dims, n, false, w.shx, false);
+     const sc: glm.exl3.Scratch = .{ .picks = try r.zeros(sz[0]), .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]) };
+     const ey = try r.zeros(rows * slots * dims * 4);
+     const xd = try r.zeros(P * n * 2);
+diff --git a/zig/tests/cuda/glm_exl3_tests.zig b/zig/tests/cuda/glm_exl3_tests.zig
+--- a/zig/tests/cuda/glm_exl3_tests.zig
++++ b/zig/tests/cuda/glm_exl3_tests.zig
+@@ -111,7 +111,7 @@
+         .rank = try r.zeros((if (wide) P else 1) * 4),
+         .hist = try r.zeros((if (wide) (P + 1023) / 1024 * E else 1) * 4),
+     };
+-    const sz = glm.exl3.scratchBytes(rows, D, N, prompt, s.shx);
++    const sz = glm.exl3.scratchBytes(rows, D, N, prompt, s.shx, false);
+     const sc: glm.exl3.Scratch = .{ .picks = try r.zeros(sz[0]), .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]) };
+     const ey = try r.zeros(rows * slots * D * 4);
+     const xd = try r.zeros(P * N * 2);
+diff --git a/zig/tests/cuda/glm_ey_direct_check.zig b/zig/tests/cuda/glm_ey_direct_check.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/glm_ey_direct_check.zig
+@@ -0,0 +1,185 @@
++//! `glm-ey-direct-check`: TF_GLM_OVN_EY_DIRECT's prompt chunks, ey and the layer output, against the copy path.
++const std = @import("std");
++const cuda = @import("cuda");
++const glm = @import("glm_cuda");
++const check = @import("check.zig");
++const Rig = @import("quant_ref_tests.zig").RigT;
++
++const E = 16; // routed experts; the shared expert is id E, which no pair takes
++const D = 4096; // GLM-5.3-Flash's hidden size
++const slots = glm.exl3.top_k + 1;
++const limit: f32 = 10.0;
++/// Prompt rows a case runs: one, a few, odd counts, one whole call, and two calls (the second of 6 rows).
++const row_counts = [_]usize{ 1, 8, 17, 255, glm.exl3.chunk_rows, glm.exl3.chunk_rows + 6 };
++
++fn sign(r: *Rig, scale: f16) f16 {
++    return if (r.rng.boolean()) scale else -scale;
++}
++
++/// E random K x N trellis matrices as the loader lays them out, and their scales; `rot`: every expert's one suh.
++fn matrix(r: *Rig, k: usize, n: usize, rot: ?[]const f16, suh: *u64, svh: *u64) !u64 {
++    const words = k / 16 * (n / 16) * 64;
++    const tr = try r.a.alloc(i16, E * words);
++    for (tr) |*v| v.* = r.rng.int(i16);
++    const su = try r.a.alloc(f16, E * k);
++    for (su, 0..) |*v, j| v.* = if (rot) |s| s[j % k] else sign(r, 1.0);
++    const sv = try r.a.alloc(f16, E * n);
++    for (sv) |*v| v.* = sign(r, 0.02);
++    suh.* = try r.dev(std.mem.sliceAsBytes(su));
++    svh.* = try r.dev(std.mem.sliceAsBytes(sv));
++    const base = try r.dev(std.mem.sliceAsBytes(tr));
++    const ptrs = try r.a.alloc(u64, E);
++    for (ptrs, 0..) |*p, e| p.* = base + e * words * 2;
++    return r.dev(std.mem.sliceAsBytes(ptrs));
++}
++
++/// A layer's experts at a rank's width `n`; `shx`: every expert's gate and up input under one rotation.
++fn experts(r: *Rig, n: usize, shx: bool) !glm.exl3.Experts {
++    const k2: [E]i32 = @splat(8);
++    var w: glm.exl3.Experts = .{ .gt = 0, .ut = 0, .dt = 0, .k2 = try r.dev(std.mem.sliceAsBytes(&k2)), .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .shx = shx };
++    var rot: ?[]f16 = null;
++    if (shx) {
++        rot = try r.a.alloc(f16, D);
++        for (rot.?) |*v| v.* = sign(r, 1.0);
++    }
++    w.gt = try matrix(r, D, n, rot, &w.suh_g, &w.svh_g);
++    w.ut = try matrix(r, D, n, rot, &w.suh_u, &w.svh_u);
++    w.dt = try matrix(r, n, D, null, &w.suh_d, &w.svh_d);
++    return w;
++}
++
++/// Each row's 8 distinct routed experts, then the shared expert's id.
++fn picks(r: *Rig, rows: usize) ![]i32 {
++    const out = try r.a.alloc(i32, rows * slots);
++    for (0..rows) |row| {
++        var seen: [E]bool = @splat(false);
++        for (0..slots - 1) |j| {
++            var e = r.rng.uintLessThan(usize, E);
++            while (seen[e]) e = r.rng.uintLessThan(usize, E);
++            seen[e] = true;
++            out[row * slots + j] = @intCast(e);
++        }
++        out[row * slots + slots - 1] = E;
++    }
++    return out;
++}
++
++/// cuda_moe.fill's tail on a chunk's slot rows: the shared expert's rows into slot 8, then the 9 slots' weighted sum.
++const Tail = struct {
++    put_slot: cuda.Function,
++    glue: *const glm.glue.Kernels,
++
++    fn run(t: Tail, r: *Rig, ey: u64, sy: u64, wts: u64, out: u64, rows: usize) !void {
++        var a: cuda.Args = .{};
++        a.add(sy);
++        a.add(ey);
++        for ([_]usize{ rows, D, slots, glm.exl3.top_k, 0 }) |v| a.add(@as(c_int, @intCast(v)));
++        try cuda.launch.launch(t.put_slot, .{ .grid = .{ .x = @intCast((rows * D + 255) / 256) }, .block = .{ .x = 256 } }, r.s, &a);
++        try glm.glue.combine(.{ .glue = t.glue }, r.s, ey, true, wts, out, rows, D, slots);
++    }
++};
++
++/// One dispatch's slot rows ey [rows][slots][D] fp32 and its arena, every byte 0xff before the run.
++const Out = struct { ey: u64, arena: u64 };
++
++/// glm.exl3.run on prompt rows, Scratch.ey_direct = `direct`, the copy path's arena size; `shift` slots off: a control.
++fn dispatch(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, w: glm.exl3.Experts, n: usize, x: u64, pk: u64, rows: usize, direct: bool, shift: usize) !Out {
++    const P = rows * glm.exl3.top_k;
++    const wide = P > cuda.grouped.small;
++    const plan: cuda.grouped.Plan = .{
++        .members = try r.zeros(P * 4),
++        .items = try r.zeros(cuda.grouped.maxItems(P, E, glm.experts.staged_tile) * 12),
++        .counts = try r.zeros(8),
++        .rank = try r.zeros((if (wide) P else 1) * 4),
++        .hist = try r.zeros((if (wide) (P + 1023) / 1024 * E else 1) * 4),
++    };
++    const sz = glm.exl3.scratchBytes(rows, D, n, true, w.shx, direct);
++    const arena = try r.zeros(glm.exl3.scratchBytes(rows, D, n, true, w.shx, false)[0]);
++    const sc: glm.exl3.Scratch = .{ .picks = arena, .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]), .ey_direct = direct };
++    const ey = try r.zeros((rows * slots + shift) * D * 4);
++    try glm.exl3.run(k, ek, r.s, w, sc, plan, x, D, pk, slots, rows, E, D, n, limit, true, ey + shift * D * 4, 0);
++    try r.s.synchronize();
++    return .{ .ey = ey, .arena = arena };
++}
++
++/// Random fp32 values in [-1, 1) on the device.
++fn floats(r: *Rig, n: usize) !u64 {
++    const v = try r.a.alloc(f32, n);
++    for (v) |*f| f.* = r.rng.float(f32) * 2 - 1;
++    return r.dev(std.mem.sliceAsBytes(v));
++}
++
++/// The copy path, the direct one and the control (the direct values one slot over) on the same rows, compared.
++fn case(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, tail: Tail, w: glm.exl3.Experts, n: usize, rows: usize) !void {
++    const mark = r.bufs.items.len;
++    defer {
++        for (r.bufs.items[mark..]) |*b| b.free();
++        r.bufs.shrinkRetainingCapacity(mark);
++    }
++    var host: std.heap.ArenaAllocator = .init(r.gpu.gpa);
++    defer host.deinit();
++    const keep = r.a;
++    r.a = host.allocator();
++    defer r.a = keep;
++    const name = try std.fmt.allocPrint(r.a, "width {d}, {s}, {d} rows", .{ n, if (w.shx) "one rotation" else "a rotation an expert", rows });
++    const x = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * D, 1.0)));
++    const pk = try r.dev(std.mem.sliceAsBytes(try picks(r, rows)));
++    const copied = try dispatch(r, k, ek, w, n, x, pk, rows, false, 0);
++    const direct = try dispatch(r, k, ek, w, n, x, pk, rows, true, 0);
++    const control = try dispatch(r, k, ek, w, n, x, pk, rows, true, 1);
++    const bytes = rows * slots * D * 4;
++    const want = try r.back(copied.ey, bytes);
++    try check.sameBytes(try std.fmt.allocPrint(r.a, "{s}: ey against the copy path", .{name}), try r.back(direct.ey, bytes), want);
++    const off = std.mem.indexOfDiff(u8, try r.back(control.ey, bytes), want) orelse
++        return check.expect(false, "{s}: the control (ey one slot over) equals the copy path, so the check cannot fail", .{name});
++    const full = glm.exl3.scratchBytes(rows, D, n, true, w.shx, false)[0];
++    const used = glm.exl3.scratchBytes(rows, D, n, true, w.shx, true)[0];
++    if (std.mem.indexOfNone(u8, try r.back(direct.arena + used, full - used), &.{0xff})) |i|
++        return check.expect(false, "{s}: the direct run wrote byte {d} of the arena bytes the knob frees", .{ name, i });
++    try check.expect(std.mem.indexOfNone(u8, try r.back(copied.arena + used, full - used), &.{0xff}) != null, "{s}: the copy path's y is not in the bytes the knob frees", .{name});
++    const sy = try floats(r, rows * D);
++    const wts = try floats(r, rows * slots);
++    var outs: [3]u64 = undefined;
++    for ([_]u64{ copied.ey, direct.ey, control.ey }, &outs) |ey, *out| {
++        out.* = try r.zeros(rows * D * 4);
++        try tail.run(r, ey, sy, wts, out.*, rows);
++    }
++    const layer = try r.back(outs[0], rows * D * 4);
++    try check.sameBytes(try std.fmt.allocPrint(r.a, "{s}: the layer output against the copy path's", .{name}), try r.back(outs[1], rows * D * 4), layer);
++    try check.expect(!std.mem.eql(u8, try r.back(outs[2], rows * D * 4), layer), "{s}: the control's layer output equals the copy path's", .{name});
++    std.debug.print("RESULT {s}: ey ({d} bytes) and the layer output equal the copy path's, the freed {d} arena bytes untouched; control differs at byte {d}\n", .{ name, bytes, full - used, off });
++}
++
++pub fn run(gpu: check.Gpu) !void {
++    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
++    defer arena.deinit();
++    var stream = try cuda.Stream.init(gpu.d, false);
++    defer stream.deinit();
++    var prng = std.Random.DefaultPrng.init(11);
++    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = stream, .rng = prng.random() };
++    defer {
++        for (r.bufs.items) |*b| b.free();
++        r.bufs.deinit(gpu.gpa);
++    }
++    var pm = try cuda.Module.load(gpu.d, cuda.kernels.experts);
++    defer pm.unload();
++    var k = try glm.exl3.Kernels.load(gpu.d);
++    defer k.unload();
++    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), false);
++    defer ek.unload();
++    var ops = try cuda.Module.load(gpu.d, cuda.kernels.glm_ops);
++    defer ops.unload();
++    var gm = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer gm.unload();
++    const gk = try glm.glue.Kernels.load(gm);
++    const tail: Tail = .{ .put_slot = try ops.function("tf_glm_put_slot"), .glue = &gk };
++    var cases: usize = 0;
++    for ([_]usize{ 640, 768 }) |n| for ([_]bool{ true, false }) |shx| { // TP=3's two shares, both rotation kinds
++        const w = try experts(&r, n, shx);
++        for (row_counts) |rows| {
++            try case(&r, &k, &ek, tail, w, n, rows);
++            cases += 1;
++        }
++    };
++    check.pass("glm-ey-direct-check: {d} cases of {any} rows, ey and the layer output equal the copy path's byte for byte, the freed arena untouched, every control different", .{ cases, row_counts });
++}
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -2,6 +2,7 @@
+ const std = @import("std");
+ const check = @import("check.zig");
+ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
++const glm_ey_direct_check = @import("glm_ey_direct_check.zig");
+ const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
+ const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
+ const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
+@@ -11,6 +12,7 @@
+ /// The lines these commands add to `main.zig`'s usage, after its own.
+ pub const usage =
+     \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
++    \\  glm-ey-direct-check       TF_GLM_OVN_EY_DIRECT: prompt chunks' ey and layer output against the copy path, byte for byte
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
+     \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
+@@ -23,6 +25,8 @@
+ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+     if (std.mem.eql(u8, cmd, "glm-draft-onepass")) {
+         try glm_draft_onepass.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-ey-direct-check")) {
++        try glm_ey_direct_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-index-ovn-check")) {
+         try glm_index_ovn_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-index-regroup-check")) {

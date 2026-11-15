@@ -749,3 +749,23 @@ Measured on image `rs2x3k` (`KNOBS=measured`, P=4, ids client, four-stream cells
 The model predicted +10.4% and +2.9%. The long-context decode arm with the knob on (4, 6, 8 clients against the P=4 / 1M boot): 110.84 / 109.44 /
 119.96 tok/s, 0.94x / 0.95x / 0.91x of production's 117.98 / 114.78 / 131.28 (0.86x / 0.90x / 0.87x without it). Decode at 1, 2, 6 and 8 streams
 with the knob is not yet measured (at one stream slot 0 is the only slot, so the path is unchanged).
+
+## 31. Cold prefill gap: what the capture and the arms show, and patch 0036
+
+Window `queue25` (spark1, image `rs2x3`, P=4 / 1M, `scripts` of lane PrefillGap: one capture of a cold 8,192 and a cold 32,768 prompt on rank 0 under nsys,
+and arms of two fresh boots each, replies equal to the control's in all): first token at 8k / 32k against the control: `ONEPASS_PIPE=1` -4.6% / -5.6%;
+`TF_GLM_CHUNK_SOLO=3` +1.2%; two pieces +0.0%; ring reduce +6.7%; `ABSORB_VEC` -0.3 / -0.6; `MM_WIDE` -1.0 / -1.4; `GLUE_ROW` +0.8; `PDL_EARLY` +0.5;
+`INDEX_SCHED` and the pool settings +0.3 / +0.1; a drafter-off pairing arm -5.1% / -6.4% against its own control (the controls of that file read -2.0% / -2.4%,
+so noise is about 2%). The recipe needs its drafter, so pairing is not usable. The earlier "`CHUNK_SOLO=4096` gives no gain" verdict (section 29) ran with
+8 exchange pieces under `ROCE_MULTI`, so it is confounded; the arms above vary pieces and reduce modes explicitly.
+
+The pass (2,048 rows, rank 0, 1,167.6 ms a chunk at 20 real chunks; the first parse merged chunks and read 576 ms for experts): experts 439 ms, shared expert
+114, MLA 128, KDA projections about 120, main-stream waits 90 ms (ranks 1 and 2: 165 and 170 ms). The expert kernels run at production's per-layer figure
+(`gate/up` + `down` + `rotate` 8.22 ms against production's 8.31 ms a layer at the same rows). The copy of the routed outputs into the 9-slot rows costs
+2.07 to 2.2 ms a layer, 87 to 92 ms a pass; production writes those rows directly. Ranks 1 and 2 wait about 80 ms a pass in the MoE gather because rank 0 holds
+768 expert rows against 640 (128-row EXL3 units, 16 units split 6/5/5); fixing that needs 64-row units, i.e. re-quantizing.
+
+Patch 0036 (`TF_GLM_OVN_EY_DIRECT`, default off; the fork's `EY_DIRECT`, ai-engine `f9209395e`) writes the rows in the down kernel and skips the copy; the prompt
+arena is 256 MiB smaller a rank. Byte-exact on the RTX 5070: `ey` and the MoE layer output equal the copy path's at 1 / 8 / 17 / 255 / 2,048 / 2,054 rows for
+widths 640 and 768 (24 of 24 cases), 7 of 7 planted controls fail, the base kernel's machine code is unchanged, 17 of 17 host mutants killed, gates green, lean 386
+against 386. Expected from the capture: -90 ms a pass (about -8%); the Spark cells (ctl, ey, ey, ctl at 8k and 32k) are not yet measured.

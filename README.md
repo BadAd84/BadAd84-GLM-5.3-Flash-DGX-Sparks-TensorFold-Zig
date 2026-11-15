@@ -37,7 +37,7 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
 
 ## State (2026-11-12)
 
-Base: upstream v1.2.7 (`93a2e93e`) plus the 35 patches of `patches/engine/`. Decode in tok/s at 1, 2, 4, 6 and 8
+Base: upstream v1.2.7 (`93a2e93e`) plus the 36 patches of `patches/engine/`. Decode in tok/s at 1, 2, 4, 6 and 8
 streams, one fresh boot a level, 400 tokens a stream. `TF_GLM_KDA_PAD=1` is the setting production runs and it changes
 numerics, so the pad rows are the like-for-like ones against production; replies are byte-identical between the rows of
 one group.
