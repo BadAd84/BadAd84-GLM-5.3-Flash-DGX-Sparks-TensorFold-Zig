@@ -921,3 +921,35 @@ decode-window index kernels, our decode item plan against upstream's compact cal
 **Disk tier on v1.2.9 (`patches/pr1411` net patch + cache-salt), the TP=3 window of section 32 (`docs/audit-2026-11-12/disktier-v129a-rows.jsonl`):** 17 of 17 resumed replies equal a cold server's, `cache_salt` honoured
 (another salt cached 0 of 32,213, the unsalted control 30,720), the store opened with three ranks' parts on every boot. The 596k conversation: turn 1 cold 352.59 s (v1.2.7 stack: 374.5 to 375.6 s), turn 2 from RAM
 14.02 s, after a SIGKILL of every rank 14.14 s with 618,496 tokens cached, after a clean restart 16.37 s with 641,024 cached (production: 224.68 s, 12.54 s, 12.80 s, 12.90 s; 1.57x, 1.12x, 1.10x, 1.27x).
+
+## 39. The v1.2.9 decode loss is in the build, not in a knob and not in the window
+
+Three windows on spark1 (`queue37`, `queue38`, `queue39`, 19:09 to 21:38 UTC), all on `glm53-zig:v129a` unless named, production's prompts as ids, one fresh boot a level, replies equal on every cell. A knob arm is read against its adjacent controls.
+
+**Knob arms against the control (tok/s, change from the control):**
+
+| arm | 1 stream | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| `items0` (`TF_GLM_OVN_EXL3_ITEMS=0`) vs `ctl-a` 76.51 / 78.87 / 103.14 / 134.33 / 165.86 | -0.2% | -0.0% | +0.7% | +0.8% | +0.2% |
+| `mlp0` (`DRAFT_MLPSPLIT=0`) vs `ctl-c` 76.11 / - / 103.44 / - / 165.72 | -1.8% | - | +0.1% | - | -0.4% |
+| `x3off` (the three X3 knobs off) | +0.7% | - | +0.6% | - | +0.1% |
+| `dsel0` (`TF_GLM_DSEL=0`) | -0.0% | - | +0.4% | - | -0.1% |
+| `ctl-d` (second control) | +0.1% | - | -0.4% | - | -0.1% |
+| `ks0`, `ks0b` (`KEEP_SEQS=0`) vs `ctl-k` / `ctl-k2` (2, 4, 8 streams) | - | -0.3 / +0.3% | -0.3 / -0.6% | - | -0.6 / +0.3% |
+
+The two controls of each pair agree within 0.5%, so every row above is flat: no knob recovers the loss and none was silently costing it. The arms that cannot move this bench by construction (`DSEL`, the decode index, `ONEPASS_PIPE`, the index-kernel default) were confirmed flat or dropped, because the bench's rows sit below the sparse limit (`dense_limit` 2,051 positions) and never run the DSA select. `queue37` was cut after `items0` for that reason and `arms-v129-ab2.txt` was rewritten before it ran: its first form had one pipe too many and booted every arm on the MTP head, not DFlash2 (found by the `DecodeSuspects` lane reading `arms-client.sh`).
+
+**The image A B B A, same recipe (`KNOBS=measured`, the v1.2.7 side with `TF_GLM_INDEX_CUDA=1` and `EY_DIRECT=1` as its recipe had them), 1, 4, 8 streams, tok/s:**
+
+| cell | image | 1 | 4 | 8 | tokens a round | ms a round (1 stream) |
+|---|---|---:|---:|---:|---:|---:|
+| `img-a1` | v1.2.9 `v129a` | 76.12 | 103.61 | 164.59 | 3.14 | 40.3 |
+| `img-b1` | v1.2.7 `rs2x3y` | 78.92 (+3.7%) | 107.76 (+4.0%) | 173.48 (+5.4%) | 3.14 | 38.8 |
+| `img-b2` | v1.2.7 `rs2x3y` | 79.86 (+4.9%) | 107.58 (+3.8%) | 173.98 (+5.7%) | 3.14 | 38.4 |
+| `img-a2` | v1.2.9 `v129a` | 76.34 (+0.3%) | 103.52 (-0.1%) | 165.49 (+0.5%) | 3.14 | 40.2 |
+
+The two v1.2.9 cells bracket the two v1.2.7 cells and agree within 0.5%; the v1.2.7 image is 3.7 to 5.7% faster at every level, with identical acceptance (3.14 tokens a round). So the loss is in the image, not in the state of the box in this window: the round costs 1.6 to 1.9 ms more on v1.2.9 at one stream, and the gap grows with streams (4 to 5.7%). It is smaller than section 38's -4.2 to -11.2%, which compared against section 34's cells from a different window, so the like-for-like loss is 4 to 5.7%, not 11%.
+
+**What the `DecodeSuspects` lane read (`work/DecodeSuspects/REPORT.md`, nothing run):** the GPU decode kernels and their order are identical between the two stacks, no nvcc flag changed for GLM, every collective call site reads the same, and the archived disk-tier windows show the same shape (+0.70 ms a token at 32k, +0.77 at 120k, +0.76 at 600k, +0.55 in the one-stream bench), nearly flat per token. 18 of the 32 patches have identical changed lines on both pins; of the 14 re-seated ones, only the item-plan switch (0011, `DEFS` restores the old path, now shown flat by `items0`) and DSEL ordering at long context (0012, not reached by this bench) change behaviour. The loss is therefore either host-side or in a part of the image no knob covers; the stage profile on both images (`queue40`) says which.
+
+**Erratum, found from the nsys tables of section 39 (22:13 UTC):** every v1.2.9 cell of sections 38 and 39 ran a STALE recipe. The `serve.sh` on spark1 was the 2026-11-14 11:23 copy: its `DEFS` had neither `TF_GLM_OVN_EXL3_ITEMS=1` nor `TF_GLM_OVN_KEEP_SEQS=1` (the repo's has both since `50dcf30` and `5c13c44`; the staging step copied the tarball and the images but never refreshed `serve.sh`). Patch 0031's X3 kernels run on the item plan, so with the switch unset v1.2.9 took upstream's compact decode path and X3 was inert, which is why `items0` and `x3off` were flat. The kernel tables show it: per MoE call the stale run launched `tf_exl3_group`, `tf_exl3_experts_rot_in`, `tf_exl3_down_combine` and two `tf_exl3_grouped_1` (194.0 us median) where the v1.2.7 image launched `plan_kernel`, `prompt_rotate` and two `tf_exl3_ovn_nc1` (189.5 us): about 145 of the 213 ms of extra kernel time in the cell, 1.07 ms a round, equal to the 1.0 to 1.3 ms the stage profile put in `routed`. So the 4 to 11% "regression" and the A B B A gap of this section measure a recipe without the item plan, not the v1.2.9 engine. Corrected cells with the repo's `serve.sh` are in the next paragraph; the cold-prompt rows of section 38 and the disk-tier rows (not affected by the item plan) were taken on the same stale file and are re-run with the corrected one.
