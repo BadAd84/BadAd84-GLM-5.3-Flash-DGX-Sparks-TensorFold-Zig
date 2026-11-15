@@ -39,7 +39,7 @@ Each is untested here, not known neutral. `TF_GLM_OVN_KDA_CHUNKED` changes numer
 | package | switch | state |
 |---|---|---|
 | `patches/pr1411` (GLM disk tier) | `--learn-conversations --learn-dir DIR --learn-gib N` (per rank, every rank the same) | passed only by `scripts/queue-disk-tier.sh`; correct at TP=3 (OVERNIGHT sections 32 and 35) |
-| `patches/pr1411` 0013 | `TF_GLM_OVN_DISK_SLICE_MIB=N`, default 0 | a trade, not a default: with 32 MiB the other streams' worst gap during a 4.7 GiB restore falls from 9,874 ms to 2,061 ms and the restoring turn's first token rises from 28.2 s to 41.8 s (16 MiB: 2,094 ms and 55.7 s); larger sizes being measured |
+| `patches/pr1411` 0013 | `TF_GLM_OVN_DISK_SLICE_MIB=N`, default 0 | a trade, not a default (OVERNIGHT section 36): the other streams' worst gap during a 4.7 GiB restore and the restoring turn's first token are 9,874 ms and 28.2 s off, 2,061 ms and 41.8 s at 32 MiB, 1,982 ms and 35.8 s at 64 MiB, 4,602 ms and 32.9 s at 128 MiB, 3,397 ms and 31.7 s at 256 MiB (one run each) |
 | `patches/cache-salt` | `cache_salt` on a request; `--cache-salt-per-key` | salt honoured without the option (OVERNIGHT section 35); the option is unset |
 
 ## Absorbed by upstream v1.2.9 (the re-seat in progress)

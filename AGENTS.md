@@ -80,6 +80,13 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 - **Builds run on spark1, never beside a bench** (a build shares the box's memory bandwidth), and images go to
   spark2 and spark3 by `docker save | ssh ... docker load`. Images are `glm53-zig:<tag>`; those named
   `ai-engine:<tag>` are from before 2026-11-12.
+- **NOTHING IS COMPILED ON THE WORKSTATION (owner 2026-11-15: "compiling things locally is banned, it makes the laptop far too
+  slow").** No `zig build`, `zig test`, `zig fmt` over the tree, `scripts/gates.sh`, `scripts/lean.sh`, `nvcc` or image build runs
+  on the laptop or in its WSL, by an agent, a lane or a script, with or without a lock or a memory cap. Text-only work stays local
+  (`git apply`, `git merge-file`, tree ids, `sha256sum`, patch and record files). Compile, test and gate runs go to a Spark that is
+  not inside a GPU window (builds and gates are CPU work: spark1 outside a window, or an idle dev box among spark4-6); the
+  workstation RTX 5070 bit-exact checks that earlier lanes ran are banned with them. A brief to a lane says so, and a lane that
+  finds a gate needs a compile reports it as not run instead of running it here.
 - **Quantities come from a tool, with the reading.** Elapsed time and "now" are read from the box (`date`), never
   estimated: a session can sit for hours between two tool calls.
 - **GPG-signed commits.** Stage explicit paths; the message goes in a file (`git commit -S -F`).

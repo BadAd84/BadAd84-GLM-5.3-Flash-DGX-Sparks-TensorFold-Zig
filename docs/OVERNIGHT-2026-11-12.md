@@ -851,3 +851,26 @@ Window (`scripts/queue-disk-tier.sh`, image `rs2x3ds` = series + pr1411 + cache-
 one of the 17 resumed replies equals a cold server's reply to the same messages; the 596k conversation's prefill after a SIGKILL of every rank is 15.14 s (cached 618,496), after a clean restart
 17.62 s (cached 641,024), turn 2 from RAM 15.13 s, turn 1 cold 374.54 s. Not checked: that a salted state is never written to disk (the PR's own host test covers it; this window's probe runs in the
 first boot only and records no disk counters), and decode at 1, 2, 4, 6 and 8 streams with the package.
+
+## 36. Sliced restore (patch pr1411/0013, `TF_GLM_OVN_DISK_SLICE_MIB`): the restoring turn pays for what the other streams are spared
+
+Section 32 found the other three decoding streams stop for up to 10.9 s while a 4.7 GiB disk state is restored. The stall is the restore's copy into place at admission (one scatter a block on
+the engine thread), not the disk read, which takes about 3 s on the I/O thread. Patch 0013 holds a queued request whose read-ahead is ready while other requests decode, copies at most N MiB a
+turn and resumes the request from RAM when the state is whole. Image `rs2x3f` (series 0001-0036, pr1411 0001-0013, cache-salt), `KNOBS=measured`, P=4 / 1M, the window of section 32 (k1 k2 k3), turn 4 of the
+596k conversation (a clean restart, 641,024 tokens cached, 4,697 MiB read, beside three decoding streams). One run a size; rows `docs/audit-2026-11-12/disktier-dslice-*-rows.jsonl`.
+
+| slice | other streams: median / p99 / largest gap while the state restores | restoring turn's first token | reply window, largest gap |
+|---|---|---:|---:|
+| off | 78 / 9,874 / 9,874 ms | 28.18 s | 747 ms |
+| 16 MiB | 112 / 1,359 / 2,094 ms | 55.72 s | 1,394 ms |
+| 32 MiB | 146 / 1,391 / 2,061 ms | 41.84 s | 1,315 ms |
+| 64 MiB | 216 / 1,511 / 1,982 ms | 35.82 s | 583 ms |
+| 128 MiB | 98 / 2,110 / 4,602 ms | 32.87 s | 565 ms |
+| 256 MiB | 82 / 2,102 / 3,397 ms | 31.65 s | 563 ms |
+
+The base window's largest gap before the request reads 1,207 to 1,310 ms in every arm. Every turn of every arm (17 each) has the same `token_sha` as the slices-off run, whose own turns equal a cold server's
+17 of 17; turn 3 (after a SIGKILL, no other streams) is 25.4 to 26.9 s in all arms, so the knob changes nothing when the restore is alone. The mechanism is the turns: a slice a turn means 4.7 GiB / N turns of
+extra delay for the restoring request, each turn also carrying N MiB of copy. At 64 MiB the other streams' worst stall falls 80% (9.9 s to 2.0 s) and the restoring turn waits 7.6 s (27%) longer; at
+128 and 256 MiB the restoring turn waits 4.7 and 3.5 s longer but the other streams' worst gap is 3.4 to 4.6 s (a single run each, so the 128/256 maxima may be one outlier). This is a trade of
+the other streams' worst stall against the restoring request's first token, not a win at every cell: per the repo rule it ships off, with 64 MiB the measured balance point, until the owner accepts it
+or a variant removes the loss (an adaptive N that grows while no other request is waiting is the next piece to try).
