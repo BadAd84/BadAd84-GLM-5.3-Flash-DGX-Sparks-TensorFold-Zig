@@ -30,7 +30,7 @@ steps=$("$Z" build --cache-dir "$HOME/zc-gates-$NAME" -l 2>/dev/null | awk '{pri
 for step in check-native-cuda-host test-cuda-host compile-cuda-tests $STANDALONE; do
   if ! grep -qx "$step" <<< "$steps"; then echo "$step: not a step of this tree"; continue; fi
   log="$HOME/gates/$NAME-$step.log"
-  timeout -k 30 2400 "$Z" build "$step" --cache-dir "$HOME/zc-gates-$NAME" --summary all > "$log" 2>&1 < /dev/null; rc=$?
+  timeout -k 30 2400 "$Z" build "$step" ${GATE_JOBS:+-j"$GATE_JOBS"} --cache-dir "$HOME/zc-gates-$NAME" --summary all > "$log" 2>&1 < /dev/null; rc=$?
   [ "$rc" = 124 ] && echo "$step: TIMED OUT after 40 minutes" | tee -a "$log"
   echo "$step rc=$rc | $(grep -E '^Build Summary' "$log" | tail -1)"
   if [ "$rc" -ne 0 ]; then
