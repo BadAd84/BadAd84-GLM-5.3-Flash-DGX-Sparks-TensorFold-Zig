@@ -817,3 +817,23 @@ cell, order control, `TF_GLM_OVN_EY_DIRECT=1`, `EY_DIRECT=1`, control (`prefill-
 7.6% to 9.1% below the adjacent control at 8k and 7.4% to 9.1% at 32k; means 4.746 s against 4.340 s (-8.5%) and 18.567 s against 17.042 s (-8.2%), replies equal
 to the control's in all 8 of 8 and `ey_digests.py` printing `REPLIES-EQUAL`. The prediction from the capture was -90 ms a 2,048-row pass (about -8%). The knob-off
 image `rs2x3k` (0001-0035) reads 4.742 / 18.544 s, equal to the control, so 0036 with the knob off changes nothing measurable.
+
+## 34. Patches 0035 and 0036 at 1, 2, 4, 6 and 8 streams: both join the recipe
+
+Image `rs2x3y` (series 0001-0036), `KNOBS=measured`, production's prompts as ids, 400 tokens a stream, one fresh boot a level, `--context` at `zig-tp3.sh`'s
+per-level default. Control against `TF_GLM_OVN_KEEP_SEQS=1 TF_GLM_OVN_EY_DIRECT=1`, order control, knobs, knobs, control; replies equal to the control's in every cell.
+Decode aggregate tok/s:
+
+| arm | 1 stream | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| control, first | 81.19 | 82.56 | 109.22 | 143.76 | 178.65 |
+| knobs, first | 79.88 (-1.6%) | 85.12 (+3.1%) | 112.65 (+3.1%) | 150.42 (+4.6%) | 186.81 (+4.6%) |
+| knobs, second | 80.44 (-0.9%) | 84.75 (+2.6%) | 112.26 (+2.8%) | 151.00 (+5.0%) | 186.74 (+4.5%) |
+| control, second | 81.47 (+0.4%) | 83.60 (+1.3%) | 108.73 (-0.5%) | 144.63 (+0.6%) | 177.77 (-0.5%) |
+
+The one-stream cells read low, so they were rerun, each knob alone and then both (all `KNOBS=measured`, one stream, fresh boots, replies equal): `KEEP_SEQS` alone 81.09 and
+81.50, `EY_DIRECT` alone 81.08 and 81.03, controls 80.93, 81.07, 79.95 (a control spread of 1.9% between identical boots), and both knobs in the order control, both, both,
+control, both, control: controls 81.23, 79.86, 81.71 (mean 80.93), both 81.51, 79.82, 80.87 (mean 80.73, -0.2%). The low cell appears on both sides (79.82 with the knobs, 79.86 without),
+so the first one-stream reading was the box's spread and neither knob regresses one stream. At 2 to 8 streams the knobs together read +2.6% to +5.0% against
+controls that agree within 1.3%. Both are now in `serve.sh`'s `DEFS`. Measured at the deployed shape earlier: four-stream decode +10.4% at 1M (section 30) and cold first token
+-8.5% at 8k, -8.2% at 32k (section 33).
