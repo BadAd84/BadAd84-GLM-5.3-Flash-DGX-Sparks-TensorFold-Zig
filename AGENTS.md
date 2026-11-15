@@ -209,14 +209,14 @@ otherwise.
 
 ## Gates
 
-Run on the applied tree, from WSL on the workstation:
+Run on the applied tree ON A SPARK (nothing compiles on the workstation; `scripts/gates.sh` picks `~/tools/zig-$(uname -m)-linux-<version>`; spark5 has the aarch64 toolchain and a full pass of three trees takes about 15 minutes there):
 
 - `scripts/gates.sh TREE NAME` - `zig build check-native-cuda-host`, `test-cuda-host` (the gate that matters for a
   GLM patch: the other two compile none of the family's host tests), `compile-cuda-tests` (the GPU test binary; a
   check nothing imports from `main.zig` is otherwise never compiled), the standalone host steps (`test-glm-ring-host`,
   `test-glm-logprobs-host`, `test-glm-onepass-order-host`, `test-rows-host`) and `zig fmt --check zig/`. It runs on
-  a copy of the tree under `~/gt/` on the WSL filesystem.
-- `scripts/gate-names.sh BASE HEAD` - failing test NAMES of two runs compared, never counts.
+  a copy of the tree under `~/gt/` on the Spark's own filesystem.
+- `scripts/gate-names.sh BASE HEAD` - failing test NAMES of two runs compared, never counts; it exits 1 and says BUILD FAILED when the head's log holds a compile error, because a build that stops before any test runs has no failing names (a green gate is rc 0 on every step AND matching names).
 - `scripts/lean.sh BASE_TREE HEAD_TREE` - the lean gate as upstream's CI runs it: base against head, 0 new problems,
   each side scanned by its own copy of `tools/zig/lean_check.py`. A comment line followed by a comment line is a
   problem, and so is a file past 600 lines.
