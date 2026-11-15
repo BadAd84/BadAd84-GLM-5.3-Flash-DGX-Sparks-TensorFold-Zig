@@ -8,7 +8,7 @@ Source: repository `wojo/TensorFold`, branch `up-glm-disk`, head `d730aff64a2daf
 on upstream main `3885dceb2bb60fe02e609066b75ec752baf51e38`; fetched as `pull/1411/head` on 2026-11-14.
 
 Base it applies to: `93a2e93ecebff8aa52b88e58c5dd222516e69c5f` (v1.2.7) plus `patches/engine/` 0001-0036, tree
-`2a07e8cff17123a4fad350f5fb1213fcdb93e28e`, i.e. after `scripts/apply.sh`; final tree `e567d98959661da15d756103cc2d59051cacb78b`. On 0001-0035 the base tree was `685c6abbda55` and the final `321771fa88e0`. On 0001-0034 alone (the tree the gates and the images `rs2x3d` and `pr1411` were built from) the base tree was `f5495931b233` and the final `4156b5dd8708e1c423372a0bd4484608afad8bef` (the PR's ten alone: `886db39a209392dcf43123790aafb2bd060ba1c8`).
+`2a07e8cff17123a4fad350f5fb1213fcdb93e28e`, i.e. after `scripts/apply.sh`; final tree `e8f7f3c74548a445c98da58910aa13a7f1c6ee88` (0001-0012 alone: `e567d98959661da15d756103cc2d59051cacb78b`). On 0001-0035 the base tree was `685c6abbda55` and the final `321771fa88e0`. On 0001-0034 alone (the tree the gates and the images `rs2x3d` and `pr1411` were built from) the base tree was `f5495931b233` and the final `4156b5dd8708e1c423372a0bd4484608afad8bef` (the PR's ten alone: `886db39a209392dcf43123790aafb2bd060ba1c8`).
 
 How it was made (`work/disk-tier/package.py`): each commit merged onto the tree so far with its parent as the base,
 re-emitted as `git diff-tree -p --full-index` under its own author, date and message. Every patch adds and removes
@@ -30,6 +30,7 @@ all ten; patch 0011 is ours.
 | 0010 | `d730aff64` | as is |
 | 0011 | `e6b0aea97` | ours (fork commit), for patches/engine/0028 |
 | 0012 | `ours` | for patches/engine/0028: the rig's Engine.head, undefined without it |
+| 0013 | `ours` | TF_GLM_OVN_DISK_SLICE_MIB: a read-ahead state restored in slices between rounds |
 
 Apply after the series: `scripts/apply.sh WORK` then `patches/pr1411/apply.sh WORK/tree` (`--check` writes nothing and
 prints the tree it would make). Hashes: `SHA256SUMS`.

@@ -12,8 +12,9 @@ on upstream main `d6c4cce602eef4aff235625a5325bb617a9674ff`; fetched as `pull/32
 base `2ba55ec7d32d0bec446bb012678550be7ef52895` (the diff against it is the same 49 files, +743/-76).
 
 Base it applies to: `93a2e93ecebff8aa52b88e58c5dd222516e69c5f` (v1.2.7) plus `patches/engine/` 0001-0036 plus
-`patches/pr1411/`, tree `e567d98959661da15d756103cc2d59051cacb78b`; final tree `25cefd706dc3741584b0cab4d6b216ed24d752bc`
-(after 0001 `6506ffb2dc946d794c5a08890514bde56f961af6`, after 0002 `b520e775f8ddfd3942f20500a4df557336e2205e`, after 0003
+`patches/pr1411/` 0001-0013, tree `e8f7f3c74548a445c98da58910aa13a7f1c6ee88`; final tree `a3ed3b7a85f3cfaf86ec2e99d6623637883fbeec`
+(with pr1411 0001-0012 alone: tree `e567d98959661da15d756103cc2d59051cacb78b`, final `25cefd706dc3741584b0cab4d6b216ed24d752bc`;
+on that base: after 0001 `6506ffb2dc946d794c5a08890514bde56f961af6`, after 0002 `b520e775f8ddfd3942f20500a4df557336e2205e`, after 0003
 `2dba226410de6993854f11ec5b86f6594e7eebb7`).
 
 How it was made (`work/SaltCarry/package.py`): 0001 is the first commit merged three-way onto the base (its parent as the
@@ -39,6 +40,6 @@ The conflicts in 0001, each checked by the builder before it edits:
 
 Apply after the series and pr1411: `scripts/apply.sh WORK`, `patches/pr1411/apply.sh WORK/tree`, then
 `patches/cache-salt/apply.sh WORK/tree` (`--check` writes nothing and prints the tree it would make). With the sliced disk
-reads (`patches/pr1411/` 0013, not yet checked together) it shares `core/lane_host.zig` (its hunk in `run()`, ours in
+reads (`patches/pr1411/` 0013, checked together in both orders with `apply.sh --check`) it shares `core/lane_host.zig` (its hunk in `run()`, ours in
 `infoFn` and the repeat note) and `docs/environment.md` (another row); check both orders with `apply.sh --check`.
 Hashes: `SHA256SUMS`.

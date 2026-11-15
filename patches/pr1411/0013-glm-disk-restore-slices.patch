@@ -1,0 +1,1120 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] core and glm: TF_GLM_OVN_DISK_SLICE_MIB, a read-ahead disk state restored in slices between rounds
+
+Ours (lane DiskReadSlices, 2026-11-15); nothing ported (the behaviour, not the code, of our Python tier's read slot,
+wojo/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold dbb90822c). Applies after patches/pr1411 0001-0012.
+
+Why: at TP=3, P=4 / 1M (docs/audit-2026-11-12/disktier-rs2x3da, turn L/t4) a 641,024-token state (4,697 MiB) read
+ahead in 3,140 ms on the I/O thread, then stopped the other three decoding streams for 10,851 ms. Where it sits: the
+request's log line (ttft 29.507, queued 3.206, prefill 17.563 s; lane_stream.open sets job.began after the lookup) puts
+8.74 s between admission and the prompt pass, inside lane_stream.open -> lane_cache_queue.lookup ->
+prompt_cache.lookupUserAt -> rows_read.recall -> attempt -> read, whose loop calls cuda_glm_disk.scatter once a file
+(2,504 blocks and the state file) on the engine thread; the rest of the gap is the turn's first prompt chunk.
+read's own timing excludes it (with a read ahead its line prints the I/O thread's ns).
+
+What: with TF_GLM_OVN_DISK_SLICE_MIB=N (a .glm row, read through platform/environment.zig, default 0 = off), a queued
+request whose disk state the read ahead has ready while other requests are admitted stays queued
+(lane_host_fetch.held); once a turn of the engine loop (lane_host.run, after rows_host.answer) lane_host_fetch.slice
+scatters at most N MiB of it into a blank kept state (rows_slices.step: the read's own plan order, one scatter call a
+file's ranges, a range at image byte 0 whole so a family's words open its file), with the store holding the blank's
+bytes meanwhile (so a keep beside it sees the room taken). The last slice enters it as a RAM entry the way a lookup's
+read back does (rows_read.enter, shared with attempt); the request is then admitted and resumes from RAM. With no
+other request admitted the rest goes in one turn; a read the lookup no longer takes, or a restore that cannot begin,
+lets the request go to be read at admission as before; a failed slice drops the blank and gives back the hold and the
+read (rows_slices.abort); the host's stop drops a restore under way. Off: the same calls in the same order as before
+(attempt's choice and entry are moved into rows_read.place and rows_read.enter unchanged; read's counting into
+rows_read.counted unchanged).
+
+Bits: the same bytes reach the same image offsets through the same family scatter, only in more calls; GLM's scatter
+takes any sub-range (route() splits by rank and own/shared bytes, its seal needs the words whole, which step keeps).
+No kernel and no copy routine changes.
+
+Receipts: base tree e567d98959661da15d756103cc2d59051cacb78b (93a2e93ec, patches/engine 0001-0036, patches/pr1411
+0001-0012); head tree e8f7f3c74548a445c98da58910aa13a7f1c6ee88, and git apply --check then git apply on a fresh copy of the
+base files leaves files equal to that head tree. Host tests on the head tree (zig build test-rows-host, x86_64 WSL, -j2):
+-Drows-filter='disk slices' 43/43 passed, 'rows_' 142/142, 'prefetch' 45/45; a filter matches any of its words, so the first
+also runs the tree's other names carrying 'disk' or 'slices', and the 13 this patch adds all pass. Lean rule: 0 new
+problems (base 6264 files and 386 problems, head 6267 and 386), no file over 600 lines. Mutants (work/DiskReadSlices/
+mutants.py, 25 breaks one a behaviour, each applied to a scratch copy whose unmutated run passed the same filter first):
+25 of 25 killed, each by a named test. Gates (scripts/gates.sh, GATE_JOBS=4): ds-base bad=0 (test-cuda-host 6319/6349,
+30 skipped), ds-head bad=0 (6338/6368, 30 skipped), gate-names ds-base ds-head 0 failing names on either side, lean.sh
+0 new. Nothing here ran on a GPU or changed a serve.
+
+diff --git a/docs/environment.md b/docs/environment.md
+index 583c615cecb69dca7e67d0de6530ac1ad586718c..a0443db63030a1ee9bf7cd78dc5ed4e0fb2ec380 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -81,6 +81,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
+ | `TF_GLM_OVN_KEEP_SEQS` | Exactly `0` or `1`; default off (a released stream's sequence stays allocated for the next request on its slot, as slot 0's always does, so a request starts with no allocation, fill or free) |
+ | `TF_GLM_OVN_EY_DIRECT` | Exactly `0` or `1`; default off (an EXL3 prompt chunk's routed-expert down kernel writes the slot rows itself, the same values, so the prompt arena holds no 8-slot output and no copy into the slot rows runs) |
++| `TF_GLM_OVN_DISK_SLICE_MIB` | Whole MiB count; default 0 (off). With `--learn-conversations`, a queued request whose disk state was read ahead while other streams run waits while that state is copied into its kept state at most this many MiB a turn of the engine loop, between the others' decode rounds, and resumes from it once it is whole; 0 copies the whole state when the request is admitted, so the other streams pause for it. The state and the replies are the same either way |
+ | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
+ | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+ | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+diff --git a/zig/src/core/lane_cache_queue.zig b/zig/src/core/lane_cache_queue.zig
+index 55347f63f387d30bc4a4a77803df4e5f8aa88ea5..7ac40d8c8f6c751642eae5950e25f37fb2bc2039 100644
+--- a/zig/src/core/lane_cache_queue.zig
++++ b/zig/src/core/lane_cache_queue.zig
+@@ -5,11 +5,12 @@ const LaneHost = @import("lane_host.zig").LaneHost;
+ const Job = LaneHost.Job;
+ 
+ const reserve = @import("prompt_cache_reserve.zig");
+-const Snapshot = struct {
++/// The entries queued and admitted requests extend, and admitted passes' promised room: a lookup's guard.
++pub const Snapshot = struct {
+     entries: std.ArrayList(*const pc.Entry) = .empty,
+     promised: reserve.Room = .{},
+ 
+-    fn init(h: *LaneHost, current: *Job) !Snapshot {
++    pub fn init(h: *LaneHost, current: *Job) !Snapshot {
+         var out: Snapshot = .{};
+         errdefer out.entries.deinit(h.gpa);
+         h.lock();
+@@ -39,7 +40,7 @@ const Snapshot = struct {
+         return std.mem.indexOfScalar(*const pc.Entry, snapshot.entries.items, e) != null;
+     }
+ 
+-    fn guard(snapshot: *Snapshot) reserve.Guard {
++    pub fn guard(snapshot: *Snapshot) reserve.Guard {
+         return .{ .ctx = snapshot, .needed = needed, .exact = true, .promised = snapshot.promised };
+     }
+ };
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index d883f1d8acbb0231ead6bd09ed36bfb3ab2875b3..f53f44125f766773b9fd42cccc8090cd8395d29e 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -515,6 +515,7 @@ pub const LaneHost = struct {
+             ends.takeCancels(h);
+             pressure.step(h);
+             rows_host.answer(h);
++            @import("lane_host_fetch.zig").slice(h); // TF_GLM_OVN_DISK_SLICE_MIB: a read-ahead state's next slice
+             scoring.answer(h);
+             learn.refuse(h);
+             while (h.admitOne()) {}
+diff --git a/zig/src/core/lane_host_fetch.zig b/zig/src/core/lane_host_fetch.zig
+index a1f7007bfd20be6713a36bfb1f024bf86d94a7f2..827790587353c8e82ff970858892f5f7a37db6d0 100644
+--- a/zig/src/core/lane_host_fetch.zig
++++ b/zig/src/core/lane_host_fetch.zig
+@@ -4,11 +4,12 @@ const api = @import("engine_api.zig");
+ const LaneHost = @import("lane_host.zig").LaneHost;
+ const Job = LaneHost.Job;
+ const prefetch = @import("rows_prefetch.zig");
++const slices = @import("rows_slices.zig");
+ const write = @import("rows_write.zig");
+ const Name = @import("rows_chain.zig").Name;
+ 
+-/// A queued job's read ahead: looked for once while others run, and the disk state it waits for.
+-pub const Ticket = struct { looked: bool = false, name: ?Name = null, writing: ?Name = null, since: i128 = 0 };
++/// A queued job's read ahead: looked for once while others run, the disk state it waits for, and whether it slices.
++pub const Ticket = struct { looked: bool = false, name: ?Name = null, writing: ?Name = null, since: i128 = 0, unsliced: bool = false };
+ 
+ /// Reads no queued request names go; then reads start for queued requests a disk state serves (the lock held).
+ pub fn queue(h: *LaneHost) void {
+@@ -42,7 +43,7 @@ pub fn queue(h: *LaneHost) void {
+     }
+ }
+ 
+-/// Whether queued `job` waits for its read: still going and inside the bound (the lock held).
++/// Whether queued `job` waits for its read: still going and inside the bound, or scattered in slices (the lock held).
+ pub fn held(h: *LaneHost, job: *const Job) bool {
+     const r = (h.cache orelse return false).disk orelse return false;
+     const f = r.fetch orelse return false;
+@@ -51,11 +52,63 @@ pub fn held(h: *LaneHost, job: *const Job) bool {
+         return if (r.worker) |w| w.names(name) else false;
+     }
+     const name = job.fetch.name orelse return false;
+-    return f.pendingSince(name, if (job.fetch.since == 0) null else job.fetch.since);
++    return f.pendingSince(name, if (job.fetch.since == 0) null else job.fetch.since) or sliced(h, job, f, name);
+ }
+ 
+-/// Stop notifications after engine drain; a blocked read keeps only its private memory.
++/// TF_GLM_OVN_DISK_SLICE_MIB: `job`'s state is being scattered, or its read is ready to be while others run (locked).
++fn sliced(h: *LaneHost, job: *const Job, f: *prefetch.Prefetch, name: Name) bool {
++    if (h.disk.restore) |x| if (std.mem.eql(u8, &x.name, &name)) return true;
++    return slices.budget() > 0 and !job.fetch.unsliced and h.admitted.items.len > 0 and f.ready(name);
++}
++
++/// Once a turn, outside the lock: the restore under way takes a slice (the rest when none is admitted), or one begins.
++pub fn slice(h: *LaneHost) void {
++    const store = h.cache orelse return;
++    if (h.disk.restore) |x| return advance(h, store, x);
++    if (slices.budget() == 0) return;
++    const job = next(h) orelse return;
++    var guard = @import("lane_cache_queue.zig").Snapshot.init(h, job) catch return;
++    defer guard.entries.deinit(h.gpa);
++    const before = store.reservation_guard;
++    store.reservation_guard = guard.guard(); // a lookup's room, never evicting what a queued or admitted request extends
++    const x = slices.begin(store, job.fetch.name.?, job.cacheKey(), job.request.bornLen(), job.request.chunks, h.spans(job.request));
++    store.reservation_guard = before;
++    h.disk.restore = x orelse {
++        h.lock();
++        job.fetch.unsliced = true; // read at admission, as before
++        h.unlock();
++        return;
++    };
++    advance(h, store, x.?);
++}
++
++/// The first queued request whose ready read may begin a restore: others admitted, no memory pressure (lock taken).
++fn next(h: *LaneHost) ?*Job {
++    const f = ((h.cache orelse return null).disk orelse return null).fetch orelse return null;
++    h.lock();
++    defer h.unlock();
++    if (h.admitted.items.len == 0 or @import("lane_host_pressure.zig").holds(h)) return null;
++    for (h.queued.items) |job| if (job.fetch.name) |n| if (!job.fetch.unsliced and f.ready(n)) return job;
++    return null;
++}
++
++/// One slice of `x`, a whole RAM entry once its last one is in; a failure or a store without its disk ends it.
++fn advance(h: *LaneHost, store: *@import("prompt_cache.zig").Store, x: *slices.Restore) void {
++    if (store.disk == null or store.disk.? != x.r) return end(h, store, x, error.NoDisk);
++    const whole = slices.step(x, if (h.admitted.items.len > 0) slices.budget() else 0) catch |err| return end(h, store, x, err);
++    if (!whole) return;
++    h.disk.restore = null;
++    _ = slices.finish(store, x);
++}
++
++fn end(h: *LaneHost, store: *@import("prompt_cache.zig").Store, x: *slices.Restore, why: ?anyerror) void {
++    h.disk.restore = null;
++    slices.abort(store, x, why);
++}
++
++/// Stop notifications after engine drain; a blocked read keeps only its private memory, a restore under way goes.
+ pub fn stop(h: *LaneHost) void {
++    if (h.disk.restore) |x| end(h, h.cache.?, x, null);
+     const f = ((h.cache orelse return).disk orelse return).fetch orelse return;
+     f.stopAt(write.nowNs());
+ }
+@@ -80,4 +133,5 @@ fn wake(ctx: *anyopaque) void {
+ 
+ test {
+     _ = @import("lane_host_fetch_test.zig");
++    _ = @import("lane_host_slices_test.zig");
+ }
+diff --git a/zig/src/core/lane_host_fetch_test.zig b/zig/src/core/lane_host_fetch_test.zig
+index 3ab5119a4f98d3293d55493dfc9ab6189c8125e1..0d1fb1eb7569276fa04d88a10cafd93ad926599d 100644
+--- a/zig/src/core/lane_host_fetch_test.zig
++++ b/zig/src/core/lane_host_fetch_test.zig
+@@ -5,6 +5,7 @@ const lanes = @import("lanes");
+ const api = @import("engine_api.zig");
+ const pc = @import("prompt_cache.zig");
+ const prefetch = @import("rows_prefetch.zig");
++const slices = @import("rows_slices.zig");
+ const fixture = @import("rows_async_fixture.zig");
+ const rmTree = @import("prompt_imprint_test.zig").rmTree;
+ const LaneHost = api.LaneHost;
+@@ -51,6 +52,7 @@ const Snaps = struct {
+         return k;
+     }
+     fn scatter(_: *anyopaque, saved: pc.Saved, ranges: []const pc.rows.image.Range, in: []const u8) anyerror!void {
++        Cuts.saw();
+         const dst = std.mem.sliceAsBytes(kept(saved).items);
+         var o: usize = 0;
+         for (ranges) |r| {
+@@ -91,10 +93,12 @@ const Box = struct {
+         return b.tokens.items.len;
+     }
+     fn wait(b: *@This()) Reason {
+-        while (true) {
++        var waited: usize = 0;
++        while (waited < 120_000) : (waited += 1) { // a request held past two minutes fails the test, never hangs it
+             if (b.read().done) |r| return r;
+             std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+         }
++        return .failed;
+     }
+     fn read(b: *@This()) struct { n: usize, cached: ?u32, done: ?Reason } {
+         b.mutex.lockUncancelable(t.io);
+@@ -125,7 +129,34 @@ const Gate = struct {
+     }
+ };
+ 
+-const Mode = enum { off, on, cancelled };
++/// A sliced restore's scatters: how many, the other stream's tokens at the first and the last, the return's wait then.
++const Cuts = struct {
++    var other: ?*Box = null;
++    var back: ?*Box = null;
++    var calls: usize = 0;
++    var first: usize = 0;
++    var last: usize = 0;
++    var waited = false;
++
++    fn reset() void {
++        other = null;
++        back = null;
++        calls = 0;
++        first = 0;
++        last = 0;
++        waited = false;
++    }
++
++    fn saw() void {
++        calls += 1;
++        const n = if (other) |o| o.read().n else 0;
++        if (calls == 1) first = n;
++        last = n;
++        waited = if (back) |b| b.read().cached == null else false;
++    }
++};
++
++const Mode = enum { off, on, cancelled, sliced };
+ 
+ /// What a returning turn saw: its reply, where it resumed, how it ended, and the reads ahead.
+ const Seen = struct { tokens: [8]u32 = undefined, n: usize = 0, cached: ?u32 = null, reason: Reason = .failed, counts: prefetch.Counts = .{}, reads: u64 = 0 };
+@@ -155,6 +186,9 @@ fn session(root: []const u8, mode: ?Mode, first: *[706]u32, seen: *Seen) !void {
+     if (f) |x| x.reader = Gate.reader;
+     Gate.open.store(mode == null or mode == .off, .release);
+     Gate.entered.store(0, .release);
++    slices.fake(if (mode == .sliced) 64 else 0); // 64 bytes a turn: dozens of slices of the 600-token state
++    defer slices.fake(0);
++    Cuts.reset();
+     var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2 });
+     host.cache = &store;
+     try host.start();
+@@ -200,6 +234,10 @@ fn returning(h: *LaneHost, mode: Mode, first: *[706]u32, seen: *Seen) !void {
+     while (other.read().n == 0) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+     var b: Box = .{};
+     defer b.tokens.deinit(gpa);
++    if (mode == .sliced) {
++        Cuts.other = &other;
++        Cuts.back = &b;
++    }
+     const req: api.Request = .{ .prompt = first, .max_tokens = 8, .history_len = 704 };
+     try h.engine().submit(3, &req, .{ .ctx = &b, .event = Box.event });
+     defer _ = b.wait();
+@@ -277,3 +315,22 @@ test "prefetch: a returning request cancelled while its read is under way ends o
+     try t.expectEqual(@as(u64, 1), s.counts.cancelled);
+     try t.expectEqual(@as(u64, 0), s.counts.used);
+ }
++
++test "disk slices: the read-ahead state goes in slices between the other stream's rounds; the reply equals off and fresh" {
++    var first: [706]u32 = undefined;
++    const off = try run(.off, &first);
++    var want: [8]u32 = undefined;
++    try fresh(&first, &want);
++    const s = try run(.sliced, &first);
++    try t.expectEqual(Reason.length, s.reason);
++    try t.expectEqual(@as(?u32, 600), s.cached);
++    try t.expectEqualSlices(u32, &want, s.tokens[0..s.n]);
++    try t.expectEqualSlices(u32, off.tokens[0..off.n], s.tokens[0..s.n]);
++    try t.expectEqual(@as(u64, 1), s.reads); // one read counted: the request resumed from the state the slices made
++    try t.expectEqual(@as(u64, 1), s.counts.made);
++    try t.expectEqual(@as(u64, 1), s.counts.used);
++    try t.expectEqual(@as(u64, 1), s.counts.freed);
++    try t.expect(Cuts.calls > 3); // more calls than the state's three files
++    try t.expect(Cuts.last > Cuts.first); // the other stream decoded between the first slice and the last
++    try t.expect(Cuts.waited); // and the returning request was not admitted before its state was whole
++}
+diff --git a/zig/src/core/lane_host_slices_test.zig b/zig/src/core/lane_host_slices_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..da644b6de43b4873ab0ef5b43cb0fe80bbf9dc07
+--- /dev/null
++++ b/zig/src/core/lane_host_slices_test.zig
+@@ -0,0 +1,205 @@
++//! TF_GLM_OVN_DISK_SLICE_MIB on a lane host's queue: which queued request waits for its slices, and when it goes.
++const std = @import("std");
++const lanes = @import("lanes");
++const api = @import("engine_api.zig");
++const rows = @import("rows_store.zig");
++const fetch = @import("lane_host_fetch.zig");
++const prefetch = @import("rows_prefetch.zig");
++const slices = @import("rows_slices.zig");
++const fixture = @import("rows_async_fixture.zig");
++const ahead = @import("rows_prefetch_test.zig");
++const waits = @import("rows_test_wait.zig");
++const t = std.testing;
++
++/// States at 600 of `tokens` (and `more`) on disk; a host (thread never started), one request admitted, `n` queued.
++const Rig = struct {
++    x: *fixture.Fixture,
++    cfg: lanes.Config,
++    core: lanes.Engine,
++    host: api.LaneHost,
++    theirs: [1100]u32,
++    tokens: [1100]u32,
++    more: [1100]u32,
++    other_request: api.Request,
++    request: api.Request,
++    request2: api.Request,
++    other: api.LaneHost.Job,
++    job: api.LaneHost.Job,
++    job2: api.LaneHost.Job,
++    f: *prefetch.Prefetch,
++
++    fn init(g: *Rig, tag: []const u8, n: usize) !void {
++        g.x = try fixture.Fixture.open(tag, .evicted, false, 1 << 20);
++        errdefer g.x.close();
++        g.tokens = fixture.prompt(5);
++        g.more = fixture.prompt(7);
++        g.theirs = fixture.prompt(6);
++        const seeds = [_]*const [1100]u32{ &g.tokens, &g.more };
++        for (seeds[0..n]) |p| {
++            try g.x.keep(p, 600);
++            g.x.s.remove(0);
++        }
++        try g.x.settle();
++        try t.expectEqual(n, g.x.r.states.items.len);
++        g.cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
++        g.core = undefined;
++        g.core.cfg = &g.cfg;
++        g.host = api.LaneHost.init(t.allocator, t.io, &g.core, .{ .lanes = 2 });
++        g.host.cache = &g.x.s;
++        g.other_request = .{ .prompt = &g.theirs, .max_tokens = 1 };
++        g.request = .{ .prompt = &g.tokens, .max_tokens = 1 };
++        g.request2 = .{ .prompt = &g.more, .max_tokens = 1 };
++        g.other = .{ .host = &g.host, .id = 1, .request = &g.other_request, .sink = undefined };
++        g.job = .{ .host = &g.host, .id = 2, .request = &g.request, .sink = undefined };
++        g.job2 = .{ .host = &g.host, .id = 3, .request = &g.request2, .sink = undefined };
++        try g.host.admitted.append(t.allocator, &g.other);
++        const queued = [_]*api.LaneHost.Job{ &g.job, &g.job2 };
++        for (queued[0..n]) |j| try g.host.queued.append(t.allocator, j);
++        g.f = try prefetch.make(g.x.r, t.io, .{ .reads = n });
++        const end = waits.deadline();
++        while (!ready(g, &g.job) or (n > 1 and !ready(g, &g.job2))) {
++            if (rows.write.nowNs() >= end) return error.PrefetchTimedOut;
++            fetch.queue(&g.host);
++            rows.write.io.nap();
++        }
++    }
++
++    fn ready(g: *Rig, j: *const api.LaneHost.Job) bool {
++        return j.fetch.name != null and g.f.ready(j.fetch.name.?);
++    }
++
++    fn deinit(g: *Rig) void {
++        fetch.stop(&g.host);
++        g.host.queued.deinit(t.allocator);
++        g.host.admitted.deinit(t.allocator);
++        g.cfg.deinit(t.allocator);
++        g.x.close();
++    }
++};
++
++test "disk slices: a queued request waits while its restore goes a slice a turn, then resumes from RAM" {
++    slices.fake(64);
++    defer slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-turns", 1);
++    defer g.deinit();
++    try t.expect(fetch.held(&g.host, &g.job)); // ready while another request runs: it waits for its slices
++    var turns: usize = 0;
++    while (true) {
++        fetch.slice(&g.host);
++        turns += 1;
++        if (g.host.disk.restore == null) break;
++        try t.expect(fetch.held(&g.host, &g.job));
++        try t.expectEqual(@as(usize, 0), g.x.s.entries.items.len);
++    }
++    try t.expect(turns > 5); // more turns than the state's five files
++    try t.expect(!fetch.held(&g.host, &g.job));
++    try t.expectEqual(@as(usize, 1), g.x.s.entries.items.len);
++    var arena = std.heap.ArenaAllocator.init(t.allocator);
++    defer arena.deinit();
++    g.x.f.prompt = &g.tokens;
++    const l = try g.x.s.lookup(arena.allocator(), &g.tokens, 0, &.{}, &.{}, &.{});
++    try t.expectEqual(@as(u32, 600), l.entry.?.at);
++    try g.x.f.snapshots().vtable.restore(&g.x.f, null, l.entry.?.saved);
++    try t.expect(g.x.f.restored_ok);
++    g.x.s.release(l.entry.?);
++    try t.expectEqual(@as(u64, 1), g.x.r.counts.reads);
++}
++
++test "disk slices: once no other request is admitted, the restore under way takes the rest in one turn" {
++    slices.fake(64);
++    defer slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-alone", 1);
++    defer g.deinit();
++    fetch.slice(&g.host);
++    fetch.slice(&g.host);
++    try t.expect(g.host.disk.restore != null);
++    _ = g.host.admitted.pop();
++    fetch.slice(&g.host);
++    try t.expect(g.host.disk.restore == null);
++    try t.expectEqual(@as(usize, 1), g.x.s.entries.items.len);
++}
++
++test "disk slices: a ready read with no other request admitted is not held, and nothing begins" {
++    slices.fake(64);
++    defer slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-none", 1);
++    defer g.deinit();
++    _ = g.host.admitted.pop();
++    try t.expect(!fetch.held(&g.host, &g.job)); // alone: read at admission, as without the knob
++    fetch.slice(&g.host);
++    try t.expect(g.host.disk.restore == null);
++    try t.expectEqual(@as(usize, 0), g.x.f.blanks);
++}
++
++test "disk slices: a queued request whose ready read the lookup no longer takes is let go at once" {
++    slices.fake(64);
++    defer slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-taken", 1);
++    defer g.deinit();
++    try t.expect(fetch.held(&g.host, &g.job));
++    try g.x.keep(&g.tokens, 900); // the conversation's longer state in RAM: a lookup resumes that, not the read
++    fetch.slice(&g.host);
++    try t.expect(g.host.disk.restore == null);
++    try t.expect(g.job.fetch.unsliced);
++    try t.expect(!fetch.held(&g.host, &g.job));
++    try t.expect(g.f.ready(g.job.fetch.name.?)); // the read stays where admission finds it
++}
++
++test "disk slices: a request let go ahead in the queue does not keep the next one's restore from beginning" {
++    slices.fake(64);
++    defer slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-next", 2);
++    defer g.deinit();
++    try g.x.keep(&g.tokens, 900); // the first request resumes from RAM now
++    fetch.slice(&g.host);
++    try t.expect(g.job.fetch.unsliced and g.host.disk.restore == null);
++    fetch.slice(&g.host);
++    const x = g.host.disk.restore orelse return error.NotBegun;
++    try t.expectEqualSlices(u8, &g.job2.fetch.name.?, &x.name);
++    try t.expect(fetch.held(&g.host, &g.job2) and !fetch.held(&g.host, &g.job));
++}
++
++test "disk slices: a read of another state than the one the lookup chooses is not taken" {
++    slices.fake(64);
++    defer slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-wrong", 2);
++    defer g.deinit();
++    const name = g.job.fetch.name.?; // conversation one's read, offered for conversation two's prompt
++    try t.expect(slices.begin(&g.x.s, name, &g.more, @intCast(g.more.len), &.{}, &.{}) == null);
++    try t.expect(g.f.ready(name));
++    try t.expectEqual(@as(usize, 0), g.x.f.blanks);
++    try t.expectEqual(@as(u64, 0), g.x.s.held);
++}
++
++test "disk slices: the host's stop drops a restore under way with its hold and its read" {
++    slices.fake(64);
++    defer slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-stop", 1);
++    defer g.deinit();
++    fetch.slice(&g.host);
++    try t.expect(g.host.disk.restore != null);
++    try t.expect(g.x.s.held > 0);
++    fetch.stop(&g.host);
++    try t.expect(g.host.disk.restore == null);
++    try t.expectEqual(@as(u64, 0), g.x.s.held);
++    try t.expectEqual(@as(usize, 0), g.x.f.live);
++    try t.expectEqual(@as(u64, 1), ahead.counts(g.f).freed);
++}
++
++test "disk slices: with the knob off a ready read is not held and nothing begins" {
++    slices.fake(0);
++    var g: Rig = undefined;
++    try g.init("slices-off", 1);
++    defer g.deinit();
++    try t.expect(!fetch.held(&g.host, &g.job));
++    fetch.slice(&g.host);
++    try t.expect(g.host.disk.restore == null);
++    try t.expectEqual(@as(usize, 0), g.x.f.blanks);
++}
+diff --git a/zig/src/core/rows_all_test.zig b/zig/src/core/rows_all_test.zig
+index c972955cbcf2ea559b22134b9f00c895218a7c22..742646228d51c86cd8454a64db32a1b97634c2ba 100644
+--- a/zig/src/core/rows_all_test.zig
++++ b/zig/src/core/rows_all_test.zig
+@@ -16,6 +16,7 @@ test {
+     _ = @import("rows_charge_test.zig");
+     _ = @import("rows_pool_select_test.zig");
+     _ = @import("rows_prefetch.zig");
++    _ = @import("rows_slices.zig");
+     _ = @import("rows_prefetch_stack_test.zig");
+     _ = @import("rows_refusal_test.zig");
+     _ = @import("rows_startup_fault_test.zig");
+diff --git a/zig/src/core/rows_ask.zig b/zig/src/core/rows_ask.zig
+index 4e42bb26d5ce5a99b1230cf8bf80024526014ccf..9f011048d31f3040ad442da1a9eb0387d5e34927 100644
+--- a/zig/src/core/rows_ask.zig
++++ b/zig/src/core/rows_ask.zig
+@@ -62,6 +62,7 @@ pub const Disk = struct {
+     asks: std.ArrayList(*Ask) = .empty,
+     seen: u64 = 0, // the host's admissions when the writer last looked: a new one restarts the quiet
+     since: ?i96 = null,
++    restore: ?*@import("rows_slices.zig").Restore = null, // a queued request's state scattered a slice a turn (engine)
+ 
+     /// The quiet after the last admission before the first write: a client's next turn often comes sooner.
+     pub const quiet_ns: i96 = 150 * std.time.ns_per_ms;
+diff --git a/zig/src/core/rows_prefetch.zig b/zig/src/core/rows_prefetch.zig
+index 85aac5da5212b7afa5921fceba6f2e3caf91e228..7f4340197d8495941808ad042b906cfb7833f0d2 100644
+--- a/zig/src/core/rows_prefetch.zig
++++ b/zig/src/core/rows_prefetch.zig
+@@ -254,6 +254,33 @@ pub const Prefetch = struct {
+         return null;
+     }
+ 
++    /// Whether `name`'s read is finished and checked, waiting to be taken (engine thread).
++    pub fn ready(f: *Prefetch, name: Name) bool {
++        f.lock();
++        defer f.unlock();
++        return f.reads.items[f.find(name) orelse return false].phase == .ready;
++    }
++
++    /// `take` for a sliced restore: the read leaves the list but stays counted until `done`; null leaves every read.
++    pub fn claim(f: *Prefetch, name: Name, plan: *const Plan) ?*Read {
++        f.lock();
++        defer f.unlock();
++        const i = f.find(name) orelse return null;
++        const rd = f.reads.items[i];
++        if (rd.phase != .ready or !rd.plan.same(plan)) return null;
++        if (!rd.used) f.counts.used += 1;
++        rd.used = true;
++        _ = f.reads.orderedRemove(i);
++        return rd;
++    }
++
++    /// A claimed read's memory freed, once (engine thread).
++    pub fn done(f: *Prefetch, rd: *Read) void {
++        f.lock();
++        defer f.unlock();
++        f.release(rd);
++    }
++
+     /// Reads no queued request names any more go (engine thread): `named(ctx, name)` says which still wait.
+     pub fn sweep(f: *Prefetch, ctx: anytype, comptime named: fn (@TypeOf(ctx), Name) bool) void {
+         f.lock();
+diff --git a/zig/src/core/rows_read.zig b/zig/src/core/rows_read.zig
+index 129a86b22029b8343a2ad6915084971f3c02b3bb..4a4227ebaa9ab72680ce5514d3fb7c96e7c2bc61 100644
+--- a/zig/src/core/rows_read.zig
++++ b/zig/src/core/rows_read.zig
+@@ -27,14 +27,18 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
+         if (ahead) |a| try scatter(r, p.name, prefetch.ext(p.kind), saved, plan.rangesOf(p), a.payload(p)) else bytes += try one(r, p.name, p.kind, prefetch.ext(p.kind), p.at, plan.rangesOf(p), saved);
+     }
+     if (ahead) |a| bytes = a.disk;
+-    const ns = if (ahead) |a| a.ns else write.nowNs() - t0;
++    counted(r, i, s.at, bytes, if (ahead) |a| a.ns else write.nowNs() - t0, ahead != null);
++    return saved;
++}
++
++/// A read back of `bytes` on disk in `ns` counted for disk state `i` (null: gone since) of `at` tokens, and its line.
++pub fn counted(r: *Rows, i: ?usize, at: u32, bytes: u64, ns: i128, ahead: bool) void {
+     if (ns > 0 and bytes > 64 << 20) r.read_rate = 0.5 * r.read_rate + 0.5 * @as(f64, @floatFromInt(bytes)) / (@as(f64, @floatFromInt(ns)) / 1e9);
+     noteReadLatency(r, ns);
+     r.counts.read += bytes;
+     r.counts.reads += 1;
+-    r.touch(i);
+-    if (!@import("builtin").is_test) std.log.info("imprint: read {d} tokens from disk ({d} MiB in {d:.0} ms{s})", .{ s.at, bytes >> 20, @as(f64, @floatFromInt(ns)) / 1e6, if (ahead != null) ", read ahead" else "" });
+-    return saved;
++    if (i) |x| r.touch(x);
++    if (!@import("builtin").is_test) std.log.info("imprint: read {d} tokens from disk ({d} MiB in {d:.0} ms{s})", .{ at, bytes >> 20, @as(f64, @floatFromInt(ns)) / 1e6, if (ahead) ", read ahead" else "" });
+ }
+ 
+ /// One file's payload read past the page cache, checked, and copied into `ranges` of `saved`; its bytes on disk.
+@@ -60,7 +64,7 @@ fn refused(err: anyerror) bool {
+ }
+ 
+ /// A file's payload copied into `ranges` of `saved`; a refusal of its words is a failed check of the file.
+-fn scatter(r: *Rows, name: Name, ext: []const u8, saved: pc.Saved, ranges: []const image.Range, in: []const u8) !void {
++pub fn scatter(r: *Rows, name: Name, ext: []const u8, saved: pc.Saved, ranges: []const image.Range, in: []const u8) !void {
+     r.img.scatter(r.family.ptr, saved, ranges, in) catch |err| return if (refused(err)) bad(r, name, ext, err) else err;
+ }
+ 
+@@ -119,50 +123,65 @@ fn failed(before: *?u32, at: u32, err: anyerror, have: ?*pc.Entry) anyerror {
+ 
+ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry, before: *?u32) !?*pc.Entry {
+     const r = s.disk orelse return have;
++    const c = try place(s, r, prompt, born, starts, spans, have, before) orelse return have;
++    const st = r.states.items[c.i];
++    const e = s.gpa.create(pc.Entry) catch return have;
++    e.* = .{ .tokens = &.{}, .at = st.at, .saved = undefined, .bytes = c.bytes, .born = born, .used = s.clock, .last = &.{}, .shared = st.shared };
++    var ok = false;
++    defer if (!ok) {
++        s.gpa.free(e.tokens);
++        s.gpa.free(e.decode_spans);
++        s.gpa.free(e.last);
++        s.gpa.destroy(e);
++    };
++    e.tokens = s.gpa.dupe(u32, st.tokens) catch return have;
++    e.decode_spans = s.gpa.dupe(modes.Span, st.spans) catch return have;
++    e.last = s.gpa.dupe(u32, prompt) catch return have;
++    e.saved = read(r, c.i) catch |err| return failed(before, st.at, err, have);
++    if (!enter(s, e)) return have;
++    ok = true;
++    return e;
++}
++
++/// The disk state `attempt` reads back (`i`) and the storage room was made for (`bytes`).
++pub const Placed = struct { i: usize, bytes: u64 };
++
++/// The disk state a lookup of `prompt` reads back, room made for it without evicting `have`; null: none, keep `have`.
++pub fn place(s: *pc.Store, r: *Rows, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*pc.Entry, before: *?u32) !?Placed {
+     write.reap(r);
+     const choice = if (before.*) |at| select.shorter(s, prompt, starts, spans, have, at) else select.choose(s, prompt, starts, spans, have);
+-    const chosen = choice.restore orelse return have;
+-    const candidate = r.states.items[chosen];
++    const pick = choice.restore orelse return null;
++    const candidate = r.states.items[pick];
+     if (s.image_frame != 0 or !@import("cache_images.zig").diskSafe(candidate.tokens) or
+-        !@import("cache_images.zig").equal(&.{}, s.image_query orelse &.{}, @intCast(candidate.tokens.len))) return have;
++        !@import("cache_images.zig").equal(&.{}, s.image_query orelse &.{}, @intCast(candidate.tokens.len))) return null;
+     const name = candidate.name;
+     const bytes = r.blankBytes(candidate.at);
+-    if (bytes > s.budget or s.most == 0) return have;
+-    if (!ready(s, candidate.at, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err, have); // nothing goes to make room for a state whose file is gone
+-    if (r.spill != .off) r.touch(chosen); // the newest: the spills that make room for it push older states off first
++    if (bytes > s.budget or s.most == 0) return null;
++    if (!ready(s, candidate.at, bytes)) present(r, pick) catch |err| return failed(before, candidate.at, err, have); // nothing goes to make room for a state whose file is gone
++    if (r.spill != .off) r.touch(pick); // the newest: the spills that make room for it push older states off first
+     while (!ready(s, candidate.at, bytes)) {
+         if (s.family.vtable.trim) |trim| {
+             const spare = s.spare();
+             trim(s.family.ptr, s.budget -| s.held -| bytes);
+             if (s.spare() < spare) continue;
+         }
+-        s.remove(@import("prompt_cache_others.zig").victim(s, have, prompt, born, bytes, 1) orelse return have);
++        s.remove(@import("prompt_cache_others.zig").victim(s, have, prompt, born, bytes, 1) orelse return null);
+         s.counts.evicted += 1;
+     }
+-    const i = r.find(name) orelse return have; // a spill that made room went past the disk cap and took it
+-    const st = r.states.items[i];
+-    const e = s.gpa.create(pc.Entry) catch return have;
+-    e.* = .{ .tokens = &.{}, .at = st.at, .saved = undefined, .bytes = bytes, .born = born, .used = s.clock, .last = &.{}, .shared = st.shared };
+-    var ok = false;
+-    defer if (!ok) {
+-        s.gpa.free(e.tokens);
+-        s.gpa.free(e.decode_spans);
+-        s.gpa.free(e.last);
+-        s.gpa.destroy(e);
+-    };
+-    e.tokens = s.gpa.dupe(u32, st.tokens) catch return have;
+-    e.decode_spans = s.gpa.dupe(modes.Span, st.spans) catch return have;
+-    e.last = s.gpa.dupe(u32, prompt) catch return have;
+-    e.saved = read(r, i) catch |err| return failed(before, candidate.at, err, have);
++    const i = r.find(name) orelse return null; // a spill that made room went past the disk cap and took it
++    return .{ .i = i, .bytes = bytes };
++}
++
++/// `e`, its state read back into `e.saved`, in the RAM store: charged, indexed, linked and held; false: dropped.
++pub fn enter(s: *pc.Store, e: *pc.Entry) bool {
+     if (s.family.vtable.charged) |f| e.bytes = f(s.family.ptr, e.saved);
+     @import("prompt_cache_index.zig").add(s, e) catch {
+         s.family.vtable.drop(s.family.ptr, e.saved);
+-        return have;
++        return false;
+     };
+     @import("prompt_cache_policy.zig").link(s, e);
+-    ok = true;
+     s.held += e.bytes;
+-    return e;
++    return true;
+ }
+ 
+ fn ready(s: *const pc.Store, at: u32, bytes: u64) bool {
+diff --git a/zig/src/core/rows_slices.zig b/zig/src/core/rows_slices.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..2779afb8014f9e41dfed0c5242cd00e97671f813
+--- /dev/null
++++ b/zig/src/core/rows_slices.zig
+@@ -0,0 +1,173 @@
++//! TF_GLM_OVN_DISK_SLICE_MIB: a queued request's read-ahead state scattered a slice a turn while other streams run.
++const std = @import("std");
++const platform = @import("sys");
++const pc = @import("prompt_cache.zig");
++const modes = @import("cache_modes.zig");
++const image = @import("rows_image.zig");
++const rows_store = @import("rows_store.zig");
++const prefetch = @import("rows_prefetch.zig");
++const read = @import("rows_read.zig");
++const write = @import("rows_write.zig");
++const Rows = rows_store.Rows;
++const Name = @import("rows_chain.zig").Name;
++
++const knob = "TF_GLM_OVN_DISK_SLICE_MIB";
++var known = false;
++var turn_bytes: u64 = 0;
++
++/// Bytes a turn scatters while other streams run (0: off, a state read whole at admission); its .glm row read once.
++pub fn budget() u64 {
++    if (!known) {
++        turn_bytes = of((platform.environment.Process{}).get(knob));
++        known = true;
++    }
++    return turn_bytes;
++}
++
++/// The knob's text as bytes a turn: a whole MiB count; unset, blank or refused text is 0 (GLM's open refuses it first).
++pub fn of(raw: ?[]const u8) u64 {
++    const mib = platform.environment.value(u64, knob, raw, 0) catch 0;
++    return std.math.mul(u64, mib, 1 << 20) catch std.math.maxInt(u64);
++}
++
++/// Tests only: the budget reads as `bytes` from now on, as if the environment held it.
++pub fn fake(bytes: u64) void {
++    if (!@import("builtin").is_test) @compileError("rows_slices.fake is for tests");
++    known = true;
++    turn_bytes = bytes;
++}
++
++/// One restore under way: the read it scatters, the kept state it fills, its RAM entry's fields, and the next byte.
++pub const Restore = struct {
++    r: *Rows,
++    f: *prefetch.Prefetch,
++    name: Name,
++    at: u32,
++    rd: *prefetch.Read, // claimed from `f`: freed by `finish` or `abort`
++    saved: pc.Saved,
++    held: u64, // what the store holds for it until it is an entry
++    bytes: u64, // the room `read.place` made: the entry's charge unless its family charges its own
++    born: u32,
++    shared: bool,
++    tokens: []u32,
++    spans: []modes.Span,
++    last: []u32,
++    piece: usize = 0, // the next byte: this piece of the read's plan,
++    range: usize = 0, // this range of it,
++    into: u64 = 0, // this far into that range,
++    pos: u64 = 0, // and this far into the piece's payload
++    slices: u32 = 0,
++    since: i128,
++
++    fn free(x: *Restore, a: std.mem.Allocator) void {
++        a.free(x.tokens);
++        a.free(x.spans);
++        a.free(x.last);
++        a.destroy(x);
++    }
++};
++
++/// `name`'s ready read begun as a restore when a lookup of `prompt` reads that state now; null: read at admission.
++pub fn begin(s: *pc.Store, name: Name, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span) ?*Restore {
++    const r = s.disk orelse return null;
++    const f = r.fetch orelse return null;
++    if (s.imprint != null) return null; // with --learn a lookup may resume a learned state first
++    var before: ?u32 = null;
++    const c = (read.place(s, r, prompt, born, starts, spans, s.find(prompt, starts, spans), &before) catch return null) orelse return null;
++    const st = r.states.items[c.i];
++    var plan = prefetch.Plan.of(r, r.gpa, &st) catch return null;
++    defer plan.deinit(r.gpa);
++    const rd = f.claim(name, &plan) orelse return null; // the chosen state's plan: a read of another state stays
++    return start(s, r, f, rd, st, c.bytes, prompt, born) catch |err| {
++        f.done(rd);
++        pc.note("disk restore of {d} tokens failed ({s}); its request reads it at admission", .{ st.at, @errorName(err) });
++        return null;
++    };
++}
++
++fn start(s: *pc.Store, r: *Rows, f: *prefetch.Prefetch, rd: *prefetch.Read, st: rows_store.State, bytes: u64, prompt: []const u32, born: u32) !*Restore {
++    const a = s.gpa;
++    const x = try a.create(Restore);
++    errdefer a.destroy(x);
++    const tokens = try a.dupe(u32, st.tokens);
++    errdefer a.free(tokens);
++    const spans = try a.dupe(modes.Span, st.spans);
++    errdefer a.free(spans);
++    const last = try a.dupe(u32, prompt);
++    errdefer a.free(last);
++    const saved = try r.img.blank(r.family.ptr, st.at);
++    const held = if (s.family.vtable.charged) |g| g(s.family.ptr, saved) else bytes;
++    s.held += held; // a keep beside the restore sees it taken, as it will be once the state is an entry
++    x.* = .{ .r = r, .f = f, .name = st.name, .at = st.at, .rd = rd, .saved = saved, .held = held, .bytes = bytes, .born = born, .shared = st.shared, .tokens = tokens, .spans = spans, .last = last, .since = write.nowNs() };
++    return x;
++}
++
++/// Up to `bytes` more scattered (0: the rest) in plan order, a call a piece; a range at image byte 0 goes whole.
++pub fn step(x: *Restore, bytes: u64) !bool {
++    const plan = &x.rd.plan;
++    var left: u64 = if (bytes == 0) std.math.maxInt(u64) else bytes;
++    var cut: [128]image.Range = undefined;
++    while (x.piece < plan.pieces.len and left > 0) {
++        const p = plan.pieces[x.piece];
++        const all = plan.rangesOf(p);
++        var n: usize = 0;
++        var len: u64 = 0;
++        while (x.range < all.len and n < cut.len and left > 0) : (n += 1) {
++            const g = all[x.range];
++            const take = if (g.off == 0) g.len else @min(g.len - x.into, left); // a family's words open its own file
++            cut[n] = .{ .off = g.off + x.into, .len = take };
++            len += take;
++            left -|= take;
++            x.into += take;
++            if (x.into == g.len) {
++                x.range += 1;
++                x.into = 0;
++            }
++        }
++        if (n > 0) try read.scatter(x.r, p.name, prefetch.ext(p.kind), x.saved, cut[0..n], x.rd.payload(p)[@intCast(x.pos)..][0..@intCast(len)]);
++        x.pos += len;
++        if (x.range == all.len) {
++            x.piece += 1;
++            x.range = 0;
++            x.pos = 0;
++        }
++    }
++    x.slices += 1;
++    return x.piece == plan.pieces.len;
++}
++
++/// The whole state a RAM entry, entered as a lookup's read back enters one (`read.enter`); null: dropped. Frees `x`.
++pub fn finish(s: *pc.Store, x: *Restore) ?*pc.Entry {
++    const a = s.gpa;
++    read.counted(x.r, x.r.find(x.name), x.at, x.rd.disk, x.rd.ns, true);
++    const ms = @as(f64, @floatFromInt(write.nowNs() - x.since)) / 1e6;
++    if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens scattered in {d} slices over {d:.0} ms beside other streams", .{ x.at, x.slices, ms });
++    s.held -= x.held;
++    x.f.done(x.rd);
++    const e = a.create(pc.Entry) catch {
++        x.r.family.vtable.drop(x.r.family.ptr, x.saved);
++        x.free(a);
++        return null;
++    };
++    e.* = .{ .tokens = x.tokens, .at = x.at, .saved = x.saved, .bytes = x.bytes, .born = x.born, .used = s.clock, .last = x.last, .shared = x.shared, .decode_spans = x.spans };
++    if (!read.enter(s, e)) {
++        a.destroy(e);
++        x.free(a);
++        return null;
++    }
++    a.destroy(x);
++    return e;
++}
++
++/// A restore that cannot go on (`why`; null: the host stops): its state dropped, its hold and read given back.
++pub fn abort(s: *pc.Store, x: *Restore, why: ?anyerror) void {
++    if (why) |err| pc.note("disk restore of {d} tokens failed ({s}) after {d} slices; its request reads it at admission", .{ x.at, @errorName(err), x.slices });
++    x.r.family.vtable.drop(x.r.family.ptr, x.saved);
++    s.held -= x.held;
++    x.f.done(x.rd);
++    x.free(s.gpa);
++}
++
++test {
++    _ = @import("rows_slices_test.zig");
++}
+diff --git a/zig/src/core/rows_slices_test.zig b/zig/src/core/rows_slices_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8f2b76fdcf4f6b1d8b3ab7f578de7e417e5c326
+--- /dev/null
++++ b/zig/src/core/rows_slices_test.zig
+@@ -0,0 +1,215 @@
++//! TF_GLM_OVN_DISK_SLICE_MIB: a read-ahead state scattered in slices against the same state read whole.
++const std = @import("std");
++const platform = @import("sys");
++const pc = @import("prompt_cache.zig");
++const rows = @import("rows_store.zig");
++const prefetch = @import("rows_prefetch.zig");
++const slices = @import("rows_slices.zig");
++const ahead = @import("rows_prefetch_test.zig");
++const Fake = @import("rows_fake.zig").Fake;
++const fresh = @import("rows_fake.zig").fresh;
++const rmTree = @import("prompt_imprint_test.zig").rmTree;
++const Allocator = std.mem.Allocator;
++const gpa = std.testing.allocator;
++const t = std.testing;
++
++const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
++const words = 16; // the fake's first part: a family's words, which open its own file
++const at = 800;
++
++/// The fake family behind a recorder: each scatter call's first offset and bytes, and GLM's rule for the words.
++const Rec = struct {
++    f: Fake = .{ .gpa = gpa },
++    inner: pc.Snapshots = undefined,
++    image: rows.Image = undefined,
++    vt: pc.Snapshots.VTable = undefined,
++    calls: usize = 0,
++    step_bytes: u64 = 0, // bytes the calls since the last `turn` carried, words aside
++    worst: u64 = 0, // the most one turn carried, words aside
++    words_cut: bool = false, // a call opened at byte 0 with less than the whole words
++    fail_after: ?usize = null, // scatter calls that succeed before every later one fails
++
++    fn init(x: *Rec) void {
++        x.inner = x.f.snapshots();
++        x.image = x.inner.vtable.rows.?.*;
++        x.image.scatter = scatter;
++        x.vt = x.inner.vtable.*;
++        x.vt.rows = &x.image;
++    }
++
++    fn snapshots(x: *Rec) pc.Snapshots {
++        return .{ .ptr = x.inner.ptr, .vtable = &x.vt };
++    }
++
++    fn scatter(ptr: *anyopaque, saved: pc.Saved, ranges: []const rows.image.Range, in: []const u8) anyerror!void {
++        const x: *Rec = @fieldParentPtr("f", @as(*Fake, @ptrCast(@alignCast(ptr))));
++        if (x.fail_after) |n| if (x.calls >= n) return error.ScatterFailed;
++        x.calls += 1;
++        var n: u64 = 0;
++        for (ranges) |g| {
++            if (g.off == 0 and g.len < words) x.words_cut = true;
++            if (g.off >= words) n += g.len else n += g.len -| words;
++        }
++        x.step_bytes += n;
++        return x.inner.vtable.rows.?.scatter(ptr, saved, ranges, in);
++    }
++
++    fn turn(x: *Rec) void {
++        x.worst = @max(x.worst, x.step_bytes);
++        x.step_bytes = 0;
++    }
++};
++
++const Server = struct {
++    rec: Rec = .{},
++    r: *rows.Rows = undefined,
++    s: pc.Store = undefined,
++
++    fn open(x: *Server, dir: []const u8) !void {
++        x.rec.init();
++        x.r = try rows.Rows.open(gpa, x.rec.snapshots(), .{ .sync_writes = true, .root = dir, .identity = 9, .cap = 1 << 34, .floor = 0, .daily = 1 << 40, .lookahead = 1 });
++        x.s = pc.Store.init(gpa, x.rec.snapshots(), rules, 1 << 30);
++        x.s.disk = x.r;
++    }
++
++    fn close(x: *Server) void {
++        x.s.deinit();
++        x.r.deinit();
++    }
++
++    fn request(x: *Server, a: Allocator, p: []const u32, history: u32) !struct { from: u32, sum: u64 } {
++        x.rec.f.prompt = p;
++        const plan = try x.s.begin(a, p, history, &.{}, &.{}, null, &.{});
++        return .{ .from = plan.from, .sum = x.rec.f.pass(&x.s, plan) };
++    }
++};
++
++fn root(buf: []u8, tag: []const u8) []const u8 {
++    return std.fmt.bufPrint(buf, "/tmp/tf-slices-{s}-{d}", .{ tag, platform.c.getpid() }) catch unreachable;
++}
++
++/// A conversation's first turn of `at` + 100 tokens kept at `at` and written under `dir`; its next turn's prompt.
++fn seeded(a: Allocator, dir: []const u8) ![]u32 {
++    var x: Server = .{};
++    try x.open(dir);
++    defer x.close();
++    const first = try a.alloc(u32, at + 100);
++    for (first, 0..) |*w, i| w.* = @intCast(1000 + i * 7 % 997);
++    _ = try x.request(a, first, at);
++    while (rows.write.step(x.r)) {}
++    try t.expectEqual(@as(usize, 1), x.r.states.items.len);
++    return std.mem.concat(a, u32, &.{ first[0 .. at + 1], &[_]u32{ 4, 4 } });
++}
++
++/// The next turn's disk state read ahead and ready in a new server over `dir`: its name.
++fn readAhead(x: *Server, next: []const u32) !rows.chain.Name {
++    const f = try prefetch.make(x.r, t.io, .{});
++    const name = f.start(x.r, prefetch.choose(&x.s, next, &.{}, &.{}) orelse return error.NoState) orelse return error.NotReadAhead;
++    try t.expectEqual(@as(?prefetch.Phase, .ready), ahead.settled(f, name));
++    return name;
++}
++
++test "disk slices: slices of any size leave the image one whole read leaves; the turn resumes from RAM, read once" {
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    for ([_]u64{ 1, 13, 256, 4096, 0 }, 0..) |b, k| {
++        var buf: [128]u8 = undefined;
++        const dir = root(&buf, &.{@as(u8, 'a') + @as(u8, @intCast(k))});
++        defer rmTree(dir);
++        const next = try seeded(a, dir);
++        var x: Server = .{};
++        try x.open(dir);
++        defer x.close();
++        const name = try readAhead(&x, next);
++        x.rec.f.prompt = next;
++        const restore = slices.begin(&x.s, name, next, @intCast(next.len), &.{}, &.{}) orelse return error.NotBegun;
++        try t.expectEqual(@as(usize, 1), x.rec.f.blanks);
++        try t.expect(restore.held > 0);
++        try t.expectEqual(restore.held, x.s.held); // a keep meanwhile sees the state's storage taken
++        var turns: usize = 0;
++        while (true) {
++            turns += 1;
++            const whole = try slices.step(restore, b);
++            x.rec.turn();
++            if (whole) break;
++            try t.expectEqual(@as(usize, 0), x.s.entries.items.len); // no lookup can resume half a state
++        }
++        try t.expect(!x.rec.words_cut);
++        if (b == 0) try t.expectEqual(@as(usize, 1), turns) else {
++            try t.expect(turns > 1);
++            try t.expect(x.rec.worst <= b);
++        }
++        const e = slices.finish(&x.s, restore) orelse return error.NotEntered;
++        try t.expectEqual(@as(u32, at), e.at);
++        try t.expectEqual(e.bytes, x.s.held);
++        try t.expectEqual(@as(u64, 1), x.r.counts.reads);
++        const k2 = ahead.counts(x.r.fetch.?);
++        try t.expectEqual(@as(u64, 1), k2.used);
++        try t.expectEqual(@as(u64, 1), k2.freed);
++        const got = try x.request(a, next, @intCast(next.len - 1));
++        try t.expectEqual(@as(u32, at), got.from);
++        try t.expectEqual(fresh(next), got.sum);
++        try t.expect(x.rec.f.restored_ok); // every byte equals the image a fresh pass leaves
++        try t.expectEqual(@as(u64, 1), x.r.counts.reads); // resumed from RAM: no second read
++        try t.expectEqual(@as(usize, 1), x.rec.f.blanks);
++    }
++}
++
++test "disk slices: a slice that fails drops the state and gives back its hold and read; the turn reads at admission" {
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var buf: [128]u8 = undefined;
++    const dir = root(&buf, "fail");
++    defer rmTree(dir);
++    const next = try seeded(a, dir);
++    var x: Server = .{};
++    try x.open(dir);
++    defer x.close();
++    const name = try readAhead(&x, next);
++    x.rec.f.prompt = next;
++    const restore = slices.begin(&x.s, name, next, @intCast(next.len), &.{}, &.{}) orelse return error.NotBegun;
++    x.rec.fail_after = 1;
++    try t.expect(!try slices.step(restore, 64));
++    try t.expectError(error.ScatterFailed, slices.step(restore, 64));
++    slices.abort(&x.s, restore, error.ScatterFailed);
++    try t.expectEqual(@as(u64, 0), x.s.held);
++    try t.expectEqual(@as(usize, 0), x.rec.f.live); // the half-filled state dropped
++    try t.expectEqual(@as(u64, 1), ahead.counts(x.r.fetch.?).freed);
++    x.rec.fail_after = null;
++    const got = try x.request(a, next, @intCast(next.len - 1));
++    try t.expectEqual(@as(u32, at), got.from); // read from disk at admission, as without the knob
++    try t.expectEqual(fresh(next), got.sum);
++    try t.expect(x.rec.f.restored_ok);
++    try t.expectEqual(@as(u64, 1), x.r.counts.reads);
++}
++
++test "disk slices: a read the lookup does not choose now does not begin, and stays to be read at admission" {
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var buf: [128]u8 = undefined;
++    const dir = root(&buf, "other");
++    defer rmTree(dir);
++    const next = try seeded(a, dir);
++    var x: Server = .{};
++    try x.open(dir);
++    defer x.close();
++    const name = try readAhead(&x, next);
++    var other = name;
++    other[0] ^= 1;
++    try t.expect(slices.begin(&x.s, other, next, @intCast(next.len), &.{}, &.{}) == null);
++    try t.expectEqual(@as(usize, 0), x.rec.f.blanks);
++    try t.expect(x.r.fetch.?.ready(name));
++    try t.expectEqual(@as(u64, 0), x.s.held);
++}
++
++test "disk slices: TF_GLM_OVN_DISK_SLICE_MIB is a whole MiB count a turn; unset, blank or refused text is off" {
++    try t.expectEqual(@as(u64, 3 << 20), slices.of("3"));
++    try t.expectEqual(@as(u64, 0), slices.of("0"));
++    try t.expectEqual(@as(u64, 0), slices.of(null));
++    try t.expectEqual(@as(u64, 0), slices.of(" "));
++    for ([_][]const u8{ "32M", "-1", "1.5" }) |bad| try t.expectEqual(@as(u64, 0), slices.of(bad));
++    try t.expectError(error.InvalidEnvironment, platform.environment.parse("TF_GLM_OVN_DISK_SLICE_MIB", "32M"));
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 8cbcf369062428300283a18ce6e50fdd3f68daaa..93b337752445887d464e2fbf81813379f3700064 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -115,6 +115,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KEEP_SEQS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_EY_DIRECT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_DISK_SLICE_MIB", .scope = .glm, .kind = .u64, .forms = "a whole MiB count, 0 (off) or the most a disk restore scatters a turn while other streams run" },
+     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
+     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },

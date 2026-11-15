@@ -9,3 +9,4 @@ da6e206af3d9fce703b3324b5aa8e08692d9930ac5d62f1c29e5f7fe406c20e5  0004-rows--a-p
 3e768e9eb307ce93317fb8cdb26adae0b0c90948130ddc834ab7ee425901af67  0010-glm-on-cuda----learn-conversations-opens-its-store-through-t.patch
 44857f68da8c1e86a87b27d2c97046b24de7d95d2b751213556d4c680247ae89  0011-glm-tests-the-disk-image-fake-has-the-head-flag.patch
 b1fe193f3603bd9b36e53976e02ba7494b50af41b7c8655950f45a16d8333301  0012-glm-tests-the-disk-ranks-rig-sets-the-head-flag.patch
+6458055da1edeb3551c7948f7829095788873e81fb4806d12a57aecf5d0a5b0c  0013-glm-disk-restore-slices.patch
