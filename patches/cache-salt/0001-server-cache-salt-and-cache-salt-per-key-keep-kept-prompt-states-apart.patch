@@ -1,0 +1,1289 @@
+From 33ec18b31a43a2f7a9ce5f46943344857d31c9fe Mon Sep 17 00:00:00 2001
+From: Ash <71890694+ashhart@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 13:44:56 +0000
+Subject: [PATCH] server: cache_salt and --cache-salt-per-key keep kept prompt states apart
+
+A request's cache_salt (chat, completions, Responses and Messages), and
+with serve --cache-salt-per-key the API key it matched, is hashed with
+HMAC-SHA-256 under the server's tool-call id key and masks the first four
+words of the lane host's cache key. A kept state is then resumed only by a
+request with the same salt; with no salt the request is keyed exactly as
+before, and tokens never change.
+
+Salted states stay in RAM: the disk writer, reader and --learn already
+refuse high-bit words, so the disk format is unchanged. A salted request
+neither drafts from nor adds to Recall's record and neither reads nor
+writes --compact-memory notes; the server's own requests for a salted
+conversation (warm pass, compaction notes, Cortheon's planner and kept
+rounds) keep the salt, and a salted /v1/imprint ask looks up its own
+states. Engines whose cache is not the lane host's store refuse a salted
+request with 400 and refuse to start with --cache-salt-per-key. The request
+log redacts the salt, and /v1/models publishes capabilities.cache_salt.
+
+Fixes #3196
+---
+
+diff --git a/docs/api.md b/docs/api.md
+index f03f78238709b404709625fcbe8823751e220648..668277de0fbf2c9d4028c48da890cb61257cc69f 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -140,12 +140,12 @@ Unsupported image input, audio, video and non-text output requests receive HTTP
+ 
+ Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
+ It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
+-thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
+-warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
+-embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
++thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache, cache_salt
++([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The
++vision, speech, embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
+ thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
+-[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean,
+-including false, and no callback details or addresses are exposed.
++[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean, including false,
++and no callback details or addresses are exposed.
+ 
+ Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
+ Flags describe the engine; request combinations, context, template and format constraints still apply.
+@@ -922,6 +922,28 @@ A retryable refusal on an inference route answers 503 and names its wait in the
+ 
+ A capacity refusal keeps the frozen Python engine's shape (`type` `invalid_request_error` and its message) and still carries no `Retry-After`; the code is native's addition. The Messages routes keep their Anthropic envelope, which has no code field, and the Sliding Weights learn/delete and imprint routes keep their own 503 bodies.
+ 
++## Prompt cache salts
++
++By default a kept prompt state is resumed by any request whose prompt starts with the same tokens, whoever sent it.
++`cache_salt` (a non-empty string of at most 1024 bytes, on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`
++and `/v1/messages`) keeps a request's states apart: a state kept under one salt is resumed only by requests with the
++same salt, and states kept without a salt only by requests without one. `serve --cache-salt-per-key` salts every request
++by the API key it matched as well (a request's own `cache_salt` then counts within that key, and no salt a client sends
++stands for another key's), so two keys never resume each other's states; a server without API keys logs that the option
++salts nothing. The salt is hashed with HMAC-SHA-256 under the server's [tool-call id key](#messages-and-tools) (random
++at each start unless `TENSORFOLD_TOOL_ID_KEY_FILE` names one), so no cache key or state name can be tested against a
++guessed salt, and the salt itself is never echoed, stored or logged (`TENSORFOLD_REQUEST_LOG` writes `<redacted>`). The
++hash masks the first four words of the request's cache key. Salts never change the tokens of a reply, and a request
++without a salt is keyed exactly as before. Salted states stay in RAM: they are not written to the `--prompt-cache-disk`
++store, and a salted request never reads a state from it. A salted request also neither drafts from nor adds to the
++`--recall` record, neither reads nor writes `--compact-memory` notes, and a salted `/v1/imprint` ask reports and loads
++only its salt's states. The server's own requests for a salted conversation (the next turn's background prefill,
++compaction's notes, Cortheon's research planner and the server rounds it keeps) stay under the same salt. Engines on the
++shared lane host with its prompt cache report `capabilities.cache_salt` and take salts. Any other engine (one whose own
++host keeps states by tokens alone, a family's own paged cache under `TF_KV_SHARE`, or no prompt cache) returns HTTP 400
++for a salted request, naming its backend, rather than accept a salt it cannot keep apart, and does not start with
++`--cache-salt-per-key`. `TENSORFOLD_SEED_SALT` is unrelated: it only seeds sampling.
++
+ ## Conversations on disk
+ 
+ Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
+diff --git a/docs/environment.md b/docs/environment.md
+index 583c615cecb69dca7e67d0de6530ac1ad586718c..df7e879b7733ee0e9679fc2710561bb38e63951a 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -14,7 +14,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TENSORFOLD_RESTORE_PREFETCH` | Whole unsigned 64-bit count, capped at 65536; zero disables reading ahead; default 2 |
+ | `TENSORFOLD_RESTORE_PREFETCH_GIB` | Whole unsigned 64-bit GiB count, capped at 16777216; default 16 |
+ | `TENSORFOLD_RESTORE_PREFETCH_MS` | Whole unsigned 64-bit milliseconds, capped at 1099511627776; default 30000 |
+-| `TENSORFOLD_TOOL_ID_KEY_FILE` | The path of the file that holds the key for tool-call ids ([API](api.md#messages-and-tools)). The file must be a regular file, not a link, that only its owner can read or write (`chmod 600`), with 32 to 4096 bytes in it, and the path must not contain control characters. When this is unset, each server process makes its own random key. If the file is wrong, the server does not start; the message names this setting but never shows the path or what the file holds |
++| `TENSORFOLD_TOOL_ID_KEY_FILE` | The path of the file that holds the key for tool-call ids and cache salts ([API](api.md#messages-and-tools)). The file must be a regular file, not a link, that only its owner can read or write (`chmod 600`), with 32 to 4096 bytes in it, and the path must not contain control characters. When this is unset, each server process makes its own random key. If the file is wrong, the server does not start; the message names this setting but never shows the path or what the file holds |
+ | `TF_STARTUP_RECEIPT` | Exactly `0` or `1`; default off. `1` writes the startup and first completion receipts |
+ | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
+ | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
+diff --git a/zig/src/core/cache_salt_disk_test.zig b/zig/src/core/cache_salt_disk_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..f74397f38b4511661cbefb1e2b015af3bf66aacb
+--- /dev/null
++++ b/zig/src/core/cache_salt_disk_test.zig
+@@ -0,0 +1,62 @@
++//! A salted state never reaches disk, and a salted lookup never reads a plain disk state; plain ones restore as before.
++const std = @import("std");
++const pc = @import("prompt_cache.zig");
++const rows = @import("rows_store.zig");
++const fake = @import("rows_fake.zig");
++const salt_key = @import("cache_salt_key.zig");
++const t = std.testing;
++const a = t.allocator;
++const rules: pc.Rules = .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 };
++
++fn options(root: []const u8) rows.Options {
++    return .{ .sync_writes = true, .root = root, .identity = 853, .cap = 1 << 26, .floor = 0, .daily = 1 << 28, .lookahead = 1 };
++}
++
++test "the disk store keeps salted and plain apart: a salted state is not written, a salted lookup reads no plain one" {
++    var tmp = t.tmpDir(.{});
++    defer tmp.cleanup();
++    const root = try tmp.dir.realPathFileAlloc(t.io, ".", a);
++    defer a.free(root);
++    var prompt: [3000]u32 = undefined;
++    for (&prompt, 0..) |*token, i| token.* = @intCast(29 + i % 983);
++    const key = try salt_key.salted(a, &prompt, 0x5a17);
++    defer a.free(key);
++    {
++        var f: fake.Fake = .{ .gpa = a, .prompt = &prompt };
++        const r = try rows.Rows.open(a, f.snapshots(), options(root));
++        defer r.deinit();
++        var s = pc.Store.init(a, f.snapshots(), rules, 1 << 30);
++        defer s.deinit();
++        s.disk = r;
++        f.at = 2000;
++        try t.expect(s.keep(&prompt, 2000, null, &.{}, &.{}));
++        while (rows.write.step(r)) {}
++        f.prompt = key;
++        f.at = 2500;
++        try t.expect(s.keep(key, 2500, null, &.{}, &.{})); // kept in RAM like any state
++        while (rows.write.step(r)) {}
++        try t.expectEqual(@as(usize, 1), r.states.items.len); // only the plain state went to disk
++        try t.expectEqual(@as(u32, 2000), r.states.items[0].at);
++        for (r.states.items[0].tokens) |w| try t.expect(w & 0x8000_0000 == 0); // no salted word, nor the salt, on disk
++    }
++    // a new store over the same folder: the plain prompt restores from disk, the salted key reads nothing
++    var f: fake.Fake = .{ .gpa = a, .prompt = &prompt };
++    const r = try rows.Rows.open(a, f.snapshots(), options(root));
++    defer r.deinit();
++    var s = pc.Store.init(a, f.snapshots(), rules, 1 << 30);
++    defer s.deinit();
++    s.disk = r;
++    const plain = try s.begin(a, &prompt, 2900, &.{}, &.{}, null, &.{});
++    defer a.free(plain.marks);
++    try t.expectEqual(@as(u32, 2000), plain.from);
++    try t.expectEqual(fake.fresh(&prompt), f.pass(&s, plain));
++    const reads = r.counts.reads;
++    for (s.entries.items) |e| e.expired = true;
++    s.collectExpired();
++    f.prompt = key;
++    const salted = try s.begin(a, key, 2900, &.{}, &.{}, null, &.{});
++    defer a.free(salted.marks);
++    try t.expectEqual(@as(u32, 0), salted.from); // the whole prompt prefilled
++    try t.expectEqual(fake.fresh(key), f.pass(&s, salted));
++    try t.expectEqual(reads, r.counts.reads); // no disk read for it
++}
+diff --git a/zig/src/core/cache_salt_key.zig b/zig/src/core/cache_salt_key.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..397588a9d1c2cf2dce0d8163c46b3c28c9001cfb
+--- /dev/null
++++ b/zig/src/core/cache_salt_key.zig
+@@ -0,0 +1,41 @@
++//! A salted prompt-cache key: its first words masked by the salt, so only the same salt's requests share states.
++const std = @import("std");
++
++/// Key words a salt masks: four 31-bit masks must all agree before two salts' keys share a prefix.
++pub const words = 4;
++
++/// `base` with its first words high-bit and masked by `salt`; such words never go to disk (cache_images.diskSafe).
++pub fn salted(a: std.mem.Allocator, base: []const u32, salt: u64) std.mem.Allocator.Error![]u32 {
++    const out = try a.dupe(u32, base);
++    for (out[0..@min(words, out.len)], 0..) |*w, i| w.* = 0x8000_0000 | ((w.* ^ mask(salt, i)) & 0x7fff_ffff);
++    return out;
++}
++
++/// The salt's mask for word `i`: a mask, not a hash, so one salt never maps two text tokens to the same word.
++fn mask(salt: u64, i: usize) u32 {
++    return @truncate(std.hash.Wyhash.hash(salt, std.mem.asBytes(&@as(u64, i))));
++}
++
++test "one salt keeps every text token apart, as an unsalted key does; two salts differ in every masked word" {
++    const t = std.testing;
++    var base: [words]u32 = undefined;
++    var seen = std.AutoHashMap(u32, void).init(t.allocator);
++    defer seen.deinit();
++    for (0..1 << 16) |token| { // the same token at every position, under one salt: a different word for each token
++        base = @splat(@intCast(token));
++        const k = try salted(t.allocator, &base, 0x5a17);
++        defer t.allocator.free(k);
++        for (k) |w| try t.expect(w & 0x8000_0000 != 0);
++        try t.expect(!(try seen.getOrPut(k[0])).found_existing);
++    }
++    base = .{ 1, 2, 3, 4 };
++    const one = try salted(t.allocator, &base, 1);
++    defer t.allocator.free(one);
++    const two = try salted(t.allocator, &base, 2);
++    defer t.allocator.free(two);
++    for (one, two) |p, q| try t.expect(p != q);
++}
++
++test {
++    _ = @import("cache_salt_disk_test.zig");
++}
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index 27e9551333b0a4f7787301e76d1739d63baa2919..db49455dde6a51379b582a945e23d558fa1c3068 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -89,6 +89,8 @@ pub const Request = struct {
+     images: []const Image = &.{},
+     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
+     cache_key: []const u32 = &.{},
++    /// ``cache_key`` is salted (cache_salt): the lane host neither drafts from nor adds to Recall's shared record.
++    salted: bool = false,
+ 
+     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
+     pub fn cacheKey(r: *const Request) []const u32 {
+@@ -199,6 +201,8 @@ pub const Info = struct {
+     prefill_min_chunk: u32 = 256,
+     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
+     prompt_cache: bool = false,
++    /// Requests may carry cache_salt: its prompt cache goes by Request.cacheKey() (the lane host's), apart per salt.
++    cache_salt: bool = false,
+     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
+     prompt_cache_capacity: ?PromptCacheCapacity = null,
+     /// The policy the engine runs under, one line (`/health` shows it); empty: none.
+@@ -570,6 +574,7 @@ pub const Rounds = @import("lane_host.zig").Rounds;
+ 
+ /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
+ pub const prompt_cache = @import("prompt_cache.zig");
++pub const cache_salt_key = @import("cache_salt_key.zig");
+ /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
+ pub const prompt_radix = @import("prompt_radix.zig");
+ /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
+diff --git a/zig/src/core/engine_capabilities.zig b/zig/src/core/engine_capabilities.zig
+index e1a3c6f858bda6f4893036769b95a000ce3b1bb0..53a546a071d0ed512ffcd1f6ab44867087296f6d 100644
+--- a/zig/src/core/engine_capabilities.zig
++++ b/zig/src/core/engine_capabilities.zig
+@@ -14,6 +14,7 @@ pub const Capability = enum {
+     penalties,
+     prompt_logprobs,
+     prompt_cache,
++    cache_salt,
+     warm_turns,
+     plain_only,
+     decides,
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index d883f1d8acbb0231ead6bd09ed36bfb3ab2875b3..e451ea14834001318dd61f1f648876908fa2cd9f 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -196,7 +196,9 @@ pub const LaneHost = struct {
+     }
+ 
+     fn infoFn(ctx: *anyopaque) Info {
+-        return self(ctx).info_;
++        var i = self(ctx).info_;
++        i.cache_salt = self(ctx).cache != null; // its store goes by the cache key, and Recall skips salted requests
++        return i;
+     }
+ 
+     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
+@@ -456,8 +458,8 @@ pub const LaneHost = struct {
+             store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
+             if (job.request.promptOnly()) {
+                 // never kept, so a repeat of it is not worth noting
+-            } else if (job.request.images.len == 0 and job.request.cache_key.len == 0) {
+-                store.repeat_log.note(store.gpa, store.rules.repeat_min, job.request.prompt);
++            } else if (job.request.images.len == 0 and (job.request.cache_key.len == 0 or job.request.salted)) {
++                store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey()); // a text prompt, by its salt
+             } else if (store.rules.repeat_keyed and job.request.cache_key.len > 0) {
+                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
+             }
+diff --git a/zig/src/core/lane_host_recall.zig b/zig/src/core/lane_host_recall.zig
+index 517d4bbc1d6b03a5fb86b682cca5719f1001ceb6..1bf99cf14f36e1f64b636d2425b94740cb2f76d7 100644
+--- a/zig/src/core/lane_host_recall.zig
++++ b/zig/src/core/lane_host_recall.zig
+@@ -20,18 +20,18 @@ pub fn attach(ctx: *anyopaque, store: *Store) void {
+     h.recall = store;
+ }
+ 
+-/// A drafted request's reader of the record (null: no record, or a request that drafts nothing).
++/// A drafted request's reader of the record (null: no record, a request that drafts nothing, or a salted one).
+ pub fn reader(h: *LaneHost, job: *Job) ?*lanes.recall.Reader {
+     const store = h.recall orelse return null;
+-    if (!job.request.drafts) return null;
++    if (!job.request.drafts or job.request.salted) return null;
+     job.recall.reader = .{ .gpa = h.gpa, .shared = &store.shared };
+     job.recall.reading = true;
+     return &job.recall.reader;
+ }
+ 
+-/// Its prompt and reply go in unless it is a background pass, a lesson's untaught request or prompt-only (no reply).
++/// Its prompt and reply go in unless it is a background pass, an untaught, prompt-only (no reply) or salted request.
+ fn writes(job: *const Job) bool {
+-    return !job.request.background and !job.request.untaught and !job.request.promptOnly();
++    return !job.request.background and !job.request.untaught and !job.request.promptOnly() and !job.request.salted;
+ }
+ 
+ /// The prompt pass ended: what came before its resume point an earlier request read already.
+diff --git a/zig/src/core/lane_host_recall_test.zig b/zig/src/core/lane_host_recall_test.zig
+index baaed26045e1aad516735da9b346f28f4a10c37d..3baf0b5cbd3f13ef58d2c6038f56167d5657dc98 100644
+--- a/zig/src/core/lane_host_recall_test.zig
++++ b/zig/src/core/lane_host_recall_test.zig
+@@ -378,3 +378,41 @@ test "restore scale: Recall survives a failed round and a queued cancellation wi
+     s.host.unlock();
+     try std.testing.expectEqual(@as(usize, 0), queued + admitted);
+ }
++
++test "a salted request neither drafts from Recall's record nor adds to it, and its tokens are the same" {
++    var tmp = std.testing.tmpDir(.{});
++    defer tmp.cleanup();
++    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/recall", .{tmp.sub_path});
++    defer gpa.free(path);
++    const store = try openStore(path, false);
++    defer store.close();
++    var s: Served = undefined;
++    try s.init();
++    defer s.deinit();
++    try std.testing.expect(s.host.engine().attachRecall(store));
++    try s.host.start();
++    const p = prompt(200, 8);
++    var first: Box = .{};
++    defer first.deinit();
++    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &p, .max_tokens = 120 }, 1, &first));
++    const added = store.added;
++    try std.testing.expect(added > 0 and first.telemetry_len > 0);
++    const key = try @import("cache_salt_key.zig").salted(gpa, &p, 0x5a17);
++    defer gpa.free(key);
++    var again: Box = .{};
++    defer again.deinit();
++    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &p, .max_tokens = 120, .cache_key = key, .salted = true }, 2, &again));
++    try std.testing.expectEqualSlices(u32, first.tokens.items, again.tokens.items);
++    try std.testing.expectEqual(@as(usize, 0), again.telemetry_len); // no reader: nothing drafted from the record
++    const q = prompt(150, 9);
++    const other = try @import("cache_salt_key.zig").salted(gpa, &q, 0x5a17);
++    defer gpa.free(other);
++    var fresh: Box = .{};
++    defer fresh.deinit();
++    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &q, .max_tokens = 60, .cache_key = other, .salted = true }, 3, &fresh));
++    try std.testing.expectEqual(added, store.added); // its prompt and reply stay out of the shared record
++    var plain: Box = .{};
++    defer plain.deinit();
++    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &p, .max_tokens = 120 }, 4, &plain));
++    try std.testing.expect(plain.rounds < first.rounds); // the record serves an unsalted repeat, as before
++}
+diff --git a/zig/src/core/rows_all_test.zig b/zig/src/core/rows_all_test.zig
+index c972955cbcf2ea559b22134b9f00c895218a7c22..a28fc870963857f988d632a4d86c6cc1fae16355 100644
+--- a/zig/src/core/rows_all_test.zig
++++ b/zig/src/core/rows_all_test.zig
+@@ -20,5 +20,6 @@ test {
+     _ = @import("rows_refusal_test.zig");
+     _ = @import("rows_startup_fault_test.zig");
+     _ = @import("rows_drop_test.zig");
++    _ = @import("cache_salt_key.zig"); // and its disk test
+     _ = @import("rows_restore_burst_test.zig");
+ }
+diff --git a/zig/src/server/anthropic_translate.zig b/zig/src/server/anthropic_translate.zig
+index 92831f562f4d0af03a89f2a11e136b1473fa4049..378abf3d2819596086ae82a34798e66255c41ba9 100644
+--- a/zig/src/server/anthropic_translate.zig
++++ b/zig/src/server/anthropic_translate.zig
+@@ -218,7 +218,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
+         if (s != .bool) return cx.refuse("stream must be a boolean");
+         try chat.put(a, "stream", s);
+     }
+-    for ([_][]const u8{ "temperature", "top_p", "top_k" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
++    for ([_][]const u8{ "temperature", "top_p", "top_k", "cache_salt" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
+     if (body.get("stop_sequences")) |stops| {
+         const ok = stops == .array and for (stops.array) |s| {
+             if (s != .string or s.string.len == 0) break false;
+diff --git a/zig/src/server/cache_salt.zig b/zig/src/server/cache_salt.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..e534fe4a8dc56e76c2a605166192b514bb236dbc
+--- /dev/null
++++ b/zig/src/server/cache_salt.zig
+@@ -0,0 +1,106 @@
++//! cache_salt: a kept prompt state is found only by a request with the same salt (its field, or its API key).
++const std = @import("std");
++const json = @import("json");
++const errors = @import("errors.zig");
++const Server = @import("server.zig").Server;
++const Key = @import("ids.zig").Key;
++const Cx = errors.Cx;
++
++/// The longest salt a request may send.
++pub const most = 1024;
++
++/// The request's ``cache_salt``: its keyed hash, or 0 when absent; a non-empty string of at most `most` bytes.
++pub fn field(secret: *const Key, cx: *Cx, body: json.Value) errors.Refused!u64 {
++    const v = body.field("cache_salt") orelse return 0;
++    if (v != .string or v.string.len == 0 or v.string.len > most)
++        return cx.fail(.request, "cache_salt must be a non-empty string of at most {d} bytes", .{most});
++    return mix(secret, 0, "field", v.string);
++}
++
++/// --cache-salt-per-key: the salt mixed with the matched key's digest (no key matched: the salt as it is).
++pub fn withKey(secret: *const Key, per_key: bool, salt: u64, digest: ?[32]u8) u64 {
++    if (!per_key) return salt;
++    const d = digest orelse return salt;
++    return mix(secret, salt, "key", &d);
++}
++
++/// The request's salt as this server keys it: the field's hash, mixed with the matched API key's under the option.
++pub fn ofRequest(srv: *const Server, salt: u64, digest: ?[32]u8) u64 {
++    return withKey(&srv.tool_ids, srv.config.cache_salt_per_key, salt, digest);
++}
++
++/// HMAC-SHA-256 under the server's secret over a domain, the earlier salt and one part; never 0 (0 is no salt).
++fn mix(secret: *const Key, prior: u64, comptime tag: []const u8, part: []const u8) u64 {
++    var h = secret.mac; // the tool-call ids' key (ids.zig): a salt can't be tested offline against an exposed cache key
++    h.update("tensorfold cache salt 1 " ++ tag);
++    h.update(std.mem.asBytes(&prior));
++    var len: [8]u8 = undefined;
++    std.mem.writeInt(u64, &len, part.len, .little);
++    h.update(&len);
++    h.update(part);
++    const out = std.mem.readInt(u64, h.finalResult()[0..8], .little);
++    return if (out == 0) 1 else out;
++}
++
++/// `base` (the prompt's cache key) with its first words salted, or the refusal for an engine that keys by tokens alone.
++pub fn key(srv: *const Server, cx: *Cx, base: []const u32, salt: u64) errors.Refused![]const u32 {
++    if (salt == 0) return base;
++    // only a host that says its whole cache goes by the key takes a salt (one with a family's own store may not)
++    if (!srv.info.cache_salt) return cx.fail(.request, "cache_salt is not supported by backend '{s}': its prompt cache does not key requests by salt", .{srv.backendName()});
++    return salted(cx.a, base, salt);
++}
++
++/// The salted copy (core/cache_salt_key.zig): high-bit words masked by the salt, which disk never keeps.
++pub fn salted(a: std.mem.Allocator, base: []const u32, salt: u64) std.mem.Allocator.Error![]const u32 {
++    return @import("engine_api").cache_salt_key.salted(a, base, salt);
++}
++
++test "salts: absent is 0, a string hashes under the server's key, a malformed one is refused; keys mix in per key" {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    var cx: Cx = .{ .a = arena.allocator() };
++    const a = cx.a;
++    const k = Key.of("one server's secret");
++    try std.testing.expectEqual(@as(u64, 0), try field(&k, &cx, (try json.parse(a, "{}")).ok));
++    try std.testing.expectEqual(@as(u64, 0), try field(&k, &cx, (try json.parse(a, "{\"cache_salt\":null}")).ok));
++    const x = try field(&k, &cx, (try json.parse(a, "{\"cache_salt\":\"tenant-a\"}")).ok);
++    const y = try field(&k, &cx, (try json.parse(a, "{\"cache_salt\":\"tenant-b\"}")).ok);
++    try std.testing.expect(x != 0 and y != 0 and x != y);
++    try std.testing.expectEqual(x, try field(&k, &cx, (try json.parse(a, "{\"cache_salt\":\"tenant-a\"}")).ok));
++    const other = Key.of("another server's secret"); // the same salt under another key: nothing to test a guess against
++    try std.testing.expect(x != try field(&other, &cx, (try json.parse(a, "{\"cache_salt\":\"tenant-a\"}")).ok));
++    for ([_][]const u8{ "{\"cache_salt\":\"\"}", "{\"cache_salt\":7}", "{\"cache_salt\":[\"a\"]}" }) |b|
++        try std.testing.expectError(error.Refused, field(&k, &cx, (try json.parse(a, b)).ok));
++    const long = try std.mem.concat(a, u8, &.{ "{\"cache_salt\":\"", &@as([most + 1]u8, @splat('s')), "\"}" });
++    try std.testing.expectError(error.Refused, field(&k, &cx, (try json.parse(a, long)).ok));
++    try std.testing.expect(std.mem.indexOf(u8, cx.message, "tenant") == null); // a refusal never echoes the salt
++    const d1: [32]u8 = @splat(1);
++    const d2: [32]u8 = @splat(2);
++    try std.testing.expectEqual(x, withKey(&k, false, x, d1));
++    try std.testing.expectEqual(x, withKey(&k, true, x, null));
++    try std.testing.expect(withKey(&k, true, 0, d1) != 0 and withKey(&k, true, 0, d1) != withKey(&k, true, 0, d2));
++    try std.testing.expect(withKey(&k, true, x, d1) != withKey(&k, true, y, d1));
++}
++
++test "salts per key: no salt a client sends reproduces another key's, nor a keyless request's, nor its own key's" {
++    const k = Key.of("one server's secret");
++    const d1: [32]u8 = @splat(1);
++    const d2: [32]u8 = @splat(2);
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    var cx: Cx = .{ .a = arena.allocator() };
++    // the combination: the field's hash first, then the key's digest over it, each under its own domain
++    const key2 = withKey(&k, true, 0, d2);
++    const key1 = withKey(&k, true, 0, d1);
++    var bytes: [8]u8 = undefined;
++    std.mem.writeInt(u64, &bytes, key2, .little);
++    const tried = [_][]const u8{ &d2, &bytes, "key", "field", "tensorfold cache salt 1 key", "tenant-a" };
++    for (tried) |s| {
++        const body = try json.newObject(cx.a);
++        try body.put(cx.a, "cache_salt", .{ .string = s });
++        const own = try field(&k, &cx, .{ .object = body });
++        const on1 = withKey(&k, true, own, d1);
++        try std.testing.expect(on1 != key2 and on1 != key1 and on1 != own and own != key2 and own != key1);
++        try std.testing.expect(on1 != withKey(&k, true, own, d2)); // the same salt on two keys: apart
++    }
++}
+diff --git a/zig/src/server/cache_salt_test.zig b/zig/src/server/cache_salt_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7d3c67acb41c3201365e700f110bb71f12e9e12
+--- /dev/null
++++ b/zig/src/server/cache_salt_test.zig
+@@ -0,0 +1,331 @@
++//! cache_salt end to end: the lane host resumes only the same salt's states; the routes salt the key, or leave it.
++const std = @import("std");
++const lanes = @import("lanes");
++const api = @import("engine_api");
++const json = @import("json");
++const server = @import("root.zig");
++const model_text = @import("model_text.zig");
++const openai = @import("openai.zig");
++const errors = @import("errors.zig");
++const cache_salt = @import("cache_salt.zig");
++const Conn = @import("http_conn.zig").Conn;
++const pc = api.prompt_cache;
++const gpa = std.testing.allocator;
++const io = std.testing.io;
++
++const Snaps = struct {
++    fn bytes(_: *anyopaque, at: u32) u64 {
++        return 64 + 4 * @as(u64, at);
++    }
++    fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
++        const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
++        return f.save(@ptrCast(@alignCast(owner.?)), at);
++    }
++    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
++        return error.BackendRestores; // lane-core backends restore inside their own prompt pass
++    }
++    fn drop(ptr: *anyopaque, saved: pc.Saved) void {
++        const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
++        f.drop(saved);
++    }
++};
++
++const Box = struct {
++    mutex: std.Io.Mutex = .init,
++    tokens: std.ArrayList(u32) = .empty,
++    cached: ?u32 = null,
++    done: ?api.Reason = null,
++    fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
++        const b: *@This() = @ptrCast(@alignCast(ctx));
++        b.mutex.lockUncancelable(io);
++        defer b.mutex.unlock(io);
++        switch (e.*) {
++            .prefilled => |c| b.cached = c,
++            .logprobs, .prompt_logprobs, .audio => {},
++            .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
++            .finished => |f| b.done = f.reason,
++        }
++    }
++    fn wait(b: *@This()) api.Reason {
++        while (true) {
++            b.mutex.lockUncancelable(io);
++            const d = b.done;
++            b.mutex.unlock(io);
++            if (d) |r| return r;
++            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
++        }
++    }
++};
++
++/// One request run to its end under `salt` (0: none): its tokens (the caller frees them) and where it resumed.
++fn run(e: api.Engine, id: api.Id, prompt: []const u32, history: u32, max: u32, salt: u64) !struct { tokens: std.ArrayList(u32), cached: ?u32 } {
++    const key: []const u32 = if (salt != 0) try cache_salt.salted(gpa, prompt, salt) else &.{};
++    defer if (salt != 0) gpa.free(key);
++    const r: api.Request = .{ .prompt = prompt, .max_tokens = max, .history_len = history, .cache_key = key, .salted = salt != 0 };
++    var b: Box = .{};
++    try e.submit(id, &r, .{ .ctx = &b, .event = Box.event });
++    try std.testing.expectEqual(api.Reason.length, b.wait());
++    return .{ .tokens = b.tokens, .cached = b.cached };
++}
++
++const t1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3 };
++const salt_a: u64 = 0xa11ce;
++const salt_b: u64 = 0xb0b;
++
++test "two salts never resume each other's states, the same salt resumes as an unsalted turn does, tokens unchanged" {
++    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var clock: lanes.fake.FixedClock = .{};
++    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
++    defer core.deinit();
++    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
++    defer store.deinit();
++    var host = api.LaneHost.init(gpa, io, &core, .{ .lanes = 2 });
++    host.cache = &store;
++    try host.start();
++    defer host.stop();
++    const e = host.engine();
++    try std.testing.expect(e.info().cache_salt);
++    // the plain conversation, as on main: turn 2 resumes the 8 tokens turn 1 kept
++    var p1 = try run(e, 1, &t1, 8, 6, 0);
++    defer p1.tokens.deinit(gpa);
++    try std.testing.expectEqual(@as(?u32, 0), p1.cached);
++    const t2 = try std.mem.concat(gpa, u32, &.{ &t1, p1.tokens.items[0..4], &.{ 7, 7, 5, 3 } });
++    defer gpa.free(t2);
++    const h2: u32 = @intCast(t2.len - 2);
++    var p2 = try run(e, 2, t2, h2, 12, 0);
++    defer p2.tokens.deinit(gpa);
++    try std.testing.expectEqual(@as(?u32, 8), p2.cached);
++    // salt A's first turn: the plain states are not its own
++    var a1 = try run(e, 3, &t1, 8, 6, salt_a);
++    defer a1.tokens.deinit(gpa);
++    try std.testing.expectEqual(@as(?u32, 0), a1.cached);
++    try std.testing.expectEqualSlices(u32, p1.tokens.items, a1.tokens.items);
++    // salt B's second turn: neither A's states nor the plain ones
++    var b2 = try run(e, 4, t2, h2, 12, salt_b);
++    defer b2.tokens.deinit(gpa);
++    try std.testing.expectEqual(@as(?u32, 0), b2.cached);
++    // salt A's second turn resumes A's first turn, at the same place the plain turn did
++    var a2 = try run(e, 5, t2, h2, 12, salt_a);
++    defer a2.tokens.deinit(gpa);
++    try std.testing.expectEqual(p2.cached, a2.cached);
++    // salts never change tokens
++    try std.testing.expectEqualSlices(u32, p2.tokens.items, b2.tokens.items);
++    try std.testing.expectEqualSlices(u32, p2.tokens.items, a2.tokens.items);
++    // a third salt, and no salt, after all of them: each resumes only its own
++    var c2 = try run(e, 6, t2, h2, 12, 0xc0ffee);
++    defer c2.tokens.deinit(gpa);
++    try std.testing.expectEqual(@as(?u32, 0), c2.cached);
++    var again = try run(e, 7, t2, h2, 12, 0);
++    defer again.tokens.deinit(gpa);
++    try std.testing.expect(again.cached.? >= 8); // the plain turns' own states
++}
++
++test "a salted text prompt counts as a repeat under its own key, as a plain one does under its tokens" {
++    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var clock: lanes.fake.FixedClock = .{};
++    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
++    defer core.deinit();
++    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0, .repeat_min = 4 }, 1 << 20);
++    defer store.deinit();
++    var host = api.LaneHost.init(gpa, io, &core, .{ .lanes = 2 });
++    host.cache = &store;
++    try host.start();
++    defer host.stop();
++    const key = try cache_salt.salted(gpa, &t1, salt_a);
++    defer gpa.free(key);
++    try std.testing.expectEqual(@as(u32, 0), store.repeat_log.mark(4, key, 0, 0, false));
++    var once = try run(host.engine(), 1, &t1, 0, 6, salt_a);
++    defer once.tokens.deinit(gpa);
++    try std.testing.expect(store.repeat_log.mark(4, key, 0, 0, false) > 0); // its key, never its plain tokens
++    try std.testing.expectEqual(@as(u32, 0), store.repeat_log.mark(4, &t1, 0, 0, false));
++}
++
++/// Bytes as tokens; every prompt renders as "prompt".
++const Text = struct {
++    fn text(x: *@This()) model_text.Text {
++        return .{ .ctx = x, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .token_bytes = tokenBytes } };
++    }
++    fn encode(_: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
++        const ids = try a.alloc(u32, input.len);
++        for (input, ids) |byte, *id| id.* = byte;
++        return ids;
++    }
++    fn decode(_: *anyopaque, a: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
++        const out = try a.alloc(u8, ids.len);
++        for (ids, out) |id, *b| b.* = @truncate(id);
++        return out;
++    }
++    fn tokenBytes(_: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error!?[]u8 {
++        return try a.dupe(u8, &.{@as(u8, @truncate(id))});
++    }
++    fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
++        return null;
++    }
++    fn tokenString(_: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error![]u8 {
++        return a.dupe(u8, &.{@as(u8, @truncate(id))});
++    }
++    fn vocabSize(_: *anyopaque) u32 {
++        return 256;
++    }
++    fn eosIds(_: *anyopaque) []const u32 {
++        return &.{};
++    }
++    fn render(_: *anyopaque, a: std.mem.Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
++        return .{ .text = try a.dupe(u8, "prompt") };
++    }
++    fn templateSource(_: *anyopaque) []const u8 {
++        return "";
++    }
++};
++
++/// An engine that keeps prompt states (keyed by cache key, or not) and records each request's cache key.
++const Keys = struct {
++    keys: bool = true,
++    got: ?[]u32 = null,
++    salted: bool = false,
++    fn engine(k: *@This()) api.Engine {
++        return .{ .ctx = k, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
++    }
++    fn info(ctx: *anyopaque) api.Info {
++        const k: *Keys = @ptrCast(@alignCast(ctx));
++        return .{ .context_window = 64, .prompt_cache = true, .cache_salt = k.keys };
++    }
++    fn submit(ctx: *anyopaque, id: api.Id, r: *const api.Request, sink: api.Sink) api.SubmitError!void {
++        const k: *Keys = @ptrCast(@alignCast(ctx));
++        if (k.got) |g| gpa.free(g);
++        k.got = gpa.dupe(u32, r.cache_key) catch return error.Busy;
++        k.salted = r.salted;
++        sink.event(sink.ctx, id, &.{ .prefilled = 0 });
++        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .length } });
++    }
++    fn cancel(_: *anyopaque, _: api.Id) void {}
++    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
++        out.* = .{};
++    }
++    fn memory(_: *anyopaque, _: bool) ?api.Memory {
++        return null;
++    }
++};
++
++const Sent = struct {
++    status: u16 = 0,
++    fn out(s: *@This()) openai.Out {
++        return .{ .ctx = s, .vt = &.{ .open = open, .event = event, .reply = reply } };
++    }
++    fn open(_: *anyopaque, _: usize) error{Closed}!void {}
++    fn event(_: *anyopaque, _: ?json.Value) error{Closed}!void {}
++    fn reply(ctx: *anyopaque, status: u16, _: json.Value) void {
++        const s: *Sent = @ptrCast(@alignCast(ctx));
++        s.status = status;
++    }
++};
++
++/// The cache key a chat request reached the engine with (testing-allocator owned), and its reply's status.
++fn keyOf(k: *Keys, body: []const u8, per_key: bool, digest: ?[32]u8) !struct { key: []u32, status: u16, salted: bool } {
++    var text: Text = .{};
++    var secret = @import("ids.zig").Key.of("one server's salt key"); // Server.init takes it: every call's server keys alike
++    var srv = try server.Server.init(gpa, io, k.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .cache_salt_per_key = per_key, .tool_id_key = &secret }, null);
++    defer srv.deinit();
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .key_digest = digest };
++    var sent: Sent = .{};
++    if (k.got) |g| gpa.free(g);
++    k.got = null;
++    k.salted = false;
++    openai.run(srv, a, sent.out(), .{ .conn = &conn }, true, (try json.parse(a, body)).ok);
++    const got = k.got orelse try gpa.alloc(u32, 0);
++    k.got = null;
++    return .{ .key = got, .status = sent.status, .salted = k.salted };
++}
++
++const chat = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":4";
++
++test "the routes: no salt sends today's key, a salt keys the request, the per-key option isolates keys" {
++    var k: Keys = .{};
++    defer if (k.got) |g| gpa.free(g);
++    const plain = try keyOf(&k, chat ++ "}", false, null);
++    defer gpa.free(plain.key);
++    try std.testing.expectEqual(@as(usize, 0), plain.key.len); // no salt: the request is as on main
++    const a1 = try keyOf(&k, chat ++ ",\"cache_salt\":\"tenant-a\"}", false, null);
++    defer gpa.free(a1.key);
++    const a2 = try keyOf(&k, chat ++ ",\"cache_salt\":\"tenant-a\"}", false, null);
++    defer gpa.free(a2.key);
++    const b = try keyOf(&k, chat ++ ",\"cache_salt\":\"tenant-b\"}", false, null);
++    defer gpa.free(b.key);
++    try std.testing.expectEqual(@as(usize, "prompt".len), a1.key.len);
++    try std.testing.expectEqualSlices(u32, a1.key, a2.key); // the same salt, the same key
++    try std.testing.expect(!std.mem.eql(u32, a1.key[0..4], b.key[0..4]));
++    try std.testing.expectEqualSlices(u8, "pt", &.{ @as(u8, @truncate(a1.key[4])), @as(u8, @truncate(a1.key[5])) });
++    for (a1.key[0..4]) |w| try std.testing.expect(w & 0x8000_0000 != 0);
++    // --cache-salt-per-key: two API keys' requests keyed apart; one key's requests together; off, no key change
++    const d1: [32]u8 = @splat(1);
++    const d2: [32]u8 = @splat(2);
++    const k1 = try keyOf(&k, chat ++ "}", true, d1);
++    defer gpa.free(k1.key);
++    const k1b = try keyOf(&k, chat ++ "}", true, d1);
++    defer gpa.free(k1b.key);
++    const k2 = try keyOf(&k, chat ++ "}", true, d2);
++    defer gpa.free(k2.key);
++    try std.testing.expectEqualSlices(u32, k1.key, k1b.key);
++    try std.testing.expect(k1.key.len == 6 and !std.mem.eql(u32, k1.key[0..4], k2.key[0..4]));
++    const off = try keyOf(&k, chat ++ "}", false, d1);
++    defer gpa.free(off.key);
++    try std.testing.expectEqual(@as(usize, 0), off.key.len);
++    const both = try keyOf(&k, chat ++ ",\"cache_salt\":\"tenant-a\"}", true, d1);
++    defer gpa.free(both.key);
++    try std.testing.expect(!std.mem.eql(u32, both.key[0..4], a1.key[0..4]) and !std.mem.eql(u32, both.key[0..4], k1.key[0..4]));
++    // the same client salt on another key: apart from key 1's, and from key 2's own requests
++    const both2 = try keyOf(&k, chat ++ ",\"cache_salt\":\"tenant-a\"}", true, d2);
++    defer gpa.free(both2.key);
++    try std.testing.expect(!std.mem.eql(u32, both2.key[0..4], both.key[0..4]) and !std.mem.eql(u32, both2.key[0..4], k2.key[0..4]));
++    // the engine is told which requests are salted (Recall skips them); an unsalted one is as on main
++    try std.testing.expect(!plain.salted and !off.salted and a1.salted and k1.salted and both2.salted);
++}
++
++test "the routes: Messages passes the salt on, and an imprint ask looks up a salted request by its salted key" {
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    var cx: errors.Cx = .{ .a = arena.allocator() };
++    const body = (try json.parse(cx.a, "{\"model\":\"m\",\"max_tokens\":4,\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"cache_salt\":\"tenant-a\"}")).ok;
++    const translated = try @import("anthropic_translate.zig").translate(&cx, body, false);
++    try std.testing.expectEqualStrings("tenant-a", translated.strField("cache_salt").?);
++    const prompt = [_]u32{ 1, 2, 3, 4, 5 };
++    const key = try cache_salt.salted(cx.a, &prompt, salt_a);
++    const imprint = @import("imprint_routes.zig");
++    try std.testing.expectEqualSlices(u32, &prompt, imprint.askKey(.{ .prompt = &prompt, .max_tokens = 1 }));
++    try std.testing.expectEqualSlices(u32, key, imprint.askKey(.{ .prompt = &prompt, .max_tokens = 1, .cache_key = key, .salted = true }));
++}
++
++test "the routes: an engine keyed by tokens alone refuses a salt, a malformed salt is refused, Responses passes it on" {
++    var k: Keys = .{ .keys = false };
++    defer if (k.got) |g| gpa.free(g);
++    const refused = try keyOf(&k, chat ++ ",\"cache_salt\":\"tenant-a\"}", false, null);
++    defer gpa.free(refused.key);
++    try std.testing.expectEqual(@as(u16, 400), refused.status);
++    const plain = try keyOf(&k, chat ++ "}", false, null); // without a salt it serves as before
++    defer gpa.free(plain.key);
++    try std.testing.expectEqual(@as(u16, 200), plain.status);
++    k.keys = true;
++    const empty = try keyOf(&k, chat ++ ",\"cache_salt\":\"\"}", false, null);
++    defer gpa.free(empty.key);
++    try std.testing.expectEqual(@as(u16, 400), empty.status);
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    var cx: errors.Cx = .{ .a = arena.allocator() };
++    const body = (try json.parse(cx.a, "{\"model\":\"m\",\"input\":\"x\",\"cache_salt\":\"tenant-a\"}")).ok;
++    const NoHistory = struct {
++        pub fn conversation(_: @This(), c: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
++            return c.refuse("no stored responses in this test");
++        }
++    };
++    const t = try @import("responses_translate.zig").translate(&cx, body, NoHistory{});
++    try std.testing.expectEqualStrings("tenant-a", t.chat.strField("cache_salt").?);
++}
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index c64f523b47aeb1756c892ff129573db9fb394b44..8db3c4357c52962fa65b4f647b2cd12c7b0fd839 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -41,6 +41,8 @@ pub const Input = struct {
+     logprobs: ?u8 = null,
+     /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
+     prompt_logprobs: ?u8 = null,
++    /// The prompt cache's salt (cache_salt.zig): a hash, 0 for none; states kept under one salt serve only that salt.
++    cache_salt: u64 = 0,
+     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
+     format: ?[]const u8 = null,
+ };
+@@ -192,6 +194,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+         .images = rendered.images,
+         .cache_key = rendered.cache_key,
+     };
++    const salt = if (input.cache_salt != 0) input.cache_salt else cx.cache_salt;
++    if (salt != 0) request.cache_key = try @import("cache_salt.zig").key(srv, cx, request.cacheKey(), salt);
++    request.salted = salt != 0;
+     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
+     server_mod.nameStructure(input.format, &request);
+     errdefer srv.release(false, request);
+diff --git a/zig/src/server/cli.zig b/zig/src/server/cli.zig
+index ceadd0d689d66f115946292716351157d1664830..aed48240611a8b810cfa80a4a2973deed1f8ff26 100644
+--- a/zig/src/server/cli.zig
++++ b/zig/src/server/cli.zig
+@@ -70,6 +70,7 @@ pub const flags = [_]Flag{
+     .{ .name = "--max-tokens", .native = true },
+     .{ .name = "--temperature", .native = true },
+     .{ .name = "--prompt-seed", .kind = .store_true, .native = true },
++    .{ .name = "--cache-salt-per-key", .kind = .store_true, .native = true },
+     .{ .name = "--top-p", .native = true },
+     .{ .name = "--top-k", .native = true },
+     .{ .name = "--min-p", .native = true },
+@@ -209,6 +210,7 @@ pub const Args = struct {
+     max_tokens: i64 = 4096,
+     temperature: ?f64 = null,
+     prompt_seed: bool = false,
++    cache_salt_per_key: bool = false,
+     top_p: ?f64 = null,
+     top_k: ?i64 = null,
+     min_p: ?f64 = null,
+@@ -466,7 +468,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
+     } else if (is(name, "--decode-share")) {
+         out.decode_share = try float(u, a, name, v);
+         if (!(out.decode_share.? >= 0 and out.decode_share.? < 1)) return fail(u, a, "argument --decode-share: expected a share from 0 to under 1: '{s}'", .{v});
+-    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
++    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--cache-salt-per-key")) out.cache_salt_per_key = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
+             const f = try float(u, a, name, v);
+             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
+diff --git a/zig/src/server/compact.zig b/zig/src/server/compact.zig
+index 6461cfc0caa086f0eec27ac0f282e2bc5a7807ce..9fd7e30e6e51ed15138cf867dd0811afc5a6a8d9 100644
+--- a/zig/src/server/compact.zig
++++ b/zig/src/server/compact.zig
+@@ -102,6 +102,7 @@ pub fn run(srv: *Server, cx: *Cx, input: chat.Input, sink: ?chat.Sink, gone: any
+ }
+ 
+ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype) chat.Failure!Ready {
++    cx.cache_salt = input.cache_salt; // the notes this compaction writes keep their states under the same salt
+     const at = srv.config.compact_at orelse {
+         const prepared = try chat.prepare(srv, cx, input, gone);
+         return .{ .prepared = prepared, .stamp = .{ .window = srv.info.context_window, .used = prepared.prompt_len } };
+@@ -136,7 +137,7 @@ pub fn stamp(cx: *Cx, reply: *chat.Reply, s: Stamp) chat.Failure!void {
+ fn rebuild(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype, at: CompactAt, msgs: []Value) chat.Failure!Ready {
+     const a = cx.a;
+     const marker = try findMarker(a, msgs);
+-    const slot = stored.loadMem(srv, a, msgs);
++    const slot = stored.loadMem(srv, a, msgs, cx.cache_salt);
+     const hash_ok = if (slot) |m| stored.hashes(a, msgs, m) else false;
+     var prev: []const u8 = "";
+     if (hash_ok) {
+@@ -174,7 +175,7 @@ fn rebuild(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype, at: CompactA
+         var next = input;
+         next.messages = .{ .array = built };
+         if (chat.prepare(srv, cx, next, gone)) |prepared| {
+-            stored.storeMem(srv, a, msgs, tail, note);
++            stored.storeMem(srv, a, msgs, tail, note, cx.cache_salt);
+             return .{
+                 .prepared = prepared,
+                 .stamp = .{
+diff --git a/zig/src/server/compact_mem.zig b/zig/src/server/compact_mem.zig
+index b45513bad66d7ea04fad027da4e90c7f1f0e6f1b..f731d050379e13f53723b6dd2efe38957d7d25ff 100644
+--- a/zig/src/server/compact_mem.zig
++++ b/zig/src/server/compact_mem.zig
+@@ -24,7 +24,9 @@ pub fn hashes(a: Allocator, msgs: []const Value, mem: Mem) bool {
+     return std.mem.eql(u8, got, mem.hash);
+ }
+ 
+-pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value) ?Mem {
++/// The note kept for these messages (null: none, or a salted request: the store is keyed by the messages alone).
++pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value, salt: u64) ?Mem {
++    if (salt != 0) return null;
+     const dir = srv.config.compact_memory orelse return null;
+     const key = conversationKey(a, msgs) catch return null;
+     const note = readNamed(srv, a, dir, &key, ".md") orelse return null;
+@@ -39,7 +41,9 @@ pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value) ?Mem {
+     return .{ .note = note, .covered = covered, .hash = hash };
+ }
+ 
+-pub fn storeMem(srv: *Server, a: Allocator, msgs: []const Value, covered: usize, note: []const u8) void {
++/// Keep the note for these messages, unless the request is salted: another salt's request with them would read it.
++pub fn storeMem(srv: *Server, a: Allocator, msgs: []const Value, covered: usize, note: []const u8, salt: u64) void {
++    if (salt != 0) return;
+     const dir = srv.config.compact_memory orelse return;
+     std.Io.Dir.cwd().createDirPath(srv.io, dir) catch return;
+     const key = conversationKey(a, msgs) catch return;
+diff --git a/zig/src/server/cortheon/cortheon.zig b/zig/src/server/cortheon/cortheon.zig
+index 28c7e7b2e569817a05fb31fc2be7d3790e704d23..c09eaec7c3c3191ecfe5f2fd6b4d713a0f9c8add 100644
+--- a/zig/src/server/cortheon/cortheon.zig
++++ b/zig/src/server/cortheon/cortheon.zig
+@@ -63,6 +63,7 @@ pub const Turn = struct {
+     research: bool,
+     client_tools: bool,
+     user_key: u64,
++    salt: u64 = 0, // the request's cache salt: its memory keys and the planner's own request keep apart under it
+     today: []const u8,
+     hidden: std.ArrayList(Value) = .empty,
+     sources: std.ArrayList([]const u8) = .empty,
+@@ -135,7 +136,7 @@ pub const Turn = struct {
+         @memcpy(list[0 .. list.len - 1], input.messages.array);
+         list[list.len - 1] = message;
+         const text = json.stringify(a, .{ .array = t.hidden.items }, .{ .ascii = false }) catch return;
+-        const key = memory.replyKey(a, list, list.len - 1) catch return;
++        const key = (memory.replyKey(a, list, list.len - 1) catch return) ^ t.salt;
+         t.state.memory.put(key, text);
+     }
+ 
+@@ -179,7 +180,7 @@ fn utility(a: Allocator, input: *const chat.Input) bool {
+ }
+ 
+ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat.Input) !*Turn {
+-    const spliced = try memory.splice(a, &state.memory, input.messages.array);
++    const spliced = try memory.splice(a, &state.memory, input.messages.array, input.cache_salt);
+     var first: ?[]const u8 = null;
+     var latest: []const u8 = "";
+     for (spliced) |m| if (roleIs(m, "user")) {
+@@ -198,7 +199,8 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
+         .goal = latest[0..@import("html.zig").cutAt(latest, 4000)], // the cap does not split a character
+         .research = fresh_turn and latest_task.frontier and std.mem.trim(u8, latest, " \t\r\n").len >= 12,
+         .client_tools = input.tools.len > 0,
+-        .user_key = try memory.userKey(a, spliced),
++        .user_key = try memory.userKey(a, spliced) ^ input.cache_salt,
++        .salt = input.cache_salt,
+         .today = try today(a, srv.io),
+     };
+     for (spliced) |m| if (!roleIs(m, "assistant")) try t.seen.addFrom(a, try memory.text(a, m));
+diff --git a/zig/src/server/cortheon/cortheon_test.zig b/zig/src/server/cortheon/cortheon_test.zig
+index b759c54d26cbc2fe1796a5578b5ee2d1520fda70..59bab9d2c90c86f5a333a2c4a7ab0ec91acef73d 100644
+--- a/zig/src/server/cortheon/cortheon_test.zig
++++ b/zig/src/server/cortheon/cortheon_test.zig
+@@ -88,6 +88,7 @@ pub const Eng = struct {
+     refuse_at: ?usize = null,
+     refusal: api.SubmitError = error.Closed,
+     prompts: std.ArrayList([]u8) = .empty,
++    salted: std.ArrayList(bool) = .empty, // each request's Request.salted, beside its prompt
+ 
+     pub fn sample(e: *Eng) void {
+         if (e.observer) |o| o.call(o.ctx);
+@@ -97,7 +98,7 @@ pub const Eng = struct {
+         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+     }
+     fn info(_: *anyopaque) api.Info {
+-        return .{ .context_window = 0, .name = "fake" };
++        return .{ .context_window = 0, .name = "fake", .cache_salt = true };
+     }
+     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
+         const e: *Eng = @ptrCast(@alignCast(ctx));
+@@ -105,6 +106,7 @@ pub const Eng = struct {
+         if (e.refuse_at == e.next) return e.refusal;
+         const buf = decoded(gpa, request.prompt) catch return error.Busy;
+         e.prompts.append(gpa, buf) catch {};
++        e.salted.append(gpa, request.salted) catch {};
+         const reply = if (e.next < e.script.len) e.script[e.next] else "OK";
+         e.next += 1;
+         const toks = gpa.alloc(u32, reply.len) catch return error.Busy;
+@@ -124,6 +126,7 @@ pub const Eng = struct {
+     fn deinit(e: *Eng) void {
+         for (e.prompts.items) |p| gpa.free(p);
+         e.prompts.deinit(gpa);
++        e.salted.deinit(gpa);
+     }
+     fn saw(e: *const Eng, i: usize, needle: []const u8) bool {
+         return i < e.prompts.items.len and std.mem.indexOf(u8, e.prompts.items[i], needle) != null;
+@@ -314,6 +317,18 @@ test "a fresh question on current facts is researched before the model starts" {
+     try std.testing.expectEqualStrings("The latest is 0.17.\n\nOK", message(got.body.?).strField("content").?);
+ }
+ 
++test "a salted research turn salts the planner's own request as well as the turn's" {
++    var rig: Rig = .{ .eng = .{ .script = &.{ "1. Zig latest release notes\n2. Zig 0.17 changelog\n", "The latest is 0.17." } } };
++    try rig.start(true);
++    defer rig.stop();
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    _ = try rig.ask(arena.allocator(), "{\"messages\": [{\"role\": \"user\", \"content\": \"What is the latest release of Zig?\"}], \"cache_salt\": \"tenant-a\"}");
++    try std.testing.expect(rig.eng.saw(0, "You write web search queries")); // the planner's request came first
++    try std.testing.expect(rig.eng.salted.items.len == rig.eng.prompts.items.len and rig.eng.salted.items.len >= 2);
++    for (rig.eng.salted.items) |salted| try std.testing.expect(salted);
++}
++
+ test "research progress cannot open a stream before its final request is admitted" {
+     for ([_]api.SubmitError{ error.Closed, error.Busy }) |reason| {
+         var rig: Rig = .{ .eng = .{ .script = &.{"Zig latest release notes"}, .refuse_at = 1, .refusal = reason } };
+diff --git a/zig/src/server/cortheon/memory.zig b/zig/src/server/cortheon/memory.zig
+index 43c05e4bb7fd0a66e0e326dded922c794513cea1..8449c9c73cac0330ea1aba6287cf025f81296001 100644
+--- a/zig/src/server/cortheon/memory.zig
++++ b/zig/src/server/cortheon/memory.zig
+@@ -203,11 +203,11 @@ pub fn userKey(a: Allocator, messages: []const Value) Allocator.Error!u64 {
+ }
+ 
+ /// `messages` with every earlier reply's hidden messages back in front of it.
+-pub fn splice(a: Allocator, store: *Store, messages: []const Value) Allocator.Error![]const Value {
++pub fn splice(a: Allocator, store: *Store, messages: []const Value, salt: u64) Allocator.Error![]const Value {
+     var out: std.ArrayList(Value) = .empty;
+     var found = false;
+     for (messages, 0..) |m, i| {
+-        if (std.mem.eql(u8, role(m), "assistant")) if (store.get(a, try replyKey(a, messages, i))) |stored| {
++        if (std.mem.eql(u8, role(m), "assistant")) if (store.get(a, try replyKey(a, messages, i) ^ salt)) |stored| {
+             switch (json.parseText(a, stored) catch return error.OutOfMemory) {
+                 .ok => |v| if (v == .array) {
+                     if (!found) try out.appendSlice(a, messages[0..i]);
+@@ -238,12 +238,13 @@ test "a kept exchange goes back in front of its reply, whitespace and argument o
+     const turn = [_]Value{ try msg(a, "user", "What changed in Zig 0.17?"), try msg(a, "assistant", "It added  std.Io.\n") };
+     store.put(try replyKey(a, &turn, 1), "[{\"role\": \"tool\", \"content\": \"notes\"}]");
+     const later = [_]Value{ try msg(a, "system", "s"), try msg(a, "user", "What changed in Zig 0.17?"), try msg(a, "assistant", " It added std.Io."), try msg(a, "user", "And 0.16?") };
+-    const out = try splice(a, &store, &later);
++    const out = try splice(a, &store, &later, 0);
+     try std.testing.expectEqual(@as(usize, 5), out.len);
++    try std.testing.expectEqual(later.len, (try splice(a, &store, &later, 0x5a17)).len); // another cache salt: not its own
+     try std.testing.expectEqualStrings("tool", out[2].strField("role").?);
+     try std.testing.expectEqualStrings("assistant", out[3].strField("role").?);
+     const other = [_]Value{ try msg(a, "user", "Different question"), try msg(a, "assistant", "It added std.Io.") };
+-    try std.testing.expectEqual(@as(usize, 2), (try splice(a, &store, &other)).len);
++    try std.testing.expectEqual(@as(usize, 2), (try splice(a, &store, &other, 0)).len);
+     const call_a = (try json.parseText(a, "{\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"c1\", \"function\": {\"name\": \"bash\", \"arguments\": \"{\\\"b\\\": 1, \\\"a\\\": 2}\"}}]}")).ok;
+     const call_b = (try json.parseText(a, "{\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"zz\", \"function\": {\"name\": \"bash\", \"arguments\": {\"a\": 2, \"b\": 1}}}]}")).ok;
+     const u = try msg(a, "user", "run it");
+diff --git a/zig/src/server/cortheon/research.zig b/zig/src/server/cortheon/research.zig
+index bf460c6c22267016af3363fa29fde8ed19c8adb0..71472bfa9ce268ca65368aa70cee6b59f22fbe10 100644
+--- a/zig/src/server/cortheon/research.zig
++++ b/zig/src/server/cortheon/research.zig
+@@ -70,7 +70,7 @@ fn plan(t: *Turn, srv: *Server, a: Allocator, gone: anytype) chat.Failure![]cons
+     try fields.put(a, "enable_thinking", .{ .bool = false });
+     try fields.put(a, "temperature", .{ .int = "0" });
+     var scratch: errors.Cx = .{ .a = a };
+-    const reply = chat.run(srv, &scratch, .{ .messages = .{ .array = msgs }, .fields = .{ .object = fields }, .max_tokens = 160, .id = t.id }, null, gone) catch |e| switch (e) {
++    const reply = chat.run(srv, &scratch, .{ .messages = .{ .array = msgs }, .fields = .{ .object = fields }, .max_tokens = 160, .id = t.id, .cache_salt = t.salt }, null, gone) catch |e| switch (e) {
+         error.Cancelled => return error.Cancelled,
+         error.OutOfMemory => return error.OutOfMemory,
+         else => return fallback(a, t.goal),
+diff --git a/zig/src/server/errors.zig b/zig/src/server/errors.zig
+index 2622f5d6586b19006a8a82f4cf1a654d7c86cb26..b371b9b5867edc0d99766876cdc2e34da13d6199 100644
+--- a/zig/src/server/errors.zig
++++ b/zig/src/server/errors.zig
+@@ -34,6 +34,8 @@ pub const Cx = struct {
+     clear_thinking: ?bool = null,
+     /// The request controls a native prompt renderer must retain in every prefix probe.
+     template_fields: @import("json").Value = .null,
++    /// The request prompt-cache salt, retained by server-created compaction requests; 0: none.
++    cache_salt: u64 = 0,
+ 
+     pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
+         cx.kind = kind;
+diff --git a/zig/src/server/imprint_routes.zig b/zig/src/server/imprint_routes.zig
+index ad08b0d5fc477305bb73478d84b73fa23d340627..d40419fdfd7fd192a132a9f6d17f4e14089bc31b 100644
+--- a/zig/src/server/imprint_routes.zig
++++ b/zig/src/server/imprint_routes.zig
+@@ -32,7 +32,8 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, op: api.ImprintOp) void {
+     }
+     var cx: errors.Cx = .{ .a = a };
+     const body = http_body.readJson(conn, &cx) catch return refuse(conn, a, &cx);
+-    const input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
++    var input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
++    input.cache_salt = @import("cache_salt.zig").ofRequest(srv, input.cache_salt, conn.key_digest); // as its turn keys it
+     const p = chat.prepare(srv, &cx, input, Never{}) catch return refuse(conn, a, &cx);
+     defer srv.release(p.preparing, p.request);
+     const ask = make(srv, op, p.request) catch return conn.sendError(a, 500, "out of memory", null) catch {};
+@@ -51,12 +52,17 @@ fn make(srv: *Server, op: api.ImprintOp, r: api.Request) !*Ask {
+     const ask = try srv.gpa.create(Ask);
+     ask.* = .{ .op = op };
+     errdefer free(srv, ask);
+-    ask.prompt = try srv.gpa.dupe(u32, r.prompt);
++    ask.prompt = try srv.gpa.dupe(u32, askKey(r));
+     ask.starts = try srv.gpa.dupe(u32, r.chunks);
+     ask.spans = try srv.gpa.dupe([2]u32, r.decode_spans);
+     return ask;
+ }
+ 
++/// What an ask looks up: a salted request's key (its salt's states only), else its tokens as before.
++pub fn askKey(r: api.Request) []const u32 {
++    return if (r.salted) r.cache_key else r.prompt;
++}
++
+ fn free(srv: *Server, ask: *Ask) void {
+     srv.gpa.free(ask.prompt);
+     srv.gpa.free(ask.starts);
+diff --git a/zig/src/server/main.zig b/zig/src/server/main.zig
+index 0cbc71c8564df1ede29a5c6afc7dfa42db63f91c..f659a531c5046345569e4c00f56c4ecd3d12592d 100644
+--- a/zig/src/server/main.zig
++++ b/zig/src/server/main.zig
+@@ -21,7 +21,7 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
+     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
+     " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
+-    " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
++    " [--prompt-cache-over-cap] [--cache-salt-per-key] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
+     " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++
+     " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
+     " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--prompt-seed]" ++
+diff --git a/zig/src/server/openai.zig b/zig/src/server/openai.zig
+index c3c7218ea13cd6eda5dd5a362c0f262834b8a3af..49c13a0bb90a40bb25497eedae667f203c1c2104 100644
+--- a/zig/src/server/openai.zig
++++ b/zig/src/server/openai.zig
+@@ -174,6 +174,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
+             return cx.refuse("logprobs support chat without tools, stop strings, structured output or a thinking budget");
+     }
+     input.logprobs = logprobs;
++    input.cache_salt = try @import("cache_salt.zig").field(&srv.tool_ids, cx, body);
+     var policy: tool_stream.Policy = .{};
+     if (body.field("parallel_tool_calls")) |p| {
+         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
+@@ -250,6 +251,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
+         return;
+     };
+     p.input.id = id;
++    p.input.cache_salt = @import("cache_salt.zig").ofRequest(srv, p.input.cache_salt, gone.conn.key_digest);
+     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
+     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
+     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
+diff --git a/zig/src/server/request_log.zig b/zig/src/server/request_log.zig
+index 9ce6ed35895dfe8f19e7d19b7c3486ca6e96127e..cc5d3bf788b57273691539f2fba6cb418fa52119 100644
+--- a/zig/src/server/request_log.zig
++++ b/zig/src/server/request_log.zig
+@@ -1,4 +1,4 @@
+-//! TENSORFOLD_REQUEST_LOG: each chat and completion body appended as one JSON line, images redacted, for replays.
++//! TENSORFOLD_REQUEST_LOG: each chat and completion body appended as one JSON line, images and salts redacted.
+ const std = @import("std");
+ const builtin = @import("builtin");
+ const platform = @import("sys");
+@@ -7,7 +7,7 @@ const meta = @import("file_meta.zig").meta;
+ const Value = json.Value;
+ const Allocator = std.mem.Allocator;
+ 
+-/// The body with every image part's URL replaced, the rest kept.
++/// The body with every image part's URL and any cache salt replaced, the rest kept.
+ fn redact(a: Allocator, v: Value) Allocator.Error!Value {
+     switch (v) {
+         .array => |items| {
+@@ -32,7 +32,7 @@ fn redact(a: Allocator, v: Value) Allocator.Error!Value {
+                 return .{ .object = copy };
+             }
+             const out = try json.newObject(a);
+-            for (o.keys(), o.values()) |k, item| try out.put(a, k, try redact(a, item));
++            for (o.keys(), o.values()) |k, item| try out.put(a, k, if (std.mem.eql(u8, k, "cache_salt")) .{ .string = "<redacted>" } else try redact(a, item));
+             return .{ .object = out };
+         },
+         else => return v,
+@@ -66,7 +66,7 @@ fn warnOnce(path: []const u8, why: []const u8) void {
+     std.log.warn("TENSORFOLD_REQUEST_LOG {s} gets no requests: {s}", .{ path, why });
+ }
+ 
+-test "the request log is created owner-only and keeps image URLs out" {
++test "the request log is created owner-only and keeps image URLs and cache salts out" {
+     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+     defer arena.deinit();
+     const a = arena.allocator();
+@@ -81,6 +81,7 @@ test "the request log is created owner-only and keeps image URLs out" {
+     const body = try json.newObject(a);
+     const file = (try json.parse(a, "{\"type\": \"file\", \"file\": {\"filename\": \"a.pdf\", \"file_data\": \"JVBERi1zZWNyZXQ=\"}}")).ok;
+     try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{ .{ .object = part }, file }) });
++    try body.put(a, "cache_salt", .{ .string = "tenant-secret-salt" });
+     append(a, path, .{ .object = body });
+     if (comptime @import("builtin").os.tag != .windows) { // Windows files have no mode bits
+         const st = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{}); // Linux's libc has no stat for std.c
+@@ -89,6 +90,7 @@ test "the request log is created owner-only and keeps image URLs out" {
+     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 16));
+     try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
+     try std.testing.expect(std.mem.indexOf(u8, text, "example.test") == null);
++    try std.testing.expect(std.mem.indexOf(u8, text, "tenant-secret-salt") == null and std.mem.indexOf(u8, text, "cache_salt") != null);
+     try std.testing.expect(std.mem.indexOf(u8, text, "JVBERi1zZWNyZXQ=") == null and std.mem.indexOf(u8, text, "a.pdf") != null);
+ }
+ 
+diff --git a/zig/src/server/responses_translate.zig b/zig/src/server/responses_translate.zig
+index b112a8ccc32274069976ce920f4d4e7a6bbed276..605dd269b1b7056a2ba0f40b0dbfb3991f79d2de 100644
+--- a/zig/src/server/responses_translate.zig
++++ b/zig/src/server/responses_translate.zig
+@@ -10,7 +10,7 @@ const Cx = errors.Cx;
+ const Allocator = std.mem.Allocator;
+ 
+ /// Fields a chat completion reads as they are: OpenAI's and this server's own.
+-const passed = [_][]const u8{ "model", "temperature", "top_p", "top_k", "min_p", "seed", "stream", "parallel_tool_calls", "stop", "draft", "thinking_budget", "ignore_eos", "priority", "return_token_ids", "chat_template_kwargs", "grammar_budget" };
++const passed = [_][]const u8{ "model", "temperature", "top_p", "top_k", "min_p", "seed", "stream", "parallel_tool_calls", "stop", "draft", "thinking_budget", "ignore_eos", "priority", "return_token_ids", "chat_template_kwargs", "grammar_budget", "cache_salt" };
+ const refused = [_][2][]const u8{
+     .{ "background", "background responses are not supported: send the request and wait for it" },
+     .{ "conversation", "conversations are not supported: send previous_response_id or the items" },
+diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 0e57049a68c5cf4827491503873a5c3e92fdb48f..f9b00c0dcc5d5fd8efcd77b9c451fa45c736a0e1 100644
+--- a/zig/src/server/root.zig
++++ b/zig/src/server/root.zig
+@@ -71,6 +71,8 @@ test {
+     _ = @import("tool_required_test.zig");
+     _ = @import("structure_field_test.zig");
+     _ = @import("grammar.zig");
++    _ = @import("cache_salt.zig");
++    _ = @import("cache_salt_test.zig");
+     _ = @import("pyrepr.zig");
+     _ = @import("metrics.zig");
+     _ = @import("load_metrics.zig");
+diff --git a/zig/src/server/serve.zig b/zig/src/server/serve.zig
+index 3ceda496e527bc3e994a50b3653eaa5a5053589c..f6d5667535b72a79db19a3d7db10aa9e12294691 100644
+--- a/zig/src/server/serve.zig
++++ b/zig/src/server/serve.zig
+@@ -208,6 +208,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+         .silence_guard = args.silence.enabled(),
+         .cfg = args.cfg.options(),
+         .prompt_seed = args.prompt_seed,
++        .cache_salt_per_key = args.cache_salt_per_key,
+         .sse_keepalive_s = keepalive_s,
+         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
+@@ -246,6 +247,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+         std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
+         return 2;
+     }
++    if (args.cache_salt_per_key and !srv.info.capability(.cache_salt)) {
++        std.debug.print("tensorfold: --cache-salt-per-key is not supported by backend '{s}': its prompt cache does not key requests by salt\n", .{srv.backendName()});
++        return 2;
++    }
++    if (args.cache_salt_per_key and !store.enabled()) log.line("--cache-salt-per-key: no API keys are set, so no request is salted by one", .{});
+     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
+     const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
+     installSignals(store.enabled());
+diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
+index 39925cdf03f1207089e995c0047fb5c05cf40258..0a12f0c0521fb0cb674888813dfc4dce1a3232ba 100644
+--- a/zig/src/server/server.zig
++++ b/zig/src/server/server.zig
+@@ -77,8 +77,8 @@ pub const Config = struct {
+     silence_mid: bool = false,
+     silence_guard: bool = false,
+     cfg: ?@import("drama_cfg.zig").Options = null,
+-    /// --prompt-seed keeps historical prompt-keyed sampling when a request omits its seed.
+-    prompt_seed: bool = false,
++    prompt_seed: bool = false, // --prompt-seed: historical prompt-keyed sampling when a request omits its seed
++    cache_salt_per_key: bool = false, // --cache-salt-per-key: the matched API key salts each request's prompt cache
+     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
+     request_log: ?[]const u8 = null,
+     /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
+@@ -157,7 +157,7 @@ pub const Server = struct {
+     store: responses.Store,
+     /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
+     ws_cache_bytes: std.atomic.Value(usize) = .init(0),
+-    tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
++    tool_ids: @import("ids.zig").Key, // every tool-call id's and cache salt's key: the config's, else this server's own
+     next_id: std.atomic.Value(u64) = .init(1),
+     /// Connections open now; a stop waits for them before freeing what they read.
+     open_connections: std.atomic.Value(u32) = .init(0),
+diff --git a/zig/src/server/warm.zig b/zig/src/server/warm.zig
+index fdd7a5436186b32f010fdc74eaa0a26612c9f48b..377172e36439b1e2257fe9dccb50cbfef39c7443 100644
+--- a/zig/src/server/warm.zig
++++ b/zig/src/server/warm.zig
+@@ -54,6 +54,9 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
+         p.request.images = x.images;
+         p.request.cache_key = x.cache_key;
+     }
++    // a salted conversation's pass keeps its states under the same salt (an engine keyed by tokens alone: no pass)
++    if (input.cache_salt != 0) p.request.cache_key = if (srv.info.cache_salt) try @import("cache_salt.zig").salted(a, p.request.cacheKey(), input.cache_salt) else return;
++    p.request.salted = input.cache_salt != 0;
+     const id = srv.next_id.fetchAdd(1, .monotonic);
+     try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
+     handed = true;
