@@ -808,3 +808,12 @@ first-token rows are the ones to compare when production's are measured with the
   are properties of the PR's store read from its code, not measured here.
 
 Decode with the tier is untested at 1, 2, 6 and 8 streams and the 0035/0036 knobs have not been run together with it.
+
+## 33. Patch 0036 on the Sparks: cold first token -8.5% at 8k and -8.2% at 32k
+
+Image `rs2x3y` (series 0001-0036), `KNOBS=measured`, P=4 / `--context 1048576`, a cold 8,192 and a cold 32,768 token prompt of distinct text, two fresh boots a
+cell, order control, `TF_GLM_OVN_EY_DIRECT=1`, `EY_DIRECT=1`, control (`prefill-arms.sh`). First token in ms at 8k / 32k, in boot order: control 4,693 / 18,434 and
+4,760 / 18,515; knob on 4,304 / 16,926, 4,320 / 17,017, 4,346 / 17,080 and 4,391 / 17,144; control again 4,745 / 18,634 and 4,785 / 18,686. Each knob-on cell sits
+7.6% to 9.1% below the adjacent control at 8k and 7.4% to 9.1% at 32k; means 4.746 s against 4.340 s (-8.5%) and 18.567 s against 17.042 s (-8.2%), replies equal
+to the control's in all 8 of 8 and `ey_digests.py` printing `REPLIES-EQUAL`. The prediction from the capture was -90 ms a 2,048-row pass (about -8%). The knob-off
+image `rs2x3k` (0001-0035) reads 4.742 / 18.544 s, equal to the control, so 0036 with the knob off changes nothing measurable.
