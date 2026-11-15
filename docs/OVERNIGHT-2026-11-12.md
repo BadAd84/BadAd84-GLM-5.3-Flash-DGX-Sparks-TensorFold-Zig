@@ -899,3 +899,25 @@ for the broken trees because a build that stops before any test has none; it now
 
 Not done on v1.2.9: no image was built and nothing ran on a GPU, so every speed and resume cell above this section is a v1.2.7 number. The GPU bit-exact checks (`glm-exl3-items`, `glm-keep-seqs-check`) are
 inherited from v1.2.7 and need a Spark window. `serve.sh`'s `DEFS` now drops `TF_GLM_INDEX_CUDA` and `TF_GLM_OVN_EY_DIRECT` (upstream's default and a retired patch) and adds `TF_GLM_OVN_EXL3_ITEMS`.
+
+## 38. The v1.2.9 stack on the Sparks: resume and cold prompts hold, decode is 4 to 11% below the v1.2.7 stack
+
+Image `v129a` (series 0001-0032 + pr1411 + cache-salt on v1.2.9, tree `27a87244e7dc`, `KNOBS=measured`, so `TF_GLM_OVN_EXL3_ITEMS=1`, no `INDEX_CUDA` or `EY_DIRECT`), the first GPU run of the stack. One run each.
+
+**Decode, tok/s (production's prompts as ids, one fresh boot a level), against the v1.2.7 stack with the same knobs plus `KEEP_SEQS` and `EY_DIRECT` (mean of the two knob-on cells of section 34):**
+
+| streams | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| v1.2.9 stack | 76.80 | 79.22 | 103.96 | 135.34 | 165.79 |
+| v1.2.7 stack | 80.16 | 84.94 | 112.46 | 150.71 | 186.78 |
+| change | -4.2% | -6.7% | -7.6% | -10.2% | -11.2% |
+
+The v1.2.7 cells of that group spread 1.9% at one stream between identical boots, so the one-stream gap is borderline and the six and eight stream gaps are not noise. This is a regression of the v1.2.9 base
+or of a re-seat, found by measurement and not yet attributed: the arms that separate upstream's decode levers from ours (`TF_GLM_DSEL` off, our decode index, `MLPSPLIT` off, the X3 decode knobs off, the
+decode-window index kernels, our decode item plan against upstream's compact calls, `ONEPASS_PIPE`) are queued as `arms-v129-ab1.txt` and `arms-v129-ab2.txt`.
+
+**Cold first token** (8,192 and 32,768 tokens, one boot): 4.348 s and 16.983 s, against 4.340 s and 17.042 s on the v1.2.7 stack with `EY_DIRECT` (+0.2% and -0.3%): upstream's absorbed prompt path equals our patch.
+
+**Disk tier on v1.2.9 (`patches/pr1411` net patch + cache-salt), the TP=3 window of section 32 (`docs/audit-2026-11-12/disktier-v129a-rows.jsonl`):** 17 of 17 resumed replies equal a cold server's, `cache_salt` honoured
+(another salt cached 0 of 32,213, the unsalted control 30,720), the store opened with three ranks' parts on every boot. The 596k conversation: turn 1 cold 352.59 s (v1.2.7 stack: 374.5 to 375.6 s), turn 2 from RAM
+14.02 s, after a SIGKILL of every rank 14.14 s with 618,496 tokens cached, after a clean restart 16.37 s with 641,024 cached (production: 224.68 s, 12.54 s, 12.80 s, 12.90 s; 1.57x, 1.12x, 1.10x, 1.27x).
