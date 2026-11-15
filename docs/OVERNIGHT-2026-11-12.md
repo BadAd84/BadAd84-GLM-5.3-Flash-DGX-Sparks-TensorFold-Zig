@@ -769,3 +769,42 @@ Patch 0036 (`TF_GLM_OVN_EY_DIRECT`, default off; the fork's `EY_DIRECT`, ai-engi
 arena is 256 MiB smaller a rank. Byte-exact on the RTX 5070: `ey` and the MoE layer output equal the copy path's at 1 / 8 / 17 / 255 / 2,048 / 2,054 rows for
 widths 640 and 768 (24 of 24 cases), 7 of 7 planted controls fail, the base kernel's machine code is unchanged, 17 of 17 host mutants killed, gates green, lean 386
 against 386. Expected from the capture: -90 ms a pass (about -8%); the Spark cells (ctl, ey, ey, ctl at 8k and 32k) are not yet measured.
+
+## 32. Conversations on disk at TP=3: upstream PR #1411 on the triangle
+
+Upstream PR #1411 (wojo, "GLM-5.3-Flash on CUDA keeps conversation states on disk, every rank's part", `--learn-conversations`; head `d730aff64` on main `3885dceb2`) is
+the Zig GLM disk tier. Its receipts are TP=2 only. `patches/pr1411/` carries its ten commits after the series (two by context merge, one with no file because the series
+has its lines, plus two test-only patches of ours for patch 0028's head flag; tree after the series and the package: see its `RECORD.md`). The window
+(`scripts/queue-disk-tier.sh`, instrument `scripts/disk.py`, table `scripts/disk_table.py`, tested on stubs with a planted wrong-resume mutant) ran on spark1-3 at
+`--parallel 4 --context 1048576` with `--learn-conversations --learn-dir <dir>` on every rank: image `pr1411` (the PR head alone, `KNOBS=off`) and image `rs2x3d` (the 0001-0034
+series plus the package, `KNOBS=measured`). Rows and tables: `docs/audit-2026-11-12/disktier-{pr1411a,rs2x3da}-{rows.jsonl,table.md}`.
+
+**Correctness:** the store opened with 3 ranks' parts on every boot, found its states after a SIGKILL of every rank and after a clean stop, and every resumed reply
+(17 of 17 on each image, markers at 2%, 50% and 97% of the text so a wrong state cannot give the same hash) equals a cold server's reply to the same messages. Every
+rank log line counter for the tier (staging full, skipped saves, failed writes or restores, check failures, `RanksDiffer`, world, layout, words, snapshot size) is 0.
+A save in flight at a clean stop was written and resumed from disk. The store held 8.5 GiB after the first boot for a 596k-token conversation and two others.
+
+| turn of the 596k conversation (production's text) | `pr1411` image | `rs2x3d` image | production |
+|---|---:|---:|---:|
+| 1 cold, beside 3 decoding streams: prefill | 447.90 s | 375.58 s | 224.68 s |
+| 2 from RAM: prefill (cached 595,968) | 17.74 s | 15.02 s | 12.54 s |
+| 3 after SIGKILL of every rank: prefill (cached 618,496) | 18.24 s | 15.18 s | 12.80 s |
+| 3 same turn, client first token (a 4,548 MiB read in 12,349 / 10,775 ms is before the prefill) | 30.61 s | 25.97 s | not recorded |
+| 4 after a clean restart, beside 3 streams: prefill (cached 641,024) | 20.50 s | 17.56 s | 12.90 s |
+| 4 same turn, client first token (a 4,697 MiB read in 2,691 / 3,140 ms) | 31.74 s | 29.52 s | not recorded |
+
+Without a disk tier the same turn 3 refilled cold in 377.76 s (section 29). So a restart now costs about 15 to 18 s of prefill plus a read of 3 to 12 s, against 378 s, and
+a conversation survives a crash. Production's column is its `tier_chain.sh` prefill; whether its figure includes the disk read is not recorded, so the client
+first-token rows are the ones to compare when production's are measured with the same instrument. The 32k and 120k conversations resume from disk in 0.93 to 1.40 s
+(`rs2x3d`) with the read inside that time.
+
+**Gaps against production's tier**, from the same window:
+- `cache_salt` is ignored: a request with another salt resumed this conversation's state (cached 30,720 of 32,213, equal to the unsalted control). Our open Mia PR for
+  `cache_salt` and ashhart's `cache_salt` PR on upstream are the two implementations; neither is in this tree.
+- Reads stall decode: the three other streams' longest gap during the turn-4 read was 10,851 ms (`rs2x3d`; the same read of 4,697 MiB), against a base window max of
+  1,280 ms. The read is one engine-thread scatter. Our read-slot and event-reuse work on the Python tier (kept state copies in bounded slices between rounds) is not in this
+  store, whose reads take the whole step.
+- Block size 256 tokens against 2,048, no folder fsync, no per-conversation eviction or quota, state files with the MTP head's caches (about 0.7 GB for a 640k state)
+  are properties of the PR's store read from its code, not measured here.
+
+Decode with the tier is untested at 1, 2, 6 and 8 streams and the 0035/0036 knobs have not been run together with it.

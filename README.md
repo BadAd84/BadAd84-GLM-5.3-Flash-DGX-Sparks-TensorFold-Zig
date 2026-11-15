@@ -60,7 +60,7 @@ one group.
 shape production runs (`--parallel 4 --context 1048576`) the recipe's decode with 4, 6 and 8 clients is 0.86x, 0.90x and 0.87x of
 production's; cold first token on long prompts is 1.2x to 1.7x slower (8k 4.6 s against 2.8 s, 120k 67 s against 43 s); the 600k-token
 conversation takes 346 s cold against 225 s; and a conversation does not survive a restart (GLM refuses `--spill-gib` and
-`--snapshot-dir`), refilling in 378 s where production resumes in 12.8 s. `docs/OVERNIGHT-2026-11-12.md` section 29 has the table.
+`--snapshot-dir`), refilling in 378 s where production resumes in 12.8 s. `docs/OVERNIGHT-2026-11-12.md` section 29 has the table; section 30 (patch 0035) removes a context-sized cost from every request start (+10.4% four-stream decode at 1M), and section 32 measures upstream PR #1411's disk tier on this triangle (`patches/pr1411/`): conversations survive a SIGKILL of every rank and resume in 15 to 18 s of prefill instead of 378 s, every reply equal to a cold server's.
 
 The rows above the last three send our server's own rendering of the bench prompts, which is 40 tokens for the first prose prompt where
 production renders 33, so the two serves answer different text and the comparison is not like for like (`docs/OVERNIGHT-2026-11-12.md`
