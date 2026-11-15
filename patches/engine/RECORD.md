@@ -11,7 +11,7 @@ re-seated on v1.2.7 (`docs/audit-2026-11-12/reseat-v127.md`: what upstream chang
 for each). Every patch header names its provenance and its receipts. Every switch defaults off, is a row of the
 `.glm` or `.cuda` scope of `zig/src/platform/environment.zig`, and has a line in `docs/environment.md`.
 
-Proof the series rebuilds: `scripts/apply.sh` on the tag gives tree `f5495931b23322507cdbee05130836da19eb75dd`; all
+Proof the series rebuilds: `scripts/apply.sh` on the tag gives tree `685c6abbda5547f5e473d9c6a6a6be17b8e7bf69` (0001-0034 gave `f5495931b23322507cdbee05130836da19eb75dd`); all
 patches apply with plain `git apply --check`, no file passes 600 lines at any prefix, and lean base against head is
 386 problems against 386. With every switch off the image decodes 51.55 / 60.88 / 83.11 / 111.63 / 137.43 tok/s at
 1 / 2 / 4 / 6 / 8 streams against 50.16 / 58.57 / 79.23 / 106.37 / 129.66 on the clean tag, replies byte-identical
@@ -56,5 +56,6 @@ TF_GLM_OVN_ONEPASS_EXACT, a switch whose kernel lever the series does not carry.
 | 0032 | glm cuda: FP8 latent keys fetched a tile ahead, in 8-byte loads | - |
 | 0033 | server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE | `TF_GLM_OVN_HOST_ONCE` |
 | 0034 | glm exl3: TF_GLM_OVN_X3_NC, X3_XROW and X3_FUSEDOWN, production's decode kernels on the item plan | `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN` |
+| 0035 | glm cuda: TF_GLM_OVN_KEEP_SEQS, a released stream's sequence stays for the next request on its slot | `TF_GLM_OVN_KEEP_SEQS` |
 
 Hashes: `SHA256SUMS`, one line a patch, checked by `scripts/check-patch-packages.sh`.

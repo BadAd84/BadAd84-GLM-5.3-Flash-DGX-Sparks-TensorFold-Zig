@@ -722,3 +722,30 @@ at four streams was a 262,144-token serve, not the deployed shape. The first-tok
 first token), on a loaded warm turn (2.2x), and has no crash-surviving tier (29.5x on the 600k conversation after a kill). The decode
 cells at one to four streams in sections 25 and 28 were a real comparison of decode only, at a smaller context. By the repo's own rule the
 Zig serve does not replace production: it fails every long-context row and the deployed-shape decode.
+
+## 30. The request-start cost that grows with the context: patch 0035, `TF_GLM_OVN_KEEP_SEQS`
+
+Section 29's four-stream decode fell with the context (109.47 / 106.98 / 101.66 tok/s at 262,144 / 524,288 / 1,048,576). Rank-0 captures at the
+two ends (`ctx256k`, `ctx1024k`, one measured cell each) put 915 of the 1,026 ms of extra GPU time in one kernel, the f64 all-reduce of the
+chunk gate, 16 instances: 384 ms at 262,144 and 1,299 ms at 1M. Mechanism, from the source (tree `f5495931b233`): a request that does not land on
+slot 0 makes `Engine.bind` allocate the stream's whole window arena and zero it (`cuda_state.zig` `arena`: `cuMemAlloc`, then a synchronous
+`cuMemsetD8`), rank 0 first, and ranks 1 and 2 only when the begin step reaches them, so rank 0 waits for them in the gate's first all-reduce;
+`Engine.release` frees the arena again (slot 0's alone is kept). Per request: allocate 48.2 / 176.1 ms, zero fill 10.1 / 38.0 ms, gate wait
+63.6 / 216.0 ms, start 122.5 / 430.8 ms, free 16.1 / 59.6 ms at 262,144 / 1M (a start on slot 0: 1.4 to 1.5 ms).
+
+Patch 0035 (default off) keeps every slot's sequence as slot 0's is kept; `Engine.begin` resets it as it does for slot 0 on every request. No kernel
+reads past the rows a sequence wrote (`mla.cuh` zero-fills keys past `pos + r`; sparse selection takes visible pools only), and the GPU check on
+the RTX 5070 (a kept sequence, poisoned to 0xFF, against a fresh one: tokens, bf16 logits and MTP drafts over 24 steps, bf16 and fp8 caches)
+passes byte for byte with its planted control differing. Gates: `test-cuda-host` 6,283 of 6,313, 0 new failing names, lean 386 against 386, 7 of 7
+host mutants killed.
+
+Measured on image `rs2x3k` (`KNOBS=measured`, P=4, ids client, four-stream cells, 400 tokens, replies equal to the knob-off cells' in all eight):
+
+| `--context` | order | knob off | knob on |
+|---|---|---:|---:|
+| 1,048,576 | A B B A | 98.63 / 98.33 | 108.86 / 108.93 (+10.4%, +10.4%) |
+| 262,144 | A B B A | 105.96 / 105.65 | 108.43 / 108.60 (+2.4%, +2.8%) |
+
+The model predicted +10.4% and +2.9%. The long-context decode arm with the knob on (4, 6, 8 clients against the P=4 / 1M boot): 110.84 / 109.44 /
+119.96 tok/s, 0.94x / 0.95x / 0.91x of production's 117.98 / 114.78 / 131.28 (0.86x / 0.90x / 0.87x without it). Decode at 1, 2, 6 and 8 streams
+with the knob is not yet measured (at one stream slot 0 is the only slot, so the path is unchanged).
