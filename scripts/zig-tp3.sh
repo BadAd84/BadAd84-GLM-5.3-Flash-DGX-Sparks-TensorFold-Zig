@@ -5,7 +5,7 @@
 # only names the ranks, the bootstrap address and the box each rank lands on.
 # Env: IMAGE (default glm53-zig:9c9bf54), KNOBS (off|measured|all), DRAFTER (1|0),
 #      COMM_ID (default 192.168.99.11:29561), PORT (default 8300), XENV, XSERVE extras,
-#      WRAP0 / XRUN0 (rank 0 only: serve.sh's WRAP and XRUN, for profiling the head rank).
+#      WRAP0 / XRUN0 (rank 0 only: serve.sh's WRAP and XRUN, for profiling the head rank); WRAP1 / XRUN1 and WRAP2 / XRUN2 do the same for a worker rank.
 # Bring-up only: production must be STOPPED first (glm-v110-stop.sh) and the GLM watchdogs paused,
 # because a TP=3 boot occupies all three boxes' GPUs.
 set -euo pipefail
@@ -23,7 +23,8 @@ boot() { # boot RANK - rank 0 runs locally, workers over ssh (spark1 has keys to
     nohup bash -c "$envstr WRAP='${WRAP0:-}' XRUN='${XRUN0:-}' bash "$(dirname "${BASH_SOURCE[0]}")/serve.sh" $rank $P $CTX" \
       > "$HOME/glm-zig-r0-$(date +%H%M%S).log" 2>&1 < /dev/null &
   else
-    nohup ssh -n "adam@spark$((rank + 1)).ots-int.net" "$envstr bash ~/work/glm53-zig/serve.sh $rank $P $CTX" \
+    local wv="WRAP$rank" xv="XRUN$rank"
+    nohup ssh -n "adam@spark$((rank + 1)).ots-int.net" "$envstr WRAP='${!wv:-}' XRUN='${!xv:-}' bash ~/work/glm53-zig/serve.sh $rank $P $CTX" \
       > "$HOME/glm-zig-r$rank-$(date +%H%M%S).log" 2>&1 < /dev/null &
   fi
 }
@@ -32,6 +33,8 @@ docker rm -f glm53-zig-r0 >/dev/null 2>&1 || true
 boot 0
 for rank in 1 2; do
   ssh -n "adam@spark$((rank + 1)).ots-int.net" 'docker rm -f glm53-zig-r1 glm53-zig-r2 >/dev/null 2>&1 || true'
+  # the worker runs the head's copy of the recipe files, never one left there by an earlier session
+  scp -q -o BatchMode=yes "$(dirname "${BASH_SOURCE[0]}")/serve.sh" "$(dirname "${BASH_SOURCE[0]}")/config.sh" "adam@spark$((rank + 1)).ots-int.net:work/glm53-zig/" < /dev/null
   boot $rank
 done
 t0=$(date +%s); deadline=1200
