@@ -14,7 +14,7 @@ import sys
 
 RUNTIME = """serve.sh zig-tp3.sh zig-tp3-stop.sh build-image.sh dist-image.sh bench-client.sh bench-arm.sh arms-client.sh arms-file.sh abba.sh
 streams.py streams_ids.py prose33.json cells.py rounds.py nsys-rank0.sh nsys-rank.sh nsys-kern.py disk.py disk_table.py longctx.py queue-disk-tier.sh
-queue-longctx.sh""".split()
+queue-longctx.sh queue-prod-compare.sh prod_accounting.py prod_table.py""".split()
 
 
 def digest(data: bytes) -> str:

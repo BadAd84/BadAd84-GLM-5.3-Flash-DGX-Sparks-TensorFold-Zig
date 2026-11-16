@@ -51,7 +51,7 @@ def main() -> int:
                 same.append(digests(rows) == digests(b))
             out.append(s)
         one = cell(a.root, tag, 1) or []
-        acct = [r for r in one if "tok_per_round" in r]
+        acct = [r for r in one if r.get("tok_per_round") is not None]  # production's rows carry the keys as null
         tpr = f"{statistics.mean(r['tok_per_round'] for r in acct):.2f}" if acct else "-"
         mpr = f"{statistics.mean(r['ms_per_round'] for r in acct):.1f}" if acct else "-"
         acc = f"{statistics.mean(r['acceptance'] for r in acct):.3f}" if acct else "-"

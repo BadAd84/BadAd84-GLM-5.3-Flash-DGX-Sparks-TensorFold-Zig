@@ -1096,3 +1096,28 @@ Every difference is inside the spread of the pairs (0.2 to 0.8%). A first unbrac
 | `lt-on2` against its neighbour `lt-off2` | +0.1% | -0.1% | +0.2% | -0.1% | 0.0% |
 
 The tier is not slower at any level (the off pair spreads 1.7 to 2.9%, so the +1% means are the first cell reading low, not a gain). What this does not price: the bench prompts are 33 tokens, nothing is large enough to keep, and the stores were 4 KiB, so these cells measure an idle tier. The cost of a save or a restore of a large state beside decoding streams is section 32's and 36's: a 4.7 GiB restore stalls the other streams for up to 9.9 s unless `TF_GLM_OVN_DISK_SLICE_MIB` slices it, a trade the owner has not accepted. `LEARN` stays opt-in in `serve.sh` rather than a default: the disk windows' cold reference arm goes through the same `serve.sh` and must run without a tier, and a deployment is where the switch belongs (`LEARN=1`, `KNOBS=measured`, `P=4`, `CTX=1048576`).
+
+**Decode against production, in one sitting with one client** (`scripts/queue-prod-compare.sh`, 18:36 to 18:51 UTC, then `scripts/prod_accounting.py`): production's live serve, then a Zig boot at production's deployed shape (`--parallel 4 --context 1048576`, the v1.2.9 stack, `KNOBS=measured`), then production again, all driven by `scripts/streams_ids.py` with production's 33-token prompt ids (400 tokens, 3 rounds a cell, `agg_tok_s`, the statistic the first column of production's `SPEED-TARGET.md` uses), production measured only while idle. Production's replies carry its recorded digests (`8347edfe4ee6` and the others), so the instrument is the one that made its table. Cells `~/bench/pm1`, `pd-a1` to `pd-a3`, `pm2`:
+
+| clients | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| production `pm1` / `pm2` | 79.97 / 80.59 | 88.28 / 88.02 | 116.12 / 115.90 | 117.14 / 127.44 | 117.12 / 132.53 |
+| Zig `pd-a1` / `pd-a2` / `pd-a3` | 78.90 / 78.81 / 80.99 | 83.66 / 82.67 / 83.85 | 110.82 / 110.39 / 112.26 | 118.40 / 111.55 / 126.23 | 120.71 / 114.35 / 118.79 |
+| production mean (spread of its two cells) | 80.28 (0.8%) | 88.15 (0.3%) | 116.01 (0.2%) | 122.29 (8.4%) | 124.83 (12.3%) |
+| Zig mean (spread of its three cells) | 79.57 (2.7%) | 83.39 (1.4%) | 111.16 (1.7%) | 118.73 (12.4%) | 117.95 (5.4%) |
+| Zig against production | -0.9% | -5.4% | -4.2% | -2.9% | -5.5% |
+
+This table replaces the 1/2/4 numbers quoted against `SPEED-TARGET.md` (taken on 2026-11-11, not beside ours) and supersedes the +31.7% and +42.3% of section 41, which compared one-boot-a-level serves with production's queueing serve (section 28). At one client the gap is inside the noise (-1.8% to +0.9% over the three Zig boots). At two and four clients every Zig cell is below every production cell (-6.2% to -4.9% and -4.8% to -3.2% against production's mean), a real gap of about 5%. At six and eight clients both serves queue, production's own two readings differ by 8.4% and 12.3% (its first reading is level with Zig's, its second 8 to 13% above), and nothing can be said beyond "within the run-to-run spread, with Zig mostly lower".
+
+**Where the 2 and 4 client gap is, from the round counters** (production from `/health` differences over two measured waves, `prod_accounting.py`; Zig from the cells' draft counters over its nine waves):
+
+| clients | | rounds | drafted a round | accepted a round | tokens a round | acceptance |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | production | 266 | 2.92 | 2.00 | 3.008 | 0.686 |
+| 1 | Zig | 1,143 | 3.10 | 2.14 | 3.150 | 0.690 |
+| 2 | production | 664 | 2.19 | 1.40 | 2.410 | 0.641 |
+| 2 | Zig | 3,087 | 2.02 | 1.33 | 2.332 | 0.657 |
+| 4 | production | 1,260 | 2.36 | 1.53 | 2.540 | 0.649 |
+| 4 | Zig | 5,940 | 2.01 | 1.42 | 2.424 | 0.707 |
+
+Production's tokens a round against Zig's are -4.5% at one client, +3.3% at two and +4.8% at four. Set against the throughput ratios (production over Zig: +0.9%, +5.7%, +4.4%), the implied round rates are +5.7% at one client, +2.3% at two and -0.4% at four. Three readings follow, each limited by what this can show. First, the sign of the tokens-a-round difference flips between one client (Zig ahead) and two and four (production ahead), which is what two engines writing different text from one checkpoint do (section 23: the replies diverge, and tokens kept a round depend on the reply), so a ~5% tokens-a-round difference is the size of that effect and is not evidence of a weaker drafter. Second, the engines differ in draft length under concurrency: production drafts 2.92, 2.19 and 2.36 tokens a round at one, two and four clients, Zig 3.10, 2.02 and 2.01; section 15 measured longer drafts on this series as costing more ms a round than they return, so it is not an open lever. Third, round time, the engine's own property, is level at four clients and 2% behind at two; at one client production's round is 7% shorter (36.3 ms against 38.9 ms, `decode_seconds_total` over rounds, valid at one stream only) and Zig keeps 4.5% more tokens a round on this prompt, the two roughly offsetting (+0.9% throughput on the wall-time statistic, about +2% on decode time alone). What would separate text from engine is the same reply text through both engines (section 23's replay), which has not been run at two and four clients.
