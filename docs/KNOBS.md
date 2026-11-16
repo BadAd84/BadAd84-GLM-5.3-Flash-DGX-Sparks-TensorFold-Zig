@@ -26,6 +26,12 @@ On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, a
 | `TF_GLM_OVN_PDL_EARLY` | -0.6 / -0.9 / 0.0 / -0.1 / +0.5% (first cells), -0.4 / -0.4 / -0.3 / -0.1 / +0.3% repeated | section 20, table `is-pdl` |
 | `TF_GLM_OVN_GLUE_ROW`, `TF_GLM_OVN_ABSORB_VEC`, `TF_GLM_OVN_MM_WIDE`, `TF_GLM_OVN_INDEX_SCHED` on cold prompts | first token at 8k / 32k within +-1.4% of the control (the control pair itself differs by 2%) | section 31 |
 
+## Registered, not set, measured: a loss (stays off)
+
+| knob | what the cells say | where |
+|---|---|---|
+| `TF_GLM_OVN_WIN_FREE` | -20.9 / -29.6 / -28.5 / -31.2 / -28.0% at 1 / 2 / 4 / 6 / 8 clients, off / on / on / off at production's deployed shape, replies equal: every round verifies all seven drafts and acceptance falls to 0.24 to 0.36 | OVERNIGHT section 44 |
+
 ## Registered, not set, a measured win without the five-level decode cells (candidate)
 
 | knob | cells | missing |
@@ -34,7 +40,7 @@ On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, a
 
 ## Registered, not set, no cell in `docs/OVERNIGHT-2026-1*.md`, `docs/BENCH.md` or `README.md`
 
-`TF_GLM_OVN_HOST_ONCE`, `TF_GLM_OVN_KVB8`, `TF_GLM_OVN_KDA_CHUNKED`, `TF_GLM_OVN_DECODE_INDEX`, `TF_GLM_OVN_PLAIN_MARGIN`, `TF_GLM_OVN_DRAFT_NOISE`, `TF_GLM_OVN_WIN_FREE`,
+`TF_GLM_OVN_HOST_ONCE`, `TF_GLM_OVN_KVB8`, `TF_GLM_OVN_KDA_CHUNKED`, `TF_GLM_OVN_DECODE_INDEX`, `TF_GLM_OVN_PLAIN_MARGIN`, `TF_GLM_OVN_DRAFT_NOISE`,
 `TF_GLM_OVN_ROUTER16`, `TF_GLM_OVN_SWIGLU_REDUCE`, `TF_GLM_OVN_MM_CLUSTER`, `TF_GLM_OVN_MM_DECTILE`, `TF_GLM_OVN_EXCHANGE_KB`, `TF_GLM_DFLASH2_WIN`, `TF_GLM_INDEX_DECODE_FROM`.
 Each is untested here, not known neutral. `TF_GLM_OVN_KDA_CHUNKED` changes numerics (the owner decided on 2026-10-31 to keep numerics changes off); `TF_GLM_OVN_ONEPASS_EXACT` is retired.
 
