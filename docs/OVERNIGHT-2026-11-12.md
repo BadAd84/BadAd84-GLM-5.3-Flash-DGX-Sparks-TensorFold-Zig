@@ -900,7 +900,7 @@ for the broken trees because a build that stops before any test has none; it now
 Not done on v1.2.9: no image was built and nothing ran on a GPU, so every speed and resume cell above this section is a v1.2.7 number. The GPU bit-exact checks (`glm-exl3-items`, `glm-keep-seqs-check`) are
 inherited from v1.2.7 and need a Spark window. `serve.sh`'s `DEFS` now drops `TF_GLM_INDEX_CUDA` and `TF_GLM_OVN_EY_DIRECT` (upstream's default and a retired patch) and adds `TF_GLM_OVN_EXL3_ITEMS`.
 
-## 38. The v1.2.9 stack on the Sparks: resume and cold prompts hold, decode is 4 to 11% below the v1.2.7 stack
+## 38. The v1.2.9 stack on the Sparks: resume and cold prompts hold, decode is 4 to 11% below the v1.2.7 stack (STALE RECIPE: superseded by sections 39 and 40)
 
 Image `v129a` (series 0001-0032 + pr1411 + cache-salt on v1.2.9, tree `27a87244e7dc`, `KNOBS=measured`, so `TF_GLM_OVN_EXL3_ITEMS=1`, no `INDEX_CUDA` or `EY_DIRECT`), the first GPU run of the stack. One run each.
 
@@ -918,7 +918,7 @@ decode-window index kernels, our decode item plan against upstream's compact cal
 
 **Cold first token** (8,192 and 32,768 tokens, one boot): 4.348 s and 16.983 s, against 4.340 s and 17.042 s on the v1.2.7 stack with `EY_DIRECT` (+0.2% and -0.3%): upstream's absorbed prompt path equals our patch.
 
-**Disk tier on v1.2.9 (`patches/pr1411` net patch + cache-salt), the TP=3 window of section 32 (`docs/audit-2026-11-12/disktier-v129a-rows.jsonl`):** 17 of 17 resumed replies equal a cold server's, `cache_salt` honoured
+**Disk tier on v1.2.9 (`patches/pr1411` net patch + cache-salt), the TP=3 window of section 32 (`docs/audit-2026-11-12/disktier-v129a-stale-recipe-rows.jsonl`):** 17 of 17 resumed replies equal a cold server's, `cache_salt` honoured
 (another salt cached 0 of 32,213, the unsalted control 30,720), the store opened with three ranks' parts on every boot. The 596k conversation: turn 1 cold 352.59 s (v1.2.7 stack: 374.5 to 375.6 s), turn 2 from RAM
 14.02 s, after a SIGKILL of every rank 14.14 s with 618,496 tokens cached, after a clean restart 16.37 s with 641,024 cached (production: 224.68 s, 12.54 s, 12.80 s, 12.90 s; 1.57x, 1.12x, 1.10x, 1.27x).
 
@@ -953,3 +953,37 @@ The two v1.2.9 cells bracket the two v1.2.7 cells and agree within 0.5%; the v1.
 **What the `DecodeSuspects` lane read (`work/DecodeSuspects/REPORT.md`, nothing run):** the GPU decode kernels and their order are identical between the two stacks, no nvcc flag changed for GLM, every collective call site reads the same, and the archived disk-tier windows show the same shape (+0.70 ms a token at 32k, +0.77 at 120k, +0.76 at 600k, +0.55 in the one-stream bench), nearly flat per token. 18 of the 32 patches have identical changed lines on both pins; of the 14 re-seated ones, only the item-plan switch (0011, `DEFS` restores the old path, now shown flat by `items0`) and DSEL ordering at long context (0012, not reached by this bench) change behaviour. The loss is therefore either host-side or in a part of the image no knob covers; the stage profile on both images (`queue40`) says which.
 
 **Erratum, found from the nsys tables of section 39 (22:13 UTC):** every v1.2.9 cell of sections 38 and 39 ran a STALE recipe. The `serve.sh` on spark1 was the 2026-11-14 11:23 copy: its `DEFS` had neither `TF_GLM_OVN_EXL3_ITEMS=1` nor `TF_GLM_OVN_KEEP_SEQS=1` (the repo's has both since `50dcf30` and `5c13c44`; the staging step copied the tarball and the images but never refreshed `serve.sh`). Patch 0031's X3 kernels run on the item plan, so with the switch unset v1.2.9 took upstream's compact decode path and X3 was inert, which is why `items0` and `x3off` were flat. The kernel tables show it: per MoE call the stale run launched `tf_exl3_group`, `tf_exl3_experts_rot_in`, `tf_exl3_down_combine` and two `tf_exl3_grouped_1` (194.0 us median) where the v1.2.7 image launched `plan_kernel`, `prompt_rotate` and two `tf_exl3_ovn_nc1` (189.5 us): about 145 of the 213 ms of extra kernel time in the cell, 1.07 ms a round, equal to the 1.0 to 1.3 ms the stage profile put in `routed`. So the 4 to 11% "regression" and the A B B A gap of this section measure a recipe without the item plan, not the v1.2.9 engine. Corrected cells with the repo's `serve.sh` are in the next paragraph; the cold-prompt rows of section 38 and the disk-tier rows (not affected by the item plan) were taken on the same stale file and are re-run with the corrected one.
+
+**Corrected cells (22:16 to 23:15 UTC, `queue42`): the repo's `serve.sh` on both images, order v1.2.7 / v1.2.9 / v1.2.9 / v1.2.7, five levels, production's prompts as ids, replies equal.** The v1.2.7 side is the image `rs2x3y` with `TF_GLM_INDEX_CUDA=1 TF_GLM_OVN_EY_DIRECT=1 TF_GLM_OVN_KEEP_SEQS=1` (the knobs its recipe set), the v1.2.9 side is `v129a` with the `DEFS` the repo ships (`EXL3_ITEMS=1`, `X3_*`, `KEEP_SEQS=1`).
+
+| streams | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| v1.2.7 `fx-b1` | 79.08 | 83.23 | 110.59 | 147.17 | 182.08 |
+| v1.2.9 `fx-a1` | 78.50 | 81.93 | 108.61 | 142.49 | 176.12 |
+| v1.2.9 `fx-a2` | 78.40 | 81.86 | 108.23 | 142.46 | 176.27 |
+| v1.2.7 `fx-b2` | 79.46 | 83.15 | 109.70 | 147.30 | 182.62 |
+| mean v1.2.7 / mean v1.2.9 | 79.27 / 78.45 | 83.19 / 81.90 | 110.15 / 108.42 | 147.24 / 142.48 | 182.35 / 176.19 |
+| v1.2.9 against v1.2.7 | -1.0% | -1.6% | -1.6% | -3.2% | -3.4% |
+
+The two v1.2.9 cells agree within 0.4% at every level and the two v1.2.7 cells within 0.8%, so the bracket is clean; tokens a round is 3.14 on every cell (ms a round 38.7 against 39.1 at one stream). With the recipe as the repo sets it the v1.2.9 stack is 1.0 to 3.4% below the v1.2.7 stack, not 4 to 11%: the stale recipe (compact decode path, X3 inert, no `KEEP_SEQS`) cost 4 to 5.7% on top, the item plan being worth that much on v1.2.9. A residual remains, growing with streams (the one-stream 1.0% is inside the 0.8% spread of the v1.2.7 pair, the 6 and 8 stream gaps are 3.2 and 3.4% against spreads of 0.1 to 0.3%). `queue44` measures its source: stage profile and kernel tables of both images at 1 and 8 streams on the corrected recipe, and the item plan and `KEEP_SEQS` as arms on it. The disk-tier and cold-prompt rows of section 38, taken on the stale file, are re-taken in `queue43`.
+
+## 40. The v1.2.9 stack on the corrected recipe: cold prompts and the disk tier hold, decode is 1.0 to 3.4% below the v1.2.7 stack, the residual is in the collectives
+
+All cells here use the repo's `serve.sh` on spark1 (checked byte for byte by `scripts/check-spark-sync.py` before each window; sections 38 and 39 ran on a stale copy, see the erratum in section 39). Image `v129a` (tree `27a87244e7dc`), `KNOBS=measured`, production's prompts as ids.
+
+**Cold first token** (re-taken, one boot): 4.380 s at 8,192 tokens and 17.157 s at 32,768, against 4.348 s and 16.983 s on the stale recipe and 4.340 s and 17.042 s on the v1.2.7 stack: the item plan is a decode-window choice and does not move the prompt path.
+
+**Disk tier (`patches/pr1411` net patch + cache-salt), TP=3, `--parallel 4 --context 1048576`, re-taken** (`docs/audit-2026-11-12/disktier-v129b-rows.jsonl`): all 17 resumed replies equal a cold server's, no check failed, no row rejected. The 596k conversation: turn 1 cold 352.81 s, turn 2 from RAM 14.17 s, after a SIGKILL of every rank 14.28 s of server prefill (618,496 tokens cached; first token 25.02 s), after a clean restart 16.40 s of server prefill (641,024 cached; first token 27.34 s); the 32k and 120k conversations resume from disk in 0.87 to 1.32 s of server prefill. Production for the same chain (`SPEED-TARGET.md`): 224.68 s, 12.54 s, 12.80 s, 12.90 s.
+
+**The decode arms on the corrected recipe (1, 4, 8 streams, `ctl-m` / `ctl-m2` bracket; tok/s):**
+
+| arm | 1 | 4 | 8 |
+|---|---:|---:|---:|
+| `ctl-m` | 78.96 | 108.51 | 177.27 |
+| `items0m` (`TF_GLM_OVN_EXL3_ITEMS=0`) | 76.06 (-3.7%) | 104.56 (-3.6%) | 169.66 (-4.3%) |
+| `ks0m` (`TF_GLM_OVN_KEEP_SEQS=0`) | 78.81 (-0.2%) | 106.62 (-1.7%) | 171.89 (-3.0%) |
+| `ctl-m2` | 77.93 (-1.3%) | 107.85 (-0.6%) | 176.68 (-0.3%) |
+
+The item plan is worth +3.7 to +4.5% on v1.2.9 (the compact path is what sections 38 and 39 measured by mistake), and `KEEP_SEQS` +1.7% at four streams and +3.0 to +3.3% at eight (nothing at one stream, where the controls spread 1.3%). Both stay in `DEFS`; patch 0011's switch and patch 0035 are load-bearing against upstream's own path, not redundant with it.
+
+**Where the residual is.** `TF_GLM_PROF` stage times of a 3-row verify call, one stream, two cells a side (ms a call): routed 16.00 / 16.06 on v1.2.9 against 15.96 / 16.06 on v1.2.7 (equal now), gather_a 1.67 / 1.57 against 1.40 / 1.49, gather_b 1.39 / 1.24 against 1.15 / 1.15, every other stage equal. nsys on rank 0 at one and eight streams: launch counts identical on both images (269,747 and 671,857), total kernel time +7.0 ms of 6.8 s at one stream, so the compute is the same code at the same speed. The difference is in the kernels that wait on peers: `tp_roce_multi` mean 33.0 against 27.9 us (14,649 launches, median 13.4 against 12.2) at one stream, and NCCL `AllGather_RING_LL` mean 88.6 against 64.0 us (23,744 launches, median 54.2 against 48.8) at eight; the 32-launch NCCL `AllReduce` outlier is the boot barrier. These kernels spin until the slowest rank arrives, so rank 0's traces cannot yet tell slower transport from a later peer; per-rank traces and a source diff of the TP collective path (lane `CollectivePath`) decide it.
