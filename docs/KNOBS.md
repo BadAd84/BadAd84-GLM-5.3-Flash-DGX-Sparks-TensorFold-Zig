@@ -1,16 +1,18 @@
 # The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-15)
 
-`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 32 patches; the cells below were measured on the v1.2.7 stack of 36 patches, the v1.2.9 stack has not been measured on a GPU, see OVERNIGHT section 37).
+`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 33 patches; the cells below were measured on the v1.2.7 stack of 36 patches, the v1.2.9 stack has not been measured on a GPU, see OVERNIGHT section 37).
 Production on the Sparks is the Python stack and takes none of it. A knob is set only when its cells show no regression at 1, 2, 4, 6 and 8
 streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT below). Every name is a row of the `.glm` scope of
 `zig/src/platform/environment.zig`; an unregistered `TF_GLM_*` name is refused at boot, so `DEFS` must follow the patch set it runs on.
 
-## Set by `DEFS` (15 knobs) and added by `serve.sh`
+## Set by `DEFS` (16 knobs) and added by `serve.sh`
 
 `TF_GLM_KDA_PAD`, `TF_GLM_OVN_KEPT_WALK`, `TF_GLM_OVN_DRAFT_ONEPASS`, `TF_GLM_OVN_DRAFT_DOWN4`, `TF_GLM_OVN_DRAFT_MLPSPLIT=4`, `TF_GLM_OVN_MLA_FUSEMERGE`, `TF_GLM_OVN_DRAFT_EDGE=0.6`,
 `TF_GLM_OVN_DRAFT_BETA=2`, `TF_GLM_OVN_DRAFT_CUTS=1:0.3`, `TF_EXL3_DEC_ORDER`, `TF_GLM_OVN_EXL3_ITEMS` (decode windows on our 16-pair item plan: on v1.2.7 the default path, on v1.2.9 a switch because upstream's
-default is its compact 1024-row calls), `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN`, `TF_GLM_OVN_KEEP_SEQS` (OVERNIGHT sections 30 and 34).
+default is its compact 1024-row calls), `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN`, `TF_GLM_OVN_KEEP_SEQS` (OVERNIGHT sections 30 and 34), `TF_GLM_OVN_OFF_EFFORT_LINE`.
 The three-rank RoCE wire (`TF_GLM_ROCE_MULTI`, `TF_TP_MASTER`, `TF_TP_KERNEL_IMAGE`) is added when `--parallel` is at most 4, the world is above 1 and the fatbin exists.
+
+`TF_GLM_OVN_OFF_EFFORT_LINE` sets no speed cell: it is a prompt change, not a kernel one. Thinking off, GLM-5.3's chat template leaves out its default `Reasoning Effort: Max` system line, exactly as production's Python engine renders it (prompts.py `thinking_off`), so the served prompt for the bench prose prompt is the same 33 tokens production sends instead of 40; a request that names `low` or `high` keeps its line and thinking on renders as before. Replies are therefore NOT token-identical to the knob-off serve, by design.
 
 On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, arms against the mean of two controls): `TF_GLM_OVN_EXL3_ITEMS=1` is worth +3.8% at one stream, +3.9% at four and +5.3% at eight over upstream's compact decode path; `TF_GLM_OVN_KEEP_SEQS=1` +0.5% at one stream (inside the controls' 1.3% spread), +2.3% at four and +4.5% at eight. Both stay set; the X3 switches only act on the item plan. With them the stack decodes at parity with the v1.2.7 stack (section 41).
 

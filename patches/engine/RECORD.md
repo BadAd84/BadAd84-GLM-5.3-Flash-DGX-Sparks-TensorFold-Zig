@@ -22,8 +22,13 @@ Retired on this base (absorbed by upstream; each with the commit that absorbed i
 | 0029 exl3-chunk-rows | 8978c4357 | a prompt pass runs in calls of up to prompt_rows (4,096) rows, so a 2,048-row chunk is one call |
 | 0036 exl3-prompt-ey-direct | 8978c4357, dc4aef0ec | the prompt down kernel writes the caller's slot rows; exl3_prompt.Scratch has no staged y |
 
-Proof the series rebuilds: `apply.sh` on the tag gives tree `e02b8a89c2ccbb7fe67e42fb4bf300bec1a5f2c3`
-(`series-check.sh` applies it to a pristine index with plain `git apply --cached` and compares that tree).
+Proof the series rebuilds and its gates (2026-11-16): applying the 33 patches to the tag with plain `git apply --cached` on
+a pristine index gives tree `c08dd8eade958dd857c180593e0e383e12c7e044` (the `series-check.sh` method);
+`patches/pr1411/apply.sh --check` on that tree gives `fde9658728dd6ca086e96dc37f0d82cbb060cd07` and
+`patches/cache-salt/apply.sh --check` on that one gives the stack `e946a74361ca54f02c3baee5437786a1c4dbfe73`.
+`scripts/spark-gates.py` built both trees from these files on a shared x86_64 host and got the same ids; series and stack
+PASS against the pristine base (every step rc 0 but `test-cuda-host`, which fails only the base's own `cli_config_test`
+serve --config test; no new failing name; lean 0 new).
 
 | patch | from (v1.2.7) | subject | switches it registers |
 |---|---|---|---|
@@ -59,6 +64,11 @@ Proof the series rebuilds: `apply.sh` on the tag gives tree `e02b8a89c2ccbb7fe67
 | 0030 | 0033 | server: render and tokenize a request once, and TF_GLM_OVN_HOST_ONCE | `TF_GLM_OVN_HOST_ONCE` |
 | 0031 | 0034 | glm exl3: TF_GLM_OVN_X3_NC, X3_XROW and X3_FUSEDOWN, production's decode kernels on the item plan | `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN` |
 | 0032 | 0035 | glm cuda: TF_GLM_OVN_KEEP_SEQS, a released stream's sequence stays for the next request on its slot | `TF_GLM_OVN_KEEP_SEQS` |
+| 0033 | - | server: TF_GLM_OVN_OFF_EFFORT_LINE, a thinking-off GLM-5.3 prompt without its default effort line | `TF_GLM_OVN_OFF_EFFORT_LINE` |
+
+0033 is not a re-seat of a v1.2.7 patch: it is new here (2026-11-16), written on this base. Its row in
+`zig/src/platform/environment.zig` sits after `TF_GLM_OVN_HOST_ONCE` rather than at the end of the `.glm` rows, so
+`patches/pr1411`'s environment.zig and docs/environment.md hunks still apply on top of this series.
 
 Every switch still defaults off and is a row of the `.glm` scope of `zig/src/platform/environment.zig` (TF_GLM_OVN_*
 through `cuda/ovn.zig`), with a line in `docs/environment.md`. Every kept patch keeps its own header (source, what
