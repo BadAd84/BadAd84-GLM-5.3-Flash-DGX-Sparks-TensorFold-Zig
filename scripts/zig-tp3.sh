@@ -18,7 +18,7 @@ SNAP_HOST="$HOME/.cache/huggingface/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-4b
 
 boot() { # boot RANK - rank 0 runs locally, workers over ssh (spark1 has keys to its workers)
   local rank=$1
-  local envstr="IMAGE='$IMAGE' XENV='${XENV:-}' XSERVE='${XSERVE:-}' KNOBS='${KNOBS:-off}' DRAFTER='${DRAFTER:-1}' KEEP='${KEEP:-0}' COMM_ID='$COMM_ID' PORT='${PORT:-8300}'"
+  local envstr="IMAGE='$IMAGE' XENV='${XENV:-}' XSERVE='${XSERVE:-}' KNOBS='${KNOBS:-off}' DRAFTER='${DRAFTER:-1}' KEEP='${KEEP:-0}' LEARN='${LEARN:-0}' LEARN_NAME='${LEARN_NAME:-serve}' LEARN_GIB='${LEARN_GIB:-128}' LEARN_DAILY_GIB='${LEARN_DAILY_GIB:-512}' LEARN_MIN_FREE_GIB='${LEARN_MIN_FREE_GIB:-40}' COMM_ID='$COMM_ID' PORT='${PORT:-8300}'"
   if [ "$rank" = 0 ]; then
     nohup bash -c "$envstr WRAP='${WRAP0:-}' XRUN='${XRUN0:-}' bash "$(dirname "${BASH_SOURCE[0]}")/serve.sh" $rank $P $CTX" \
       > "$HOME/glm-zig-r0-$(date +%H%M%S).log" 2>&1 < /dev/null &
