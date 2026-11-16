@@ -12,7 +12,7 @@ streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT 
 default is its compact 1024-row calls), `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN`, `TF_GLM_OVN_KEEP_SEQS` (OVERNIGHT sections 30 and 34).
 The three-rank RoCE wire (`TF_GLM_ROCE_MULTI`, `TF_TP_MASTER`, `TF_TP_KERNEL_IMAGE`) is added when `--parallel` is at most 4, the world is above 1 and the fatbin exists.
 
-On v1.2.9, with the recipe as `serve.sh` sets it, each arm against the bracket of its controls (OVERNIGHT section 40): `TF_GLM_OVN_EXL3_ITEMS=1` is worth +3.7% at one stream, +3.6% at four and +4.3% at eight over upstream's compact decode path; `TF_GLM_OVN_KEEP_SEQS=1` +1.7% at four streams and +3.0% at eight (0.2% at one, inside the controls' 1.3% spread). Both stay set; the X3 switches only act on the item plan.
+On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, arms against the mean of two controls): `TF_GLM_OVN_EXL3_ITEMS=1` is worth +3.8% at one stream, +3.9% at four and +5.3% at eight over upstream's compact decode path; `TF_GLM_OVN_KEEP_SEQS=1` +0.5% at one stream (inside the controls' 1.3% spread), +2.3% at four and +4.5% at eight. Both stay set; the X3 switches only act on the item plan. With them the stack decodes at parity with the v1.2.7 stack (section 41).
 
 ## Registered, not set, measured: no regression and no gain (stays out)
 
