@@ -1069,3 +1069,30 @@ With the switch on the chat path renders exactly production's prompt: the same 3
 | `v129t` against `v129a` (means) | -0.2% | +0.1% | -0.1% | -0.4% | +0.3% |
 
 Every difference is inside the spread of the pairs (0.2 to 0.8%). A first unbracketed five-level cell on `v129t` had read 1.4 to 2.4% below section 41's means; the bracket shows the old image reads the same in this window, so that was the window, not the patch. `TF_GLM_OVN_OFF_EFFORT_LINE=1` is in `serve.sh` `DEFS`; the recipe image is `glm53-zig:v129t` (stack tree `e946a74361ca`).
+
+## 43. The v1.2.9 stack on the GPU: every bit-exact check passes, the disk tier costs nothing to have on, decode at production's deployed shape
+
+**Our patches' own GPU checks, on the v1.2.9 stack (image `v129t`, one GB10, `tf-cuda-test` from the image, `queue52`, 17:19 to 17:22 UTC).** Before this, the item plan and `KEEP_SEQS` receipts were from v1.2.7 on a workstation GPU. Every check exits 0 with its real counts (not a bare rc):
+
+| check | what it proves | result |
+|---|---|---|
+| `glm-exl3-items` | the decode item plan equals the plain decode, byte for byte | 0 of 308 comparisons differ (v1.2.7 receipt: 308) |
+| `glm-exl3` | routed experts, decode and prompt, against float64 | largest difference 0.157 of the tolerance |
+| `glm-keep-seqs-check` | kept sequences, as left and with every byte poisoned, equal fresh ones (24 greedy steps, logits, MTP drafts, prompts of 600 and 3,000 tokens, fp8 and bf16 caches) | PASS; the four planted controls differ at step 0 as planted |
+| `glm-lanes-concurrent`, `KEEP_SEQS` 0 and 1 | three concurrent streams each equal their solo run | 38 PASS / 0 FAIL both ways (v1.2.7 receipt: 38 / 0) |
+| `glm-draft-onepass`, `glm-index-check`, `glm-index-ovn-check`, `glm-index-regroup-check`, `glm-mla-skip-check`, `glm-onepass-exact-check`, `glm-kda-pad-split`, `glm-ref` | the drafter one-pass, the indexer and its decode variants, the fused MLA chunks, the pipe, the KDA padding, every GLM projection | all PASS (18, 11 and 8 byte-equal cases, 28 calls, 5 shapes; 25 PASS in `glm-ref`) |
+
+**The disk tier is not in the recipe by default, and its presence costs no decode speed.** `serve.sh` started without any way to turn the tier on (only `scripts/queue-disk-tier.sh` passed the flags), so a serve started from the recipe forgot every conversation at a restart while production keeps them. `LEARN=1` (commit `519bb76`) adds `--learn-conversations` with the store under the mounted cache and the queue's caps (128 GiB, 512 GiB a day, 40 GiB free) on every rank; `scripts/tests/test_serve_learn.sh` runs `serve.sh` against a recording `docker` (six checks) and is killed by three one-line mutants of `serve.sh`.
+
+`queue53`, image `v129t`, `KNOBS=measured`, production's prompts as ids, one fresh boot a level, order off / on / on / off, tok/s (tier-on boots print `conversation states on disk ... 3 ranks' parts; a save stages up to 7429 MiB`, tier-off boots do not; replies equal on every cell):
+
+| streams | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| tier off `lt-off1` | 79.04 | 83.41 | 110.36 | 146.95 | 182.65 |
+| tier on `lt-on1` | 79.82 | 84.65 | 111.58 | 147.93 | 187.03 |
+| tier on `lt-on2` | 81.39 | 84.71 | 112.41 | 150.61 | 186.24 |
+| tier off `lt-off2` | 81.33 | 84.81 | 112.24 | 150.80 | 186.20 |
+| mean on against mean off | +0.5% | +0.7% | +0.6% | +0.3% | +1.2% |
+| `lt-on2` against its neighbour `lt-off2` | +0.1% | -0.1% | +0.2% | -0.1% | 0.0% |
+
+The tier is not slower at any level (the off pair spreads 1.7 to 2.9%, so the +1% means are the first cell reading low, not a gain). What this does not price: the bench prompts are 33 tokens, nothing is large enough to keep, and the stores were 4 KiB, so these cells measure an idle tier. The cost of a save or a restore of a large state beside decoding streams is section 32's and 36's: a 4.7 GiB restore stalls the other streams for up to 9.9 s unless `TF_GLM_OVN_DISK_SLICE_MIB` slices it, a trade the owner has not accepted. `LEARN` stays opt-in in `serve.sh` rather than a default: the disk windows' cold reference arm goes through the same `serve.sh` and must run without a tier, and a deployment is where the switch belongs (`LEARN=1`, `KNOBS=measured`, `P=4`, `CTX=1048576`).
