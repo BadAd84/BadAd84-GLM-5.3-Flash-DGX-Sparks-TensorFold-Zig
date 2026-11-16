@@ -1173,3 +1173,56 @@ A position where our target leaves production's text keeps nothing in that count
 **Where this leaves the comparison with production.** At one, two and four streams the gap (-3.5% over 24 prompts at one stream; -5.4% and -4.2% in section 43) is the round's cost at equal work, about 1.8 ms of fixed cost at one stream and 4 to 5% at two and four. Drafting is level: the same picks on production's text, the same tokens a round on prose-like prompts, and a deficit on code-like prompts that is the text and the cut. No knob in the series moves it: the one candidate, `TF_GLM_OVN_WIN_FREE`, loses 21 to 31%.
 
 Tools added: `scripts/per_prompt.py`, `per_prompt_table.py`, `make_prompt_ids.py`, `prompts24.json`, `forced-arm.sh`, `teacher_forced.py`, `forced_score.py`, `chain_log.py`, `live_vs_forced.py`. The scorer's and the log parser's own tests need production's draft dumps and the Python repo, so they stay with those fixtures on the workstation; they are not in `scripts/tests/`.
+
+## 45. Short replies, the never-measured kernel knobs, and what cuts chains on code: the lanes core's context copies
+
+2026-11-16, 20:49 to 23:05 UTC, `glm53-zig:v129t`, the recipe (`KNOBS=measured`), boots at production's deployed shape (`--parallel 4 --context 1048576`) unless a row says otherwise; windows `work/queue59.sh` to `queue62.sh`, production restored and healthy after each. Section 44 left the round's own cost as the gap and a deficit on code-like prompts unexplained; this section measures the knobs that act on the round and finds the cause on code.
+
+**Short replies** (`per_prompt.py --max-tokens 16` and `48` over `prompts24.json`, two repetitions, production's live serve while idle against a Zig boot):
+
+| reply length | rounds, production / Zig | first token, ms | decode span, ms | whole request, ms | Zig over production, whole request (95% interval) |
+|---|---:|---:|---:|---:|---:|
+| 16 tokens | 127 / 129 | 168 / 153 | 185 / 186 | 352 / 339 | 0.964 (0.926 to 1.004) |
+| 48 tokens | 372 / 385 | 164 / 152 | 564 / 577 | 728 / 729 | 1.008 (0.973 to 1.047) |
+
+Short replies are level: our first token is about 9% sooner (ratio 0.913, interval 0.894 to 0.939, at 16 tokens) and we take 3.5% more rounds in the first 48 tokens (per-prompt ratio 1.051, interval 1.000 to 1.105), about half a round a request. On the 9 code-like prompts at 48 tokens that is 96 rounds against 89 and 638 ms against 615 ms. One cause is the depth rule of the lanes core (`core/lanes/depth.zig`): a stream with no acceptance history takes the depth with the most expected tokens a ms from a fixed prior (0.85, 0.75, 0.7, ...) and the cost table, which is four, so a request's first decode round holds four drafts (section 44's forced runs: at most four kept anywhere).
+
+**The kernel knobs `docs/KNOBS.md` listed as never measured: a screen** (`queue59`: one boot an arm, `streams_ids.py` with 1, 2 and 4 clients, mean of three waves; three controls, which fell across the window from 81.44 to 80.96 to 78.97 tok/s at one client, so an arm is read beside its neighbours and a single boot within about 2% decides nothing):
+
+| arm (run order) | 1 | 2 | 4 | replies |
+|---|---:|---:|---:|---|
+| control 1 | 81.44 | 85.12 | 113.09 | |
+| `TF_GLM_OVN_ROUTER16=3` | 81.22 | 85.00 | 112.49 | equal |
+| `TF_GLM_OVN_ROUTER16=4` | 81.16 | 84.99 | 112.49 | equal |
+| `TF_GLM_OVN_DECODE_INDEX=33` | 81.27 | 84.65 | 111.95 | equal |
+| control 2 | 80.96 | 83.53 | 111.33 | |
+| `TF_GLM_OVN_MM_CLUSTER=1` | 79.02 | 82.16 | 110.40 | equal |
+| `TF_GLM_OVN_MM_DECTILE=100000` | 81.62 | 84.83 | 112.10 | equal |
+| `TF_GLM_OVN_SWIGLU_REDUCE=1` | 80.54 | 84.82 | 112.60 | equal |
+| `TF_GLM_OVN_KVB8=1` | 84.41 | 87.59 | 114.87 | DIFFER |
+| control 3 | 78.97 | 83.09 | 110.33 | |
+
+`ROUTER16` and `DECODE_INDEX` sit between their controls: no effect seen. `MM_CLUSTER` is below both of its neighbours at every level (production also runs without clusters). `KVB8` changes the replies (120 rounds against 127 on the prose prompt, a round 0.8% slower): it is a numerics change, which the owner keeps off, and its tok/s is a different text's. `MM_DECTILE` and `SWIGLU_REDUCE` are each above the control before them: candidates, tested next.
+
+**`TF_GLM_OVN_MM_DECTILE=100000` with `TF_GLM_OVN_SWIGLU_REDUCE=1`** (`queue61`). Part 1: c d d c c d d c, one boot each, 1, 2 and 4 clients; part 2: c d d c with a fresh `--parallel 6` and `--parallel 8` boot each (`bench-client.sh`):
+
+| | 1 | 2 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|
+| controls | 80.06, 80.58, 81.06, 80.00 | 83.20, 84.35, 84.62, 83.90 | 111.65, 112.31, 111.98, 111.82 | 151.20, 147.05 | 186.10, 181.67 |
+| both knobs | 81.51, 81.78, 82.10, 81.77 | 85.29, 84.47, 85.61, 85.23 | 113.26, 113.37, 113.54, 113.33 | 151.35, 152.04 | 186.66, 186.06 |
+| knobs against the adjacent control, mean of pairs | +1.70% (s.e. 0.20) | +1.35% (s.e. 0.49) | +1.28% (s.e. 0.11) | +1.7% | +1.3% |
+
+At one and four clients every knob cell is above every control cell; at six and eight the gain is inside the control pairs' spread (2.8% and 2.4%) and no cell regresses. Replies and round counts are the recipe's in every cell and on all 24 prompts (9,600 tokens). The two are a candidate for `DEFS`, not yet in it: equal replies are a served check, and the series carries no byte-level GPU check of the two kernels (`glm_mm<bits>_16n32`, `glm_mm_reduce_swiglu`); the fork's `glm-mm-ovn` check was left out when patch 0022 was ported.
+
+**What cuts a chain before its first miss on code: a copy from the context, not the drafter's confidence.** Section 44 showed 19 of 70 live rounds on our own `code` reply stopping before the chain's first miss. `GLM`'s lanes facts leave the core's `copy_drafts` on (its default) with `first_copy_rows = 4`: when a stream's last 8 tokens occur earlier in its context, the core proposes the continuation from there as a copy, a first copy in a 4-row window, and that window takes the round instead of the DFlash2 block's seven drafts. From the live logs (`work/forced/own9-*/live.log`), for every round: whether the last 8 tokens through the anchor occur earlier in the prompt and reply, and whether the round kept fewer drafts than the block's correct lead:
+
+| our own reply | rounds with a match: cut / not cut | rounds without: cut / not cut | drafts lost in matched rounds, of all lost |
+|---|---:|---:|---:|
+| `code` | 13 / 3 | 7 / 48 | 56 of 67 |
+| `code4` | 6 / 1 | 3 / 64 | 21 of 24 |
+
+In every matched and cut round the kept count is exactly the smaller of 3 and the copy's own correct lead (for example 7 right, 3 kept, copy good for 5; 7 right, 1 kept, copy good for 1), and the uncut matched rounds are later copies that had grown to the full window. No round in either log kept more than the block's own chain would have. The unmatched cuts are the request's first round (the prior's depth) and one to three drafts at a time. Production's engine has no such copy: on its own `code` reply it drafts 6.90 a round. `TF_GLM_COPY_MAX` and `TF_GLM_COPY_REPLY_MATCH`, which `serve.sh` has set since the first launcher, are read nowhere in the v1.2.9 source. Upstream main (`077998f7d`) has the same facts.
+
+**Upstream's opt-in copy mode, `TF_GLM_COPIES=1`** (verified root and context copies, where a copy shares the window with the drafts it agrees with; `queue62`, control / on / control, 24 prompts solo and 1, 2, 4 clients): replies equal on 24 of 24; 3,184 rounds against 3,140; decode 120.1 s against 117.6 and 117.2 s (-2.3%); on the 9 code-like prompts 743 rounds against 712 and -3.6%; 77.22 / 83.05 / 109.83 tok/s at 1 / 2 / 4 clients against controls of 81.12 and 79.52 / 85.03 and 82.47 / 112.98 and 111.01. It stays off. The arm that turns copies off for a block drafter needs an engine switch (patch 0034, `TF_GLM_OVN_NO_COPY`, in its gates as this is written).
+
+**A lead from upstream that applies to our path.** Upstream issue 3570 (opened 2026-11-16) counts three layout-only GPU operations a MoE layer in the EXL3 decode window: two `cuMemcpy2DAsync` and `tf_glm_put_slot`, 135 a round. Our item-plan profiles show `tf_glm_put_slot` once a layer a round (6,426 instances beside `tf_glm_combine`'s 6,426 in `work/nsys41` and `work/nsys44`) and both copies are in `cuda_exl3.zig` `run` (`copyRows`, two calls), so the same operations are in our round.
