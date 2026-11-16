@@ -23,6 +23,8 @@ for P in ${LEVELS:-1}; do
     || { echo "[bench-client $TAG] CLIENT FAILED P=$P"; docker logs --tail 12 glm53-zig-r0 > "$OUT/fail-P$P.log" 2>&1; }
   tail -3 "$OUT/P$P.out" 2>/dev/null
   docker logs glm53-zig-r0 2>&1 | grep -a "^info\|^warn\|^error\|^debug" | tail -n 800 > "$OUT/r0-P$P.log"
+  for r in 1 2; do ssh -n -o BatchMode=yes -o ConnectTimeout=15 "adam@spark$((r + 1)).ots-int.net" "docker logs glm53-zig-r$r 2>&1" 2>/dev/null \
+    | grep -a "^info\|^warn\|^error\|^debug" | tail -n 800 > "$OUT/r$r-P$P.log" || true; done
   bash "$G/zig-tp3-stop.sh" >/dev/null 2>&1
   sleep 10
 done

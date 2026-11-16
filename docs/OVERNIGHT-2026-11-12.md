@@ -987,3 +987,18 @@ All cells here use the repo's `serve.sh` on spark1 (checked byte for byte by `sc
 The item plan is worth +3.7 to +4.5% on v1.2.9 (the compact path is what sections 38 and 39 measured by mistake), and `KEEP_SEQS` +1.7% at four streams and +3.0 to +3.3% at eight (nothing at one stream, where the controls spread 1.3%). Both stay in `DEFS`; patch 0011's switch and patch 0035 are load-bearing against upstream's own path, not redundant with it.
 
 **Where the residual is.** `TF_GLM_PROF` stage times of a 3-row verify call, one stream, two cells a side (ms a call): routed 16.00 / 16.06 on v1.2.9 against 15.96 / 16.06 on v1.2.7 (equal now), gather_a 1.67 / 1.57 against 1.40 / 1.49, gather_b 1.39 / 1.24 against 1.15 / 1.15, every other stage equal. nsys on rank 0 at one and eight streams: launch counts identical on both images (269,747 and 671,857), total kernel time +7.0 ms of 6.8 s at one stream, so the compute is the same code at the same speed. The difference is in the kernels that wait on peers: `tp_roce_multi` mean 33.0 against 27.9 us (14,649 launches, median 13.4 against 12.2) at one stream, and NCCL `AllGather_RING_LL` mean 88.6 against 64.0 us (23,744 launches, median 54.2 against 48.8) at eight; the 32-launch NCCL `AllReduce` outlier is the boot barrier. These kernels spin until the slowest rank arrives, so rank 0's traces cannot yet tell slower transport from a later peer; per-rank traces and a source diff of the TP collective path (lane `CollectivePath`) decide it.
+
+**Per rank (`queue45`, `TF_GLM_PROF` on all three ranks, one stream, order v1.2.7 / v1.2.9 / v1.2.9 / v1.2.7; ms a 3-row verify call, means of two cells for rank 0 and four for ranks 1 and 2).** Rank 0 does the most work (routed 16.0 against 13.5 ms on the peers) and is the critical path:
+
+| | stage | v1.2.7 | v1.2.9 | change |
+|---|---|---:|---:|---:|
+| rank 0 | wall | 30.98 | 31.49 | +0.51 |
+| rank 0 | gather_a | 1.40 | 1.71 | +0.31 |
+| rank 0 | gather_b | 1.13 | 1.35 | +0.23 |
+| rank 0 | routed / kda | 16.01 / 5.20 | 16.04 / 5.17 | +0.04 / -0.03 |
+| ranks 1, 2 | wall | 30.68 | 31.04 | +0.36 |
+| ranks 1, 2 | routed | 13.54 | 14.75 | +1.21 |
+| ranks 1, 2 | kda / mla | 4.03 / 2.33 | 4.43 / 2.40 | +0.40 / +0.07 |
+| ranks 1, 2 | gather_a / gather_b | 2.45 / 3.96 | 2.03 / 3.05 | -0.42 / -0.92 |
+
+Two effects, only the first on the critical path. (1) Rank 0's own stages are equal and its two collectives cost 0.53 ms more, which is the whole +0.51 ms of its wall time; per layer that is about +6 us a collective, the +5 us mean of `tp_roce_multi` in nsys. Rank 0's pre-gather work (kda and mla, 7.8 ms) is longer than the peers' (6.3 and 6.8 ms), so it is not waiting for a late peer: the collective itself is slower. (2) The peers' own compute grew (routed +1.21, kda +0.40, mla +0.07 ms) with rank 0's unchanged, so some per-rank path is asymmetric; they still finish before rank 0, and the extra compute is absorbed by shorter waits in their gathers (-0.42 and -0.92 ms). The one-stream gap of 1.0% is effect (1); the lane `CollectivePath` is reading both in source.
