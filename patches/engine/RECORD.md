@@ -65,10 +65,27 @@ serve --config test; no new failing name; lean 0 new).
 | 0031 | 0034 | glm exl3: TF_GLM_OVN_X3_NC, X3_XROW and X3_FUSEDOWN, production's decode kernels on the item plan | `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN` |
 | 0032 | 0035 | glm cuda: TF_GLM_OVN_KEEP_SEQS, a released stream's sequence stays for the next request on its slot | `TF_GLM_OVN_KEEP_SEQS` |
 | 0033 | - | server: TF_GLM_OVN_OFF_EFFORT_LINE, a thinking-off GLM-5.3 prompt without its default effort line | `TF_GLM_OVN_OFF_EFFORT_LINE` |
+| 0034 | - | glm lanes: TF_GLM_OVN_NO_COPY, a DFlash2 drafter's windows without copied continuations | `TF_GLM_OVN_NO_COPY` |
+| 0035 | - | glm cuda tests: glm-mm-ovn, the matmul launch variants against the default launch byte for byte | - |
 
 0033 is not a re-seat of a v1.2.7 patch: it is new here (2026-11-16), written on this base. Its row in
 `zig/src/platform/environment.zig` sits after `TF_GLM_OVN_HOST_ONCE` rather than at the end of the `.glm` rows, so
 `patches/pr1411`'s environment.zig and docs/environment.md hunks still apply on top of this series.
+
+0034 is not a re-seat of a v1.2.7 patch either: it is new here (2026-11-16), written on this base. Its row in
+`zig/src/platform/environment.zig` sits after `TF_GLM_OVN_WIN_FREE`'s, and its line in `docs/environment.md` after that
+switch's, so `patches/pr1411`'s environment.zig and docs/environment.md hunks still apply on top of this series. The
+34-patch series is tree `6363e6b5d3faab6646cd361cf357d24745764d62`; pr1411 then cache-salt make the stack
+`5058123fa4f4f38637c0a5c023936b462cba453b` (the gate host's `git write-tree`, run sg-20261116-234035: series and stack
+PASS against the pristine base, lean 0 new).
+
+0035 is the GPU check that `0022-mm-knobs.patch` was ported without: `zig/tests/cuda/glm_mm_ovn_tests.zig` from the fork
+commit the knobs came from (ai-engine `cbf94fde5`), on this tree's helpers, with a planted control the fork's file did
+not have. It registers `glm-mm-ovn` in `zig/tests/cuda/glm_ovn_checks.zig`, so `zig/tests/cuda/main.zig` stays at 599
+lines, and gives the host stub `zig/test_support/glm_mm_cuda.zig` the `cluster` field `cuda_mm.zig` names. No engine
+file changes. The 35-patch series is tree `2af443845021d4b310032b3e51d81c38d6059df4` (run sg-20261116-230553: PASS
+against the pristine base, `compile-cuda-tests` rc 0, lean 0 new); with pr1411 and cache-salt the stack is
+`f3204870b8fce9de0731527420584b6893d3a2da` (38 patches; run sg-20261117-002047: series and stack PASS, lean 0 new).
 
 Every switch still defaults off and is a row of the `.glm` scope of `zig/src/platform/environment.zig` (TF_GLM_OVN_*
 through `cuda/ovn.zig`), with a line in `docs/environment.md`. Every kept patch keeps its own header (source, what

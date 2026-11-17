@@ -1,0 +1,207 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm lanes: TF_GLM_OVN_NO_COPY, a DFlash2 drafter's windows without copied continuations
+
+GLM's facts() leave the lanes core's copy_drafts at true, so a stream whose last tokens match
+earlier context proposes a copied continuation, and that window replaces the block's held
+drafts for the round. TF_GLM_OVN_NO_COPY (exactly 0 or 1, default off) has facts() set
+copy_drafts = false when a DFlash2 drafter is loaded and the switch is on: the config's max_copy
+is 0 and root and context copies are off, so no stream of the round proposes a copy and its
+window carries the block's drafts. Off, or with no drafter, facts() are exactly as before.
+
+One more effect of copy_drafts = false, from config.zig: first_copy becomes 1 and base_width 2, and base_width
+sizes a window of forced tokens, so with the switch on a stream forces one token a round instead of up to three.
+Forced tokens come only from a thinking block's close (a thinking budget's cut forces two of GLM's three close
+tokens, a loop guard's close all three), and both happen only while thinking is open.
+
+New here, not a re-seat: written on this series at v1.2.9. The row in
+zig/src/platform/environment.zig sits after TF_GLM_OVN_WIN_FREE's and the line in
+docs/environment.md after that switch's, so patches/pr1411's environment.zig and
+docs/environment.md hunks still apply on top. no_copy_test.zig (the lanes core's GLM-shaped
+lone stream, with and without the switch) and a facts() test in cuda_lanes_test.zig ride in
+this patch.
+
+Gates on pin+0001..0034: check-native-cuda-host and fmt green, test-cuda-host fails only the
+base's own cli_config_test, lean 0 new; series and series+pr1411+cache-salt PASS against the
+pristine base in the three-tree run.
+
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -67,6 +67,7 @@
+ | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
+ | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
+ | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
++| `TF_GLM_OVN_NO_COPY` | Exactly `0` or `1`; default off (a DFlash2 drafter's streams propose no copied continuations; their windows carry the block's drafts) |
+ | `TF_GLM_OVN_SPARSE_ONEPASS` | Exactly `0` or `1`; default off (a prompt's rows take production's one-pass sparse attention) |
+ | `TF_GLM_OVN_ONEPASS_PIPE` | Exactly `0` or `1`; default off (the DSA block's prompt rows take the one-pass pipeline) |
+ | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
+diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+--- a/zig/src/core/lanes/lanes.zig
++++ b/zig/src/core/lanes/lanes.zig
+@@ -94,6 +94,7 @@
+     _ = @import("granted_reservation_test.zig");
+     _ = @import("rollback_test.zig");
+     _ = @import("free_shared_test.zig");
++    _ = @import("no_copy_test.zig");
+ }
+ 
+ pub const learned_disk = @import("learned_disk.zig");
+diff --git a/zig/src/core/lanes/no_copy_test.zig b/zig/src/core/lanes/no_copy_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/core/lanes/no_copy_test.zig
+@@ -0,0 +1,94 @@
++//! TF_GLM_OVN_NO_COPY: a DFlash2 drafter's windows keep the block's drafts instead of a copied continuation.
++const std = @import("std");
++const Config = @import("config.zig").Config;
++const Cost = @import("config.zig").Cost;
++const Engine = @import("engine.zig").Engine;
++const Stream = @import("stream.zig").Stream;
++const SuffixLookup = @import("proposer.zig").SuffixLookup;
++const win = @import("windows.zig");
++const fake = @import("fake.zig");
++
++const gpa = std.testing.allocator;
++
++/// The prompt ends in its own first eight ids, whose continuation the proposer offers as the copy.
++const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8 };
++const copied = [_]u32{ 9, 10, 11 }; // the three ids after the prompt's first run of 1..8
++const held: u32 = 7; // a DFlash2 block's drafts, the most a lone stream holds for a round
++
++/// GLM's shape (cuda_lanes.facts): 8-row windows, a first copy of 3, 7 drafts, 52 + 6.8 and 76 + 4.1 ms a row.
++fn model(copy_drafts: bool) !Config {
++    var lone: [8]Cost = undefined;
++    for (&lone, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 52.0 + 6.8 * @as(f64, @floatFromInt(w - 1)) };
++    var shared: [32]Cost = undefined;
++    for (&shared, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 76.0 + 4.1 * @as(f64, @floatFromInt(w - 1)) };
++    return Config.init(gpa, .{
++        .exact_width = 8,
++        .first_copy_rows = 4,
++        .mtp = true,
++        .speculate = true,
++        .speculate_early = false,
++        .drafts = 7,
++        .draft_streams = true,
++        .mtp_step_ms = 1.6 / 7.0,
++        .draft_probabilities = true,
++        .window_costs = &lone,
++        .shared_costs = &shared,
++        .hidden_rows = true,
++        .batch_rows = 32,
++        .max_streams = 16,
++        .copy_drafts = copy_drafts,
++    }, 8, 7);
++}
++
++/// One lone stream's round, planned and allocated: the rows it carries and where they came from.
++const Round = struct {
++    kind: win.Kind = .none,
++    held: u32 = 0,
++    rows: usize = 0,
++    tokens: [8]u32 = @splat(0),
++    n: usize = 0,
++};
++
++/// Plans and allocates one lone stream's round, its seven held drafts priced by chances near one.
++fn round(copy_drafts: bool, out: *Round) !void {
++    var cfg = try model(copy_drafts);
++    defer cfg.deinit(gpa);
++    var target: fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var clock: fake.FixedClock = .{};
++    var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
++    defer e.deinit();
++    var look = try SuffixLookup.init(gpa, .{});
++    defer look.deinit();
++    var s = try Stream.init(gpa, .{ .id = "lone", .prompt = &prompt, .max_new = 64, .proposer = look.proposer() });
++    defer s.deinit(gpa);
++    // the block's drafts land round after round: each depth's chance moves toward one
++    for (0..64) |_| try e.rule.observeDepth(win.who(&s), held, held);
++    s.next = .{ .count = held };
++    _ = e.arena.reset(.retain_capacity);
++    var plans = [_]win.Plan{try win.plan(&e, &s, null)};
++    try win.allocate(&e, &plans);
++    out.kind = plans[0].kind;
++    out.held = plans[0].held;
++    out.rows = plans[0].count();
++    out.n = plans[0].tokens.len;
++    @memcpy(out.tokens[0..out.n], plans[0].tokens);
++}
++
++test "TF_GLM_OVN_NO_COPY off: the repeated context's copy takes the round at its three narrow rows" {
++    var got: Round = .{};
++    try round(true, &got);
++    try std.testing.expectEqual(win.Kind.copy, got.kind);
++    try std.testing.expectEqual(@as(u32, 0), got.held); // no held draft reaches a copy window
++    try std.testing.expectEqual(@as(usize, 3), got.rows); // the first copy's width, not the block's seven
++    try std.testing.expectEqualSlices(u32, &copied, got.tokens[0..got.n]);
++}
++
++test "TF_GLM_OVN_NO_COPY on: no proposal is made, and the window is the block's seven held drafts" {
++    var got: Round = .{};
++    try round(false, &got);
++    try std.testing.expectEqual(win.Kind.head, got.kind);
++    try std.testing.expectEqual(held, got.held);
++    try std.testing.expectEqual(@as(usize, held), got.rows);
++    try std.testing.expectEqual(@as(usize, 0), got.n); // nothing copied: the backend holds every row
++}
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -119,6 +119,7 @@
+             .floor_rates = !block, // a chain's step costs a forward: --mtp-confidence cuts the rates' depth, not max_drafts
+             .plain_margin = @as(f64, @floatFromInt(cuda.ovn.int("PLAIN_MARGIN", 0) catch 0)) / 100.0, // TF_GLM_OVN_PLAIN_MARGIN, in hundredths
+             .free_shared = block and cuda.ovn.on("WIN_FREE"), // TF_GLM_OVN_WIN_FREE: shared windows fill by chance alone
++            .copy_drafts = !(block and cuda.ovn.on("NO_COPY")), // TF_GLM_OVN_NO_COPY: keep the block's drafts
+             .hidden_rows = sharing,
+             .batch_rows = if (sharing) engine.shared_rows else 0,
+             .max_streams = if (sharing) engine.max_shared else 1,
+diff --git a/zig/src/families/glm/cuda_lanes_test.zig b/zig/src/families/glm/cuda_lanes_test.zig
+--- a/zig/src/families/glm/cuda_lanes_test.zig
++++ b/zig/src/families/glm/cuda_lanes_test.zig
+@@ -6,6 +6,8 @@
+ const fw = @import("cuda_forward.zig");
+ const solo = @import("cuda_prompt_solo.zig");
+ const prompt_cuts = @import("cuda_prompt_cuts.zig");
++const cuda = @import("cuda");
++const dflash = @import("dflash.zig");
+ 
+ test "a lane's slot is chosen before its map entry exists" {
+     var storage: [8192]u8 = @splat(0);
+@@ -98,3 +100,25 @@
+         try std.testing.expectEqual(if (c.why == null) c.at else 0, s.cached); // refused: the pass starts at 0
+     }
+ }
++
++test "TF_GLM_OVN_NO_COPY: a drafter's facts drop copy drafts only while the switch is on" {
++    var e: engine.Engine = undefined;
++    e.gpa = std.testing.allocator;
++    e.mtp = true;
++    e.drafter = null;
++    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
++    defer self.lanes.deinit(e.gpa);
++    defer cuda.ovn.fake("NO_COPY", null);
++    cuda.ovn.fake("NO_COPY", null);
++    try std.testing.expect(self.facts().copy_drafts); // no drafter loaded: nothing to switch off
++    cuda.ovn.fake("NO_COPY", "1");
++    try std.testing.expect(self.facts().copy_drafts); // nor with the switch on: the head's copies stay
++    var block: dflash.Drafter = undefined;
++    e.drafter = &block;
++    defer e.drafter = null;
++    try std.testing.expect(!self.facts().copy_drafts);
++    cuda.ovn.fake("NO_COPY", null);
++    try std.testing.expect(self.facts().copy_drafts); // the switch off: the model's own default stands
++    cuda.ovn.fake("NO_COPY", "0");
++    try std.testing.expect(self.facts().copy_drafts);
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -109,6 +109,7 @@
+     .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
+     .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
+     .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_NO_COPY", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_SPARSE_ONEPASS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_ONEPASS_PIPE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },

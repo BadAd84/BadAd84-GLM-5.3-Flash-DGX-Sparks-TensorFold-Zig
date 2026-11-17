@@ -1,0 +1,311 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda tests: glm-mm-ovn, the matmul launch variants against the default launch byte for byte
+
+ai-engine cbf94fde5's check, which the matmul knobs port left behind. Each case runs a variant's
+launch and the default launch on the same input and compares the whole output buffer, byte for
+byte: MM_WIDE (w2x4 and w4x4 prompt blocks) at two prompt shapes, MM_DECTILE and MM_CLUSTER on
+the 16-row decode windows and on the sliced windows summed in a cluster, over bf16, 4, 6 and 8
+bits, and SWIGLU_REDUCE against glm_mm_reduce plus glue.swiglu at widths 704, 640 and 2048. A
+planted control on one small shape requires the comparison to see a written output, a changed
+input and a one-bit change of the reference.
+
+Adapted: the command joins glm_ovn_checks.zig's table, its usage and its dispatch, so main.zig is
+untouched; ROUTER16 is left out (a router tile, not a matmul launch variant); the control is
+added. zig/test_support/glm_mm_cuda.zig gains Config.cluster, the field the cluster launch names,
+without which the host stub cannot compile cuda_mm.zig.
+
+diff --git a/zig/tests/cuda/glm_mm_ovn_tests.zig b/zig/tests/cuda/glm_mm_ovn_tests.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/glm_mm_ovn_tests.zig
+@@ -0,0 +1,252 @@
++//! TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against glm_mm's default launches, byte for byte.
++const std = @import("std");
++const cuda = @import("cuda");
++const glm = @import("glm_cuda");
++const check = @import("check.zig");
++pub const Gpu = check.Gpu;
++
++const marker = 0xa5;
++
++const Rig = struct {
++    gpu: Gpu,
++    s: cuda.Stream,
++    mk: glm.mm.Kernels,
++    rng: std.Random,
++};
++
++fn bf(v: f32) u16 {
++    const u: u32 = @bitCast(v);
++    return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
++}
++
++/// `n` bf16 values in [-scale, scale] from a hash (cheap at tens of millions in a debug build).
++fn values(r: *Rig, n: usize, scale: f32) ![]u16 {
++    const out = try r.gpu.gpa.alloc(u16, n);
++    const seed = r.rng.int(u32);
++    for (out, 0..) |*v, i| {
++        const h = @as(u32, @truncate(i *% 0x9E3779B97F4A7C15 >> 23)) ^ seed;
++        v.* = bf((@as(f32, @floatFromInt(h % 4001)) / 2000 - 1) * scale);
++    }
++    return out;
++}
++
++/// A weight [n][k] tiled as the loader tiles it: random bf16, or random codes with fp16 scales.
++const Weight = struct {
++    codes: cuda.DeviceBuffer,
++    scales: cuda.DeviceBuffer,
++    t: glm.mm.Tiled,
++
++    fn deinit(w: *Weight) void {
++        w.codes.free();
++        w.scales.free();
++    }
++};
++
++fn weight(r: *Rig, bits: u8, n: usize, k: usize) !Weight {
++    const a = r.gpu.gpa;
++    if (bits == 16) {
++        const host = try values(r, n * k, 0.05);
++        defer a.free(host);
++        var src = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(host));
++        defer src.free();
++        var out: Weight = .{ .codes = try cuda.DeviceBuffer.alloc(r.gpu.d, n * k * 2), .scales = try cuda.DeviceBuffer.alloc(r.gpu.d, 16), .t = undefined };
++        try glm.mm.tile(&r.mk, r.s, src.ptr, out.codes.ptr, n, k);
++        try r.s.synchronize();
++        out.t = .{ .w = out.codes.ptr, .n = n, .k = k };
++        return out;
++    }
++    const words = try a.alloc(u32, n * k * bits / 32); // every bit pattern is a valid code vector
++    defer a.free(words);
++    const seed = r.rng.int(u32);
++    for (words, 0..) |*v, i| v.* = @as(u32, @truncate(i *% 0x9E3779B97F4A7C15 >> 19)) ^ seed;
++    const hs = try a.alloc(u16, n * (k / 64));
++    defer a.free(hs);
++    for (hs) |*v| v.* = @bitCast(@as(f16, @floatCast(0.002 + r.rng.float(f32) * 0.01)));
++    var src = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(words));
++    defer src.free();
++    var ss = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(hs));
++    defer ss.free();
++    var out: Weight = .{ .codes = try cuda.DeviceBuffer.alloc(r.gpu.d, n * k * bits / 8), .scales = try cuda.DeviceBuffer.alloc(r.gpu.d, hs.len * 2), .t = undefined };
++    try glm.mm.tilePacked(&r.mk, r.s, bits, src.ptr, ss.ptr, out.codes.ptr, out.scales.ptr, n, k);
++    try r.s.synchronize();
++    out.t = .{ .w = out.codes.ptr, .s = out.scales.ptr, .n = n, .k = k, .bits = bits };
++    return out;
++}
++
++/// Both whole buffers equal (filled with the marker first: nothing written past what today's kernels write).
++fn same(r: *Rig, what: []const u8, got: cuda.DeviceBuffer, want: cuda.DeviceBuffer) !void {
++    try r.s.synchronize();
++    const a = r.gpu.gpa;
++    const g = try a.alloc(u8, got.len);
++    defer a.free(g);
++    const w = try a.alloc(u8, want.len);
++    defer a.free(w);
++    try got.download(0, g);
++    try want.download(0, w);
++    try check.sameBytes(what, g, w);
++}
++
++const Shape = struct { n: usize, k: usize };
++
++/// `rows` rows of x by `w` through today's launches and `on`, both outputs equal at fp32 and bf16.
++fn compare(r: *Rig, what: []const u8, on: *const glm.mm.Kernels, w: glm.mm.Tiled, rows: usize, one: bool) !void {
++    const stride = w.k + 8;
++    const host = try values(r, rows * stride, 1.0);
++    defer r.gpu.gpa.free(host);
++    var x = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(host));
++    defer x.free();
++    var part = try cuda.DeviceBuffer.alloc(r.gpu.d, @max(16, glm.mm.partBytes(rows, w)));
++    defer part.free();
++    var a = try cuda.DeviceBuffer.alloc(r.gpu.d, rows * w.n * 4);
++    defer a.free();
++    var b = try cuda.DeviceBuffer.alloc(r.gpu.d, a.len);
++    defer b.free();
++    for ([_]bool{ false, true }) |fp32| {
++        try a.fill8(marker, r.s.handle);
++        try b.fill8(marker, r.s.handle);
++        try glm.mm.matmul(&r.mk, r.s, x.ptr, stride, w, a.ptr, part.ptr, rows, fp32, one);
++        try glm.mm.matmul(on, r.s, x.ptr, stride, w, b.ptr, part.ptr, rows, fp32, one);
++        try same(r, what, b, a);
++    }
++}
++
++/// MM_WIDE=1 (64 x 32 warps) and =2 (32 x 32): prompts in 128 x 128 blocks, against today's prompt launch.
++fn wide(r: *Rig, m: cuda.Module) !void {
++    // ragged rows and columns; 96 or more 128 x 128 blocks is where the wide rule applies (108 here, and 125)
++    const shapes = [_]Shape{ .{ .n = 1032, .k = 8192 }, .{ .n = 3080, .k = 1024 } };
++    const rows = [_]usize{ 1450, 600 };
++    for ([_]u64{ 1, 2 }) |variant| {
++        var on = r.mk;
++        on.ovn = try glm.mm.Ovn.choose(m, r.mk.reduce, .{ .wide = variant });
++        for ([_]u8{ 16, 4, 6, 8 }) |bits| for (shapes, rows) |sh, n_rows| {
++            var w = try weight(r, bits, sh.n, sh.k);
++            defer w.deinit();
++            try compare(r, "glm-mm-ovn: MM_WIDE prompt against glm_mm's prompt blocks", &on, w.t, n_rows, true);
++        };
++    }
++    check.pass("glm-mm-ovn: MM_WIDE (64 x 32 and 32 x 32 warps), bf16/4/6/8 bits, ragged rows and columns, two bands", .{});
++}
++
++/// MM_DECTILE (16-row windows, 32-column tiles) and, on sm_90 and later, MM_CLUSTER (slices summed in a cluster).
++fn decode(r: *Rig, m: cuda.Module) !void {
++    const shapes = [_]Shape{ .{ .n = 1032, .k = 8192 }, .{ .n = 3080, .k = 1024 }, .{ .n = 4096, .k = 704 }, .{ .n = 1408, .k = 4096 } };
++    // 1 to 16 rows take the 16-row windows; 17 to 100 rows take today's buckets in both arms, the variant's own gate
++    const counts = [_]usize{ 1, 2, 3, 8, 16, 17, 24, 32, 33, 64, 65, 100 };
++    const clusters = try r.mk.reduce.attribute(.binary_version) >= 90;
++    const choices = [_]glm.mm.Ovn.Choice{ .{ .dectile_below = 1 << 30 }, .{ .cluster_from = 0 } };
++    for (choices[0..if (clusters) 2 else 1]) |c| {
++        var on = r.mk;
++        on.ovn = try glm.mm.Ovn.choose(m, r.mk.reduce, c);
++        for ([_]u8{ 16, 4, 6, 8 }) |bits| for (shapes) |sh| {
++            var w = try weight(r, bits, sh.n, sh.k);
++            defer w.deinit();
++            for (counts) |rows| try compare(r, "glm-mm-ovn: MM_DECTILE / MM_CLUSTER decode windows against today's", &on, w.t, rows, false);
++        };
++    }
++    check.pass("glm-mm-ovn: MM_DECTILE{s}, bf16/4/6/8 bits, 1-100 rows, sliced and one-slice shapes", .{if (clusters) " and MM_CLUSTER" else " (no clusters before sm_90)"});
++}
++
++/// MM_SWIGLU_REDUCE against glm_mm_reduce plus glue.swiglu, on the one-shaped linear's gate and up.
++fn swiglu(r: *Rig, m: cuda.Module, glue: *const glm.glue.Kernels) !void {
++    const a = r.gpu.gpa;
++    var on = r.mk;
++    on.ovn = try glm.mm.Ovn.choose(m, r.mk.reduce, .{ .swiglu = true });
++    const set: glm.glue.Set = .{ .glue = glue, .mm = &r.mk };
++    const limit: f32 = 7.0;
++    for ([_]u8{ 16, 4, 6, 8 }) |bits| for ([_]usize{ 704, 640, 2048 }) |width| {
++        const k: usize = 4096;
++        var w = try weight(r, bits, 2 * width, k);
++        defer w.deinit();
++        for ([_]usize{ 1, 2, 3, 16, 17, 64, 100 }) |rows| {
++            const host = try values(r, rows * k, 4.0);
++            defer a.free(host);
++            var x = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(host));
++            defer x.free();
++            var part = try cuda.DeviceBuffer.alloc(r.gpu.d, @max(16, glm.mm.partBytes(rows, w.t)));
++            defer part.free();
++            var gu = try cuda.DeviceBuffer.alloc(r.gpu.d, rows * 2 * width * 2);
++            defer gu.free();
++            var xs = try cuda.DeviceBuffer.alloc(r.gpu.d, rows * (width / 64) * 4);
++            defer xs.free();
++            var want = try cuda.DeviceBuffer.alloc(r.gpu.d, rows * width * 2);
++            defer want.free();
++            var got = try cuda.DeviceBuffer.alloc(r.gpu.d, want.len);
++            defer got.free();
++            try want.fill8(marker, r.s.handle);
++            try got.fill8(marker, r.s.handle);
++            try glm.mm.matmul(&r.mk, r.s, x.ptr, k, w.t, gu.ptr, part.ptr, rows, false, false);
++            try glm.glue.swiglu(set, r.s, gu.ptr, want.ptr, xs.ptr, limit, rows, width);
++            try check.expect(try glm.mm.swigluReduce(&on, r.s, x.ptr, k, w.t, got.ptr, part.ptr, rows, limit, false), "glm-mm-ovn: SWIGLU_REDUCE declined a sliced decode gate/up", .{});
++            try same(r, "glm-mm-ovn: SWIGLU_REDUCE against glm_mm_reduce + swiglu", got, want);
++        }
++    };
++    check.pass("glm-mm-ovn: SWIGLU_REDUCE, bf16/4/6/8 bits, widths 704/640/2048, 1-100 rows", .{});
++}
++
++/// The planted control: the equal pair, a changed input and a one-bit reference change, all three reported.
++fn planted(r: *Rig, m: cuda.Module) !void {
++    const sh: Shape = .{ .n = 256, .k = 1024 };
++    const rows = 8;
++    var w = try weight(r, 16, sh.n, sh.k);
++    defer w.deinit();
++    const stride = sh.k + 8;
++    const host = try values(r, rows * stride, 1.0);
++    defer r.gpu.gpa.free(host);
++    var x = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(host));
++    defer x.free();
++    var part = try cuda.DeviceBuffer.alloc(r.gpu.d, @max(16, glm.mm.partBytes(rows, w.t)));
++    defer part.free();
++    var a = try cuda.DeviceBuffer.alloc(r.gpu.d, rows * sh.n * 2);
++    defer a.free();
++    var b = try cuda.DeviceBuffer.alloc(r.gpu.d, a.len);
++    defer b.free();
++    var on = r.mk;
++    on.ovn = try glm.mm.Ovn.choose(m, r.mk.reduce, .{ .dectile_below = 1 << 30 }); // 8 rows take the 16-row window
++    const g = try r.gpu.gpa.alloc(u8, a.len);
++    defer r.gpu.gpa.free(g);
++    const h = try r.gpu.gpa.alloc(u8, b.len);
++    defer r.gpu.gpa.free(h);
++    try a.fill8(marker, r.s.handle);
++    try b.fill8(marker, r.s.handle);
++    try glm.mm.matmul(&r.mk, r.s, x.ptr, stride, w.t, a.ptr, part.ptr, rows, false, false);
++    try glm.mm.matmul(&on, r.s, x.ptr, stride, w.t, b.ptr, part.ptr, rows, false, false);
++    try r.s.synchronize();
++    try a.download(0, g);
++    try b.download(0, h);
++    try check.sameBytes("glm-mm-ovn: the control's pair", h, g);
++    var wrote: usize = 0;
++    for (g) |v| {
++        if (v != marker) wrote += 1;
++    }
++    try check.expect(wrote > g.len / 2, "glm-mm-ovn: the control's launches write their output", .{});
++    h[h.len / 2] ^= 1; // one bit of a pair the comparison has just called equal
++    try check.expect(!std.mem.eql(u8, g, h), "glm-mm-ovn: the control's one-bit change is a difference", .{});
++    h[h.len / 2] ^= 1;
++    const other = try values(r, rows * stride, 1.0);
++    defer r.gpu.gpa.free(other);
++    var x2 = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(other));
++    defer x2.free();
++    try glm.mm.matmul(&r.mk, r.s, x2.ptr, stride, w.t, a.ptr, part.ptr, rows, false, false);
++    try r.s.synchronize();
++    try a.download(0, g);
++    try check.expect(!std.mem.eql(u8, g, h), "glm-mm-ovn: the control's second input changes the output", .{});
++    check.pass("glm-mm-ovn: the planted control: written bytes, a changed input and a one-bit reference change show", .{});
++}
++
++pub fn run(gpu: Gpu) !void {
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var m = try cuda.Module.load(gpu.d, cuda.kernels.glm_mm);
++    defer m.unload();
++    var gm = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer gm.unload();
++    const glue = try glm.glue.Kernels.load(gm);
++    var prng = std.Random.DefaultPrng.init(29);
++    var r: Rig = .{ .gpu = gpu, .s = s, .mk = try glm.mm.Kernels.load(m), .rng = prng.random() };
++    r.mk.ovn = .{}; // today's kernels, whatever the environment sets
++    try wide(&r, m);
++    try decode(&r, m);
++    try swiglu(&r, m, &glue);
++    try planted(&r, m);
++    check.pass("glm-mm-ovn: every variant's kernels equal today's byte for byte", .{});
++}
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -7,6 +7,7 @@
+ const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
+ const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
+ const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
++const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
+ const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
+ 
+ /// The lines these commands add to `main.zig`'s usage, after its own.
+@@ -17,6 +18,7 @@
+     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
+     \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
+     \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
++    \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
+     \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
+     \\
+ ;
+@@ -35,6 +37,8 @@
+         try glm_keep_seqs_check.run(gpu, rest);
+     } else if (std.mem.eql(u8, cmd, "glm-mla-skip-check")) {
+         try glm_mla_skip_check.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-mm-ovn")) {
++        try glm_mm_ovn.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-onepass-exact-check")) {
+         try glm_onepass_exact_check.run(gpu);
+     } else return false;
+diff --git a/zig/test_support/glm_mm_cuda.zig b/zig/test_support/glm_mm_cuda.zig
+--- a/zig/test_support/glm_mm_cuda.zig
++++ b/zig/test_support/glm_mm_cuda.zig
+@@ -1,5 +1,5 @@
+ pub const Dim3 = struct { x: u32 = 1, y: u32 = 1, z: u32 = 1 };
+-pub const Config = struct { grid: Dim3 = .{}, block: Dim3 = .{}, shared: u32 = 0, pdl: bool = false };
++pub const Config = struct { grid: Dim3 = .{}, block: Dim3 = .{}, shared: u32 = 0, cluster: ?Dim3 = null, pdl: bool = false };
+ pub const Stream = struct {};
+ pub const Function = struct {
+     id: u32 = 0,

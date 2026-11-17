@@ -40,7 +40,8 @@ On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, a
 | knob | cells | missing |
 |---|---|---|
 | `TF_GLM_OVN_ONEPASS_PIPE` | cold first token -4.6% at 8k, -5.6% at 32k, replies equal (two boots each, section 31); exact by design | decode at 1, 2, 4, 6 and 8 streams |
-| `TF_GLM_OVN_MM_DECTILE=100000` with `TF_GLM_OVN_SWIGLU_REDUCE=1` | +1.70 / +1.35 / +1.28% at 1 / 2 / 4 clients (four alternating pairs), +1.7 / +1.3% at 6 / 8 streams (fresh boots, inside the controls' spread), replies equal on every cell and on 24 prompts (section 45) | a byte-level GPU check of the two kernels |
+| `TF_GLM_OVN_MM_DECTILE=100000` with `TF_GLM_OVN_SWIGLU_REDUCE=1` | +1.70 / +1.35 / +1.28% at 1 / 2 / 4 clients (four alternating pairs), +1.7 / +1.3% at 6 / 8 streams (fresh boots, inside the controls' spread), replies equal on every cell and on 24 prompts (section 45); `glm-mm-ovn` (patch 0035) passes on a GB10 (section 47) | the decision to set them, with `TF_GLM_OVN_NO_COPY`, after `queue66` |
+| `TF_GLM_OVN_NO_COPY` (patch 0034) | 24 prompts: 3,140 rounds to 3,117, +1.39% (+3.60% on code-like prompts), replies equal; the prose bench level at 1 / 2 / 4 clients (copies never fire there); 6 / 8 streams -1.0 / -1.5% with identical rounds in every arm, one block (section 47) | 6 / 8 streams repeated, code prompts at concurrency (`queue66`) |
 
 ## Registered, not set, no cell in `docs/OVERNIGHT-2026-1*.md`, `docs/BENCH.md` or `README.md`
 
