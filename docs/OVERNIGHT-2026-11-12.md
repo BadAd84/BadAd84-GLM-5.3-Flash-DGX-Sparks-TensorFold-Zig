@@ -1226,3 +1226,25 @@ In every matched and cut round the kept count is exactly the smaller of 3 and th
 **Upstream's opt-in copy mode, `TF_GLM_COPIES=1`** (verified root and context copies, where a copy shares the window with the drafts it agrees with; `queue62`, control / on / control, 24 prompts solo and 1, 2, 4 clients): replies equal on 24 of 24; 3,184 rounds against 3,140; decode 120.1 s against 117.6 and 117.2 s (-2.3%); on the 9 code-like prompts 743 rounds against 712 and -3.6%; 77.22 / 83.05 / 109.83 tok/s at 1 / 2 / 4 clients against controls of 81.12 and 79.52 / 85.03 and 82.47 / 112.98 and 111.01. It stays off. The arm that turns copies off for a block drafter needs an engine switch (patch 0034, `TF_GLM_OVN_NO_COPY`, in its gates as this is written).
 
 **A lead from upstream that applies to our path.** Upstream issue 3570 (opened 2026-11-16) counts three layout-only GPU operations a MoE layer in the EXL3 decode window: two `cuMemcpy2DAsync` and `tf_glm_put_slot`, 135 a round. Our item-plan profiles show `tf_glm_put_slot` once a layer a round (6,426 instances beside `tf_glm_combine`'s 6,426 in `work/nsys41` and `work/nsys44`) and both copies are in `cuda_exl3.zig` `run` (`copyRows`, two calls), so the same operations are in our round.
+
+## 46. Upstream PR #1411 at its new head: the restore's pause at TP=3 falls from 10.8 s to 3.2 s
+
+2026-11-16 23:24 to 2026-11-17 00:28 UTC, `work/queue64.sh`, production restored and healthy at 00:28. Section 32 measured PR #1411 (conversation states on disk) at head `d730aff64` and reported upstream that a restore beside three decoding streams left them silent for 10.8 s. Its author answered with `1f6b50c67` (a disk read sends each block's rows to the other ranks in one step and each rank copies its pieces device to device) on a branch rebased onto main, head `f0a9651b6`, and could measure only two ranks. This is the same window on that head: built as is with no patch of ours (image `glm53-zig:pr1411b`, source tar sha256 `695d02e4376c38bf`, one image id on the three ranks), `scripts/queue-disk-tier.sh` unchanged, the PR tree's two knobs, `--parallel 4 --context 1048576`. Rows and table: `docs/audit-2026-11-12/disktier-pr1411b-{rows.jsonl,table.md}`; the old head's are `disktier-pr1411a-*`.
+
+17 of 17 resumed turns equal a cold server's reply, no row rejected, no disk tier check failed, and no rank log holds a `StagingFull`, `RanksDiffer`, `DiskOrder`, failed write, failed restore or error line.
+
+| turn | `d730aff64` | `f0a9651b6` |
+|---|---|---|
+| L (596k) turn 3, after every rank was SIGKILLed, 618,496 of 642,700 cached: first token | 30.6 s | 18.4 s |
+| its disk read | 4,548 MiB in 12,349 ms | 4,548 MiB in 2,912 ms |
+| L turn 4, after a clean restart, beside three decoding streams, 641,024 of 665,918 cached: first token | 31.7 s | 21.2 s |
+| its disk read (read ahead) | 4,697 MiB in 2,691 ms | 4,697 MiB in 2,321 ms |
+| the other three streams' longest gap during turn 4 (before the request) | 10,779 ms (1,397 ms) | 3,150 ms (1,407 ms) |
+| 32k conversation after SIGKILL: first token, disk read | 2.0 s, 644 MiB in 782 ms | 1.3 s, 644 MiB in 306 ms |
+| 120k conversation after SIGKILL: first token, disk read | 4.0 s, 1,229 MiB in 2,548 ms | 1.9 s, 1,229 MiB in 664 ms |
+| L turn 2 from RAM | 17.8 s | 15.2 s |
+| L turn 1 cold, beside three decoding streams | 447.9 s | 389.3 s |
+
+The last two rows involve no disk, so they are the rebase onto a newer main and not the commit; the same base effect is in the server's prompt pass after a restore (18.2 to 15.4 s on turn 3, 20.5 to 17.7 s on turn 4). The first token less that prompt pass, which is the restore's own part, went from 12.4 s to 2.9 s on turn 3 and from 11.2 s to 3.5 s on turn 4. Against production's tier on the same conversation (12.80 s after a SIGKILL, 12.90 s after a clean restart) this head's server prompt pass is 15.43 s and 17.67 s, 1.21 and 1.37 times production's where the old head was 1.42 and 1.59.
+
+What this means for the recipe: `patches/pr1411` is the net patch of the old head. Re-cutting it from `f0a9651b6` needs the head's base (main past v1.2.9) reconciled with our pin, so it is a re-seat, not a copy; the numbers above are what it would bring to a restore on the recipe.
