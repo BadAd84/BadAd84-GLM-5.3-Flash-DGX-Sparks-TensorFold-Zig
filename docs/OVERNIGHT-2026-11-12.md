@@ -707,7 +707,7 @@ pool. Prompt passes are 2,048 rows against production's 4,096.
 | turn 3 after every rank was SIGKILLed | 377.78 s (a cold refill, 0 tokens cached) | 12.80 s (from the spill tier) | 29.5x |
 | warm turn (+1,978 tokens on a 98k kept conversation) beside three decoding streams | 2.702 s | 1.217 s | 2.22x |
 
-With `TF_GLM_REQUEST_STARTS=1` the same warm turn is 1.305 s idle and 1.871 s loaded (1.54x), with different numerics; with
+With `TF_GLM_REQUEST_STARTS=1` the same warm turn is 1.305 s idle and 1.871 s loaded (1.54x), with the same replies (corrected 2026-11-17: this line said "different numerics", from upstream's registry class; the window's own rows, `docs/audit-2026-11-12/longctx-lc1-rows.jsonl`, give the same `token_sha` on all six warm turns and the cold 32k turn with and without the switch); with
 `TF_GLM_CHUNK_SOLO=4096` cold prompts read 4.733 / 18.398 / 68.701 s at 8k / 32k / 120k, no gain. A cold 32k prompt beside three decoding
 streams is 19.659 s against 18.099 idle (production not measured).
 
@@ -1276,3 +1276,51 @@ At 6 and 8 streams (fresh boots, the prose bench, control / on / on / control): 
 **The three candidates together, one boot** (`NO_COPY`, `MM_DECTILE=100000`, `SWIGLU_REDUCE`): 79.73 / 83.48 / 111.13 tok/s at 1 / 2 / 4 clients (+0.48 / +1.00 / +0.58% against the controls), and 114.73 s over the 24 prompts, +3.79% against the controls' mean (code-like +6.03%, prose-like +2.90%). Against production that is not a same-sitting number (production's 24 prompts were measured on 2026-11-16 at 19:09); `queue66` measures production before and after the Zig boots.
 
 **A correction to section 44's determinism note:** reply texts are identical between a prompt's two repetitions everywhere, but the rounds are not always: code3 took 70 and 72 rounds, gc 153 and 154, in some boots (history in one earlier boot). The lanes core's depth rule prices a depth by measured round times (`depth.zig`, `roundCost`), so timing can move one round's depth. A per-prompt difference of one or two rounds is therefore noise; the copy effect above (23 rounds over the set, 7 on one prompt) is not.
+
+## 48. The three candidate knobs at every level, `pr1411/0002` on the stack, warm turns against production, and a boot race in the window tooling
+
+2026-11-17, 15:55 to 18:58 UTC, `work/queue66.sh` and `queue67.sh`, image `glm53-zig:v129v` (stack tree `5137a5ef75ab`: pin, `patches/engine` 0001 to 0035, `patches/pr1411` 0001 and 0002, cache-salt; the image source was packed from that tree and the image id is the same on the three ranks). Production restored and healthy at 18:38 and 18:58.
+
+**`tf-cuda-test glm-mm-ovn` again on a GB10**: five PASS lines, rc 0, 1.31 s including the container's start.
+
+**The candidate knobs, six boots** (`queue66`: recipe, `NO_COPY`, candidate, candidate, `NO_COPY`, recipe; the candidate is `TF_GLM_OVN_NO_COPY=1` with `TF_GLM_OVN_MM_DECTILE=100000` and `TF_GLM_OVN_SWIGLU_REDUCE=1`). 1, 2 and 4 clients on a `--parallel 4 --context 1048576` boot, 6 and 8 streams on fresh `--parallel 6` and `--parallel 8` boots; each cell the mean `agg_tok_s` of three waves, the prose bench (`prose33.json`) and the four code prompts as ids (`scripts/code_ids.json`):
+
+| level | prose: recipe 1, 2 | no copy 1, 2 | candidate 1, 2 | code: recipe 1, 2 | no copy 1, 2 | candidate 1, 2 |
+|---|---|---|---|---|---|---|
+| 1 | 80.49, 79.66 | 79.47, 79.10 | 80.17, 79.45 | 104.00, 101.25 | 111.89, 111.65 | 112.41, 112.44 |
+| 2 | 84.70, 82.80 | 82.73, 82.90 | 83.76, 82.94 | 132.32, 132.25 | 134.68, 134.29 | 134.95, 134.68 |
+| 4 | 112.76, 110.67 | 110.15, 110.42 | 111.16, 110.94 | 161.57, 158.05 | 164.58, 164.67 | 163.92, 165.17 |
+| 6 | 147.95, 150.70 | 146.73, 150.91 | 150.64, 150.94 | 196.32, 200.31 | 198.53, 202.84 | 202.11, 202.35 |
+| 8 | 182.44, 185.53 | 182.02, 186.48 | 186.76, 186.30 | 229.17, 233.13 | 243.82, 242.44 | 243.12, 241.93 |
+
+Replies are equal across all six boots in every cell. On code, no copy and the candidate take fewer rounds than the recipe at every level (72 to 65 at one client, 148 or 150 to 137, 334 to 310, 547 to 526, 867 to 834) and are faster at every level: the candidate against the recipe +9.55 / +1.91 / +2.97 / +1.98 / +4.92%. On prose every arm takes the same rounds (127, 343, 660, 1,065, 1,436): copies never fire there, so the recipe and no copy do the same work, and their difference (-0.99 / -1.11 / -1.28 / -0.34 / +0.14%) is boot-to-boot variation, which here reaches 2.3% between the recipe's own two boots. The candidate against no copy on prose, the two matmul knobs alone: +0.66 / +0.65 / +0.69 / +1.32 / +1.24%. Against the recipe on prose: -0.33 / -0.47 / -0.60 / +0.98 / +1.38%, where the recipe's first boot reads 1.0 to 2.3% above its second at 1, 2 and 4 clients. With differences this size against single boots, the decision is not made from this window: `queue68` repeats it as four recipe and candidate pairs after a discarded warm-up boot, with the 24 prompts on every boot.
+
+The 24 prompts, one at a time, in the same sitting (production before and after the Zig boots, its two runs 114.2 and 115.9 s of decode with every reply and round count equal): the recipe's first boot against production 0.981 (95% interval 0.962 to 0.999, faster on 10 of 24), the candidate 0.984 (0.970 to 0.997); the candidate takes 3,117 rounds where the recipe takes 3,140 and production 3,116. First token, mean over the 24: production 167 ms, the recipe 151 ms, the candidate 152 ms.
+
+**`patches/pr1411/0002` on the stack** (the disk tier window, `scripts/queue-disk-tier.sh`, `KNOBS=measured`; rows `docs/audit-2026-11-12/disktier-v129v-*`): 17 of 17 resumed replies equal a cold server's, no check failed, no row rejected. Against the same window on the stack without 0002 (`disktier-v129c-*`, section 41):
+
+| turn | without 0002 | with 0002 |
+|---|---|---|
+| 596k conversation after every rank was SIGKILLed: first token, disk read | 25.00 s, 4,548 MiB in 10,768 ms | 16.43 s, 4,548 MiB in 2,380 ms |
+| after a clean restart, beside three decoding streams: first token | 27.73 s | 20.32 s |
+| the other streams' longest gap during that turn (before the request) | 10,441 ms (1,206 ms) | 3,272 ms (1,203 ms) |
+| 32k conversation after SIGKILL: first token, disk read | 1.62 s, 644 MiB in 721 ms | 1.17 s, 644 MiB in 280 ms |
+| 120k conversation after SIGKILL | 3.51 s | 1.74 s |
+| 120k state written at a clean stop, next start | 3.38 s | 1.57 s |
+
+The first column's pause is from section 41's rows put through today's `scripts/disk_table.py` (that run kept no table); the tool also lists one failed instrument check there, a 120k state that was still in RAM when the window expected it on disk, its reply equal. The server's own prompt pass after each restore is unchanged (14.22 and 14.04 s; 16.48 and 16.20 s), so the whole gain is the restore. The long conversation's replies differ between the two images because its prompt does: 596,183 tokens on the first image, 596,176 on this one, the 7 tokens of the effort line patch 0033 removes; each image's resumed replies equal its own cold ones.
+
+**An agent's warm turn** (`queue67`, `scripts/longctx.py probe`, production's `ttft.py` method: a conversation primed, re-primed before every turn and not measured, then the turn's first token; thinking off, three repetitions; first token in ms):
+
+| case | production | Zig with `TF_GLM_REQUEST_STARTS=1` | Zig over production |
+|---|---:|---:|---:|
+| ~100k conversation, +2,000 tokens, idle | 927, 939, 921 (2,110 tokens new) | 1,207, 1,260, 1,200 (2,050 new) | 1.30x |
+| ~250k conversation, +600 tokens, idle | 489, 497, 499 (648 new) | 715, 652, 653 (712 new) | 1.31x |
+| the same beside three decoding streams | 614, 583, 640 | 730, 765, 763 | 1.24x |
+| the conversation's cold prime, 100k / 250k | 35.1 s / 91.1 s | 51.1 s / 131.8 s | 1.45x / 1.45x |
+
+Production keeps a finished request's state on its 64-token grid (cached 99,584 and 251,968 of the primes' 99,647 and 251,977); with request starts Zig resumes at the last message start or 2,048-row point (99,644 and 251,904: the start of a message under 256 tokens past a cut is not a cut). Zig re-reads about as many tokens and is 150 to 280 ms slower a turn: what is left is prompt speed. The recipe's own arm without request starts is missing (next paragraph); section 29 measured it at 2.1 s on the 100k turn on an older image.
+
+**The failed boot, and the fix.** The recipe arm's boot reported "rank 0 never created its container (301s)". Docker's own events say otherwise: rank 0's container was created and started at 18:46:23, the same second production's head was removed, and ran until its process exited at 18:51:24, when `--rm` removed it, so `zig-tp3.sh`'s check found no container and misnamed the cause. On spark2 and spark3 the Zig workers' containers started at 18:46:23 and 18:46:24 and exited within a second, while production's own rank 1 and rank 2 containers kept running until 18:48:22: the queues stopped production with `docker rm -f glm53-flash-tf samplers pwcap` on spark1 alone, and production's workers outlive their head by about two minutes (their NCCL timeout). Rank 0 then waited 300 s for workers that were gone. The next boot, at 18:51:36, came up. Every earlier window used the same stop and booted without trouble, so it is a race, lost here after production had just served 250k-token probes. Fixed in the tooling: `scripts/prod-stop.sh` removes production's container on all three ranks and returns once none runs; `zig-tp3.sh` waits up to 240 s until no box runs production before it boots, and reports a rank 0 container that ran and was removed as exited, with the workers' state. `scripts/tests/test_zig_tp3_prod_wait.sh` (stubs, no GPU) passes on the fixed script and fails on the old one (8 of 10 checks) and on three single-line mutants (no wait: 3; the exit not tracked: 2; spark1 alone probed: 6). `queue68` re-runs the recipe's warm turns with `prod-stop.sh` and `KEEP=1`.
+
+**A correction to section 29 and `docs/audit-2026-11-12/longctx-audit.md`:** both said `TF_GLM_REQUEST_STARTS=1` changes numerics. That came from upstream's registry, which classes the switch as arithmetic; section 29's own rows give the same `token_sha` on all six warm turns and the cold 32k turn with and without it, and upstream PR #2404's receipts show 19 turns with one reply digest across 12 runs. Both places are corrected. With `--learn-conversations` the switch is refused by upstream ("until the disk image takes off-grid rows"); `patches/learn-starts` (in its gates as this is written) carries a kept state's chunk-start digest in the disk image so the two can run together.

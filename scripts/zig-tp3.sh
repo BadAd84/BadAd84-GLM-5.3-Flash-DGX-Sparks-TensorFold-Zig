@@ -29,6 +29,21 @@ boot() { # boot RANK - rank 0 runs locally, workers over ssh (spark1 has keys to
   fi
 }
 echo "[zig-tp3] $(date -Is) $IMAGE P=$P ctx=$CTX knobs=${KNOBS:-off} drafter=${DRAFTER:-1} comm=$COMM_ID"
+# production's ranks 1 and 2 outlive a removal of its head by about two minutes (their NCCL timeout), and a Zig worker
+# started beside one exits at once: wait until no box runs production's container (prod-stop.sh stops all three)
+busy=""
+for i in $(seq 1 48); do
+  busy=""
+  if docker ps --format '{{.Names}}' | grep -qx glm53-flash-tf; then busy="$busy spark1"; fi
+  for h in spark2 spark3; do
+    if ssh -n -o BatchMode=yes -o ConnectTimeout=15 "adam@$h.ots-int.net" "docker ps --format '{{.Names}}'" 2>/dev/null \
+      | grep -qx glm53-flash-tf; then busy="$busy $h"; fi
+  done
+  [ -z "$busy" ] && break
+  [ "$i" = 1 ] && echo "[zig-tp3] production's container still runs on:$busy; waiting for it to exit"
+  sleep 5
+done
+[ -n "$busy" ] && { echo "[zig-tp3] production still runs on:$busy after 240 s: stop it on every rank first (prod-stop.sh)"; exit 1; }
 docker rm -f glm53-zig-r0 >/dev/null 2>&1 || true
 boot 0
 for rank in 1 2; do
@@ -37,19 +52,32 @@ for rank in 1 2; do
   scp -q -o BatchMode=yes "$(dirname "${BASH_SOURCE[0]}")/serve.sh" "$(dirname "${BASH_SOURCE[0]}")/config.sh" "adam@spark$((rank + 1)).ots-int.net:work/glm53-zig/" < /dev/null
   boot $rank
 done
-t0=$(date +%s); deadline=1200
+workers() { # the worker ranks' containers, for a failed boot's report
+  local rank
+  for rank in 1 2; do
+    echo "[zig-tp3] rank $rank: $(ssh -n -o BatchMode=yes -o ConnectTimeout=15 "adam@spark$((rank + 1)).ots-int.net" \
+      "docker ps -a --format '{{.Names}} {{.Status}}' | grep -x 'glm53-zig-r$rank .*' || echo 'no container'" 2>/dev/null)"
+  done
+}
+t0=$(date +%s); deadline=1200; seen=0
 while :; do
   if curl -sf "http://127.0.0.1:${PORT:-8300}/v1/models" >/dev/null 2>&1; then
     echo "[zig-tp3] up in $(( $(date +%s) - t0 )) s"; exit 0
   fi
   elapsed=$(( $(date +%s) - t0 ))
   if ! docker inspect glm53-zig-r0 >/dev/null 2>&1; then
+    if [ "$seen" = 1 ]; then
+      echo "[zig-tp3] rank 0's container exited after ${elapsed}s and was removed (serve.sh's --rm; KEEP=1 keeps its log)"
+      workers
+      exit 1
+    fi
     if [ "$elapsed" -gt 60 ]; then
       echo "[zig-tp3] rank 0 never created its container (${elapsed}s)"
       tail -30 "$(ls -t "$HOME"/glm-zig-r0-*.log 2>/dev/null | head -1)" 2>/dev/null || true
       exit 1
     fi
   else
+    seen=1
     running=$(docker inspect -f '{{.State.Running}}' glm53-zig-r0 2>/dev/null | tr -d '[:space:]')
     if [ "$running" = false ]; then
       echo "[zig-tp3] rank 0 container exited (${elapsed}s)"

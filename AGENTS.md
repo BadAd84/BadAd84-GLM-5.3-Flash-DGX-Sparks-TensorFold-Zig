@@ -250,9 +250,11 @@ Run on the applied tree on a shared gate host, never on the workstation (`script
 - **Do not run Zig tests or builds in place on `/mnt/c`.** A hung test there left two real files of 100 GB and 70 GB
   in a cache directory and filled the disk; the WSL disk file (`ext4.vhdx`) only grows, and a full C: puts it
   read-only. `scripts/gates.sh` copies to the WSL filesystem.
-- **Production and the Zig serve cannot share the GPUs.** Stop production (`docker rm -f glm53-flash-tf samplers
-  pwcap`) before a Zig boot and restore it with `setsid nohup bash ~/glm-v110-start.sh`; both GLM watchdogs stay
-  stopped for the whole window.
+- **Production and the Zig serve cannot share the GPUs.** Stop production on all three ranks (`scripts/prod-stop.sh` on
+  spark1) before a Zig boot and restore it with `setsid nohup bash ~/glm-v110-start.sh`; both GLM watchdogs stay
+  stopped for the whole window. Removing the head's container alone (`docker rm -f glm53-flash-tf samplers pwcap`) leaves
+  production's ranks 1 and 2 running on spark2 and spark3 for about two minutes (their NCCL timeout): a Zig worker
+  started beside one exits at once and rank 0 gives up after 300 s. `zig-tp3.sh` now waits for them and refuses after 240 s.
 - **`TF_GLM_L2PF`, prefill and fill rows are not environment switches on this engine** the way they are in
   production's file: setting production's values killed every boot of that arm.
 - **The lanes' full reports are in `docs/audit-2026-11-12/`**; a status table quotes them, it does not replace them.
