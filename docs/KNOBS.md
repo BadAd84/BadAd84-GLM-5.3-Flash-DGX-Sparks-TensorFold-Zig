@@ -1,6 +1,6 @@
-# The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-15)
+# The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-17)
 
-`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 33 patches; the cells below were measured on the v1.2.7 stack of 36 patches, the v1.2.9 stack has not been measured on a GPU, see OVERNIGHT section 37).
+`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 35 patches) and the packages `patches/pr1411` and `patches/cache-salt`. Cells measured on the v1.2.9 stack are in OVERNIGHT sections 41 to 48; the older ones (sections 17 to 36) were measured on the v1.2.7 stack.
 Production on the Sparks is the Python stack and takes none of it. A knob is set only when its cells show no regression at 1, 2, 4, 6 and 8
 streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT below). Every name is a row of the `.glm` scope of
 `zig/src/platform/environment.zig`; an unregistered `TF_GLM_*` name is refused at boot, so `DEFS` must follow the patch set it runs on.
@@ -40,13 +40,22 @@ On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, a
 | knob | cells | missing |
 |---|---|---|
 | `TF_GLM_OVN_ONEPASS_PIPE` | cold first token -4.6% at 8k, -5.6% at 32k, replies equal (two boots each, section 31); exact by design | decode at 1, 2, 4, 6 and 8 streams |
-| `TF_GLM_OVN_MM_DECTILE=100000` with `TF_GLM_OVN_SWIGLU_REDUCE=1` | +1.70 / +1.35 / +1.28% at 1 / 2 / 4 clients (four alternating pairs), +1.7 / +1.3% at 6 / 8 streams (fresh boots, inside the controls' spread), replies equal on every cell and on 24 prompts (section 45); `glm-mm-ovn` (patch 0035) passes on a GB10 (section 47) | the decision to set them, with `TF_GLM_OVN_NO_COPY`, after `queue66` |
-| `TF_GLM_OVN_NO_COPY` (patch 0034) | 24 prompts: 3,140 rounds to 3,117, +1.39% (+3.60% on code-like prompts), replies equal; the prose bench level at 1 / 2 / 4 clients (copies never fire there); 6 / 8 streams -1.0 / -1.5% with identical rounds in every arm, one block (section 47) | 6 / 8 streams repeated, code prompts at concurrency (`queue66`) |
+| `TF_GLM_OVN_MM_DECTILE=100000` with `TF_GLM_OVN_SWIGLU_REDUCE=1` | +1.70 / +1.35 / +1.28% at 1 / 2 / 4 clients (four alternating pairs), +1.7 / +1.3% at 6 / 8 streams (fresh boots, inside the controls' spread), replies equal on every cell and on 24 prompts (section 45); `glm-mm-ovn` (patch 0035) passes on a GB10 (section 47); with `TF_GLM_OVN_NO_COPY`: section 48 | the decision, from `queue68`'s four recipe and candidate pairs (all three switches together) |
+| `TF_GLM_OVN_NO_COPY` (patch 0034) | 24 prompts: 3,140 rounds to 3,117, +1.39% (+3.60% on code-like prompts), replies equal; the code bench +8.91 / +1.66 / +3.02 / +1.20 / +5.19% at 1 / 2 / 4 / 6 / 8 streams with fewer rounds at every level; the prose bench takes the same rounds, copies never fire there (sections 47 and 48) | as above |
 
 ## Registered, not set, no cell in `docs/OVERNIGHT-2026-1*.md`, `docs/BENCH.md` or `README.md`
 
 `TF_GLM_OVN_HOST_ONCE`, `TF_GLM_OVN_KDA_CHUNKED`, `TF_GLM_OVN_PLAIN_MARGIN`, `TF_GLM_OVN_DRAFT_NOISE`, `TF_GLM_OVN_EXCHANGE_KB`, `TF_GLM_DFLASH2_WIN`, `TF_GLM_INDEX_DECODE_FROM`.
 Each is untested here, not known neutral. `TF_GLM_OVN_KDA_CHUNKED` changes numerics (the owner decided on 2026-10-31 to keep numerics changes off), and so does `TF_GLM_OVN_KVB8` (section 45: the replies differ; 84.41 / 87.59 / 114.87 tok/s on its own text); `TF_GLM_OVN_ONEPASS_EXACT` is retired.
+`queue69` measures `TF_GLM_OVN_HOST_ONCE` (most of patch 0030, a request rendered and tokenized once, is always on; the switch only stops the rewind probe's render early) on an agent's warm turn at 250k tokens, and gives `TF_GLM_OVN_ONEPASS_PIPE` its decode cells at 1, 2, 4, 6 and 8 streams beside a fresh cold-prompt measurement.
+
+## Upstream's switches the recipe does not set
+
+| switch | what it does | state |
+|---|---|---|
+| `TF_GLM_REQUEST_STARTS=1` | a chat's next turn resumes where its previous turn's history ends, not at the last 2,048-row point | same replies (sections 29 and 48); a warm turn 1.3 s against 2.1 s at 100k (section 29); refused with `--learn-conversations` by upstream, so not with `LEARN=1` until `patches/learn-starts` (in its gates) lands |
+| `TF_GLM_CHUNK_SOLO=4096` | while no stream decodes, a prompt step is one 4,096-row forward (weights read once for both chunks), prompt buffers sized for it | section 29's "no gain" ran with 8 wire pieces and is confounded (section 31); `queue69` measures it against the recipe on cold 8k, 32k and 120k prompts |
+| `TF_GLM_COPIES=1` | verified root and context copies | a loss (table above) |
 
 ## Not knobs of `DEFS`: the packages and their switches
 
@@ -60,5 +69,5 @@ Each is untested here, not known neutral. `TF_GLM_OVN_KDA_CHUNKED` changes numer
 
 Four patches of ours are retired because v1.2.9 has the behaviour: the logit gather (upstream `5cd52c7a8`, `5b927e2bf`), the forward pieces split (`1ba369792`), the 2,048-row expert chunk
 (`8978c4357`) and `EY_DIRECT` (`8978c4357`, `dc4aef0ec`: the prompt chunk writes the slot rows itself, so its knob left `DEFS`). `TF_GLM_INDEX_CUDA` is upstream's default (`8fe15871c`) and also left `DEFS`.
-Upstream's own defaults on v1.2.9 (`TF_GLM_DSEL`, 4,096-row prompt passes) need no setting. Overlaps kept for with/without windows instead of dropped on text: our decode-window index patches against
+Upstream's own defaults on v1.2.9 need no setting: `TF_GLM_DSEL`, and `TF_GLM_PROMPT_PAIR=1` (while no stream decodes, a prompt step takes two 2,048-row chunks, each one's exchanges under the other's compute; the kernels still run on 2,048 rows, and pairing is refused while a pass has request starts). Overlaps kept for with/without windows instead of dropped on text: our decode-window index patches against
 `TF_GLM_DSEL`, the item plan against compact decode, `MLPSPLIT` against upstream's drafter split, `SPARSE_ONEPASS` against the new prompt plan, the X3 decode knobs, and the glue gather on the collective path.
