@@ -1353,7 +1353,7 @@ Every `ONEPASS_PIPE` boot is under both recipe boots at all three sizes, and so 
 
 **`TF_GLM_OVN_HOST_ONCE`** (`queue69` C, both arms with `TF_GLM_REQUEST_STARTS=1`, boots recipe, host, host, recipe; a ~250k conversation, +600 tokens, three turns idle and three beside three decoding streams): idle 664.7 against 658.3 ms (-0.95%), loaded 762.7 against 760.0 ms (-0.35%); the same six reply digests in every boot. Level, a hair faster when idle.
 
-**Request starts are a trade** (`queue68`, the recipe and the recipe with `TF_GLM_REQUEST_STARTS=1` on fresh boots, queue67's prompts; first token in ms):
+**Request starts: the warm probe prices their cost, not their payoff** (`queue68`, the recipe and the recipe with `TF_GLM_REQUEST_STARTS=1` on fresh boots, queue67's prompts; first token in ms):
 
 | warm turn | recipe | with request starts | resumed at (recipe, request starts) |
 |---|---|---|---|
@@ -1361,7 +1361,7 @@ Every `ONEPASS_PIPE` boot is under both recipe boots at all three sizes, and so 
 | ~250k, +600 tokens, idle | 565, 567, 559 | 663, 647, 654 | 251,904, 251,904 |
 | the same beside three decoding streams | 581, 578, 580 | 756, 791, 774 | 251,904, 251,904 |
 
-At 100k the request start is a nearer place to resume (2,038 rows to read again, not 3,378), and the turn is 37% faster. At 250k both arms resume at the same point and read the same 705 rows, and request starts cost 91 ms idle and 194 ms beside decoding streams. The hypothesis, not yet measured: the cut at the message start splits the turn's prompt pass into two steps, each reading every weight once, and buys nothing when the nearest kept state is the same; the server's `TF_GLM_PROF` prompt lines for one such turn in each arm will show it or rule it out. Until then the switch stays off, and the trade procedure applies.
+At 100k the request start is a nearer place to resume (2,038 rows to read again, not 3,378), and the turn is 37% faster. At 250k both arms resume at the same point and read the same 705 rows, and request starts cost 91 ms idle and 194 ms beside decoding streams. The rows show what was paid for: the recipe's 250k turn kept no state (`kept_states` 0), the request-starts turn kept one (`kept_states` 1, 1,734 MiB more held), by the switch's design where its history ends, the place the next turn of that conversation would resume (the 100k turns resumed at 99,644; production's rows of the same prime count 99,647 tokens). The probe never sends that next turn: every repetition is the same base with a new suffix, re-primed in between, so the kept state is never used and only its cost is measured. A growing conversation is the instrument (each turn the previous prompt, its reply and a new message: `longctx.py chain`, now with `--salt` so production can be sent a conversation it has not cached). Until it is measured that way the switch stays off; whether the cut and keep cost an extra prompt step is read from the `TF_GLM_PROF` prompt lines of the same turns.
 
 **Production's rows in `queue68` are void as a comparison.** They reused queue67's seeds, and production's prefix cache is persistent: its 100k turns were served with 101,632 and 101,696 of 101,682 to 101,713 prompt tokens cached (queue67: 99,584 on first sight), its 250k turns with 252,608 of about 252,610, so they measure a turn production had already seen (227 to 300 ms and 369 to 387 ms). Queue67's production rows (section 48) stay the comparison; a production leg must use prompts production has not been sent before. The Zig boots start empty, so their rows are unaffected.
 

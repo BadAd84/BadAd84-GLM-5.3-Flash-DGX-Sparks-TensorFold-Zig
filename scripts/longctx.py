@@ -18,7 +18,8 @@ Subcommands (PORT: the serve's port; common: --tag, --n (streams the serve was b
            /metrics (prompt cache budget, device memory), the startup line, MemAvailable on spark1 and --workers (over
            --ssh) after the boot and after one short warm-up request
   probe    --cold-sizes 1000,8000,32000,120000 --warm-base 100000 --warm-add 2000 --reps 3 --load 0|N
-  chain    STATE.json [--note cold|pool|after-kill]: the next turn of chainturn.py's conversation (128 tokens a reply)
+  chain    STATE.json [--note cold|pool|after-kill] [--t1 N] [--add N] [--salt S]: the next turn of chainturn.py's conversation
+           (128 tokens a reply); --salt puts a line in front of turn 1, so a serve with a persistent cache has never seen it
   longest  the longest prompt the context admits: max_model_len - --max-tokens, filled to within --margin of it
 """
 import argparse
@@ -502,7 +503,8 @@ def cmd_chain(args):
         with open(args.state, encoding="utf-8") as fh:
             conv = json.load(fh)
     turn = len(conv) // 2 + 1
-    msgs = conv + [{"role": "user", "content": chain_user(turn, args.t1, args.add)}]
+    first = f"[{args.salt}]\n" if turn == 1 and args.salt else ""  # empty: chainturn.py's text, byte for byte
+    msgs = conv + [{"role": "user", "content": first + chain_user(turn, args.t1, args.add)}]
     tokenized = c.tokenize(msgs)
     res = c.stream(msgs, 128)
     if not res["error"]:
@@ -566,6 +568,7 @@ def parser():
     c.add_argument("--note", default="")
     c.add_argument("--t1", type=int, default=520000, help="chainturn.py's filler budget for turn 1")
     c.add_argument("--add", type=int, default=20000, help="chainturn.py's filler budget a later turn")
+    c.add_argument("--salt", default="", help="a line in front of turn 1 (default none: chainturn.py's text)")
     lg = sub.add_parser("longest", parents=[common])
     lg.add_argument("--max-tokens", type=int, default=16)
     lg.add_argument("--margin", type=int, default=1024)

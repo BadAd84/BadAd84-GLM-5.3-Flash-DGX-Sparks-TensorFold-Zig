@@ -53,7 +53,7 @@ On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, a
 
 | switch | what it does | state |
 |---|---|---|
-| `TF_GLM_REQUEST_STARTS=1` | a chat's next turn resumes where its previous turn's history ends, not at the last 2,048-row point | same replies (sections 29 and 48); a trade (section 49): a warm turn at ~100k 1,225 against 1,956 ms, at ~250k 655 against 564 ms idle and 774 against 580 ms beside three decoding streams, where both arms resume at the same point; refused with `--learn-conversations` by upstream until `patches/learn-starts` (in its gates) lands |
+| `TF_GLM_REQUEST_STARTS=1` | a chat's next turn resumes where its previous turn's history ends, not at the last 2,048-row point | same replies (sections 29 and 48); the warm probe (section 49): a turn at ~100k 1,225 against 1,956 ms, at ~250k 655 against 564 ms idle and 774 against 580 ms beside three decoding streams, the cost of keeping a state for a next turn the probe never sends; a growing conversation (`longctx.py chain`) decides it; refused with `--learn-conversations` by upstream until `patches/learn-starts` (in its gates) lands |
 | `TF_GLM_CHUNK_SOLO=4096` | while no stream decodes, a prompt step is one 4,096-row forward (weights read once for both chunks), prompt buffers sized for it | a measured win on cold prompts (table above, section 49); section 29's "no gain" ran with 8 wire pieces and is confounded (section 31) |
 | `TF_GLM_COPIES=1` | verified root and context copies | a loss (table above) |
 
