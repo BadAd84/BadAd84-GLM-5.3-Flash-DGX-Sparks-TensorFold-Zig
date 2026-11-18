@@ -1324,3 +1324,44 @@ Production keeps a finished request's state on its 64-token grid (cached 99,584 
 **The failed boot, and the fix.** The recipe arm's boot reported "rank 0 never created its container (301s)". Docker's own events say otherwise: rank 0's container was created and started at 18:46:23, the same second production's head was removed, and ran until its process exited at 18:51:24, when `--rm` removed it, so `zig-tp3.sh`'s check found no container and misnamed the cause. On spark2 and spark3 the Zig workers' containers started at 18:46:23 and 18:46:24 and exited within a second, while production's own rank 1 and rank 2 containers kept running until 18:48:22: the queues stopped production with `docker rm -f glm53-flash-tf samplers pwcap` on spark1 alone, and production's workers outlive their head by about two minutes (their NCCL timeout). Rank 0 then waited 300 s for workers that were gone. The next boot, at 18:51:36, came up. Every earlier window used the same stop and booted without trouble, so it is a race, lost here after production had just served 250k-token probes. Fixed in the tooling: `scripts/prod-stop.sh` removes production's container on all three ranks and returns once none runs; `zig-tp3.sh` waits up to 240 s until no box runs production before it boots, and reports a rank 0 container that ran and was removed as exited, with the workers' state. `scripts/tests/test_zig_tp3_prod_wait.sh` (stubs, no GPU) passes on the fixed script and fails on the old one (8 of 10 checks) and on three single-line mutants (no wait: 3; the exit not tracked: 2; spark1 alone probed: 6). `queue68` re-runs the recipe's warm turns with `prod-stop.sh` and `KEEP=1`.
 
 **A correction to section 29 and `docs/audit-2026-11-12/longctx-audit.md`:** both said `TF_GLM_REQUEST_STARTS=1` changes numerics. That came from upstream's registry, which classes the switch as arithmetic; section 29's own rows give the same `token_sha` on all six warm turns and the cold 32k turn with and without it, and upstream PR #2404's receipts show 19 turns with one reply digest across 12 runs. Both places are corrected. With `--learn-conversations` the switch is refused by upstream ("until the disk image takes off-grid rows"); `patches/learn-starts` (in its gates as this is written) carries a kept state's chunk-start digest in the disk image so the two can run together.
+
+## 49. The three candidate knobs decided in four clean pairs, the prompt-pass switches and `HOST_ONCE` measured, request starts are a trade
+
+2026-11-17 21:39 to 2026-11-18 01:02 UTC, `work/queue68.sh` and `queue69.sh`, image `glm53-zig:v129v` (stack tree `5137a5ef75ab`), every boot `--parallel 4 --context 1048576` except the 6 and 8 stream cells (fresh `--parallel 6` and `--parallel 8` boots), `KNOBS=measured`, `KEEP=1`. Production stopped on all three ranks for both and restored healthy at the end of each. Scores: `work/score68.py`, `work/score69.py`.
+
+**The candidate (`TF_GLM_OVN_NO_COPY=1`, `TF_GLM_OVN_MM_DECTILE=100000`, `TF_GLM_OVN_SWIGLU_REDUCE=1`) against the recipe** (`queue68`, boots recipe, candidate, candidate, recipe, recipe, candidate, candidate, recipe after one discarded warm-up boot; pairs taken adjacent; 6 and 8 streams on two more pairs; each cell the mean `agg_tok_s` of three waves, production's prompt ids):
+
+| level | prose: pairs | mean | code: pairs | mean |
+|---|---|---:|---|---:|
+| 1 | +0.94 +2.44 +1.38 -1.32% | +0.86% | +10.82 +12.14 +12.22 +9.40% | +11.15% |
+| 2 | +1.05 +1.89 +1.62 -0.71% | +0.96% | +4.11 +4.84 +4.70 +2.86% | +4.13% |
+| 4 | +0.99 +1.85 +0.26 +0.37% | +0.87% | +4.19 +4.65 +4.33 +3.66% | +4.21% |
+| 6 | -0.04 -0.42% | -0.23% | +3.17 +0.77% | +1.97% |
+| 8 | +0.43 +0.18% | +0.30% | +5.10 +4.66% | +4.88% |
+
+Replies are equal in every cell across all boots. On prose the rounds are the same in both arms at every level (127, 343, 660, 1,065, 1,436: copies never fire there), so the prose difference is the two matmul knobs; the one negative pair at one and two clients and the 6-stream mean (-0.23%, both values inside one recipe pair's own spread) are not slower under the noise rule. On code the candidate takes fewer rounds at every level (72 to 65, 150 to 137, 334 to 310, 547 to 526, 867 to 834). The 24 prompts one at a time, four boots each arm: every reply equal across all eight boots; the candidate over the recipe 1.0218 (95% interval 1.0126 to 1.0337), faster on 23 of 24, code-like 1.0404, prose-like 1.0108; 3,117 rounds against 3,140. No level regresses: the three knobs are wins.
+
+**The prompt-pass switches** (`queue69` A, boots recipe, `CHUNK_SOLO=4096`, `ONEPASS_PIPE=1`, `ONEPASS_PIPE=1`, `CHUNK_SOLO=4096`, recipe; first token of a cold prompt, the mean of two requests a boot, then each arm's mean over its two boots):
+
+| prompt | recipe | `CHUNK_SOLO=4096` | `ONEPASS_PIPE=1` |
+|---|---|---|---|
+| 8k | 4,212, 4,199 ms | 4,211, 4,207 ms, +0.08% | 4,000, 4,014 ms, -4.73% |
+| 32k | 16,316, 16,439 ms | 15,952, 15,928 ms, -2.67% | 15,420, 15,422 ms, -5.84% |
+| 120k | 62,042, 61,967 ms | 59,736, 59,764 ms, -3.64% | 57,934, 57,998 ms, -6.51% |
+
+Every `ONEPASS_PIPE` boot is under both recipe boots at all three sizes, and so is every `CHUNK_SOLO` boot at 32k and 120k. Decode on the same boots, prose and code ids at 1, 2 and 4 clients: both within -0.81% to +0.46% of the recipe, the rounds and the replies the same in every arm (code at 2 clients took 148 or 150 rounds by boot, recipe boots included). `ONEPASS_PIPE` at 6 and 8 streams (boots recipe, pipe, pipe, recipe): prose -0.08% and +0.33%; code -1.05% (pairs -0.40, -1.69%) and -0.46% (pairs -2.26, +1.34%), neither slower under the noise rule (no pipe boot is under both recipe boots), with the code rounds varying by boot in both arms (1,627 to 1,641 at 6, 2,586 to 2,601 at 8). **What these rows do not show:** the cold probe seeded its prompts by boot (`--seed pf69-<label>`), so the cold replies of the three arms answer different prompts and cannot be compared; the exactness of both switches on long prompts is measured again in `queue71` with one seed for every boot.
+
+**`TF_GLM_OVN_HOST_ONCE`** (`queue69` C, both arms with `TF_GLM_REQUEST_STARTS=1`, boots recipe, host, host, recipe; a ~250k conversation, +600 tokens, three turns idle and three beside three decoding streams): idle 664.7 against 658.3 ms (-0.95%), loaded 762.7 against 760.0 ms (-0.35%); the same six reply digests in every boot. Level, a hair faster when idle.
+
+**Request starts are a trade** (`queue68`, the recipe and the recipe with `TF_GLM_REQUEST_STARTS=1` on fresh boots, queue67's prompts; first token in ms):
+
+| warm turn | recipe | with request starts | resumed at (recipe, request starts) |
+|---|---|---|---|
+| ~100k, +2,000 tokens, idle | 1,936, 1,947, 1,985 | 1,207, 1,266, 1,201 | 98,304, 99,644 |
+| ~250k, +600 tokens, idle | 565, 567, 559 | 663, 647, 654 | 251,904, 251,904 |
+| the same beside three decoding streams | 581, 578, 580 | 756, 791, 774 | 251,904, 251,904 |
+
+At 100k the request start is a nearer place to resume (2,038 rows to read again, not 3,378), and the turn is 37% faster. At 250k both arms resume at the same point and read the same 705 rows, and request starts cost 91 ms idle and 194 ms beside decoding streams. The hypothesis, not yet measured: the cut at the message start splits the turn's prompt pass into two steps, each reading every weight once, and buys nothing when the nearest kept state is the same; the server's `TF_GLM_PROF` prompt lines for one such turn in each arm will show it or rule it out. Until then the switch stays off, and the trade procedure applies.
+
+**Production's rows in `queue68` are void as a comparison.** They reused queue67's seeds, and production's prefix cache is persistent: its 100k turns were served with 101,632 and 101,696 of 101,682 to 101,713 prompt tokens cached (queue67: 99,584 on first sight), its 250k turns with 252,608 of about 252,610, so they measure a turn production had already seen (227 to 300 ms and 369 to 387 ms). Queue67's production rows (section 48) stay the comparison; a production leg must use prompts production has not been sent before. The Zig boots start empty, so their rows are unaffected.
+
