@@ -1,0 +1,446 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm disk: carry a kept state's cuts digest in its image, so request starts resume from disk
+
+TF_GLM_REQUEST_STARTS=1 was refused together with --learn-conversations at startup,
+because a state read back from disk came back with its cuts digest zeroed: the image's
+words held its position, head rows, ring bases, copy bits, world and layout, but not the
+digest of its pass's chunk starts below its position (cuda_prompt_cuts.below), and
+cuda_prompt_cuts.resumes refuses a state whose digest differs from the resuming pass's.
+A state kept at a request start off the 2,048-row grid therefore could never be resumed,
+and a grid state restored with a zero digest was refused by any pass with a cut below it.
+
+The image's words gain a tenth word, the digest, and the format rises to 2. cuda_native's
+snap_save and cuda_snapshots' keepAs record the digest in the engine's snapshot when a
+state is kept; wordsOf writes it into the image; a read back decodes it and cuda_disk_ranks'
+unseal sets it on the state and seals it, so the lanes' resumes check sees the digest the
+image was written with. A state on the plain grid carries zero, as before. The store's
+identity hashes the probe's image, words included, so a store written by the previous
+build is never read: its directory differs, and decode refuses a kept file's format 1
+words by name (DiskWords) rather than resuming bytes it cannot check.
+
+This patch is new here: it is not an upstream commit, and it is written on this repo's
+stack (v1.2.9, patches/pr1411, patches/cache-salt) for the GLM disk tier that pr1411
+adds. It lifts the GLM startup refusal of the two settings (the TF_KV_SHARE refusal
+stays) and changes the disk image's words, not its rows: the state's rows and the
+resumed replies are unchanged, and a state read back has the same bytes it was saved
+with.
+
+---
+
+diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
+--- a/zig/src/families/glm/cuda_disk_image.zig
++++ b/zig/src/families/glm/cuda_disk_image.zig
+@@ -8,7 +8,7 @@
+ const State = st_mod.State;
+ const window_rows = st_mod.window_rows;
+ 
+-/// The image's first bytes: the format, the position, the head's rows, both ring bases, the KDA copy bits, the layout.
++/// The image's first bytes: its format, position, head rows, ring bases, copy bits, layout and its cuts digest.
+ pub const Words = struct {
+     at: u64,
+     mtp_len: u64,
+@@ -18,17 +18,18 @@
+     world: u64, // the ranks that wrote it
+     layout: Layout = .unsplit,
+     owner: u64 = no_owner, // the rank holding its latent rows alone (split layouts); unsplit: no_owner
++    below: u64 = 0, // cuda_prompt_cuts.below of the pass that kept it: a resume must cut the same chunks below `at`
+ 
+-    pub const count = 9;
++    pub const count = 10;
+     pub const bytes: u64 = count * 8;
+-    const format: u64 = 1;
++    const format: u64 = 2; // 1: nine words, this digest missing: refused as DiskWords
+ 
+     /// Which rows each rank's image holds: unsplit, every rank every row (the only layout written so far).
+     pub const Layout = enum(u64) { unsplit = 0, _ };
+     pub const no_owner: u64 = std.math.maxInt(u64);
+ 
+     pub fn encode(w: Words) [count]u64 {
+-        return .{ format, w.at, w.mtp_len, w.base, w.mtp_base, w.cur, w.world, @backingInt(w.layout), w.owner };
++        return .{ format, w.at, w.mtp_len, w.base, w.mtp_base, w.cur, w.world, @backingInt(w.layout), w.owner, w.below };
+     }
+ 
+     /// Words read back, refused by name unless this format at `at`, written by `world` ranks in this server's `layout`.
+@@ -38,7 +39,7 @@
+         const l: Layout = @fromBackingInt(@intCast(x[7]));
+         if (l != layout) return error.DiskLayout;
+         if (if (l == .unsplit) x[8] != no_owner else x[8] >= world) return error.DiskLayout;
+-        return .{ .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5], .world = x[6], .layout = l, .owner = x[8] };
++        return .{ .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5], .world = x[6], .layout = l, .owner = x[8], .below = x[9] };
+     }
+ };
+ 
+diff --git a/zig/src/families/glm/cuda_engine_types.zig b/zig/src/families/glm/cuda_engine_types.zig
+--- a/zig/src/families/glm/cuda_engine_types.zig
++++ b/zig/src/families/glm/cuda_engine_types.zig
+@@ -22,8 +22,8 @@
+     cuts: std.ArrayList(u32) = .empty, // the request's chunk starts after 0 (TF_GLM_REQUEST_STARTS), every rank's copy
+ };
+ 
+-/// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
+-pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0, win_from: ?i64 = null };
++/// One rank's copy of a kept prompt state: the state arena's bytes, its host fields, and its cuts digest.
++pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, below: u64 = 0, shared: usize = 0, win_from: ?i64 = null };
+ 
+ /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a cold pass's cut (cuda_prompt_cuts).
+ pub const Resume = struct { id: u64, at: usize };
+diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
+--- a/zig/src/families/glm/cuda_snapshots.zig
++++ b/zig/src/families/glm/cuda_snapshots.zig
+@@ -5,6 +5,7 @@
+ pub const pages = @import("cuda_snapshot_pages.zig");
+ pub const layout = @import("cuda_snapshot_layout.zig");
+ const ring_bytes = @import("dflash.zig").ring_bytes;
++const prompt_cuts = @import("cuda_prompt_cuts.zig");
+ 
+ pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
+ 
+@@ -117,7 +118,7 @@
+     errdefer e.gpa.free(cur);
+     try pool.move(e.stream, &lease, &plan, true);
+     try e.stream.synchronize();
+-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .win_from = if (win) |w| w.from else null });
++    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .below = prompt_cuts.below(e.cur.cuts.items, @intCast(e.cur.st.pos)), .shared = plan.shared, .win_from = if (win) |w| w.from else null });
+ }
+ 
+ /// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
+@@ -136,8 +137,8 @@
+     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 } });
+ }
+ 
+-/// A blank state made whole from its image's words (its bytes are in or follow): a restore takes it from here.
+-pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !void {
++/// A blank state made whole from its image's words, with the cuts digest they carry: a restore takes it from here.
++pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64, below: u64) !void {
+     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
+     if (s.len != 0) return error.StateKept;
+     if (s.cur.len > 64 or (s.cur.len < 64 and cur >> @intCast(s.cur.len) != 0)) return error.DiskWords;
+@@ -151,6 +152,7 @@
+     s.len = n;
+     s.mtp_len = mtp_len;
+     s.bases = bases;
++    s.below = below;
+ }
+ 
+ pub fn restore(e: anytype, id: u64) !void {
+diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cuda_disk_ranks.zig
+--- a/zig/src/families/glm/cuda_disk_ranks.zig
++++ b/zig/src/families/glm/cuda_disk_ranks.zig
+@@ -5,6 +5,7 @@
+ const image = @import("cuda_disk_image.zig");
+ const snapshots = @import("cuda_snapshots.zig");
+ const Engine = @import("cuda_engine.zig").Engine;
++const Kept = @import("cuda_engine.zig").Kept;
+ 
+ /// Rank 0 at TP: its follow link, set by Link.lead, cleared by its deinit; null: one rank, every op local.
+ pub var link: ?*follow.Link = null;
+@@ -18,13 +19,13 @@
+     return image.Shape.of(&e.cur.st, &e.c, e.capacity, e.mtp);
+ }
+ 
+-/// The words of a kept state on this rank: its position, head rows, ring bases, KDA copy bits and layout (unsplit).
++/// The words of a kept state on this rank: position, head rows, ring bases, copy bits, layout and its cuts digest.
+ pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
+     const s = e.snaps.get(id) orelse return error.NoKeptState;
+     if (s.cur.len > 64) return error.SnapshotShape;
+     var cur: u64 = 0;
+     for (s.cur, 0..) |b, i| cur |= @as(u64, b) << @intCast(i);
+-    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world };
++    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world, .below = s.below };
+ }
+ 
+ /// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
+@@ -183,9 +184,16 @@
+     return image.Words.decode(x, at, @intCast(e.share.world), .unsplit);
+ }
+ 
+-/// Rank 0: every rank's blank `id` sealed with `w` (its head's rows, ring bases and KDA copy bits).
++/// A blank state's words from its file: the cuts digest it carries, and its lease sealed with it.
++pub fn unseal(e: *Engine, k: *Kept, x: [image.Words.count]u64) !void {
++    const w = try decode(e, x, k.at);
++    k.below = w.below;
++    try seal(e, k.id, w);
++}
++
++/// Rank 0: every rank's blank `id` sealed with `w` (its head's rows, ring bases, copy bits and cuts digest).
+ pub fn seal(e: *Engine, id: u64, w: image.Words) !void {
+-    try snapshots.seal(e, id, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
++    try snapshots.seal(e, id, w.mtp_len, .{ w.base, w.mtp_base }, w.cur, w.below);
+     if (leader(e)) |x| {
+         const words = w.encode();
+         try x.disk(.{ .kind = kind, .flags = @backingInt(Op.seal), .a = id }, std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(&words)));
+@@ -223,7 +231,7 @@
+             var x: [image.Words.count]u64 = undefined;
+             @memcpy(std.mem.sliceAsBytes(&x), std.mem.sliceAsBytes(ids));
+             const w = try decode(e, x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
+-            try snapshots.seal(e, h.a, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
++            try snapshots.seal(e, h.a, w.mtp_len, .{ w.base, w.mtp_base }, w.cur, w.below);
+         },
+         .rows => {
+             try fits(ids, h.depth, l.buf.len - 64);
+diff --git a/zig/src/native/cuda_glm_disk.zig b/zig/src/native/cuda_glm_disk.zig
+--- a/zig/src/native/cuda_glm_disk.zig
++++ b/zig/src/native/cuda_glm_disk.zig
+@@ -76,7 +76,7 @@
+     return @ptrCast(k);
+ }
+ 
+-/// The last scatter brings the state's own file, words first: every rank seals it then (the words place the head).
++/// The last scatter brings the state's own file, words first: every rank seals it then (the words place its cuts).
+ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, in: []const u8) anyerror!void {
+     const e = engineOf(ptr);
+     const k: *Kept = @ptrCast(@alignCast(saved));
+@@ -86,7 +86,7 @@
+         if (ranges[0].len < img.Words.bytes) return error.DiskWords;
+         var x: [img.Words.count]u64 = undefined;
+         @memcpy(std.mem.sliceAsBytes(&x), in[0..img.Words.bytes]);
+-        try ranks.seal(e, k.id, try ranks.decode(e, x, k.at));
++        try ranks.unseal(e, k, x);
+     }
+     var pieces: std.ArrayList(img.Piece) = .empty;
+     defer pieces.deinit(e.gpa);
+diff --git a/zig/src/families/glm/cuda_env.zig b/zig/src/families/glm/cuda_env.zig
+--- a/zig/src/families/glm/cuda_env.zig
++++ b/zig/src/families/glm/cuda_env.zig
+@@ -8,10 +8,10 @@
+     try environment.checkScope(.glm, environment.Process{});
+ }
+ 
+-/// TF_GLM_REQUEST_STARTS=1 cuts off the rows TF_KV_SHARE and --learn-conversations keep on: refused with either.
++/// TF_GLM_REQUEST_STARTS=1 cuts off the rows TF_KV_SHARE keeps on: refused with it alone.
+ pub fn requestStartsAlone(learn_conversations: bool) !void {
++    _ = learn_conversations; // --learn-conversations' disk states carry their cuts digest (cuda_disk_image.Words)
+     const on = if (@import("core").profile.get(.TF_GLM_REQUEST_STARTS)) |v| std.mem.eql(u8, v, "1") else false;
+-    if (on and learn_conversations) return error.GlmRequestStartsWithLearnConversations;
+     if (on and try kp.sharing() > 0) return error.GlmRequestStartsWithSharedKv;
+ }
+ 
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -52,7 +52,7 @@
+     drafter: ?[]const u8 = null, // --drafter: DFlash2's folder (the same on every rank; needs drafts on)
+     drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
+     mtp_confidence: ?f64 = null, // --mtp-confidence: rank 0's lanes stop an MTP chain where its chance falls under it
+-    learn_conversations: bool = false, // --learn-conversations: refused with TF_GLM_REQUEST_STARTS=1 (cuda_env)
++    learn_conversations: bool = false, // --learn-conversations: conversation states on disk, beside request starts (cuda_env)
+ };
+ /// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, Apache-2.0 weights) drafts instead of the MTP head.
+ pub const takes_drafter = true;
+@@ -517,7 +517,6 @@
+         error.BadKvShare => "TF_KV_SHARE: give how many states the prompt store over the KV pages keeps, or 0 or unset for off",
+         error.GlmKvShareMoved => "TF_GLM_KV_SHARE is now TF_KV_SHARE, the prompt store every family on the KV pool shares: set that instead",
+         error.GlmRequestStartsWithSharedKv => "TF_GLM_REQUEST_STARTS=1 cannot be used with TF_KV_SHARE above 0: unset request starts or disable shared KV",
+-        error.GlmRequestStartsWithLearnConversations => "TF_GLM_REQUEST_STARTS=1 cannot be used with --learn-conversations: unset request starts or serve without it",
+         error.GlmShareNeedsPages => "TF_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
+         error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
+         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
+diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
+--- a/zig/src/families/glm/cuda_disk_image_test.zig
++++ b/zig/src/families/glm/cuda_disk_image_test.zig
+@@ -289,18 +289,19 @@
+     }
+     try expectError(error.StateKept, snaps.blankAs(&e, 7, at));
+     try expectError(error.UnsealedState, snaps.restore(&e, 7));
+-    try expectError(error.DiskWords, snaps.seal(&e, 7, at + @import("cuda_state.zig").window_rows + 1, .{ 0, 0 }, 0)); // a head past its verify window
+-    try expectError(error.DiskWords, snaps.seal(&e, 7, at, .{ 0, 0 }, @as(u64, 1) << @intCast(e.cur.st.cur.len))); // a copy bit no layer has
+-    try expectError(error.DiskWords, snaps.seal(&e, 7, at - 1, .{ at + 1, 0 }, 0)); // a main ring based past the state
+-    try expectError(error.DiskWords, snaps.seal(&e, 7, at - 1, .{ 0, at }, 0)); // a head ring based past its rows
+-    try snaps.seal(&e, 7, at - 1, .{ 3, 5 }, 0b01);
++    try expectError(error.DiskWords, snaps.seal(&e, 7, at + @import("cuda_state.zig").window_rows + 1, .{ 0, 0 }, 0, 0)); // a head past its verify window
++    try expectError(error.DiskWords, snaps.seal(&e, 7, at, .{ 0, 0 }, @as(u64, 1) << @intCast(e.cur.st.cur.len), 0)); // a copy bit no layer has
++    try expectError(error.DiskWords, snaps.seal(&e, 7, at - 1, .{ at + 1, 0 }, 0, 0)); // a main ring based past the state
++    try expectError(error.DiskWords, snaps.seal(&e, 7, at - 1, .{ 0, at }, 0, 0)); // a head ring based past its rows
++    try snaps.seal(&e, 7, at - 1, .{ 3, 5 }, 0b01, 0x51ed);
+     const s = e.snaps.get(7).?;
+     const sh = try image.Shape.of(&e.cur.st, &e.c, capacity, true);
+     try expectEqual(image.leaseBytes(sh, at, at - 1), @as(u64, s.len));
+     try expectEqual(@as(usize, at - 1), s.mtp_len);
+     try expectEqual([2]usize{ 3, 5 }, s.bases);
++    try expectEqual(@as(u64, 0x51ed), s.below);
+     try std.testing.expectEqualSlices(u1, &.{ 1, 0 }, s.cur);
+-    try expectError(error.StateKept, snaps.seal(&e, 7, at, .{ 0, 0 }, 0));
++    try expectError(error.StateKept, snaps.seal(&e, 7, at, .{ 0, 0 }, 0, 0));
+     const far: u32 = capacity - 1024; // a state past the rings' rows
+     const back: u32 = far - @as(u32, @intCast(e.cur.st.ring_rows)); // the least base whose ring still holds its rows
+     try snaps.blankAs(&e, 8, far);
+@@ -308,25 +309,25 @@
+         var held = e.snaps.get(8).?;
+         snaps.free(&e, &held);
+     }
+-    try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back - 1, back }, 0)); // a main ring too far back
+-    try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back, back - 1 }, 0)); // a head ring too far back
+-    try snaps.seal(&e, 8, far, .{ back, back }, 0);
++    try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back - 1, back }, 0, 0)); // a main ring too far back
++    try expectError(error.DiskWords, snaps.seal(&e, 8, far, .{ back, back - 1 }, 0, 0)); // a head ring too far back
++    try snaps.seal(&e, 8, far, .{ back, back }, 0, 0);
+     try snaps.blankAs(&e, 9, far);
+     defer {
+         var held = e.snaps.get(9).?;
+         snaps.free(&e, &held);
+     }
+-    try snaps.seal(&e, 9, 0, .{ back, 0 }, 0); // no head rows yet (as without drafts): the main ring holds the state's rows
++    try snaps.seal(&e, 9, 0, .{ back, 0 }, 0, 0); // no head rows yet (as without drafts): the main ring holds the state's rows
+ }
+ 
+ test "GLM disk image: the words record the world, the layout and the owner, and a read refuses another by name" {
+     const at: u32 = 4096;
+     const w: image.Words = .{ .at = at, .mtp_len = 7, .base = 1, .mtp_base = 2, .cur = 0b1, .world = 3 };
+     const x = w.encode();
+-    try expectEqual(@as(u64, 72), image.Words.bytes);
++    try expectEqual(@as(u64, 80), image.Words.bytes);
+     try expectEqual(@as(usize, image.Words.bytes), @sizeOf(@TypeOf(x)));
+     // an unsplit state: every rank holds every row, so no rank owns it
+-    try std.testing.expectEqualSlices(u64, &.{ 3, 0, image.Words.no_owner }, x[6..]);
++    try std.testing.expectEqualSlices(u64, &.{ 3, 0, image.Words.no_owner }, x[6..9]);
+     try expectEqual(w, try image.Words.decode(x, at, 3, .unsplit));
+     try expectError(error.DiskWorld, image.Words.decode(x, at, 2, .unsplit)); // written by three ranks, read by two
+     try expectError(error.DiskWorld, image.Words.decode(x, at, 4, .unsplit));
+@@ -335,18 +336,35 @@
+     var y = x;
+     y[7] = 1; // an image of a split layout read unsplit
+     try expectError(error.DiskLayout, image.Words.decode(y, at, 3, .unsplit));
+-    const owned = try image.Words.decode(y[0..8].* ++ [1]u64{2}, at, 3, split);
++    const owned = try image.Words.decode(y[0..8].* ++ [2]u64{ 2, 0 }, at, 3, split);
+     try expectEqual(@as(u64, 2), owned.owner);
+     try expectError(error.DiskLayout, image.Words.decode(y, at, 3, split)); // a split image names an owner rank
+-    try expectError(error.DiskLayout, image.Words.decode(y[0..8].* ++ [1]u64{3}, at, 3, split));
++    try expectError(error.DiskLayout, image.Words.decode(y[0..8].* ++ [2]u64{ 3, 0 }, at, 3, split));
+     y = x;
+     y[8] = 0; // an unsplit image that names an owner
+     try expectError(error.DiskLayout, image.Words.decode(y, at, 3, .unsplit));
+     y = x;
+-    y[0] = 2; // the format comes first: a format this server does not read is DiskWords, whatever its layout
++    y[0] = 3; // the format comes first: a format this server does not read is DiskWords, whatever its layout
+     try expectError(error.DiskWords, image.Words.decode(y, at, 2, .unsplit));
+ }
+ 
++test "GLM disk image: the words' digest round-trips, and a nine-word format 1 image is refused by name" {
++    const at: u32 = 4096;
++    const below: u64 = 0x9e3779b97f4a7c15 | 1; // what cuda_prompt_cuts.below gives off the plain grid: never 0
++    const w: image.Words = .{ .at = at, .mtp_len = 7, .base = 1, .mtp_base = 2, .cur = 0b1, .world = 3, .below = below };
++    const x = w.encode();
++    try expectEqual(@as(u64, 10), image.Words.count);
++    try expectEqual(below, x[image.Words.count - 1]);
++    try expectEqual(w, try image.Words.decode(x, at, 3, .unsplit));
++    // the words before this change: nine words, the ninth the owner; a file written by that build reads as nothing
++    var old = x;
++    old[0] = 1;
++    try expectError(error.DiskWords, image.Words.decode(old, at, 3, .unsplit));
++    // a state kept on the plain grid carries a zero digest, as every image did
++    const plain: image.Words = .{ .at = at, .mtp_len = 7, .base = 1, .mtp_base = 2, .cur = 0b1, .world = 3 };
++    try expectEqual(@as(u64, 0), (try image.Words.decode(plain.encode(), at, 3, .unsplit)).below);
++}
++
+ /// A state's store image at `at` for two ranks, rank 1's prefix a copy of rank 0's: what the load's probe gathers.
+ fn storeImage(a: std.mem.Allocator, d: *const cuda.Driver, pool: *pages.Pool, st: *const State, c: *const @import("config.zig").Config, sh: image.Shape, at: u32, mtp: u64) ![]u8 {
+     const plan = try Plan.init(st, c, at, mtp, 0);
+diff --git a/zig/src/families/glm/cuda_disk_ranks_test.zig b/zig/src/families/glm/cuda_disk_ranks_test.zig
+--- a/zig/src/families/glm/cuda_disk_ranks_test.zig
++++ b/zig/src/families/glm/cuda_disk_ranks_test.zig
+@@ -8,8 +8,10 @@
+ const pages = @import("cuda_snapshot_pages.zig");
+ const fixture = @import("cuda_disk_image_test.zig");
+ const State = @import("cuda_state.zig").State;
++const prompt_cuts = @import("cuda_prompt_cuts.zig");
+ const Seq = @import("cuda_engine_types.zig").Seq;
+ const Engine = @import("cuda_engine.zig").Engine;
++const Kept = @import("cuda_engine.zig").Kept;
+ const t = std.testing;
+ 
+ /// The link's kernel and NCCL: the put kernel records each step's header; a broadcast fails, or brings a rank's bytes.
+@@ -180,11 +182,54 @@
+     try ranks.copy(x.e, id, 0, buf[0..front], false);
+     try t.expectError(error.DiskOrder, ranks.copy(x.e, id, front - 8, buf[0..16], false)); // across the front
+     try t.expectError(error.DiskOrder, ranks.copy(x.e, id, front, buf[0..1], true)); // read out, too
+-    try snapshots.seal(x.e, id, at - 1, .{ 0, 0 }, 0);
++    try snapshots.seal(x.e, id, at - 1, .{ 0, 0 }, 0, 0);
+     try ranks.copy(x.e, id, front - 8, buf[0..16], false);
+     try ranks.copy(x.e, id, front, buf[0..1], true);
+ }
+ 
++test "GLM disk ranks: a kept state's words carry the digest of the cuts its pass kept it under" {
++    var x: Rig = undefined;
++    try x.init();
++    defer x.deinit();
++    x.e.drafter = null; // keep reads the drafter only with DRAFT_KEEPWIN on, and this engine holds none
++    const at: u32 = 2048;
++    x.seq.st.pos = at;
++    x.seq.st.pending = 0;
++    x.seq.st.mtp_len = 0;
++    try x.seq.cuts.append(t.allocator, 300); // one request start below `at`: the pass cut off the plain grid
++    defer x.seq.cuts.deinit(t.allocator);
++    const id = try snapshots.keep(x.e);
++    const want = prompt_cuts.below(x.seq.cuts.items, at);
++    try t.expect(want != 0);
++    try t.expectEqual(want, (try ranks.wordsOf(x.e, id)).below); // the words gather writes into the image
++    try t.expectEqual(want, x.e.snaps.get(id).?.below); // the snapshot a second gather reads them off
++}
++
++test "GLM disk ranks: a state read back keeps its file's digest, and resumes only a pass that cuts alike" {
++    var x: Rig = undefined;
++    try x.init();
++    defer x.deinit();
++    const at: u32 = 2348; // a grid point past a request start: the position a warm turn resumes at
++    const cuts = [_]u32{300}; // the pass that kept the state: one start below `at`
++    const kept = prompt_cuts.below(&cuts, at);
++    try t.expect(kept != 0);
++    const id = try ranks.blank(x.e, at);
++    var k: Kept = .{ .id = id, .at = at };
++    const file = image.Words{ .at = at, .mtp_len = 0, .base = 0, .mtp_base = 0, .cur = 0, .world = x.e.share.world, .below = kept };
++    try ranks.unseal(x.e, &k, file.encode()); // what scatter does with the state's own file
++    try t.expectEqual(kept, k.below);
++    try t.expectEqual(kept, x.e.snaps.get(id).?.below);
++    try t.expect(prompt_cuts.resumes(4 * at, &cuts, at, k.below)); // the same cuts below it: resumed
++    try t.expect(!prompt_cuts.resumes(4 * at, &.{ 700, at }, at, k.below)); // another start below it: refused
++    try t.expect(!prompt_cuts.resumes(4 * at, &cuts, at, 0)); // the digest a read back used to lose: refused
++    const id2 = try ranks.blank(x.e, 4096); // a state on the plain grid round-trips with a zero digest
++    var k2: Kept = .{ .id = id2, .at = 4096 };
++    try ranks.unseal(x.e, &k2, (image.Words{ .at = 4096, .mtp_len = 0, .base = 0, .mtp_base = 0, .cur = 0, .world = x.e.share.world }).encode());
++    try t.expectEqual(@as(u64, 0), k2.below);
++    try t.expect(prompt_cuts.resumes(8192, &.{}, 4096, k2.below)); // the plain grid, as before
++    try t.expect(!prompt_cuts.resumes(8192, &.{ 300, 4096 }, 4096, k2.below)); // a start below it: refused, as before
++}
++
+ test "GLM disk ranks: a follower refuses a disk step rank 0 does not send, before its states or the link" {
+     var x: Rig = undefined;
+     try x.init();
+diff --git a/zig/src/families/glm/cuda_request_starts_test.zig b/zig/src/families/glm/cuda_request_starts_test.zig
+--- a/zig/src/families/glm/cuda_request_starts_test.zig
++++ b/zig/src/families/glm/cuda_request_starts_test.zig
+@@ -43,17 +43,17 @@
+     try t.expect(std.mem.indexOf(u8, reason, "TF_KV_SHARE") != null);
+ }
+ 
+-test "glm request starts: --learn-conversations refuses at startup before any rank opens, by name" {
++test "glm request starts: --learn-conversations starts beside the switch, past the startup check" {
+     var saved = try Saved.take();
+     defer saved.restore();
+     try put("TF_GLM_REQUEST_STARTS", "1");
+     try put("TF_KV_SHARE", null);
++    try glm_env.requestStartsAlone(true); // the switch on with --learn-conversations: no refusal
+     var ctx: cuda.Context = undefined;
+     const o: native.Options = .{ .context = 8192, .drafts = false, .learn_conversations = true };
+-    try t.expectError(error.GlmRequestStartsWithLearnConversations, native.open(t.allocator, t.io, &ctx, "missing-request-starts-checkpoint", null, o));
+-    const reason = native.explain(null, error.GlmRequestStartsWithLearnConversations) orelse return error.MissingNamedRefusal;
+-    try t.expect(std.mem.indexOf(u8, reason, "TF_GLM_REQUEST_STARTS=1") != null);
+-    try t.expect(std.mem.indexOf(u8, reason, "--learn-conversations") != null);
++    if (native.open(t.allocator, t.io, &ctx, "missing-request-starts-checkpoint", null, o)) |_| {
++        return error.OpenedWithoutACheckpoint; // a host test has no device: the open stops at the load
++    } else |err| try t.expect(err != error.GlmRequestStartsWithLearnConversations); // the check above let it through
+     try put("TF_GLM_REQUEST_STARTS", null);
+     try glm_env.requestStartsAlone(true); // the switch off: --learn-conversations starts as today
+ }
+diff --git a/docs/recipes/glm-5.3-flash-cuda.md b/docs/recipes/glm-5.3-flash-cuda.md
+--- a/docs/recipes/glm-5.3-flash-cuda.md
++++ b/docs/recipes/glm-5.3-flash-cuda.md
+@@ -86,7 +86,8 @@
+ - `TF_GLM_REQUEST_STARTS=1` on rank 0 (opt-in, off by default) cuts each prompt pass at the request's message starts
+   too, and every 2,048 rows from the last cut, so a chat's next turn resumes where its previous turn's history ends
+   instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes no solo
+-  or batched pass. GLM refuses the switch at startup with `TF_KV_SHARE` above 0 or with `--learn-conversations`
++  or batched pass. GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the
++  cuts digest in each state's disk image, so a warm turn resumes where its previous turn ended even after a restart
+   (#2404, part of #2396).
+ - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
+   faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in
