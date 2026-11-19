@@ -1,9 +1,9 @@
 #!/bin/bash
-# queue-longctx.sh [TAG] - on spark1, detached, inside an owner-opened window (the opener has stopped production and both GLM
-# watchdogs): long prompts, resumed conversations and loaded decode on the recipe as scripts/serve.sh defines it (image rs2x3,
+# queue-longctx.sh [TAG] - on spark1, detached, with production stopped (it stays down for the speed-parity campaign; the GLM
+# watchdogs stay inactive): long prompts, resumed conversations and loaded decode on the recipe as scripts/serve.sh defines it (image rs2x3,
 # KNOBS=measured), each arm a fresh boot through zig-tp3.sh, measured by longctx.py (and streams_ids.py for the decode cells)
 # into ~/bench/longctx-TAG/rows.jsonl, compared with production/SPEED-TARGET.md by longctx_table.py (table.md, every arm
-# labelled with its boot shape); production restored. LONGCTX-DONE in the log.
+# labelled with its boot shape); production is left down. LONGCTX-DONE in the log.
 #   d4     the deployed shape, P=4 with context 1,048,576 (production's --parallel 4 --context 1048576; its --spill-gib and
 #          --snapshot-dir are refused by this engine for GLM, so no tier flag is passed): boot facts; cold 1k/8k/32k/120k x3
 #          idle; warm turn (kept 100k + 2k) x3 idle; under three decoding streams: cold 32k x3 and the warm turn x3; decode
@@ -20,7 +20,7 @@
 # first-token and decode cases on r4 (P=4, 262,144), the conversation on P=1 at 1,048,576 (d1c, then d1k after the kill),
 # rs4 and solo4 at 262,144.
 # Every arm (and the longest prompt) starts only if its worst case (EST_<arm> minutes) fits what is left of BUDGET_MIN (165),
-# and a long request's timeout is what is left less 5 minutes, so the window ends inside about three hours with production up.
+# and a long request's timeout is what is left less 5 minutes, so the window ends inside about three hours.
 # Env: ARMS (the list above, in order), BUDGET_MIN, EST_<arm>, IMAGE, the sizes below. Every command it drives is a variable
 # (ZTP3, ZSTOP, DOCKER, SSH, SYSTEMCTL, PROD_START, the ports), so dryrun.sh runs it end to end on stubs.
 set -u
@@ -78,7 +78,7 @@ say() { echo "[longctx] $(date -u +%T) $*"; }
 prod_up() { curl -sf -o /dev/null --max-time 3 "localhost:$PROD_PORT/health"; }
 abort() { say "$*"; echo "LONGCTX-ABORTED $(date -u +%T)"; exit 1; }
 
-# The window opener stops production and the watchdogs; this script never touches a production that is up.
+# Production is stopped before this runs (prod-stop.sh); this script never touches a production that is up.
 prod_up && abort "production answers on :$PROD_PORT: stop it (~/glm-v110-stop.sh) and both GLM watchdogs first"
 $DOCKER ps --format '{{.Names}}' 2>/dev/null | grep -qx glm53-flash-tf && abort "glm53-flash-tf runs on spark1: stop production first"
 for w in $WORKERS; do
@@ -105,14 +105,16 @@ restore() {
   fi
   bash "$ZSTOP" > /dev/null 2>&1
   $DOCKER rm -f glm53-zig-r0 > /dev/null 2>&1
-  if prod_up; then
+  if [ "${RESTORE:-0}" != 1 ]; then
+    say "production left down (it stays down for the speed-parity campaign; RESTORE=1 starts it)"
+  elif prod_up; then
     say "production already answers"
   else
     setsid nohup bash "$PROD_START" > "$OUT/prod-restore.log" 2>&1 < /dev/null &
     for _ in $(seq 1 90); do prod_up && { say "production healthy"; break; }; sleep "$PROD_POLL"; done
     prod_up || say "PRODUCTION NOT HEALTHY after $((90 * PROD_POLL)) s: $OUT/prod-restore.log"
   fi
-  say "both GLM watchdogs are still stopped: the window closer starts glm-watchdog-system.service (sudo)"
+  say "both GLM watchdogs stay inactive"
   echo "LONGCTX-DONE $(date -u +%T)"
 }
 trap restore EXIT

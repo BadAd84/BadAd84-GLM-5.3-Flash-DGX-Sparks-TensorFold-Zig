@@ -1,8 +1,8 @@
 #!/bin/bash
-# queue-disk-tier.sh [TAG] - on spark1, detached, inside an owner-opened window (the opener has stopped production and
-# both GLM watchdogs): GLM-5.3-Flash's conversation states on disk (--learn-conversations, upstream PR #1411) on the
+# queue-disk-tier.sh [TAG] - on spark1, detached, with production stopped (it stays down for the speed-parity campaign; the
+# GLM watchdogs stay inactive): GLM-5.3-Flash's conversation states on disk (--learn-conversations, upstream PR #1411) on the
 # TP=3 serve at the deployed shape (--parallel 4 --context 1048576), each boot through zig-tp3.sh, measured by
-# disk.py into ~/bench/disktier-TAG/rows.jsonl and tabled by disk_table.py (table.md); production restored.
+# disk.py into ~/bench/disktier-TAG/rows.jsonl and tabled by disk_table.py (table.md); production is left down.
 # DISKTIER-DONE in the log.
 #   k1   a boot with the disk tier on a fresh store: conversations M32 and M120 (markers at 2%, 50%, 97%) turn 1 cold
 #        and turn 2 from RAM; the long conversation L (production's tier_chain text, ~596k tokens) turn 1 cold beside
@@ -21,8 +21,8 @@
 # LEARN_CTR inside every rank's container (rank 0 alone writes it). The engine writes it as root and makes its
 # directories 0700, so this script reads its size and removes it through a container of the same image; it is kept
 # when a disk tier check failed (table rc 3) or KEEP_LEARN=1.
-# Every step starts only if its worst case fits what is left of BUDGET_MIN; production is restored at the end unless
-# RESTORE=0 (a second image queued behind this one). Every command it drives is a variable (ZTP3, ZSTOP, DOCKER, SSH,
+# Every step starts only if its worst case fits what is left of BUDGET_MIN; production is left down at the end unless
+# RESTORE=1 (the owner ending the campaign). Every command it drives is a variable (ZTP3, ZSTOP, DOCKER, SSH,
 # SYSTEMCTL, PROD_START, the ports), so dryrun.sh runs it end to end on stubs.
 set -u
 TAG=${1:-$(date -u +%m%d-%H%M)}
@@ -84,7 +84,7 @@ say() { echo "[disktier] $(date -u +%T) $*"; }
 prod_up() { curl -sf -o /dev/null --max-time 3 "localhost:$PROD_PORT/health"; }
 abort() { say "$*"; echo "DISKTIER-ABORTED $(date -u +%T)"; exit 1; }
 
-# The window opener stops production and the watchdogs; this script never touches a production that is up.
+# Production is stopped before this runs (prod-stop.sh); this script never touches a production that is up.
 prod_up && abort "production answers on :$PROD_PORT: stop it (~/glm-v110-stop.sh) and both GLM watchdogs first"
 $DOCKER ps --format '{{.Names}}' 2>/dev/null | grep -qx glm53-flash-tf && abort "glm53-flash-tf runs on spark1: stop production first"
 for w in $WORKERS; do
@@ -126,8 +126,8 @@ restore() {
   else
     learn_in rm -rf "/learn/$(basename "$LEARN_HOST")" > /dev/null 2>&1 && say "the store at $LEARN_HOST removed"
   fi
-  if [ "${RESTORE:-1}" = 0 ]; then
-    say "RESTORE=0: production left down for the next queued run"
+  if [ "${RESTORE:-0}" != 1 ]; then
+    say "production left down (it stays down for the speed-parity campaign; RESTORE=1 starts it)"
   elif prod_up; then
     say "production already answers"
   else
@@ -135,7 +135,7 @@ restore() {
     for _ in $(seq 1 90); do prod_up && { say "production healthy"; break; }; sleep "$PROD_POLL"; done
     prod_up || say "PRODUCTION NOT HEALTHY after $((90 * PROD_POLL)) s: $OUT/prod-restore.log"
   fi
-  say "both GLM watchdogs are still stopped: the window closer starts glm-watchdog-system.service (sudo)"
+  say "both GLM watchdogs stay inactive"
   echo "DISKTIER-DONE $(date -u +%T)"
 }
 trap restore EXIT

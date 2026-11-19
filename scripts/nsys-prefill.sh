@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # nsys-prefill.sh TAG - where a cold prompt's time goes at production's shape (--parallel 4 --context 1048576), run on
 # the head (spark1) beside zig-tp3.sh, serve.sh, longctx.py, longctx_table.py, nsys-kern.py, prefill_stages.py and
-# prompt_trace.py, inside an owner-opened window (the opener stops production and both GLM watchdogs; this script
+# prompt_trace.py, with production stopped (it stays down for the campaign; this script
 # refuses to start otherwise and never starts production itself).
 #   nsys  rank 0 under `nsys launch` through zig-tp3.sh (so it has exactly the serve's env), one warm-up cold prompt
 #         of 4,096 tokens, then `nsys start`, one cold prompt of each SIZES (8,192 and 32,768 tokens, distinct text, a
@@ -61,7 +61,7 @@ ROWS=$OUT/rows.jsonl
 { sha256sum "$0" "$ZTP3" "$G/serve.sh" "$G/longctx.py" "$G/prefill_stages.py" "$G/prompt_trace.py" 2>&1
   $DOCKER image inspect --format '{{.Id}} {{.RepoTags}}' "$IMAGE" 2>&1
   echo "TAG=$TAG IMAGE=$IMAGE KNOBS=$KNOBS P=$P CTX=$CTX SIZES='$SIZES' WARM=$WARM XENV='$XENV'"; } > "$OUT/provenance.txt"
-trap '$ZSTOP > /dev/null 2>&1; say "serve stopped; production stays down for the window closer"' EXIT
+trap '$ZSTOP > /dev/null 2>&1; say "serve stopped; production stays down"' EXIT
 
 probe() { # probe SEED SIZE MAXTOK: one cold prompt of SIZE tokens, salted by SEED, its row in ROWS
   $PY "$G/longctx.py" probe "$ZPORT" --tag "pf-$TAG" --n "$P" --cold-sizes "$2" --reps 1 --warm-base 0 \
