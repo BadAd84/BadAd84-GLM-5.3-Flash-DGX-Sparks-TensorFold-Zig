@@ -52,9 +52,16 @@ def main():
         return 1
     shapes = collections.defaultdict(list)
     for r in rs:
-        shapes[len(r[2])].append(r)
-    print(f"{len(rs)} decode rounds in {len(shapes)} shapes (main-stream kernels a round: rounds)")
-    print("  " + ", ".join(f"{n}: {len(v)}" for n, v in sorted(shapes.items(), key=lambda kv: -len(kv[1]))[:12]))
+        shapes[next((k[4] for k in r[2] if k[3] == "tf_glm_embed_b16"), 0)].append(r)
+    print(f"{len(rs)} decode rounds; rows a round (the embed kernel's grid): rounds")
+    print("  " + ", ".join(f"{n}: {len(v)}" for n, v in sorted(shapes.items(), key=lambda kv: -len(kv[1]))[:16]))
+    print("rows | rounds | wall ms | busy ms | idle ms | ms a row")
+    for n, group in sorted(shapes.items()):
+        if len(group) < 3:
+            continue
+        w = st.mean((r[1] - r[0]) / 1e6 for r in group)
+        b = st.mean(ps.union_len([(k[0], k[1]) for k in r[2]]) / 1e6 for r in group)
+        print(f"{n:4d} | {len(group):6d} | {w:7.2f} | {b:7.2f} | {w - b:7.2f} | {w / max(n, 1):7.2f}")
     out = {}
     for n, group in sorted(shapes.items(), key=lambda kv: -len(kv[1]))[:4]:
         if len(group) < 3:
@@ -80,7 +87,7 @@ def main():
                 nxt = next((k[3] for k in seg if k[0] >= s1), "?")
                 gaps[nxt] += (s1 - e0) / 1e6
         R = len(group)
-        print(f"\n== rounds of {n} main-stream kernels: {R} rounds, wall {st.mean(wall):.2f} ms (min {min(wall):.2f}, max {max(wall):.2f}), busy {st.mean(busy):.2f} ms "
+        print(f"\n== rounds of {n} rows: {R} rounds, wall {st.mean(wall):.2f} ms (min {min(wall):.2f}, max {max(wall):.2f}), busy {st.mean(busy):.2f} ms "
               f"({st.mean(busy) / st.mean(wall):.1%}), idle {st.mean(wall) - st.mean(busy):.2f} ms, side-stream NCCL {st.mean(side):.2f} ms")
         print("category ms a round: " + ", ".join(f"{c} {sum(v) / R:.2f}" for c, v in sorted(cats.items(), key=lambda kv: -sum(kv[1]))))
         print("ranked kernels, ms a round (launches a round):")

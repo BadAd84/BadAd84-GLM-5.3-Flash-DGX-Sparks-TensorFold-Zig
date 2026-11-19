@@ -84,17 +84,21 @@ def secA():
 
 
 def secR():
-    print("== R. request starts (R1 R2) against N (the mean of N1 and N2), the same cells")
+    print("== R and V: request starts (R1 R2) and MM_WIDE=2 (V1) against N (the mean of N1 and N2), the same cells")
     for kind, label in KINDS:
         for n in (1, 2, 4):
             nn = [cell(f"{D}/f77-c/dec-{l}", kind, n) for l in ("N1", "N2")]
             rr = [cell(f"{D}/f77-c/dec-{l}", kind, n) for l in ("R1", "R2")]
-            if not all(nn) or not all(rr):
+            vv = cell(f"{D}/f77-c/dec-V1", kind, n)
+            if not all(nn):
                 continue
             m = st.mean(x["agg"] for x in nn)
-            inside = all(min(x["agg"] for x in nn) <= r["agg"] <= max(x["agg"] for x in nn) for r in rr)
-            print(f"{label} {n}: N {nn[0]['agg']:.2f} {nn[1]['agg']:.2f} | R {rr[0]['agg']:.2f} {rr[1]['agg']:.2f} ({pct(rr[0]['agg'], m)} {pct(rr[1]['agg'], m)}) "
-                  f"| both R inside N's range: {inside} | reply sets {len({x['sha'] for x in nn + rr})}")
+            if all(rr):
+                inside = all(min(x["agg"] for x in nn) <= r["agg"] <= max(x["agg"] for x in nn) for r in rr)
+                print(f"{label} {n}: N {nn[0]['agg']:.2f} {nn[1]['agg']:.2f} | R {rr[0]['agg']:.2f} {rr[1]['agg']:.2f} ({pct(rr[0]['agg'], m)} {pct(rr[1]['agg'], m)}) "
+                      f"| both R inside N's range: {inside} | reply sets {len({x['sha'] for x in nn + rr})}")
+            if vv:
+                print(f"{label} {n}: V1 {vv['agg']:.2f} ({pct(vv['agg'], m)}) | reply sets {len({x['sha'] for x in nn + [vv]})}")
 
 
 def cold_ms(rs, arm, size):
@@ -113,7 +117,7 @@ def secCold():
         base = [x for x in base if x is not None]
         ref = st.mean(base) if base else None
         line = f"{size // 1000}k:"
-        for a in ("P1", "N1", "N2", "P2", "R1", "R2"):
+        for a in ("P1", "N1", "N2", "P2", "V1", "X1", "X2", "Y1", "R1", "R2"):
             x = cold_ms(rs, a, size)
             if x is not None:
                 line += f" {a} {x:.0f}" + (f" ({pct(x, ref)})" if ref and a not in ("P1", "P2") else "")
@@ -131,7 +135,7 @@ def chain_of(label):
 
 
 def secChain():
-    tab = {l: chain_of(l) for l in ("P1", "N1", "N2", "P2", "R1", "R2")}
+    tab = {l: chain_of(l) for l in ("P1", "N1", "N2", "P2", "V1", "X1", "X2", "Y1", "R1", "R2")}
     tab = {l: c for l, c in tab.items() if c}
     if not tab:
         return
@@ -147,7 +151,7 @@ def secChain():
     if all(l in tab for l in ("P1", "P2")):
         first = st.mean(tab[l][0]["ttft_ms"] for l in ("P1", "P2"))
         warm = st.mean(st.mean(x["ttft_ms"] for x in tab[l][1:]) for l in ("P1", "P2"))
-        for grp in (("N1", "N2"), ("R1", "R2")):
+        for grp in (("N1", "N2"), ("V1",), ("X1",), ("X2",), ("Y1",), ("R1", "R2")):
             if all(l in tab for l in grp):
                 print(f"{'/'.join(grp)} over the recipe: first turn {st.mean(tab[l][0]['ttft_ms'] for l in grp) / first:.3f}, "
                       f"turns 2+ {st.mean(st.mean(x['ttft_ms'] for x in tab[l][1:]) for l in grp) / warm:.3f}")
