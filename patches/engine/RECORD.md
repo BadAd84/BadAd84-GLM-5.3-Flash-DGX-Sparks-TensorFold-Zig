@@ -67,6 +67,7 @@ serve --config test; no new failing name; lean 0 new).
 | 0033 | - | server: TF_GLM_OVN_OFF_EFFORT_LINE, a thinking-off GLM-5.3 prompt without its default effort line | `TF_GLM_OVN_OFF_EFFORT_LINE` |
 | 0034 | - | glm lanes: TF_GLM_OVN_NO_COPY, a DFlash2 drafter's windows without copied continuations | `TF_GLM_OVN_NO_COPY` |
 | 0035 | - | glm cuda tests: glm-mm-ovn, the matmul launch variants against the default launch byte for byte | - |
+| 0036 | - | glm latent: TF_GLM_OVN_LATENT_ROWS, absorb_q and expand_v two and four rows a loop step | `TF_GLM_OVN_LATENT_ROWS` |
 
 0033 is not a re-seat of a v1.2.7 patch: it is new here (2026-11-16), written on this base. Its row in
 `zig/src/platform/environment.zig` sits after `TF_GLM_OVN_HOST_ONCE` rather than at the end of the `.glm` rows, so
@@ -86,6 +87,22 @@ lines, and gives the host stub `zig/test_support/glm_mm_cuda.zig` the `cluster` 
 file changes. The 35-patch series is tree `2af443845021d4b310032b3e51d81c38d6059df4` (run sg-20261116-230553: PASS
 against the pristine base, `compile-cuda-tests` rc 0, lean 0 new); with pr1411 and cache-salt the stack is
 `f3204870b8fce9de0731527420584b6893d3a2da` (38 patches; run sg-20261117-002047: series and stack PASS, lean 0 new).
+
+0036 is new here too (2026-11-19), written on this base: it adds `tf_glm_absorb_q_x2`, `_x4`, `tf_glm_expand_v_x2` and
+`_x4` to `zig/kernels/cuda/glm_glue_latent.cuh` (the same block and the same per-row chain, with 2 or 4 rows in flight
+between one pair of syncs) and the switch that takes them on plain bf16 kv_b, and registers `glm-latent-rows` in
+`zig/tests/cuda/glm_ovn_checks.zig`, so `zig/tests/cuda/main.zig` keeps its own line count. Its row in
+`zig/src/platform/environment.zig` sits after `TF_GLM_OVN_KVB8`'s and its line in `docs/environment.md` after that
+switch's, so `patches/pr1411`'s environment.zig and docs/environment.md hunks still apply on top. The 36-patch series is
+tree `bb881628a1995a58308c64c44a9522e9e3c153d2`; pr1411 makes `da6fb412b415964303c93c18d7da9f98626c9b85`, cache-salt
+`33247f87b97b2762424a0e5390cf86044be13268`, learn-starts `85d45758d73b66f75f6fbe38b0c58a9cde586008` and solo-cuts
+`fc3526cde368da5a0a034794045c3bd5c1bf2814` (42 patches), each a `git write-tree` on a temporary index from the pin
+(the gate host's own build reproduced the 41-patch id without solo-cuts, and the same id comes out with 0036 applied
+after the packages). On the shared x86_64 gate host, `scripts/spark-gates.py iter` on the 41-patch stack without
+solo-cuts got `check-native-cuda-host` 7 of 7 steps rc 0, `fmt` rc 0, `test-cuda-host` 6,904 of 6,938 tests passed with
+only the base's own `cli_config_test.test.serve --config` name failing, and lean 341 problems against the base's 341,
+0 new. An image built from that tree on spark1 with nvcc sm_121 compiled the glue fatbins and `tf-cuda-test`. No GPU
+has run the check yet, so its verdict on a GB10 is still to come.
 
 Every switch still defaults off and is a row of the `.glm` scope of `zig/src/platform/environment.zig` (TF_GLM_OVN_*
 through `cuda/ovn.zig`), with a line in `docs/environment.md`. Every kept patch keeps its own header (source, what

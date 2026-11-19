@@ -176,3 +176,9 @@ v129b-comb fmt rc=0
 [v129b-comb gates] error: 'cli_config_test.test.serve --config: expand reads the file, passes other commands through and names what it cannot read' failed:
 [v129b-comb gates] error: 'listener.test.accepted IPv4 and IPv6 TCP streams disable Nagle for incremental responses' failed:
 ```
+
+## With `patches/engine/0036` in the series (2026-11-19)
+
+The series is then 36 patches, tree `bb881628a1995a58308c64c44a9522e9e3c153d2`; this package applies to it unchanged
+and makes `da6fb412b415964303c93c18d7da9f98626c9b85` (`git write-tree` on a temporary index from the pin).
+`patches/cache-salt` then makes `33247f87b97b2762424a0e5390cf86044be13268`.

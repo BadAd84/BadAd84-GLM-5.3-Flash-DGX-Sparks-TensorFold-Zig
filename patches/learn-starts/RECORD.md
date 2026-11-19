@@ -58,6 +58,9 @@ Base it applies to: the stack at the pin `6b9de695104b6b8b30c20458da87ac06c94802
 pin by `scripts/apply.sh`, `patches/pr1411/apply.sh` and `patches/cache-salt/apply.sh`, with this package's
 `apply.sh --check` giving the second.
 
+With `patches/engine/0036` in the series (2026-11-19) the base is `33247f87b97b2762424a0e5390cf86044be13268` (40
+patches) and this package applies to it unchanged and makes `85d45758d73b66f75f6fbe38b0c58a9cde586008` (41 patches).
+
 Apply after the other three: `bash patches/learn-starts/apply.sh --check WORK/tree` writes nothing and prints the
 tree it would make; without `--check` it applies the patch to the tree. Hashes: `SHA256SUMS`.
 

@@ -1,6 +1,6 @@
 # The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-19)
 
-`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 35 patches) and the packages `patches/pr1411`, `patches/cache-salt` and `patches/learn-starts` (gated, its GPU check pending). Cells measured on the v1.2.9 stack are in OVERNIGHT sections 41 to 50; the older ones (sections 17 to 36) were measured on the v1.2.7 stack.
+`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 36 patches) and the packages `patches/pr1411`, `patches/cache-salt`, `patches/learn-starts` and `patches/solo-cuts` (the last two gated, their GPU checks pending). Cells measured on the v1.2.9 stack are in OVERNIGHT sections 41 to 50; the older ones (sections 17 to 36) were measured on the v1.2.7 stack.
 Production on the Sparks is the Python stack and takes none of it. A knob is set only when its cells show no regression at 1, 2, 4, 6 and 8
 streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT below). Every name is a row of the `.glm` scope of
 `zig/src/platform/environment.zig`; an unregistered `TF_GLM_*` name is refused at boot, so `DEFS` must follow the patch set it runs on.
@@ -58,7 +58,7 @@ The seven that joined on 2026-11-19 (OVERNIGHT sections 45 to 50; replies equal 
 
 | switch | what it does | state |
 |---|---|---|
-| `TF_GLM_REQUEST_STARTS=1` | a chat's next turn resumes where its previous turn's history ends, not at the last 2,048-row point | same replies (sections 29 and 48). On a growing conversation (`longctx.py chain`, section 50): -35.5% a turn at ~113k and -35.9% at ~284k, uncached tokens a turn 1,274 against 2,208 (production 1,306); the cost is +7% on a cold prime (+4.1 / +6.5 / +7.2% cold at 8k / 32k / 120k) because a request with a cut runs no solo pass, and +5% / +12% on a warm probe that never sends the next turn. Break-even 8.3 turns after a cold ~113k prime. Off until `patches/learn-starts` has its GPU check (upstream refuses it with `--learn-conversations`) and the cold cost has a fix or the owner takes the trade |
+| `TF_GLM_REQUEST_STARTS=1` | a chat's next turn resumes where its previous turn's history ends, not at the last 2,048-row point | same replies (sections 29 and 48). On a growing conversation (`longctx.py chain`, section 50): -35.5% a turn at ~113k and -35.9% at ~284k, uncached tokens a turn 1,274 against 2,208 (production 1,306); the cost is +7% on a cold prime (+4.1 / +6.5 / +7.2% cold at 8k / 32k / 120k) because a request with a cut ran no solo pass, and +5% / +12% on a warm probe that never sends the next turn. Break-even 8.3 turns after a cold ~113k prime. `patches/solo-cuts` lets a solo step run between the cuts (2026-11-19: gated, GPU check pending) and `patches/learn-starts` lifts upstream's refusal with `--learn-conversations` (gated, GPU check pending); off until both checks have run and the cold cost is measured with the fix |
 | `TF_GLM_COPIES=1` | verified root and context copies | a loss (table above) |
 
 ## Not knobs of `DEFS`: the packages and their switches
@@ -68,6 +68,8 @@ The seven that joined on 2026-11-19 (OVERNIGHT sections 45 to 50; replies equal 
 | `patches/pr1411` (GLM disk tier) | `--learn-conversations --learn-dir DIR --learn-gib N` (per rank, every rank the same), or `LEARN=1` in `serve.sh` (default 0) | correct at TP=3 (OVERNIGHT sections 32 and 35); `scripts/queue-disk-tier.sh` passes the flags itself, `LEARN=1` is the recipe's way to deploy it and costs no decode speed while idle (section 43); a deployment is `LEARN=1 KNOBS=measured P=4 CTX=1048576` |
 | `patches/pr1411` 0013 | `TF_GLM_OVN_DISK_SLICE_MIB=N`, default 0 | a trade, not a default (OVERNIGHT section 36): the other streams' worst gap during a 4.7 GiB restore and the restoring turn's first token are 9,874 ms and 28.2 s off, 2,061 ms and 41.8 s at 32 MiB, 1,982 ms and 35.8 s at 64 MiB, 4,602 ms and 32.9 s at 128 MiB, 3,397 ms and 31.7 s at 256 MiB (one run each) |
 | `patches/cache-salt` | `cache_salt` on a request; `--cache-salt-per-key` | salt honoured without the option (OVERNIGHT section 35); the option is unset |
+| `patches/solo-cuts` | none (acts under `TF_GLM_CHUNK_SOLO=4096` with `TF_GLM_REQUEST_STARTS=1`) | gated 2026-11-19 (host tests, mutants m1 to m8); GPU check in `scripts/queues/queue73.sh`: cold first token and replies with request starts, against the same image's solo-only arm and the image without the patch |
+| `patches/engine/0036` | `TF_GLM_OVN_LATENT_ROWS=2` or `4`, default 0 | gated 2026-11-19, no GPU run yet: `glm-latent-rows` (byte equality of the absorb and expand kernels at 2 and 4 rows a step against today's launch) and the cold first token arms are in `scripts/queues/queue73.sh` |
 
 ## Absorbed by upstream v1.2.9 (landed 2026-11-15; OVERNIGHT section 37)
 

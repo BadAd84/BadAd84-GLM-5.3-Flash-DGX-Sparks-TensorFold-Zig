@@ -1,0 +1,222 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: a solo prompt step runs between request starts
+
+TF_GLM_REQUEST_STARTS=1 cuts a prompt pass at each message start, and a request with any cut took no solo step
+(TF_GLM_CHUNK_SOLO=4096): prompt_solo.at, prompt_solo.allowed and cuda_prompt_cuts.stepRows each refused a solo-sized
+step when the request had a cut. A chat prompt has a message start after row 0, so every chat request under request
+starts ran in 2,048-row steps. On three GB10s at TP=3 a cold first token with request starts read 4.1%, 6.5% and 7.2%
+slower than without at 8k, 32k and 120k, within 1% of the CHUNK_SOLO-only arm, and a ~113k cold prime 7.3% slower.
+
+The cold plan is unchanged: a pass cuts every 2,048 rows from 0 and at each start (nextCut, coldCut), and a kept
+state resumes only at a cold cut (resumes, below). A solo step is two such chunks run as one pass, so with no start
+inside it, it begins and ends on cold cuts, and its middle grid point is a point the plan has no start at. cutInside
+names the one case that is not allowed: a start after the step's first row and before its end (a start at its end is
+the next step's first row). prompt_solo.at (rank 0's choice), prompt_solo.allowed (every rank's check of the step) and
+stepRows (the part's length) all use it, so the ranks agree on every step; takesTwo still refuses a step whose middle
+grid point holds a keep mark. A request with no cut is unchanged: cutInside is false for an empty list. Pairing
+(TF_GLM_PROMPT_PAIR) still refuses a request with cuts.
+
+Replies are CHUNK_SOLO's: upstream's contract is the same tokens as 2,048-row passes. Receipts: the host tests of
+cuda_prompt_cuts (stepRows, cutInside, the leader-rows walk over the cut lists). The GPU receipts (cold first token and
+replies with request starts on and solo on, against solo alone and request starts alone) are not in this header.
+
+New here, not a re-seat: written at v1.2.9 on top of this repo's stack (patches/engine, pr1411, cache-salt and
+learn-starts). Its docs hunk sits on learn-starts' text of the request starts paragraph, which now says that a pass
+with starts takes a solo pass only where no start is inside it.
+
+---
+
+diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cuda_prompt_cuts.zig
+--- a/zig/src/families/glm/cuda_prompt_cuts.zig
++++ b/zig/src/families/glm/cuda_prompt_cuts.zig
+@@ -49,12 +49,19 @@
+     try list.appendSlice(gpa, cuts);
+ }
+ 
+-/// A prompt step's rows from `start` with `part_len` ids: to the next cut, or a solo pass's when `part_len` holds more.
++/// Whether a request start lies inside the step of `rows` from `start`: past its first row, before its end.
++pub fn cutInside(cuts: []const u32, start: usize, rows: usize) bool {
++    for (cuts) |c| if (c > start and c < start + rows) return true;
++    return false;
++}
++
++/// A prompt step's rows from `start` with `part_len` ids: to the next cut, or a solo pass's when no start is inside it.
+ pub fn stepRows(len: usize, cuts: []const u32, start: usize, part_len: usize) !usize {
+     if (start >= len or !coldCut(len, cuts, start)) return error.BadChunk;
+     if (part_len <= prefill_rows + 1) return nextCut(len, cuts, start) - start;
+-    if (cuts.len > 0) return error.BadChunk; // a solo pass would step over a request start
+-    return @min(len - start, state.solo_rows);
++    const rows = @min(len - start, state.solo_rows);
++    if (cutInside(cuts, start, rows)) return error.BadChunk; // a solo pass would step over a request start
++    return rows;
+ }
+ 
+ test "glm request starts: with no cuts a pass cuts every prefill_rows rows from 0, as before" {
+@@ -93,15 +100,32 @@
+     try std.testing.expect(!coldCut(3000, &cuts, 0 + prefill_rows));
+ }
+ 
+-test "glm request starts: a step runs to the next cut, a solo step only without cuts, and only from a cold cut" {
++test "glm request starts: a step runs to the next cut, or solo where no start is inside it, from a cold cut only" {
+     const m = prefill_rows;
++    const s: usize = state.solo_rows;
+     try std.testing.expectEqual(@as(usize, m), try stepRows(3 * m, &.{}, 0, m + 1));
+-    try std.testing.expectEqual(@as(usize, state.solo_rows), try stepRows(3 * m, &.{}, 0, state.solo_rows + 1));
++    try std.testing.expectEqual(s, try stepRows(3 * m, &.{}, 0, s + 1));
+     try std.testing.expectEqual(@as(usize, 500), try stepRows(3 * m, &.{500}, 0, 501));
+     try std.testing.expectEqual(@as(usize, m), try stepRows(3 * m, &.{500}, 500, m + 1));
+-    try std.testing.expectError(error.BadChunk, stepRows(3 * m, &.{500}, 0, state.solo_rows + 1));
++    try std.testing.expectError(error.BadChunk, stepRows(3 * m, &.{500}, 0, s + 1));
+     try std.testing.expectError(error.BadChunk, stepRows(3 * m, &.{500}, m, m + 1)); // the old grid point, not a cut here
+     try std.testing.expectError(error.BadChunk, stepRows(3 * m, &.{}, 3 * m, 1));
++    // a solo step from a start has none inside it, and a start at its end is fine
++    try std.testing.expectEqual(s, try stepRows(5 * m, &.{500}, 500, s + 1));
++    try std.testing.expectEqual(s, try stepRows(5 * m, &.{ 500, 500 + s }, 500, s + 1));
++    // a start at its middle grid point, or one row short of its end, is inside it
++    try std.testing.expectError(error.BadChunk, stepRows(5 * m, &.{ 500, 500 + m }, 500, s + 1));
++    try std.testing.expectError(error.BadChunk, stepRows(5 * m, &.{ 500, 500 + s - 1 }, 500, s + 1));
++}
++
++test "glm request starts: a start is inside a step when it falls past the step's first row and before its end" {
++    const s: usize = state.solo_rows;
++    try std.testing.expect(!cutInside(&.{}, 0, s));
++    try std.testing.expect(!cutInside(&.{500}, 500, s)); // where the step begins
++    try std.testing.expect(cutInside(&.{500}, 499, s)); // one row in
++    try std.testing.expect(cutInside(&.{s - 1}, 0, s)); // one row before its end
++    try std.testing.expect(!cutInside(&.{s}, 0, s)); // at its end
++    try std.testing.expect(!cutInside(&.{ 100, 200 }, 200, s)); // before it
+ }
+ 
+ test "glm request starts: starts 1 and 2 rows apart each end a chunk, and a step from each runs to the next" {
+@@ -177,9 +201,9 @@
+             const n = leaderRows(c.len, c.cuts, start, false);
+             try std.testing.expectEqual(@min(left, n), try stepRows(c.len, c.cuts, start, @min(left, n + 1)));
+             const w = leaderRows(c.len, c.cuts, start, true); // a solo or paired step: two grid steps left
+-            if (start + prefill_rows + 1 < c.len) { // prompt_solo.takesTwo; with starts rank 0 never steps wide
++            if (start + prefill_rows + 1 < c.len) { // prompt_solo.takesTwo; wide only where no start is inside the step
+                 const wide = stepRows(c.len, c.cuts, start, @min(left, w + 1));
+-                if (c.cuts.len > 0) {
++                if (cutInside(c.cuts, start, @min(left, w))) {
+                     try std.testing.expectError(error.BadChunk, wide);
+                 } else try std.testing.expectEqual(@min(left, w), try wide);
+             }
+@@ -189,6 +213,31 @@
+     }
+ }
+ 
++test "glm request starts: a walk taking solo steps where no start is inside them starts every step on a cold cut" {
++    const extra = [_]Pass{
++        .{ .len = 5 * prefill_rows + 7, .cuts = &.{500} },
++        .{ .len = 9 * prefill_rows, .cuts = &.{ 10, 2 * prefill_rows + 10 } },
++        .{ .len = 6 * prefill_rows, .cuts = &.{ 700, 700 + state.solo_rows, 700 + 2 * state.solo_rows } },
++    };
++    var solo_steps: usize = 0;
++    for (passes ++ extra) |c| {
++        var start: usize = 0;
++        while (start < c.len) {
++            try std.testing.expect(coldCut(c.len, c.cuts, start));
++            const left = c.len - start;
++            const takes_two = start + prefill_rows + 1 < c.len; // prompt_solo.takesTwo
++            const wide = takes_two and !cutInside(c.cuts, start, @min(left, state.solo_rows)); // as prompt_solo.at
++            const n = leaderRows(c.len, c.cuts, start, wide);
++            const rows = try stepRows(c.len, c.cuts, start, @min(left, n + 1));
++            try std.testing.expectEqual(@min(left, n), rows);
++            solo_steps += @intFromBool(wide);
++            start += rows;
++        }
++        try std.testing.expectEqual(c.len, start);
++    }
++    try std.testing.expect(solo_steps > 5);
++}
++
+ test "glm request starts: starts must ascend after 0, and a refused list leaves the last one in place" {
+     var list: std.ArrayList(u32) = .empty;
+     defer list.deinit(std.testing.allocator);
+diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cuda_prompt_solo.zig
+--- a/zig/src/families/glm/cuda_prompt_solo.zig
++++ b/zig/src/families/glm/cuda_prompt_solo.zig
+@@ -3,6 +3,7 @@
+ const fw = @import("cuda_forward.zig");
+ const engine = @import("cuda_engine.zig");
+ const Engine = engine.Engine;
++const prompt_cuts = @import("cuda_prompt_cuts.zig");
+ 
+ /// Whether a stream besides `s` is past its prompt pass (a lane with no fill): a solo pass would hold up its rounds.
+ pub fn othersDecode(lanes: anytype, s: anytype) bool {
+@@ -30,11 +31,12 @@
+     return @min(len - start, fw.solo_rows);
+ }
+ 
+-/// Rank 0's choice for the step at `start`; not beside what reads a chunk's rows, nor with request starts (cut there).
++/// Rank 0's choice for the step at `start`; not beside what reads a chunk's rows, nor across a request start.
+ pub fn at(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, marks: ?engine.Marks) bool {
+-    if (e.bp.rows < fw.solo_rows or e.prompt_logprobs != null or e.prompt_profs[3] != null or e.cur.cuts.items.len > 0) return false;
++    if (e.bp.rows < fw.solo_rows or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;
+     if (e.images) |v| if (v.rowCount() > 0) return false;
+     if (!takesTwo(start, len, if (marks) |m| m.at else &.{})) return false;
++    if (prompt_cuts.cutInside(e.cur.cuts.items, start, rowsAt(start, len))) return false; // the cold plan cuts there
+     // a resumed step restores its kept state, and the rings' base, after this choice
+     const base = if (from) |r| (e.snaps.get(r.id) orelse return false).bases[0] else e.cur.st.base;
+     return ringsAgree(base, e.cur.st.ring_rows, start, rowsAt(start, len));
+@@ -42,7 +44,8 @@
+ 
+ /// Whether a pass of `rows` past a chunk may run: `at`'s rule on every rank, its kept state restored.
+ pub fn allowed(e: *const Engine, start: usize, rows: usize) bool {
+-    if (e.bp.rows < rows or e.prompt_logprobs != null or e.cur.cuts.items.len > 0) return false;
++    if (e.bp.rows < rows or e.prompt_logprobs != null) return false;
++    if (prompt_cuts.cutInside(e.cur.cuts.items, start, rows)) return false;
+     return ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rows);
+ }
+ 
+@@ -85,3 +88,34 @@
+     try std.testing.expectEqual(@as(usize, fw.prefill_rows), bufferRows(false));
+     try std.testing.expectEqual(@as(usize, fw.solo_rows), bufferRows(true));
+ }
++
++test "a solo pass: taken between request starts, refused where one is inside it, in rank 0's choice and the check" {
++    const gpa = std.testing.allocator;
++    const C = fw.prefill_rows;
++    const Seq = @import("cuda_engine_types.zig").Seq;
++    var seq: Seq = .{ .st = undefined };
++    defer seq.cuts.deinit(gpa);
++    seq.st.base = 0;
++    seq.st.ring_rows = fw.solo_rows; // a pass from past C rebases the rings at its first row, as chunks do
++    var e: Engine = undefined;
++    e.bp.rows = fw.solo_rows;
++    e.prompt_logprobs = null;
++    e.prompt_profs = @splat(null);
++    e.images = null;
++    e.cur = &seq;
++    const len = 5 * C + 7;
++    const start = C + 12;
++    const cases = [_]struct { cuts: []const u32, solo: bool }{
++        .{ .cuts = &.{}, .solo = true },
++        .{ .cuts = &.{start}, .solo = true }, // a start where the step begins
++        .{ .cuts = &.{ start, start + fw.solo_rows }, .solo = true }, // and one where it ends
++        .{ .cuts = &.{ start, start + C }, .solo = false }, // one at its middle grid point
++        .{ .cuts = &.{ start, start + fw.solo_rows - 1 }, .solo = false }, // one row before its end
++        .{ .cuts = &.{ 100, start + 1 }, .solo = false }, // one row in
++    };
++    for (cases) |c| {
++        try prompt_cuts.set(gpa, &seq.cuts, c.cuts);
++        try std.testing.expectEqual(c.solo, at(&e, start, len, null, null));
++        try std.testing.expectEqual(c.solo, allowed(&e, start, fw.solo_rows));
++    }
++}
+diff --git a/docs/recipes/glm-5.3-flash-cuda.md b/docs/recipes/glm-5.3-flash-cuda.md
+--- a/docs/recipes/glm-5.3-flash-cuda.md
++++ b/docs/recipes/glm-5.3-flash-cuda.md
+@@ -85,9 +85,10 @@
+   Unset or `2048`, every pass takes 2,048 rows and nothing extra is held. See [Prompt chunk size](#prompt-chunk-size).
+ - `TF_GLM_REQUEST_STARTS=1` on rank 0 (opt-in, off by default) cuts each prompt pass at the request's message starts
+   too, and every 2,048 rows from the last cut, so a chat's next turn resumes where its previous turn's history ends
+-  instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes no solo
+-  or batched pass. GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the
+-  cuts digest in each state's disk image, so a warm turn resumes where its previous turn ended even after a restart
++  instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes a solo
++  pass only where no start is inside it, and no batched pass. GLM refuses the switch at startup with `TF_KV_SHARE`
++  above 0; `--learn-conversations` keeps the cuts digest in each state's disk image, so a warm turn resumes where its
++  previous turn ended even after a restart
+   (#2404, part of #2396).
+ - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
+   faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in
