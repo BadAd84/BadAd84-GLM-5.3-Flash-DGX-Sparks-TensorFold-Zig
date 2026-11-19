@@ -1,0 +1,47 @@
+77 kernels, 22275.1 ms of kernel time, 76424 launches
+ share   total ms  launches   mean us   med us  name
+ 22.8%     5080.5     14778     343.8    238.2  ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<(unsigned long)4096>)
+ 20.4%     4538.3     12612     359.8    130.0  glm_mm4_128
+ 13.7%     3060.2       504    6071.8   6945.1  tf_exl3_prompt_gu
+  9.9%     2204.4       504    4373.7   5034.0  tf_exl3_prompt_down
+  6.0%     1347.2      3612     373.0    395.0  tf_glm_combine
+  3.8%      840.5       476    1765.7   2339.5  tf_glm_kda_step
+  3.7%      822.9       132    6233.8   8044.9  tf_glm_onepass_pipe_exact
+  3.4%      765.6       176    4350.3   6824.2  tf_glm_expand_v
+  2.7%      604.1       176    3432.6   5334.1  tf_glm_absorb_q
+  2.5%      558.9      7740      72.2     74.0  tf_glm_hc_post
+  2.2%      480.3       476    1009.1   1341.1  tf_glm_kda_prep
+  1.5%      344.3       176    1956.3   2008.4  tf_glm_chunks_32_fp8_fused
+  1.4%      312.7      7130      43.9     40.4  tf_glm_hc_partial
+  1.1%      249.1       848     293.7    388.4  tf_glm_router_tile
+  0.7%      162.9      3612      45.1     44.7  tf_glm_put_slot
+  0.5%      122.1       672     181.7    282.4  tf_exl3_prompt_rotate
+  0.5%      109.0       476     229.1    305.6  tf_glm_kda_out
+  0.5%      108.5      7670      14.1     12.6  tf_glm_hc_finish
+  0.4%       78.7       848      92.9     47.9  tf_glm_slice_sum
+  0.3%       68.1       440     154.9    109.6  tf_glm_index_scores
+  0.3%       66.0       332     198.9    203.6  void tf_qmm_group::group_kernel<(int)64, (int)16, (int)64, (int)1, (in
+  0.2%       51.8       110     470.7    459.8  ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<(unsigned lon
+  0.2%       46.5       336     138.3    132.1  tf_exl3_ovn_nc1
+  0.1%       24.5      3444       7.1      6.4  tf_glm_swiglu_64
+  0.1%       23.9       176     135.8    199.7  tf_glm_dsa_tokens
+  0.1%       23.1      1124      20.6     12.4  glm_mm4_16n32
+  0.1%       22.4       440      51.0     52.4  tf_glm_index_pools
+  0.1%       19.3       356      54.1     61.3  dsv41_l2pace::paced_kernel(const long *, int, unsigned int, unsigned l
+  0.1%       13.3        12    1110.0   1076.7  glm_mm8_128
+  0.1%       13.3        36     369.9    438.6  tf_glm_swiglu_512
+  0.1%       12.5        24     520.0    134.0  ncclDevKernel_AllReduce_Sum_f64_TREE_LL(ncclDevKernelArgsStorage<(unsi
+  0.1%       11.4       390      29.1     12.2  tp_roce_multi
+  0.0%        9.6       672      14.3     19.2  tf_glm_topk
+  0.0%        8.7       176      49.5     75.2  tf_glm_rmsnorm_1536
+  0.0%        7.0        20     348.2    345.2  tf_glm_embed_b16
+  0.0%        4.8       176      27.1     40.3  tf_glm_rmsnorm_512
+  0.0%        4.7       540       8.8      8.2  tf_glm_hc_partial8
+  0.0%        4.7       136      34.3     33.6  void tfl2pf::segments_kernel<(bool)1>(const long *, int, unsigned int)
+  0.0%        4.6       420      10.9     10.5  tf_experts::plan_offsets(int, int, int, int *, int *, int *)
+  0.0%        4.4       176      25.0     36.6  tf_glm_lat_write_fp8
+  0.0%        3.9        68      57.8     56.8  tf_glm_kda_chain
+  0.0%        3.9         4     982.7    981.8  glm_mm8_16n32
+  0.0%        3.4       176      19.4     28.1  tf_glm_index_write
+  0.0%        3.4        68      49.4      2.6  tf_glm_rmsnorm_4096
+  0.0%        3.1       168      18.3      2.9  df_gsum

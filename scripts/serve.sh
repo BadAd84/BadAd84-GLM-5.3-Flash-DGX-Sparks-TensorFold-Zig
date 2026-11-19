@@ -78,7 +78,9 @@ DEFS="TF_GLM_KDA_PAD=1 TF_GLM_OVN_KEPT_WALK=1
  TF_GLM_OVN_MLA_FUSEMERGE=1
  TF_GLM_OVN_DRAFT_EDGE=0.6 TF_GLM_OVN_DRAFT_BETA=2 TF_GLM_OVN_DRAFT_CUTS=1:0.3
  TF_EXL3_DEC_ORDER=1 TF_GLM_OVN_EXL3_ITEMS=1 TF_GLM_OVN_X3_NC=1 TF_GLM_OVN_X3_XROW=1 TF_GLM_OVN_X3_FUSEDOWN=1
- TF_GLM_OVN_KEEP_SEQS=1 TF_GLM_OVN_OFF_EFFORT_LINE=1"
+ TF_GLM_OVN_KEEP_SEQS=1 TF_GLM_OVN_OFF_EFFORT_LINE=1
+ TF_GLM_OVN_NO_COPY=1 TF_GLM_OVN_MM_DECTILE=100000 TF_GLM_OVN_SWIGLU_REDUCE=1
+ TF_GLM_OVN_ONEPASS_PIPE=1 TF_GLM_CHUNK_SOLO=4096 TF_GLM_OVN_HOST_ONCE=1 TF_GLM_OVN_DRAFT_NOISE=1"
 # The first seven are the arm measured together (docs/OVERNIGHT-2026-11-12.md section 17); EDGE, BETA and CUTS are production's DFlash2
 # chain rule (fnc7:0.3, section 22); TF_EXL3_DEC_ORDER and the three TF_GLM_OVN_X3_* switches are production's routed-expert decode
 # kernel set (section 24); KEEP_SEQS (patch 0031 of the v1.2.9 series, section 30) was measured with EY_DIRECT at
@@ -86,6 +88,12 @@ DEFS="TF_GLM_KDA_PAD=1 TF_GLM_OVN_KEPT_WALK=1
 # INDEX_REGROUP, MM_WIDE, SPARSE_ONEPASS and ROUTER_WARM were measured one at a time, within the noise, so they stay out.
 # OFF_EFFORT_LINE (patch 0033) sets no speed cell: it is the prompt production sends, a thinking-off request renders
 # without its default `Reasoning Effort: Max` line, so its replies are not token-identical to the knob-off ones by design.
+# The last seven joined together (sections 45 to 49 and the queue71 and queue72 records in docs/KNOBS.md): NO_COPY (patch 0034: a DFlash2
+# drafter's windows without copied continuations), MM_DECTILE (a decode-window tile variant of the matmul launch) and SWIGLU_REDUCE (the
+# reduce and the swiglu in one launch), both checked byte for byte against the default launches by patch 0035's glm-mm-ovn, ONEPASS_PIPE
+# (the DSA block's prompt rows on the one-pass pipeline), CHUNK_SOLO=4096 (upstream: one 4,096-row prompt step while no stream decodes),
+# HOST_ONCE (a request rendered once) and DRAFT_NOISE (a sampled stream's draft pick uses the target's keyed Gumbel draws; greedy streams
+# never read it). Replies equal the recipe's on every cell, and the pairs show no level slower (docs/KNOBS.md has each knob's cells).
 # Off by default: a knob is default-off until it has been A/B'd at 1/2/4/6/8 streams on this series
 # (docs/OVERNIGHT-2026-11-12.md has the cells). KNOBS=measured opts into the set above; KNOBS=all is the same
 # list for an arm that means to test them all.

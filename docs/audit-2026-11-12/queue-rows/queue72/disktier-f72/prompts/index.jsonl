@@ -1,0 +1,17 @@
+{"case_id": "M32000/t1", "file": "M32000_t1.json", "tokenized": 32038}
+{"case_id": "M32000/t2", "file": "M32000_t2.json", "tokenized": 32074}
+{"case_id": "M120000/t1", "file": "M120000_t1.json", "tokenized": 120604}
+{"case_id": "M120000/t2", "file": "M120000_t2.json", "tokenized": 120640}
+{"case_id": "L/t1", "file": "L_t1.json", "tokenized": 596176}
+{"case_id": "L/t2", "file": "L_t2.json", "tokenized": 619437}
+{"case_id": "M32000/t3", "file": "M32000_t3.json", "tokenized": 32151}
+{"case_id": "M120000/t3", "file": "M120000_t3.json", "tokenized": 120712}
+{"case_id": "L/t3", "file": "L_t3.json", "tokenized": 642693}
+{"case_id": "L/t3q", "file": "L_t3q.json", "tokenized": 642863}
+{"case_id": "M32000/t4", "file": "M32000_t4.json", "tokenized": 32228}
+{"case_id": "M120000/t4", "file": "M120000_t4.json", "tokenized": 120784}
+{"case_id": "S120000/t1", "file": "S120000_t1.json", "tokenized": 120356}
+{"case_id": "L/t4", "file": "L_t4.json", "tokenized": 665911}
+{"case_id": "S120000/t2", "file": "S120000_t2.json", "tokenized": 120392}
+{"case_id": "M32000/t5", "file": "M32000_t5.json", "tokenized": 32305}
+{"case_id": "M120000/t5", "file": "M120000_t5.json", "tokenized": 120856}

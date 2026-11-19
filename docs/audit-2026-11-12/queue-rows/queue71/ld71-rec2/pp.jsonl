@@ -1,0 +1,8 @@
+{"name": "ctx100k-prose2", "rep": 0, "sha12": "75d8f91a523a", "tokens": 400, "prompt_tokens": 100059, "rounds": 155, "drafted": 344, "accepted": 244, "ttft_s": 50.90543067827821, "span_s": 5.519071375019848}
+{"name": "ctx100k-prose2", "rep": 1, "sha12": "75d8f91a523a", "tokens": 400, "prompt_tokens": 100059, "rounds": 155, "drafted": 344, "accepted": 244, "ttft_s": 51.1568624000065, "span_s": 5.537427404895425}
+{"name": "ctx100k-code2", "rep": 0, "sha12": "aea194e2e2f7", "tokens": 400, "prompt_tokens": 100087, "rounds": 69, "drafted": 401, "accepted": 330, "ttft_s": 51.216895292978734, "span_s": 3.701424510218203}
+{"name": "ctx100k-code2", "rep": 1, "sha12": "aea194e2e2f7", "tokens": 400, "prompt_tokens": 100087, "rounds": 69, "drafted": 402, "accepted": 330, "ttft_s": 51.28285013558343, "span_s": 3.727970955427736}
+{"name": "ctx250k-prose2", "rep": 0, "sha12": "46fe6179d533", "tokens": 400, "prompt_tokens": 250040, "rounds": 153, "drafted": 365, "accepted": 246, "ttft_s": 130.210859159939, "span_s": 5.742961885873228}
+{"name": "ctx250k-prose2", "rep": 1, "sha12": "46fe6179d533", "tokens": 400, "prompt_tokens": 250040, "rounds": 153, "drafted": 365, "accepted": 246, "ttft_s": 130.2023520572111, "span_s": 5.7500462788157165}
+{"name": "ctx250k-code2", "rep": 0, "sha12": "d34afec69cc0", "tokens": 400, "prompt_tokens": 250068, "rounds": 72, "drafted": 409, "accepted": 327, "ttft_s": 130.33459049882367, "span_s": 3.8850069670006633}
+{"name": "ctx250k-code2", "rep": 1, "sha12": "d34afec69cc0", "tokens": 400, "prompt_tokens": 250068, "rounds": 72, "drafted": 409, "accepted": 327, "ttft_s": 130.3192828297615, "span_s": 3.8953796713612974}

@@ -1279,7 +1279,7 @@ At 6 and 8 streams (fresh boots, the prose bench, control / on / on / control): 
 
 ## 48. The three candidate knobs at every level, `pr1411/0002` on the stack, warm turns against production, and a boot race in the window tooling
 
-2026-11-17, 15:55 to 18:58 UTC, `work/queue66.sh` and `queue67.sh`, image `glm53-zig:v129v` (stack tree `5137a5ef75ab`: pin, `patches/engine` 0001 to 0035, `patches/pr1411` 0001 and 0002, cache-salt; the image source was packed from that tree and the image id is the same on the three ranks). Production restored and healthy at 18:38 and 18:58.
+2026-11-17, 15:55 to 18:58 UTC, `scripts/queues/queue66.sh` and `queue67.sh`, image `glm53-zig:v129v` (stack tree `5137a5ef75ab`: pin, `patches/engine` 0001 to 0035, `patches/pr1411` 0001 and 0002, cache-salt; the image source was packed from that tree and the image id is the same on the three ranks). Production restored and healthy at 18:38 and 18:58. Rows: `docs/audit-2026-11-12/queue-rows/queue66` and `queue67-68-warm`.
 
 **`tf-cuda-test glm-mm-ovn` again on a GB10**: five PASS lines, rc 0, 1.31 s including the container's start.
 
@@ -1327,7 +1327,7 @@ Production keeps a finished request's state on its 64-token grid (cached 99,584 
 
 ## 49. The three candidate knobs decided in four clean pairs, the prompt-pass switches and `HOST_ONCE` measured, request starts are a trade
 
-2026-11-17 21:39 to 2026-11-18 01:02 UTC, `work/queue68.sh` and `queue69.sh`, image `glm53-zig:v129v` (stack tree `5137a5ef75ab`), every boot `--parallel 4 --context 1048576` except the 6 and 8 stream cells (fresh `--parallel 6` and `--parallel 8` boots), `KNOBS=measured`, `KEEP=1`. Production stopped on all three ranks for both and restored healthy at the end of each. Scores: `work/score68.py`, `work/score69.py`.
+2026-11-17 21:39 to 2026-11-18 01:02 UTC, `scripts/queues/queue68.sh` and `queue69.sh`, image `glm53-zig:v129v` (stack tree `5137a5ef75ab`), every boot `--parallel 4 --context 1048576` except the 6 and 8 stream cells (fresh `--parallel 6` and `--parallel 8` boots), `KNOBS=measured`, `KEEP=1`. Production stopped on all three ranks for both and restored healthy at the end of each. Scores: `scripts/queue-scores/score68.py` and `score69.py` over `docs/audit-2026-11-12/queue-rows/queue68`, `queue69` and `queue67-68-warm`.
 
 **The candidate (`TF_GLM_OVN_NO_COPY=1`, `TF_GLM_OVN_MM_DECTILE=100000`, `TF_GLM_OVN_SWIGLU_REDUCE=1`) against the recipe** (`queue68`, boots recipe, candidate, candidate, recipe, recipe, candidate, candidate, recipe after one discarded warm-up boot; pairs taken adjacent; 6 and 8 streams on two more pairs; each cell the mean `agg_tok_s` of three waves, production's prompt ids):
 
@@ -1364,4 +1364,83 @@ Every `ONEPASS_PIPE` boot is under both recipe boots at all three sizes, and so 
 At 100k the request start is a nearer place to resume (2,038 rows to read again, not 3,378), and the turn is 37% faster. At 250k both arms resume at the same point and read the same 705 rows, and request starts cost 91 ms idle and 194 ms beside decoding streams. The rows show what was paid for: the recipe's 250k turn kept no state (`kept_states` 0), the request-starts turn kept one (`kept_states` 1, 1,734 MiB more held), by the switch's design where its history ends, the place the next turn of that conversation would resume (the 100k turns resumed at 99,644; production's rows of the same prime count 99,647 tokens). The probe never sends that next turn: every repetition is the same base with a new suffix, re-primed in between, so the kept state is never used and only its cost is measured. A growing conversation is the instrument (each turn the previous prompt, its reply and a new message: `longctx.py chain`, now with `--salt` so production can be sent a conversation it has not cached). Until it is measured that way the switch stays off; whether the cut and keep cost an extra prompt step is read from the `TF_GLM_PROF` prompt lines of the same turns.
 
 **Production's rows in `queue68` are void as a comparison.** They reused queue67's seeds, and production's prefix cache is persistent: its 100k turns were served with 101,632 and 101,696 of 101,682 to 101,713 prompt tokens cached (queue67: 99,584 on first sight), its 250k turns with 252,608 of about 252,610, so they measure a turn production had already seen (227 to 300 ms and 369 to 387 ms). Queue67's production rows (section 48) stay the comparison; a production leg must use prompts production has not been sent before. The Zig boots start empty, so their rows are unaffected.
+
+## 50. The wins together, the recipe against production on every leg, and where the prompt pass loses its time
+
+2026-11-18 22:44 to 2026-11-19 05:39 UTC, `scripts/queues/queue71.sh` and `queue72.sh`, image `glm53-zig:v129v` (stack tree `5137a5ef75ab`), every Zig boot `--parallel 4 --context 1048576` (production's deployed shape), `KNOBS=measured`, `KEEP=1`. Production served the production legs of both queues, was stopped on all three ranks from 22:50 to 02:37 and from 02:56 to 05:20, and was restored healthy both times. Rows: `docs/audit-2026-11-12/queue-rows/` (committed with this section, with the rows of queues 66 to 69); scores: `scripts/queue-scores/score71.py` and `score72.py` (`score68.py` and `score69.py` for section 49). Every figure below is printed by those scripts.
+
+**The prompt-pass switches are exact on long prompts** (`queue71` A: eight boots, one seed on every boot, cold 8k / 32k / 120k twice a boot). Each of the six prompts has one reply digest across all eight boots, so `ONEPASS_PIPE`, `CHUNK_SOLO=4096`, both together, and both with `TF_GLM_OVN_EXCHANGE_KB=4096` reproduce the recipe's replies. Cold first token against the recipe (its two boots 4,270 and 4,207 ms, 16,683 and 16,466 ms, 63,040 and 62,126 ms):
+
+| arm | 8k | 32k | 120k |
+|---|---:|---:|---:|
+| `ONEPASS_PIPE` (one boot) | -5.30% | -6.74% | -6.95% |
+| `CHUNK_SOLO=4096` (one boot) | -0.68% | -3.71% | -4.46% |
+| both (two boots) | -5.26% | -9.57% | -10.53% |
+| both and `EXCHANGE_KB=4096` (two boots) | -5.14% | -9.46% | -10.60% |
+
+`EXCHANGE_KB` adds nothing and stays out. Section 49's two-boot rows for the two switches alone agree (-4.73 / -5.84 / -6.51% and +0.08 / -2.67 / -3.64%).
+
+**Decode at depth and the draft rule** (`queue71` B and C, two boots each arm, replies equal in every cell). `TF_GLM_INDEX_CUDA=all` (decode windows on the index kernels) and `TF_GLM_OVN_DECODE_INDEX=33` against the recipe on a ~100k and a ~250k context (`scripts/longdec_ids.json`, two requests each) read -0.2% to +1.0% for `all` (six of eight cells above the recipe's boots) and -0.9% to +0.5% for `33`; on the greedy ids at 1 / 2 / 4 clients `all` reads +2.0 / +1.6 / +0.7% (prose) and +1.2 / +1.2 / +0.7% (code). The recipe's own two boots on the one-stream prose cell read 79.12 and 79.54 tok/s in that block and 81.03 and 80.81 in the next, so a gain of +2% is inside the boot-to-boot spread; both stay out and `all` gets more boots later. `TF_GLM_DFLASH2_WIN=1024` loses on code at depth (-1.5% and -2.5% at 100k, -1.2% and -1.7% at 250k): out. `TF_GLM_OVN_PLAIN_MARGIN=100` leaves every round count unchanged, greedy and sampled, and decode within -1.3% to +1.2%: inert, out. `TF_GLM_OVN_DRAFT_NOISE=1` leaves greedy streams alone (rounds equal, decode -0.1% to +0.8%) and on sampled streams (temperature 1.0, top-p 0.95, top-k 20, seed 7, production's agent sampling, `scripts/streams_sampled.py`) takes fewer rounds with the same replies: prose 438 to 435, 1,107 to 1,092 and 2,154 to 2,109 rounds at 1 / 2 / 4 clients, decode +0.74 / +1.76 / +2.96%; code 219 to 216, 465 to 459 and 1,041 to 1,035 rounds, +0.74 / +0.57 / +0.44%. It joins the recipe.
+
+**The wins together against the recipe** (`queue72`: the candidate is `NO_COPY`, `MM_DECTILE=100000`, `SWIGLU_REDUCE`, `ONEPASS_PIPE`, `CHUNK_SOLO=4096` and `HOST_ONCE`, without `DRAFT_NOISE`; boots candidate, recipe, recipe, candidate, adjacent pairs; production's prompt ids, three waves a cell):
+
+| level | prose pairs | mean | code pairs | mean |
+|---|---|---:|---|---:|
+| 1 | +2.59 +0.54% | +1.57% | +10.25 +10.50% | +10.37% |
+| 2 | +0.11 +0.63% | +0.37% | +3.55 +4.23% | +3.89% |
+| 4 | +0.76 +0.47% | +0.62% | +3.95 +3.94% | +3.95% |
+| 6 (4 slots, 2 queued) | -2.30 -4.96% | -3.63% | +5.54 +11.91% | +8.73% |
+| 8 (4 slots, 4 queued) | +7.66 -0.89% | +3.38% | -0.29 +4.17% | +1.94% |
+
+Replies and prose rounds are equal at every level (381, 1,029, 1,980 rounds at 1 / 2 / 4 clients) and the candidate takes fewer code rounds (216 to 195, 450 to 411, 1,002 to 930). At 1, 2 and 4 clients both candidate boots are above both recipe boots on every cell. The 6 and 8 cells at the deployed shape queue requests behind four slots, which makes them noisy: the recipe's two boots differ by 7.9% on prose at 6 clients (113.48 and 122.48) and production's two runs by 4.0%, so those rows decide nothing. The fresh `--parallel 6` and `--parallel 8` pairs of section 49 decide those levels for `NO_COPY`, `MM_DECTILE`, `SWIGLU_REDUCE` and `ONEPASS_PIPE`; `CHUNK_SOLO` and `HOST_ONCE` have no such pairs. The 24 prompts one at a time: the candidate over the recipe 1.0148 (95% interval 1.0052 to 1.0273), faster on 18 of 24, code-like 1.0351, prose-like 1.0027, every reply equal across the four Zig boots; decode 116.8 s on both recipe boots against 115.0 and 115.8 s on the candidate's, and 3,141 and 3,140 rounds against 3,117.
+
+**Where the Zig stack stands against production** (`queue72`; production before the window and again after it, the Zig candidate on two boots, the same prompt ids; ratio above 1 is Zig faster):
+
+| decode, aggregate tok/s | production | Zig | Zig over production |
+|---|---:|---:|---:|
+| greedy prose, 1 stream | 80.19 | 81.72 | 1.019 |
+| greedy prose, 2 | 88.40 | 84.86 | 0.960 |
+| greedy prose, 4 | 116.56 | 112.43 | 0.965 |
+| greedy code, 1 | 115.40 | 114.14 | 0.989 |
+| greedy code, 2 | 145.19 | 136.65 | 0.941 |
+| greedy code, 4 | 183.90 | 166.61 | 0.906 |
+| sampled prose, 1 / 2 / 4 | 82.47 / 85.43 / 116.25 | 76.62 / 79.96 / 104.31 | 0.929 / 0.936 / 0.897 |
+| sampled code, 1 / 2 / 4 | 108.35 / 139.30 / 173.53 | 115.61 / 140.48 / 158.62 | 1.067 / 1.008 / 0.914 |
+
+The queued cells at 6 and 8 clients read 0.974 and 0.978 (prose) and 1.008 and 0.897 (code), within the noise above. The sampled rows are the candidate without `DRAFT_NOISE` and the two serves draw different replies, so they compare speed only; `DRAFT_NOISE` is worth +0.4% to +3.0% there (`queue71` C). The 24 prompts one at a time: Zig over production 0.9803 (95% interval 0.9660 to 0.9941, faster on 7 of 24), code-like 0.9787, prose-like 0.9813, the rounds 3,117 against production's 3,116, so what is left is round time. Decode at ~100k and ~250k (two requests each, `scripts/longdec_ids.json`): prose 71.7 and 68.8 tok/s against production's 79.1 and 73.7 (0.906 and 0.932), code 119.7 and 111.8 against 114.8 and 117.1 (1.043 and 0.954).
+
+| prompt work | production | Zig | Zig over production |
+|---|---:|---:|---:|
+| cold first token, 8k | 2,908 ms | 4,007 ms | 1.378x |
+| cold first token, 32k | 11,054 ms | 14,977 ms | 1.355x |
+| cold first token, 120k | 41,904 ms | 55,910 ms | 1.334x |
+| a growing conversation (~1,300 new tokens a turn), ~113k, turns 2 to 8 | 668 ms | 1,308 ms without request starts, 844 ms with | 1.96x, 1.26x |
+| the same at ~284k, turns 2 to 6 | 744 ms | 1,420 ms, 910 ms | 1.91x, 1.22x |
+| 596k conversation after a SIGKILL of every rank (disk tier), prefill | 12.80 s | 12.81 s | 1.00x |
+| the same after a clean restart, beside 3 decoding streams | 12.90 s | 15.79 s | 1.22x |
+| the same conversation, turn 2 from RAM | 12.54 s | 12.69 s | 1.01x |
+| 596k conversation cold, no other stream (the disk-tier window's reference boot) | 224.68 s (its `tier_chain.sh` run, load not recorded) | 291.26 s | 1.30x |
+
+The first three rows and the two growing conversations are measured today; the 596k rows are the disk-tier window's own (`docs/audit-2026-11-12/queue-rows/queue72/disktier-f72/table.md`: 17 of 17 resumed replies equal a cold server's, no failed check; production's figures as `scripts/disk_table.py` carries them from its `tier_chain.sh`, taken on an earlier day). The recipe without the wins read 1.46x, 1.50x and 1.51x of production's cold first token at 8k, 32k and 120k (`queue71`'s recipe boots against today's production); with them it reads 1.38x, 1.36x and 1.33x. A restart no longer costs anything against production. What remains is prompt speed (cold, and the new tokens of a warm turn: with request starts 1,274 new rows at about 455 us a row against production's 1,306 at about 345 is 131 ms of the 176 ms between 844 and 668 ms, an estimate that assumes a 1,300-row pass costs what a 4,096-row pass does a row), decode at two to four streams, and sampled decode.
+
+**Request starts, on the instrument that sends the next turn** (`longctx.py chain`, with `--salt` so production is sent a conversation it has not cached; production's first turn 39.5 and 39.8 s at ~113k tokens, 102.2 and 102.7 s at ~284k). At ~113k, without request starts a turn re-reads from the last 2,048-row grid point: 1,330 to 3,112 uncached tokens a turn (mean 2,208) against production's mean 1,306 on its 64-token grid, and the first-token times scatter with where the grid falls (811 to 1,834 ms). With them a turn re-reads 1,242 to 1,330 tokens (mean 1,274) and the times are steady (828 to 878 ms): -35.5% a turn at ~113k (464 ms) and -35.9% at ~284k (510 ms; uncached 1,248 to 1,292 against 1,566 to 3,148). The cost is on the cold prime: +7.3% at both sizes (56.3 against 52.4 s and 144.0 against 134.2 s), and on cold prompts +4.1% at 8k, +6.5% at 32k and +7.2% at 120k. The warm probe's +4.9% and +12.4% at ~250k (idle and beside three streams, section 49) are a separate cost: the state kept for a next turn that the probe never sends. The break-even is 8.3 turns after a cold ~113k prime and 19.1 after a cold ~284k one. The prompt cache holds about the same bytes in both arms (7,304 to 7,970 MiB with 8 to 12 states without request starts, 6,406 to 8,014 MiB with 4 to 7, of a 9,1xx MiB budget). **Why the cold prime costs 7%, as far as it is known:** the cold means with request starts (4,170, 15,956 and 59,919 ms) are within 1% of the `CHUNK_SOLO`-only arm of `queue71` (4,210, 15,959 and 59,794 ms) and 3 to 4% above its `ONEPASS_PIPE`-only arm (4,014, 15,457 and 58,235 ms). `cuda_prompt_cuts.zig`'s `stepRows` refuses a solo pass for any request that has a cut ("a solo pass would step over a request start"), and a chat prompt has a message start after row 0, so with request starts a prompt runs in 2,048-row steps and loses solo's 3.7 to 4.5%. Whether `ONEPASS_PIPE`'s gain survives request starts is not measured. A solo step that ends at the next cut instead of stepping over it would keep solo; the chunk plan has to stay a deterministic function of the request's cuts, because the resume check (`resumes`, and `learn-starts`' `below` digest) compares plans, so the change needs its own host tests and a bit-exactness run before it is trusted.
+
+**Where a 4,096-row prompt pass loses its time** (`queue72`'s capture, rank 0, `scripts/nsys-prefill.sh` with `prefill_stages.py`: a cold 8,192 and a cold 32,768 prompt on the candidate, 40,989 rows; `docs/audit-2026-11-12/queue-rows/queue72/pf-f72/`). Passes 1 to 7 of the 32k prompt take 1,843 to 1,887 ms, 450 to 461 us a row (the client's first token for that prompt under nsys, 15,081 ms, equals the unprofiled probes'); its first pass shows 5.3 s of idle because the capture script leaves a 5 s pause between its two prompts. In a steady pass the main stream is idle 216 of 1,843 ms (11.7%), waiting on the side stream's exchanges (the partials exchange 22 us a row, the glued rows' share 30), while the side stream's NCCL kernels run 506 to 513 ms of the pass, 198 to 205 ms of it with the main stream idle; over the capture they are 123.9 us a row in 14,778 launches of mean 344 us. Kernel time a row, rank 0, against production's own accounting of a 4,096-row chunk at 32k (`HuntPrefill/REPORT.md` in the Python repo: derived from an nsys of an older image, the indexer taken as sharded, not taken on today's image, so a lead and not a verdict):
+
+| kernel family | ours, us a row | production's accounting |
+|---|---:|---:|
+| dense prompt matmul (`glm_mm4_128`) | 110.7 | 96.5 |
+| experts gate/up, down | 74.7, 53.8 | 83.8, 60.1 |
+| combine | 32.9 | 32.1 |
+| KDA (`kda_step`, `kda_prep`) | 32.2 | 27.7 |
+| sparse attention | 20.1 | 20.1 |
+| `absorb_q` and `expand_v` | 33.4 | 6.6 |
+| hc post and partial | 21.2 | 17.2 |
+| router | 6.1 | 4.8 |
+| NCCL send and receive (side stream) | 123.9 | 113.2 |
+| main stream waiting on exchanges | about 52 | 5 to 12 (1.3 to 3.2% of 375) |
+
+Added up, the kernel rows of our column exceed production's by 36 us a row (385 against 349) and the waits by 40 to 47, which accounts for the 450 to 470 us a row we run at against the 375 of that accounting. Production's present figure is about 345 us a row (cold 32k: four requests, 343.5 to 348.3), a further 30 us a row that this comparison cannot see. Three leads follow from the table, none yet tried here. (1) The exchanges. We move about the bytes production moves (NCCL kernel time a row 123.9 against 113.2) and leave the main stream waiting for them where production's accounting shows almost no wait. Our boot posts each exchange in **8 row pieces** (`glm: a prompt chunk's exchanges in 8 row pieces`: upstream's default under `CHUNK_SOLO=4096` with `ROCE_MULTI=1`, `cuda_ranks.zig`) and production in 2 (its `HuntComms` report), and upstream's recipe documents solo gaining 7.3 to 8.4% on cold prompts without the RoCE wire against 3.2 to 3.4% with it (`docs/recipes/glm-5.3-flash-cuda.md` at the pin). The piece count changes scheduling only (`forward.pieced_layers`: same kernels and bits as unpieced), so a sweep is bit-exact; `ROCE_MULTI` buys +1.4 to +1.8% decode at 1 to 4 streams (section 21), a trade to price in seconds a turn. (2) `absorb_q` and `expand_v` (`glm_glue_latent.cuh`) are CUDA-core ports of production's Triton reductions in the same accumulation order, one row a pass of the loop with two block syncs a row, 33.4 us a row against production's 6.6; the file's own note says rows per block change no bits, so a version that takes several rows through each load of the weights and each sync would keep every bit. (3) The dense matmul (`glm_mm4_128`) is 14% above production's (110.7 against 96.5).
+
+**What the recipe takes from this.** `DEFS` gains the seven switches measured above as wins (`NO_COPY`, `MM_DECTILE=100000`, `SWIGLU_REDUCE`, `ONEPASS_PIPE`, `CHUNK_SOLO=4096`, `HOST_ONCE`, `DRAFT_NOISE`): 23 in all, none changing a reply on any cell here. Fresh 6 and 8 stream pairs exist for the first four (section 49); `CHUNK_SOLO` (a prompt step while no stream decodes), `HOST_ONCE` (a request's render) and `DRAFT_NOISE` (sampled streams) have none, so those cells are the next window's, with the exact final set against the recipe. Out: `EXCHANGE_KB`, `INDEX_CUDA=all`, `DECODE_INDEX=33`, `DFLASH2_WIN=1024`, `PLAIN_MARGIN=100`. Request starts stay off in the recipe until `patches/learn-starts` has its GPU check (the disk tier refuses the pair without it) and until the cold-prime cost has a fix or the owner takes the trade (8.3 turns to break even after a ~113k cold prime). The image with `learn-starts` is `glm53-zig:v129w`: the `v129v` tree plus that package, tree `7c8a05f9cf72`.
 

@@ -1,0 +1,8 @@
+eb3e755ec5178deaa358232bfa15216f04a3a77ef022507289bc77f20896338c  nsys-prefill.sh
+87cee4a7cf4171c3078a15ef3b7eae66358cb280bdec7367fa270084b831fa54  $HOME/work/glm53-zig/zig-tp3.sh
+2f6058712f52da45648cae5f306eb9a79ed12a3454e06fd667f73deb8d333385  $HOME/work/glm53-zig/serve.sh
+5b7998c0d1df816c1baa7d9ad6fa06631f6616d6884a8fef867b7809c009fd7d  $HOME/work/glm53-zig/longctx.py
+8d3f2f844e3b1d7f953ace2fa5ccdacfb6d6ade8e959edde7fc660ded47e3d95  $HOME/work/glm53-zig/prefill_stages.py
+45693b7834ac39d2da607aa5b6fa4b56f748e8ff5efc48f40bbd33afcd8a1311  $HOME/work/glm53-zig/prompt_trace.py
+sha256:1e835babe80b55ded41cbe1ad832dc7cb990266fae2ac6f515eb74463688af0c [glm53-zig:v129v]
+TAG=f72 IMAGE=glm53-zig:v129v KNOBS=measured P=4 CTX=1048576 SIZES='8192 32768' WARM=4096 XENV='-e TF_GLM_OVN_NO_COPY=1 -e TF_GLM_OVN_MM_DECTILE=100000 -e TF_GLM_OVN_SWIGLU_REDUCE=1 -e TF_GLM_OVN_ONEPASS_PIPE=1 -e TF_GLM_CHUNK_SOLO=4096 -e TF_GLM_OVN_HOST_ONCE=1'

@@ -1,0 +1,7 @@
+87cee4a7cf4171c3078a15ef3b7eae66358cb280bdec7367fa270084b831fa54  $HOME/work/glm53-zig/zig-tp3.sh
+2f6058712f52da45648cae5f306eb9a79ed12a3454e06fd667f73deb8d333385  $HOME/work/glm53-zig/serve.sh
+5b7998c0d1df816c1baa7d9ad6fa06631f6616d6884a8fef867b7809c009fd7d  $HOME/work/glm53-zig/longctx.py
+c9f5111d64598122c46f6917ebec4f98e5fd1e4fdb5544d5667a985bc63874b2  $HOME/work/glm53-zig/disk.py
+57354796bbe3cc81f319e29d61e771e4c3f4751df08f9bea4442d89a837bbde3  $HOME/work/glm53-zig/disk_table.py
+44292faf3261b946e61f88c2446bdaba05f14b65d2bc21dffdf065b2c3e4b464  queue-disk-tier.sh
+sha256:1e835babe80b55ded41cbe1ad832dc7cb990266fae2ac6f515eb74463688af0c [glm53-zig:v129v] 3e010cb4e5e34a78

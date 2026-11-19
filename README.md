@@ -35,34 +35,26 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
 - `AGENTS.md` - the rules of this repo: how a patch is cut, gated, measured and landed, what a version bump of
   upstream requires, and how a change goes upstream. `.omp/RULES.md` carries the hard order for upstream work.
 
-## State (2026-11-15)
+## State (2026-11-19)
 
-Base: upstream v1.2.9 (`6b9de695`) plus the 32 patches of `patches/engine/`, then `patches/pr1411/` (GLM disk tier, upstream PR #1411 re-seated on the series) and `patches/cache-salt/` (upstream PR #3222); trees `e02b8a89`, `3b06d167`, `27a87244`. Gated on a Spark: check, fmt, `test-cuda-host` (only the two aarch64-environment tests the pristine v1.2.9 fails too), lean 0 new. **The tables below were measured on the v1.2.7 stack** (36 patches, section 34 of `docs/OVERNIGHT-2026-11-12.md`); the v1.2.9 stack has not been measured on a GPU yet, and four of our patches are now upstream's (section 37). Decode in tok/s at 1, 2, 4, 6 and 8
-streams, one fresh boot a level, 400 tokens a stream. `TF_GLM_KDA_PAD=1` is the setting production runs and it changes
-numerics, so the pad rows are the like-for-like ones against production; replies are byte-identical between the rows of
-one group.
+Base: upstream v1.2.9 (`6b9de695`) plus the 35 patches of `patches/engine/`, then `patches/pr1411/` (GLM disk tier, upstream PR #1411: its head and the batched restore) and `patches/cache-salt/` (upstream PR #3222); image `glm53-zig:v129v`, tree `5137a5ef75ab`. `patches/learn-starts/` (the disk image carries a request-start chunk digest, so `TF_GLM_REQUEST_STARTS=1` runs with `--learn-conversations`; tree `7c8a05f9cf72`) passes its gates on a gate host and waits for its GPU check. Gates: check, fmt, `test-cuda-host` (the only failure is the pristine v1.2.9's own `cli_config_test` case), lean 0 new. The recipe is `KNOBS=measured` in `scripts/serve.sh`: 23 switches, each measured against the recipe with the replies equal (`docs/KNOBS.md`).
 
-| serve | 1 | 2 | 4 | 6 | 8 |
-|---|---:|---:|---:|---:|---:|
-| production (Python engine; its own rendering of the bench prompts; `--parallel 4` at every level, so at 6 and 8 streams requests wait for a slot) | 81.73 | 89.22 | 117.98 | 114.78 | 131.28 |
-| upstream v1.2.7, no pad | 50.16 | 58.57 | 79.23 | 106.37 | 129.66 |
-| this series, switches off | 51.55 | 60.88 | 83.11 | 111.63 | 137.43 |
-| this series, pad | 64.57 | 73.71 | 93.66 | 126.18 | 153.75 |
-| this series, pad + drafter knobs | 69.78 | 78.17 | 98.83 | 133.80 | 160.25 |
-| this series, pad + the seven-knob set (`KNOBS=measured`) | 70.17 | 78.71 | 99.40 | 134.31 | 165.26 |
-| the same plus the RoCE wire at 4 streams or fewer (mean of two cells; 6 and 8 as the row above) | 71.54 | 79.65 | 101.00 | 134.31 | 165.26 |
-| the recipe as `serve.sh` defines it (`KNOBS=measured`: those seven, production's chain rule, the wire at 4 streams or fewer; mean of two cells) | 71.09 | 80.35 | 100.94 | 134.20 | 163.36 |
-| **the same recipe on production's prompts** (`scripts/bench-client.sh`: its rendering of the four bench prompts as ids; mean of two cells) | 78.71 | 80.81 | 105.47 | 139.26 | 172.67 |
-| **that recipe plus production's routed-expert block order** (`TF_EXL3_DEC_ORDER=1`, now in `DEFS`; mean of two cells) | 78.68 | 80.68 | 107.30 | 141.09 | 173.52 |
-| **the whole recipe launched through `serve.sh`** (`KNOBS=measured` on the 34-patch series: patch 0034's `TF_GLM_OVN_X3_*`, the block order, the chain rule, the wire at 4 streams or fewer; mean of two runs) | 80.47 | 83.43 | 109.46 | 144.32 | 178.35 |
+**Against production on the Sparks (the Python engine)**, at its deployed shape (`--parallel 4 --context 1048576`, so 6 and 8 clients queue), the same prompt ids, 2026-11-19 (`docs/OVERNIGHT-2026-11-12.md` section 50; the Zig rows are the recipe's six prompt and decode switches without `DRAFT_NOISE`, two boots; production before and after the window). Ratio above 1 is Zig faster.
 
-**Read this first (2026-11-14): the rows below are decode at a smaller context, and the Zig serve does not yet replace production.** At the
-shape production runs (`--parallel 4 --context 1048576`) the recipe's decode with 4, 6 and 8 clients is 0.86x, 0.90x and 0.87x of
-production's; cold first token on long prompts is 1.2x to 1.7x slower (8k 4.6 s against 2.8 s, 120k 67 s against 43 s); the 600k-token
-conversation takes 346 s cold against 225 s; and a conversation does not survive a restart (GLM refuses `--spill-gib` and
-`--snapshot-dir`), refilling in 378 s where production resumes in 12.8 s. `docs/OVERNIGHT-2026-11-12.md` section 29 has the table; section 30 (patch 0035) removes a context-sized cost from every request start (+10.4% four-stream decode at 1M), and section 32 measures upstream PR #1411's disk tier on this triangle (`patches/pr1411/`): conversations survive a SIGKILL of every rank and resume in 15 to 18 s of prefill instead of 378 s, every reply equal to a cold server's.
+| decode, aggregate tok/s | production | Zig | Zig over production |
+|---|---:|---:|---:|
+| greedy prose, 1 / 2 / 4 streams | 80.19 / 88.40 / 116.56 | 81.72 / 84.86 / 112.43 | 1.019 / 0.960 / 0.965 |
+| greedy code, 1 / 2 / 4 streams | 115.40 / 145.19 / 183.90 | 114.14 / 136.65 / 166.61 | 0.989 / 0.941 / 0.906 |
+| sampled prose, 1 / 2 / 4 streams | 82.47 / 85.43 / 116.25 | 76.62 / 79.96 / 104.31 | 0.929 / 0.936 / 0.897 |
+| sampled code, 1 / 2 / 4 streams | 108.35 / 139.30 / 173.53 | 115.61 / 140.48 / 158.62 | 1.067 / 1.008 / 0.914 |
+| the 24 prompts one at a time | 113.1 s of decode | 115.0 and 115.8 s | 0.980 |
 
-The rows above the last three send our server's own rendering of the bench prompts, which is 40 tokens for the first prose prompt where
-production renders 33, so the two serves answer different text and the comparison is not like for like (`docs/OVERNIGHT-2026-11-12.md`
-section 23). On production's own prompt tokens the recipe as `serve.sh` defines it is -1.5% at one stream, -6.5% and -7.2% at two and four, and shows +25.7% and +35.9% at six and eight, which is not a like-for-like win; cells from different measuring windows differ by up to 3%, so these are about, not exact. The six and eight stream cells compare unequal serves: our rows are fresh boots with `--parallel` equal to the stream count (true 6 and 8 slots), production's are one `--parallel 4` serve with two or four requests queued; and our boots default to `--context` 262144 at two to six streams where production runs 1048576 at `--parallel 4`, so only the one, two and four stream cells are comparable, and only for decode. The rest of
-the gap is in `docs/OVERNIGHT-2026-11-12.md` sections 11 to 25 and `docs/audit-2026-11-12/round-structure.md`.
+| prompt work | production | Zig | Zig over production |
+|---|---:|---:|---:|
+| cold first token, 8k / 32k / 120k | 2.9 / 11.1 / 41.9 s | 4.0 / 15.0 / 55.9 s | 1.38x / 1.36x / 1.33x |
+| a growing conversation, ~113k, turns 2 to 8 (without request starts, with) | 668 ms | 1,308, 844 ms | 1.96x, 1.26x |
+| the same at ~284k, turns 2 to 6 | 744 ms | 1,420, 910 ms | 1.91x, 1.22x |
+| 596k conversation after a SIGKILL of every rank (disk tier), prefill | 12.80 s | 12.81 s | 1.00x |
+| the same after a clean restart, beside 3 decoding streams | 12.90 s | 15.79 s | 1.22x |
+
+At one stream decode is level with production (0.93 to 1.07 of its tok/s over the four decode rows); at two and four streams it is 0% to 10% behind (0.897 to 1.008), and a conversation survives a restart at parity. What is left is prompt speed: a cold prompt costs 1.33x to 1.38x, a warm turn 1.26x with request starts (which are off in the recipe until the disk tier's check of them and a 7% cold-prime cost are settled), and the sampled and two-to-four stream decode cells above. The profile of a 4,096-row prompt pass (section 50) puts the time in the exchanges between ranks (we leave the main stream waiting about 11.7% of a pass for them), in two attention helper kernels that step through rows one at a time, and in the dense matmul. The 6 and 8 stream cells at this shape queue requests and vary by 4% to 8% between identical boots, so they decide nothing; the fresh `--parallel 6` and `--parallel 8` pairs are in sections 48 and 49. Tables measured on the v1.2.7 stack are in sections 11 to 41.
