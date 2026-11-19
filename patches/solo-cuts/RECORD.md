@@ -54,6 +54,11 @@ Measured on the shared gate host (x86_64, 16 threads) with `scripts/spark-gates.
   `7708651f40d6`, 41 patches, before engine 0036 joined): `check-native-cuda-host` and `zig fmt` rc 0; lean 341 problems
   against 341 on the pristine pin, 0 new; `test-cuda-host` 3,145 of 3,167 passed, 21 skipped, 1 failed, `cli_config_test`'s
   `serve --config` case, which fails on the pristine v1.2.9 itself.
+- Full run `sg-20261119-101335`, the pristine pin (tree `4be51cc6beef`) against the stack of 42 patches (engine 0001 to 0036,
+  pr1411, cache-salt, learn-starts, solo-cuts; tree `fc3526cde368`, the id this record expects): `check-native-cuda-host`,
+  `compile-cuda-tests`, `test-glm-ring-host`, `test-glm-logprobs-host`, `test-rows-host` and `fmt` rc 0 on both,
+  `test-glm-onepass-order-host` rc 0 on the stack (not a step of the base); `test-cuda-host` rc 1 on both with the same one
+  failing name, 0 new; lean base 6,454 files and 341 problems, head 6,517 files and 341 problems, 0 new. Verdict PASS.
 - Eight mutants of this patch, each applied in place of it on the same stack and run through `test-cuda-host`. Each fails
   exactly the tests named for it, plus the pristine pin's own case, and nothing else:
 

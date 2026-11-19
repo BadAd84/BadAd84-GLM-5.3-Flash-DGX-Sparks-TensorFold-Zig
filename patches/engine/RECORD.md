@@ -101,8 +101,10 @@ tree `bb881628a1995a58308c64c44a9522e9e3c153d2`; pr1411 makes `da6fb412b41596430
 after the packages). On the shared x86_64 gate host, `scripts/spark-gates.py iter` on the 41-patch stack without
 solo-cuts got `check-native-cuda-host` 7 of 7 steps rc 0, `fmt` rc 0, `test-cuda-host` 6,904 of 6,938 tests passed with
 only the base's own `cli_config_test.test.serve --config` name failing, and lean 341 problems against the base's 341,
-0 new. An image built from that tree on spark1 with nvcc sm_121 compiled the glue fatbins and `tf-cuda-test`. No GPU
-has run the check yet, so its verdict on a GB10 is still to come.
+0 new. An image built from that tree on spark1 with nvcc sm_121 compiled the glue fatbins and `tf-cuda-test`. With all the
+packages (42 patches, tree `fc3526cde368`) a full run, `sg-20261119-101335`, passes against the pristine pin: every step rc 0
+but `test-cuda-host`, which fails only the base's own name, and lean 0 new. No GPU has run the check yet, so its verdict on a
+GB10 is still to come.
 
 Every switch still defaults off and is a row of the `.glm` scope of `zig/src/platform/environment.zig` (TF_GLM_OVN_*
 through `cuda/ovn.zig`), with a line in `docs/environment.md`. Every kept patch keeps its own header (source, what
