@@ -61,6 +61,9 @@ pin by `scripts/apply.sh`, `patches/pr1411/apply.sh` and `patches/cache-salt/app
 With `patches/engine/0036` in the series (2026-11-19) the base is `33247f87b97b2762424a0e5390cf86044be13268` (40
 patches) and this package applies to it unchanged and makes `85d45758d73b66f75f6fbe38b0c58a9cde586008` (41 patches).
 
+With `patches/engine/0037` as well (2026-11-19) the base is `4a72871f89fac64631c9b6701d0d121ed8dde79a` (41 patches) and this
+package applies to it unchanged and makes `098a8968dc83c191e71c67bc3a9a13da9545a52c` (42 patches).
+
 Apply after the other three: `bash patches/learn-starts/apply.sh --check WORK/tree` writes nothing and prints the
 tree it would make; without `--check` it applies the patch to the tree. Hashes: `SHA256SUMS`.
 

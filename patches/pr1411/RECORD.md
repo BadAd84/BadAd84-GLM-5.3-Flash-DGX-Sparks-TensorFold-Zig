@@ -182,3 +182,7 @@ v129b-comb fmt rc=0
 The series is then 36 patches, tree `bb881628a1995a58308c64c44a9522e9e3c153d2`; this package applies to it unchanged
 and makes `da6fb412b415964303c93c18d7da9f98626c9b85` (`git write-tree` on a temporary index from the pin).
 `patches/cache-salt` then makes `33247f87b97b2762424a0e5390cf86044be13268`.
+
+With `patches/engine/0037` as well the series is 37 patches, tree `d674e199cf6d97f7ac84a374c83153baabc911ed`; this package still
+applies unchanged and makes `e767d7cbdd82993dc2a61948b011750df5f69322`, and `patches/cache-salt` then makes
+`4a72871f89fac64631c9b6701d0d121ed8dde79a`.

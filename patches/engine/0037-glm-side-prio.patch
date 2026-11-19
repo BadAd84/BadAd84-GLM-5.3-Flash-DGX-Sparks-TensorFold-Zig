@@ -1,0 +1,120 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: TF_GLM_OVN_SIDE_PRIO, the prompt exchanges' side stream at the highest priority without a pair
+
+A prompt chunk's pieced exchanges (partials, glue, shares) run on a side stream, cuda_forward_pieces.Pieces.side. Pieces.init
+created it at the highest priority only for a pair (TF_GLM_PROMPT_PAIR, whose twin a server with solo passes does not hold);
+every other server, the recipe's included (TF_GLM_CHUNK_SOLO=4096), ran it at the default priority, so its NCCL and glue
+kernels were scheduled on equal terms with the main stream's grids. On the GB10 triangle the main stream sits idle about 11.7%
+of a 4,096-row pass waiting for those exchanges.
+
+TF_GLM_OVN_SIDE_PRIO=1 gives the stream the pair's priority without a pair: Pieces.high(pair) is `pair` or the switch, and
+Pieces.init takes its result. Scheduling only: no kernel, buffer, event or order changes, so the bits are the same. Default
+off: with the switch unset Pieces.high(pair) is `pair`, as before. The engine logs the priority at boot when the switch, not a
+pair, set it. Production's own overlap stream has the same choice (TF_GLM_OVERLAP_PRIORITY, normal by default, with the note
+that decode rounds after a high-priority prompt were about 0.5 to 1% slower), so decode is measured with it too.
+
+Host test: the choice over pair and the switch (cuda_side_prio_test.zig, listed in cuda.zig's test block). The registry row
+follows TF_GLM_OVN_LATENT_ROWS' and the docs line follows that switch's, so patches/pr1411's environment.zig and
+docs/environment.md hunks still apply on top. Not run on a GPU yet.
+
+New here, not a re-seat: written on this series at v1.2.9.
+
+---
+
+diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm/cuda_forward_pieces.zig
+--- a/zig/src/families/glm/cuda_forward_pieces.zig
++++ b/zig/src/families/glm/cuda_forward_pieces.zig
+@@ -36,10 +36,15 @@
+     shared: [max_pieces]cuda.Event, // split: every rank's glued rows of a piece in
+     owns_side: bool = true, // a paired step's second chunk (initTwin) runs on the first's side stream
+ 
+-    /// With `pair` (TF_GLM_PROMPT_PAIR) the side stream runs at the highest priority, ahead of the main stream's grids.
+-    pub fn init(d: *const cuda.Driver, count: usize, pair: bool) !Pieces {
++    /// Whether the side stream runs at the highest priority: with a pair (TF_GLM_PROMPT_PAIR) or TF_GLM_OVN_SIDE_PRIO.
++    pub fn high(pair: bool) bool {
++        return pair or cuda.ovn.on("SIDE_PRIO");
++    }
++
++    /// With `at_high` the side stream runs at the highest priority, ahead of the main stream's grids.
++    pub fn init(d: *const cuda.Driver, count: usize, at_high: bool) !Pieces {
+         if (count == 0 or count > max_pieces) return error.BadPieces;
+-        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
++        return make(d, count, if (at_high) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
+     }
+ 
+     /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -160,7 +160,8 @@
+         var m = try fw.Modules.load(d, ctx, block32);
+         errdefer m.deinit();
+         const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
+-        var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
++        const side_high = fw.Pieces.high(pair);
++        var pieces = try fw.Pieces.init(d, o.settings.pieces, side_high);
+         errdefer pieces.deinit();
+         if (o.settings.layers > c.layers) return error.BadLayers;
+         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
+@@ -202,6 +203,7 @@
+         errdefer e.bp.deinit();
+         if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
+         if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
++        if (world > 1 and rank == 0 and side_high and !pair) std.log.info("glm: the exchanges' side stream runs at the highest priority", .{});
+         if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+         errdefer if (e.pair) |*p| p.deinit();
+         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -60,6 +60,7 @@
+     _ = @import("cuda_images_interleave_test.zig");
+     _ = @import("cuda_pages_test.zig");
+     _ = @import("cuda_keep_seqs_test.zig");
++    _ = @import("cuda_side_prio_test.zig");
+     _ = @import("cuda_snapshot_layout_test.zig");
+     _ = @import("cuda_ranks_test.zig");
+     _ = @import("cuda_ranks_roce_test.zig");
+diff --git a/zig/src/families/glm/cuda_side_prio_test.zig b/zig/src/families/glm/cuda_side_prio_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_side_prio_test.zig
+@@ -0,0 +1,16 @@
++//! TF_GLM_OVN_SIDE_PRIO: which prompt exchanges' side streams run at the highest priority.
++const std = @import("std");
++const cuda = @import("cuda");
++const Pieces = @import("cuda_forward_pieces.zig").Pieces;
++
++test "TF_GLM_OVN_SIDE_PRIO: the side stream is at the highest priority with a pair or the switch, and not otherwise" {
++    defer cuda.ovn.fake("SIDE_PRIO", null);
++    cuda.ovn.fake("SIDE_PRIO", null);
++    try std.testing.expect(!Pieces.high(false));
++    try std.testing.expect(Pieces.high(true));
++    cuda.ovn.fake("SIDE_PRIO", "1");
++    try std.testing.expect(Pieces.high(false));
++    cuda.ovn.fake("SIDE_PRIO", "0");
++    try std.testing.expect(!Pieces.high(false));
++    try std.testing.expect(Pieces.high(true));
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -116,6 +116,7 @@
+     .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
++    .{ .name = "TF_GLM_OVN_SIDE_PRIO", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
+     .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -74,6 +74,7 @@
+ | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
+ | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
+ | `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
++| `TF_GLM_OVN_SIDE_PRIO` | Exactly `0` or `1`; default off (the prompt chunk's exchanges run on a side stream at the highest priority, ahead of the main stream's grids, as they do with `TF_GLM_PROMPT_PAIR`; the bits are the same) |
+ | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
+ | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
+ | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |

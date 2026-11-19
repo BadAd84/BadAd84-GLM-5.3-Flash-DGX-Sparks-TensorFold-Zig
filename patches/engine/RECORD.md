@@ -68,6 +68,7 @@ serve --config test; no new failing name; lean 0 new).
 | 0034 | - | glm lanes: TF_GLM_OVN_NO_COPY, a DFlash2 drafter's windows without copied continuations | `TF_GLM_OVN_NO_COPY` |
 | 0035 | - | glm cuda tests: glm-mm-ovn, the matmul launch variants against the default launch byte for byte | - |
 | 0036 | - | glm latent: TF_GLM_OVN_LATENT_ROWS, absorb_q and expand_v two and four rows a loop step | `TF_GLM_OVN_LATENT_ROWS` |
+| 0037 | - | glm cuda: TF_GLM_OVN_SIDE_PRIO, the prompt exchanges' side stream at the highest priority without a pair | `TF_GLM_OVN_SIDE_PRIO` |
 
 0033 is not a re-seat of a v1.2.7 patch: it is new here (2026-11-16), written on this base. Its row in
 `zig/src/platform/environment.zig` sits after `TF_GLM_OVN_HOST_ONCE` rather than at the end of the `.glm` rows, so
@@ -105,6 +106,20 @@ only the base's own `cli_config_test.test.serve --config` name failing, and lean
 packages (42 patches, tree `fc3526cde368`) a full run, `sg-20261119-101335`, passes against the pristine pin: every step rc 0
 but `test-cuda-host`, which fails only the base's own name, and lean 0 new. No GPU has run the check yet, so its verdict on a
 GB10 is still to come.
+
+0037 is new here as well (2026-11-19): `zig/src/families/glm/cuda_forward_pieces.zig`'s `Pieces.init` made the prompt exchanges' side
+stream at the highest priority only for a pair (`TF_GLM_PROMPT_PAIR`, whose twin a server with solo passes does not hold), so the
+recipe's server ran it at the default priority. `TF_GLM_OVN_SIDE_PRIO=1` gives it the pair's priority without a pair: `Pieces.high(pair)`
+is `pair` or the switch, and the engine passes its result to `Pieces.init` and logs the priority at boot when the switch set it.
+Scheduling only; the bits are the same, and the default path is the code as it was. The host test is `cuda_side_prio_test.zig`
+(listed in `cuda.zig`'s test block); the engine's wiring has no host test, and its boot log line is what names it on a GPU. The
+registry row follows `TF_GLM_OVN_LATENT_ROWS`'s and the docs line follows that switch's, so `patches/pr1411`'s hunks still apply on top.
+The 37-patch series is tree `d674e199cf6d97f7ac84a374c83153baabc911ed`; pr1411 and cache-salt make `4a72871f89fac64631c9b6701d0d121ed8dde79a`,
+learn-starts `098a8968dc83c191e71c67bc3a9a13da9545a52c` and solo-cuts `da12e9d259aef12d0962d27810897466b24b23e9` (43 patches; the same
+id comes out with 0037 applied after the packages). On the shared x86_64 gate host, `scripts/spark-gates.py iter` on that 43-patch
+stack got `check-native-cuda-host` 7 of 7 steps rc 0, `fmt` rc 0, `test-cuda-host` 6,908 of 6,942 tests passed (33 skipped) with
+only the base's own `cli_config_test.test.serve --config` name failing, and lean 341 problems against the base's 341, 0 new. Three
+mutants of `Pieces.high` (the switch ignored, a pair ignored, always high) each fail the new test and nothing else. No GPU has run it yet.
 
 Every switch still defaults off and is a row of the `.glm` scope of `zig/src/platform/environment.zig` (TF_GLM_OVN_*
 through `cuda/ovn.zig`), with a line in `docs/environment.md`. Every kept patch keeps its own header (source, what

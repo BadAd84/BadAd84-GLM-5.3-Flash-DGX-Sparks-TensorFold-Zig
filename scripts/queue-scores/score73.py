@@ -149,7 +149,7 @@ def secE():
 
 def secLR():
     fs = ["a73-F2", "a73-F3"]
-    for arm in ("lr2", "lr4"):
+    for arm in ("lr2", "lr4", "sp"):
         printed = False
         for kind, label in (("P", "greedy prose"), ("C", "greedy code")):
             for n in (1, 2, 4):
@@ -158,7 +158,7 @@ def secLR():
                 if not c or not all(f):
                     continue
                 if not printed:
-                    print(f"== LR. decode with TF_GLM_OVN_LATENT_ROWS ({arm}) against the recipe's two boots of block A (a73-F2, a73-F3)")
+                    print(f"== decode with {arm} (lr2 and lr4: TF_GLM_OVN_LATENT_ROWS; sp: TF_GLM_OVN_SIDE_PRIO) against the recipe's two boots of block A (a73-F2, a73-F3)")
                     printed = True
                 m = st.mean(x["agg"] for x in f)
                 print(f"{label} {n}: {arm} {c['agg']:.2f} | recipe {f[0]['agg']:.2f} {f[1]['agg']:.2f} = {pct(c['agg'], m)} | reply set equals both recipe boots': {c['sha'] == f[0]['sha'] == f[1]['sha']}")

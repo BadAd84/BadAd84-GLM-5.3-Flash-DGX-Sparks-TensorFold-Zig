@@ -39,9 +39,9 @@ What it edits (all on the tree it applies to):
 | `docs/recipes/glm-5.3-flash-cuda.md` | the request starts row: a solo pass only where no start is inside it |
 
 Base it applies to: the stack at the pin `6b9de695104b6b8b30c20458da87ac06c9480289` (v1.2.9) plus
-`patches/engine` (36 patches, series tree `bb881628a1995a58308c64c44a9522e9e3c153d2`), `patches/pr1411` (2),
-`patches/cache-salt` (2) and `patches/learn-starts` (1), tree `85d45758d73b66f75f6fbe38b0c58a9cde586008` (41 patches).
-This package makes tree `fc3526cde368da5a0a034794045c3bd5c1bf2814` (42 patches). Both ids are `git write-tree` on the
+`patches/engine` (37 patches, series tree `d674e199cf6d97f7ac84a374c83153baabc911ed`), `patches/pr1411` (2),
+`patches/cache-salt` (2) and `patches/learn-starts` (1), tree `098a8968dc83c191e71c67bc3a9a13da9545a52c` (42 patches).
+This package makes tree `da12e9d259aef12d0962d27810897466b24b23e9` (43 patches). Both ids are `git write-tree` on the
 tree built from the pin by `scripts/apply.sh` and the packages' `apply.sh` in that order, with this package's
 `apply.sh --check` giving the second. The docs hunk sits on `learn-starts`' text of the request starts row, so this
 package applies after it.

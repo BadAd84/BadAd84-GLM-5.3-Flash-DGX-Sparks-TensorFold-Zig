@@ -1,7 +1,7 @@
 #!/bin/bash
 # queue73.sh - on spark1, detached: tonight's window. KNOBS=measured: the recipe is DEFS as committed (23 switches); R is the recipe before 2026-11-19
 # (the seven new switches turned off by overrides), F the recipe. Images (queue73.env): IMG the main one (stack + learn-starts + solo-cuts + the latent
-# rows patch, off by default), IMGW the one without solo-cuts and latent rows (stack + learn-starts). Production is stopped for the window (prod-stop.sh) and
+# rows and side priority patches, both off by default), IMGW the one without solo-cuts and the two (stack + learn-starts). Production is stopped for the window (prod-stop.sh) and
 # restored at the end and by the exit trap. Every block starts only while the deadline allows. QUEUE73-DONE.
 #  E  on IMGW: the disk tier with TF_GLM_REQUEST_STARTS=1 (patches/learn-starts' GPU check): scripts/queue-disk-tier.sh f73, every resumed reply
 #     against a cold server's, after a SIGKILL and a clean restart.
@@ -12,6 +12,8 @@
 #       f1 f2        the recipe (8 row pieces under solo with the wire)
 #       p2 p3 p4 p6  TF_GLM_OVERLAP_PIECES (production runs 2)
 #       nr           TF_GLM_ROCE_MULTI=0 (pieces default 3)
+#       mw           TF_GLM_OVN_MM_WIDE=1 (the prompt linears' 128 x 128 blocks; bit-exact by patch 0035's check, last measured neutral at +-1.4%)
+#       sp           TF_GLM_OVN_SIDE_PRIO=1 (the exchanges' side stream at the highest priority without a pair); also greedy decode at 1, 2 and 4 clients
 #       rs rs0 rsnp  TF_GLM_REQUEST_STARTS=1 on IMG (solo between starts), on IMGW (no solo with a start), and on IMG with TF_GLM_OVN_ONEPASS_PIPE=0;
 #                    f1, rs and rs0 also run a growing conversation (longctx.py chain, ~113k)
 #       lr2 lr4      TF_GLM_OVN_LATENT_ROWS=2 / 4 on IMG, only when block S glm-latent-rows check printed its six PASS lines; also greedy decode at 1, 2 and 4 clients
@@ -124,6 +126,7 @@ arm() { # arm LABEL XENV [chain [dec]]: dec also runs greedy prose and code at 1
   local label=$1 xenv=$2 withchain=${3:-} withdec=${4:-}
   room || return
   boot "c73-$label" "$xenv" || return
+  [ "$label" = sp ] && echo "[q73] sp boot log: $(docker logs glm53-zig-r0 2>&1 | grep -a -c 'side stream runs at the highest priority') priority line(s)"
   facts "$label" "$xenv"
   python3 longctx.py probe 8300 --tag "$label" --n 4 --out "$OUT/f73-c/rows.jsonl" --log-cmd "$ZLOG" --seed pf73 --cold-sizes 8000,32000,120000 --warm-base 0 --reps 2 --load 0 > "$OUT/f73-c/$label-probe.out" 2>&1
   echo "[q73] $(date -u +%T) $label cold rc=$? $(grep -o '"ttft_ms": [0-9]*' "$OUT/f73-c/$label-probe.out" | cut -d' ' -f2 | tr '\n' ' ')"
@@ -137,6 +140,8 @@ arm p3 "-e TF_GLM_OVERLAP_PIECES=3"
 arm p4 "-e TF_GLM_OVERLAP_PIECES=4"
 arm p6 "-e TF_GLM_OVERLAP_PIECES=6"
 arm nr "-e TF_GLM_ROCE_MULTI=0"
+arm mw "-e TF_GLM_OVN_MM_WIDE=1"
+arm sp "-e TF_GLM_OVN_SIDE_PRIO=1" "" dec
 [ "$NEWIMG" = 1 ] && arm rs "-e TF_GLM_REQUEST_STARTS=1" chain
 BIMG=$IMGW arm rs0 "-e TF_GLM_REQUEST_STARTS=1" chain
 [ "$NEWIMG" = 1 ] && arm rsnp "-e TF_GLM_REQUEST_STARTS=1 -e TF_GLM_OVN_ONEPASS_PIPE=0"
