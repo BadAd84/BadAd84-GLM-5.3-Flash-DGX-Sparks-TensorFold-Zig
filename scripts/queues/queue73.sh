@@ -1,8 +1,8 @@
 #!/bin/bash
 # queue73.sh - on spark1, detached: tonight's window. KNOBS=measured: the recipe is DEFS as committed (23 switches); R is the recipe before 2026-11-19
 # (the seven new switches turned off by overrides), F the recipe. Images (queue73.env): IMG the main one (stack + learn-starts + solo-cuts + the latent
-# rows and side priority patches, both off by default), IMGW the one without solo-cuts and the two (stack + learn-starts). Production is stopped for the window (prod-stop.sh) and
-# restored at the end and by the exit trap. Every block starts only while the deadline allows. QUEUE73-DONE.
+# rows and side priority patches, both off by default), IMGW the one without solo-cuts and the two (stack + learn-starts). Production is stopped at the start
+# (prod-stop.sh) and stays down: it is not needed until the speed parity campaign ends. Every block starts only while the deadline allows. QUEUE73-DONE.
 #  E  on IMGW: the disk tier with TF_GLM_REQUEST_STARTS=1 (patches/learn-starts' GPU check): scripts/queue-disk-tier.sh f73, every resumed reply
 #     against a cold server's, after a SIGKILL and a clean restart.
 #  S  on IMG: the glm-latent-rows GPU check (six PASS lines expected) and a smoke boot; a failed smoke boot sends the rest to IMGW, IMG-only arms skipped.
@@ -18,8 +18,7 @@
 #                    f1, rs and rs0 also run a growing conversation (longctx.py chain, ~113k)
 #       lr2 lr4      TF_GLM_OVN_LATENT_ROWS=2 / 4 on IMG, only when block S glm-latent-rows check printed its six PASS lines; also greedy decode at 1, 2 and 4 clients
 #  B  fresh --parallel 6 and --parallel 8 boots, R F F R each: greedy and sampled prose and code at that many clients.
-# Env (queue73.env beside this file): IMG, IMGW, WORKERS, START (HH:MM UTC, default 21:00), HOURS (the deadline after the start, default 5).
-# To veto the window: touch ~/work/glm53-zig/q73.veto before START (the queue then exits without touching production).
+# Env (queue73.env beside this file): IMG, IMGW, WORKERS, HOURS (the time budget from the start, default 5).
 set -u
 G=$HOME/work/glm53-zig; cd "$G" || exit 1
 . ./queue73.env
@@ -33,15 +32,7 @@ OUT=$HOME/bench
 ROLD="-e TF_GLM_OVN_NO_COPY=0 -e TF_GLM_OVN_MM_DECTILE=0 -e TF_GLM_OVN_SWIGLU_REDUCE=0 -e TF_GLM_OVN_ONEPASS_PIPE=0 -e TF_GLM_CHUNK_SOLO=2048 -e TF_GLM_OVN_HOST_ONCE=0 -e TF_GLM_OVN_DRAFT_NOISE=0"
 agg() { tail -1 "$1" | grep -o '"agg_tok_s": [0-9.]*'; }
 stop() { bash zig-tp3-stop.sh > /dev/null 2>&1; sleep 10; }
-restore() {
-  curl -sf localhost:8888/health > /dev/null 2>&1 && return 0
-  setsid nohup bash ~/glm-v110-start.sh > "$OUT/prod-restore-q73.log" 2>&1 < /dev/null &
-  for i in $(seq 1 90); do curl -sf localhost:8888/health > /dev/null 2>&1 && return 0; sleep 10; done; return 1
-}
-finish() { stop; docker rm -f glm53-zig-r0 > /dev/null 2>&1; restore && echo "[q73] production healthy" || echo "[q73] PRODUCTION NOT HEALTHY"; echo "QUEUE73-DONE $(date -u +%T)"; }
-T0=$(date -u -d "$(date -u +%F) ${START:-21:00}" +%s); now=$(date +%s)
-[ "$now" -lt "$T0" ] && { echo "[q73] $(date -u +%T) waiting for ${START:-21:00} UTC (veto: touch $G/q73.veto)"; sleep $((T0 - now)); }
-[ -e "$G/q73.veto" ] && { echo "[q73] $(date -u +%T) vetoed, production untouched"; exit 0; }
+finish() { stop; docker rm -f glm53-zig-r0 > /dev/null 2>&1; echo "QUEUE73-DONE $(date -u +%T)"; }
 DEADLINE=$(( $(date +%s) + ${HOURS:-5} * 3600 ))
 room() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 trap finish EXIT

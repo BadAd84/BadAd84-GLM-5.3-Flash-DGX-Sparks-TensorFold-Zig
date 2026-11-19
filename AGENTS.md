@@ -74,9 +74,13 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 - **Reply digests must equal the base's** unless the owner accepts a numerics change. `TF_GLM_KDA_PAD=1` is such a
   change (the KDA stack in 4 bits, as production's `TF_GLM_DENSE=q4` has it); it is the like-for-like configuration
   for comparing with production, and its digests are compared with the base's own pad digests.
-- **Production is down only inside a window the owner opened.** A window stops production
-  (`~/glm-v110-stop.sh`) and both GLM watchdogs (they restart production under a boot). Restore:
-  `setsid nohup ~/glm-v110-start.sh`, then `sudo systemctl start glm-watchdog-system.service`.
+- **Production (the Python serve on spark1-3) stays DOWN for the whole speed-parity campaign (owner 2026-11-19, after saying it
+  several times: "production is down and doesnt need to be back up until we finish this speed parity campaign").** Nothing asks
+  the owner for a window, nothing waits for the evening, no veto is offered, and no queue or script restores it at its end: the
+  GPU boxes spark1-3 are ours to use at any hour. Stop it with `~/glm-v110-stop.sh` when it is up (both GLM watchdogs stay
+  inactive: they restart it). It is started only for a production leg of a measurement and stopped again after the leg. It comes
+  back only when the owner says the campaign is over: `setsid nohup ~/glm-v110-start.sh`, then
+  `sudo systemctl start glm-watchdog-system.service`.
 - **Builds run on spark1, never beside a bench** (a build shares the box's memory bandwidth), and images go to
   spark2 and spark3 by `docker save | ssh ... docker load`. Images are `glm53-zig:<tag>`; those named
   `ai-engine:<tag>` are from before 2026-11-12.
@@ -250,9 +254,9 @@ Run on the applied tree on a shared gate host, never on the workstation (`script
 - **Do not run Zig tests or builds in place on `/mnt/c`.** A hung test there left two real files of 100 GB and 70 GB
   in a cache directory and filled the disk; the WSL disk file (`ext4.vhdx`) only grows, and a full C: puts it
   read-only. `scripts/gates.sh` copies to the WSL filesystem.
-- **Production and the Zig serve cannot share the GPUs.** Stop production on all three ranks (`scripts/prod-stop.sh` on
-  spark1) before a Zig boot and restore it with `setsid nohup bash ~/glm-v110-start.sh`; both GLM watchdogs stay
-  stopped for the whole window. Removing the head's container alone (`docker rm -f glm53-flash-tf samplers pwcap`) leaves
+- **Production and the Zig serve cannot share the GPUs.** Production stays down for the campaign (the conventions above), so a Zig
+  boot needs only the check that it really is down: `scripts/prod-stop.sh` on spark1 stops it on all three ranks and is safe to
+  run when it is already down. Removing the head's container alone (`docker rm -f glm53-flash-tf samplers pwcap`) leaves
   production's ranks 1 and 2 running on spark2 and spark3 for about two minutes (their NCCL timeout): a Zig worker
   started beside one exits at once and rank 0 gives up after 300 s. `zig-tp3.sh` now waits for them and refuses after 240 s.
 - **`TF_GLM_L2PF`, prefill and fill rows are not environment switches on this engine** the way they are in
