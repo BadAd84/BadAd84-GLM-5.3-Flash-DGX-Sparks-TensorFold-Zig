@@ -33,7 +33,8 @@ treats as a failed check and deletes, and the store's identity hashes the load p
 directory written by the previous build differs and is never read. A state on the plain grid carries a zero digest
 and resumes exactly as before. A state whose position is not a whole number of pooled rows (the image's `parts`
 refuse it, `cuda_disk_image.zig:116`) is not written: the store counts the save skipped and the request is
-unaffected, so such a start keeps its state in RAM only.
+unaffected, so such a start keeps its state in RAM only. That held for this package alone: its GPU check (OVERNIGHT
+section 51) found that three request starts in four were such states, and `patches/disk-any-position` lifts the rule.
 
 What it edits (all on the tree it applies to):
 

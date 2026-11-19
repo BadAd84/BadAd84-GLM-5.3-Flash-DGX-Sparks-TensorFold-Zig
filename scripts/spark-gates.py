@@ -112,6 +112,14 @@ def ssh_stream(host, command):
     return subprocess.run([tool("ssh"), *SSH_OPTS, host, command], env=ssh_env(), stdin=subprocess.DEVNULL).returncode
 
 
+def hold_session(host, seconds):
+    """One login session kept open for `seconds`: with lingering off the host's user manager stops 10 s after the last session
+    ends and takes the detached run's systemd scope with it (SIGTERM, 'the runner exited early rc=143'), so a run is held up by
+    a session between its launch and the end of its wait. The caller terminates it when the run is over."""
+    return subprocess.Popen([tool("ssh"), *SSH_OPTS, host, f"sleep {int(seconds)}"], env=ssh_env(), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def scp(host, local_dir, name, remote_path):
     """Copies local_dir/name to host:remote_path; run in local_dir so no drive letter reaches scp."""
     r = subprocess.run([tool("scp"), "-q", *SSH_OPTS, name, f"{host}:{remote_path}"], cwd=local_dir, env=ssh_env(),
@@ -595,6 +603,7 @@ def cmd_gates(a):
     me = sys.argv[0].replace("\\", "/")
     print(f"run {run} started on {a.host}: log ~/{REMOTE}/{run}/run.log")
     print(f"wait: python {me} wait --host {a.host} --run {run}")
+    hold_session(a.host, 180)  # a wait started within three minutes takes the login session over
 
 
 def latest_run(host):
@@ -611,18 +620,22 @@ def cmd_wait(a):
     if not RUN_RE.match(run):
         die(f"--run {run!r}: a run is named sg-YYYYMMDD-HHMMSS")
     print(f"waiting for {run} on {a.host}, polling every {a.interval} s", flush=True)
+    keep = hold_session(a.host, a.max_minutes * 60 + 60)
     deadline = time.monotonic() + a.max_minutes * 60
-    while True:
-        rc, out = ssh(a.host, f"bash {REMOTE}/{run}/status.sh", check=False)
-        last = out.strip().splitlines()[-1] if out.strip() else ""
-        if rc == 0 and last.startswith(("DONE", "DEAD")):
-            break
-        if rc == 127 or "No such file" in out:
-            die(f"no run {run} on {a.host}: {last}")
-        print(last if rc == 0 else f"{time.strftime('%H:%M:%S')} ssh rc={rc}: {last[:200]} (trying again)", flush=True)
-        if time.monotonic() > deadline:
-            die(f"gave up after {a.max_minutes} minutes; the run goes on")
-        time.sleep(a.interval)
+    try:
+        while True:
+            rc, out = ssh(a.host, f"bash {REMOTE}/{run}/status.sh", check=False)
+            last = out.strip().splitlines()[-1] if out.strip() else ""
+            if rc == 0 and last.startswith(("DONE", "DEAD")):
+                break
+            if rc == 127 or "No such file" in out:
+                die(f"no run {run} on {a.host}: {last}")
+            print(last if rc == 0 else f"{time.strftime('%H:%M:%S')} ssh rc={rc}: {last[:200]} (trying again)", flush=True)
+            if time.monotonic() > deadline:
+                die(f"gave up after {a.max_minutes} minutes; the run goes on")
+            time.sleep(a.interval)
+    finally:
+        keep.terminate()
     _, log = ssh(a.host, f"cat {REMOTE}/{run}/run.log")
     lines = log.splitlines()
     cut = next((i for i, x in enumerate(lines) if x.startswith("== verdict")), len(lines))

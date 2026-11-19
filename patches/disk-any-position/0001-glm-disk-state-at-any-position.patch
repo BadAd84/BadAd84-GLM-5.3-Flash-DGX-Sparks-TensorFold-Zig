@@ -1,0 +1,175 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: the disk image takes a conversation state at any position
+
+cuda_disk_image.parts refused every state whose position was not a multiple of the 4-row pool (`SnapshotShape`), and the
+store counts such a save as skipped, so a conversation state kept at a request start or at a prompt's end reached the
+disk only when it happened to land on a multiple of 4: three in four did not. With --learn-conversations and
+TF_GLM_REQUEST_STARTS=1 on three GB10s at TP=3, a restart left a 596k-token conversation resuming from the 595,968-row
+state its first turn kept instead of the 619,434-row endpoint its second turn kept (the endpoint's save was skipped), and
+32k and 120k-token conversations whose only kept states were off a pool's edge (32,035 and 120,601 rows) resumed from
+nothing and prefilled cold. Six saves were skipped in the first boot of that run, four in the second and five in the third.
+
+The image has no other reason to refuse such a state. The store's `rows.image.valid` takes a pooled part of between
+`at / per` and `at / per + 1` rows, and `parts` already gives the whole pools as rows by position and leaves the pool
+past them, with the spare row, as the state's own bytes (`cache`). The pooled-key kernel writes only a completed pool
+(`tf_glm_pool_keys` returns when `4 * p + 3 > pos + rows - 1`), so a prompt pass that ends inside a pool leaves that
+pool's row unwritten, which is what `unwritten` already assumes of the rows past the whole pools; a pass that starts
+inside a pool reads that pool's earlier rows from the index rings, and the image carries the rings. So `parts` takes
+every position from 1 to the capacity, and `longest` is the capacity.
+
+An image written at a position on a pool's edge is unchanged, and so is the words' format: only states the old `parts`
+refused are new files. Replies are the cold pass's: a kept state resumes the same tokens whether it came from RAM or
+from the image, and the disk tier's own check compares every resumed reply with a cold server's.
+
+Receipts: host tests of the image at positions on and inside a pool (the lease bytes against the snapshot plan, the rows
+by position and the own parts, a round trip through the lease into another sequence, and the probe hash's unwritten
+spans). The GPU receipts (the disk tier's resume check with request starts on) are not in this header.
+
+New here, not a re-seat: written at v1.2.9 on top of this repo's stack (patches/engine, pr1411, cache-salt, learn-starts
+and solo-cuts).
+
+---
+
+diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
+--- a/zig/src/families/glm/cuda_disk_image.zig
++++ b/zig/src/families/glm/cuda_disk_image.zig
+@@ -107,14 +107,14 @@
+     };
+ }
+ 
+-/// The longest state an image holds: the capacity's whole pools (`parts` takes no other position).
++/// The longest state an image holds: the capacity (`parts` takes every position from 1 to it).
+ pub fn longest(sh: Shape) u32 {
+-    return sh.capacity - sh.capacity % sparse.pool;
++    return sh.capacity;
+ }
+ 
+-/// The image at `at` (a chunk start): the words, the prefix, each DSA layer's rows, the head's caches, the tail.
++/// The image at `at`, whole pools or not: the words, the prefix, each DSA layer's rows, the head's caches, the tail.
+ pub fn parts(sh: Shape, at: u32, out: *std.ArrayList(Part), a: std.mem.Allocator) !void {
+-    if (at == 0 or at % sparse.pool != 0 or at > sh.capacity) return error.SnapshotShape;
++    if (at == 0 or at > sh.capacity) return error.SnapshotShape;
+     try out.appendSlice(a, &.{ .{ .bytes = Words.bytes }, .{ .bytes = sh.prefix } });
+     const pooled: u64 = at / sparse.pool;
+     for (0..sh.layers) |_| {
+diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
+--- a/zig/src/families/glm/cuda_disk_image_test.zig
++++ b/zig/src/families/glm/cuda_disk_image_test.zig
+@@ -102,7 +102,7 @@
+         defer st.deinit();
+         for ([_]bool{ false, true }) |head| {
+             const sh = try image.Shape.of(&st, &m.w.config, capacity, head);
+-            for ([_]u32{ 2048, 4096, 6144 }) |at| {
++            for ([_]u32{ 2048, 2049, 2051, 4096, 4099, 6141, 6144 }) |at| {
+                 for ([_]u64{ at - 1, at, sh.headRows(at) }) |mtp| {
+                     const plan = try Plan.init(&st, &m.w.config, at, if (head) mtp else null, 0);
+                     try expectEqual(@as(u64, plan.len), image.leaseBytes(sh, at, if (head) mtp else 0));
+@@ -112,7 +112,7 @@
+     }
+ }
+ 
+-test "GLM disk image: the longest state is a position the store's parts take, so the staging floor prices it" {
++test "GLM disk image: the longest state is the capacity, so the staging floor prices it" {
+     var m: Model = undefined;
+     try m.init();
+     var d = H.driver();
+@@ -123,12 +123,12 @@
+         defer st.deinit();
+         const sh = try image.Shape.of(&st, &m.w.config, cap, true);
+         const at = image.longest(sh);
+-        try expect(at <= cap and cap - at < 4 and at % 4 == 0);
++        try expectEqual(cap, @as(usize, at));
+         var parts: std.ArrayList(image.Part) = .empty;
+         defer parts.deinit(a);
+         try image.storeParts(sh, &.{ sh.prefix, sh.prefix }, at, &parts, a);
+         try expect(parts.items.len > 0);
+-        try expectError(error.SnapshotShape, image.storeParts(sh, &.{ sh.prefix, sh.prefix }, at + 4, &parts, a));
++        try expectError(error.SnapshotShape, image.storeParts(sh, &.{ sh.prefix, sh.prefix }, at + 1, &parts, a));
+     }
+ }
+ 
+@@ -144,26 +144,37 @@
+     defer list.deinit(a);
+     var segs: std.ArrayList(image.Seg) = .empty;
+     defer segs.deinit(a);
+-    const at: u32 = 6144;
+-    try image.parts(sh, at, &list, a);
+-    try image.segments(sh, at, at, &segs, a);
+-    var total: u64 = 0;
+-    var rows: usize = 0;
+-    for (list.items) |p| {
+-        total += p.bytes;
+-        if (p.row == 0) continue;
+-        rows += 1;
+-        try expect(256 % p.per == 0);
+-        try expectEqual(@as(u64, at / p.per) * p.row, p.bytes); // a pooled part counts the whole pools alone
++    for ([_]u32{ 6144, 6143, 6141 }) |at| { // on a pool's edge, and inside the last pool
++        list.clearRetainingCapacity();
++        segs.clearRetainingCapacity();
++        try image.parts(sh, at, &list, a);
++        try image.segments(sh, at, at, &segs, a);
++        var total: u64 = 0;
++        var rows: usize = 0;
++        for (list.items) |p| {
++            total += p.bytes;
++            if (p.row == 0) continue;
++            rows += 1;
++            try expect(256 % p.per == 0);
++            try expectEqual(@as(u64, at / p.per) * p.row, p.bytes); // a pooled part counts the whole pools alone
++        }
++        try expectEqual(@as(usize, 3 * 2), rows); // each DSA layer's latent rows, scales and whole pools
++        const last = segs.items[segs.items.len - 1];
++        try expectEqual(total, last.img + last.len);
++        try expectEqual(@as(u64, 2 * 256), list.items[7].bytes); // layer 0's pools past `at`: the spare rows
++        try expectError(error.SnapshotShape, image.segments(sh, at, sh.headRows(at) + 1, &segs, a));
+     }
+-    try expectEqual(@as(usize, 3 * 2), rows); // each DSA layer's latent rows, scales and whole pools
+-    const last = segs.items[segs.items.len - 1];
+-    try expectEqual(total, last.img + last.len);
+-    try expectEqual(@as(u64, 2 * 256), list.items[7].bytes); // layer 0's pools past `at`: the spare rows
+-    try expectError(error.SnapshotShape, image.segments(sh, at, sh.headRows(at) + 1, &segs, a));
+ }
+ 
+ test "GLM disk image: a kept state's image read out of its lease restores every planned byte into another sequence" {
++    try roundTrip(2048);
++}
++
++test "GLM disk image: the same inside a pool, where the unfinished pool's keys stay the state's own" {
++    try roundTrip(2051);
++}
++
++fn roundTrip(at: u32) !void {
+     var m: Model = undefined;
+     try m.init();
+     var d = H.driver();
+@@ -175,7 +186,6 @@
+     var pool = try pages.Pool.init(a, &d, 64 << 20, false);
+     defer pool.deinit();
+     const stream: cuda.Stream = .{ .d = &d, .handle = null };
+-    const at: u32 = 2048;
+     const mtp: u64 = at - 1; // a head one row behind: its last image row is not in the lease
+     const sh = try image.Shape.of(&st, c, capacity, true);
+     const plan = try Plan.init(&st, c, at, mtp, 0);
+@@ -385,6 +395,14 @@
+ }
+ 
+ test "GLM disk image: the probe's hash leaves out what a prompt pass does not write, whatever the slot ran before" {
++    try probeHash(2048);
++}
++
++test "GLM disk image: the same inside a pool, where the unfinished pool's keys are not written either" {
++    try probeHash(2051);
++}
++
++fn probeHash(at: u32) !void {
+     var m: Model = undefined;
+     try m.init();
+     var d = H.driver();
+@@ -395,7 +413,6 @@
+     for (H.bytes(st.arena.buf.ptr, st.arena.buf.len), 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+     var pool = try pages.Pool.init(a, &d, 64 << 20, false);
+     defer pool.deinit();
+-    const at: u32 = 2048;
+     const mtp: u64 = at - 1; // the head a row behind: its last pool unfinished
+     const sh = try image.Shape.of(&st, c, capacity, true);
+     const prefixes = [_]u64{ sh.prefix, sh.prefix };
