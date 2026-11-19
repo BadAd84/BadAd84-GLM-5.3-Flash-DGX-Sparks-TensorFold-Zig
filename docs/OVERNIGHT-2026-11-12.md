@@ -1444,3 +1444,78 @@ Added up, the kernel rows of our column exceed production's by 36 us a row (385 
 
 **What the recipe takes from this.** `DEFS` gains the seven switches measured above as wins (`NO_COPY`, `MM_DECTILE=100000`, `SWIGLU_REDUCE`, `ONEPASS_PIPE`, `CHUNK_SOLO=4096`, `HOST_ONCE`, `DRAFT_NOISE`): 23 in all, none changing a reply on any cell here. Fresh 6 and 8 stream pairs exist for the first four (section 49); `CHUNK_SOLO` (a prompt step while no stream decodes), `HOST_ONCE` (a request's render) and `DRAFT_NOISE` (sampled streams) have none, so those cells are the next window's, with the exact final set against the recipe. Out: `EXCHANGE_KB`, `INDEX_CUDA=all`, `DECODE_INDEX=33`, `DFLASH2_WIN=1024`, `PLAIN_MARGIN=100`. Request starts stay off in the recipe until `patches/learn-starts` has its GPU check (the disk tier refuses the pair without it) and until the cold-prime cost has a fix or the owner takes the trade (8.3 turns to break even after a ~113k cold prime). The image with `learn-starts` is `glm53-zig:v129w`: the `v129v` tree plus that package, tree `7c8a05f9cf72`.
 
+## 51. Queue73: the recipe against the one before it, the cold-prompt arms, and two defects the GPU found (a solo pass never taken with request starts, a disk tier that kept one state in four)
+
+2026-11-19 15:35 to 19:18 UTC, `scripts/queues/queue73.sh`, scored by `scripts/queue-scores/score73.py` (rows in `docs/audit-2026-11-12/queue-rows/queue73/`). Image `glm53-zig:v129z` (43 patches, tree `da12e9d259ae`: engine 0001 to 0037, pr1411, cache-salt, learn-starts, solo-cuts) for every block but the first; block E ran on `v129w` (40 patches, tree `7c8a05f9cf72`: the stack and learn-starts, without solo-cuts and engine 0036 and 0037). Every boot `--parallel 4 --context 1048576` (the deployed shape) unless a block says otherwise, `KNOBS=measured`. Production was stopped at 15:35 and stays down for the campaign.
+
+**The committed recipe against the one before it** (blocks A and B: boots R F F R, R the recipe without the seven switches of 2026-11-19, F the committed 23; production's prompt ids; the 6 and 8 client rows on serves booted with that `--parallel`). Replies and prose rounds are equal in every cell; F takes fewer rounds on code and on sampled streams.
+
+| cell | recipe before | recipe | pairs | mean | rounds before / now |
+|---|---|---|---|---:|---|
+| greedy prose, 1 | 79.21 79.88 | 80.45 80.40 | +1.57% +0.66% | +1.11% | 381 / 381 |
+| greedy prose, 2 | 83.47 84.56 | 83.45 83.79 | -0.02% -0.91% | -0.47% | 1029 / 1029 |
+| greedy prose, 4 | 110.44 112.34 | 110.88 112.96 | +0.40% +0.55% | +0.47% | 1980 / 1980 |
+| greedy prose, 6 | 150.50 151.18 | 151.12 150.64 | +0.41% -0.36% | +0.03% | 3195 / 3195 |
+| greedy prose, 8 | 186.90 186.05 | 185.73 186.12 | -0.62% +0.04% | -0.29% | 4308 / 4308 |
+| greedy code, 1 | 102.46 102.34 | 112.41 112.93 | +9.71% +10.35% | +10.03% | 216 / 195 |
+| greedy code, 2 | 130.78 132.09 | 135.53 135.78 | +3.63% +2.79% | +3.21% | 450 / 411 |
+| greedy code, 4 | 159.19 161.23 | 164.65 167.60 | +3.43% +3.95% | +3.69% | 1002 / 930 |
+| greedy code, 6 | 199.05 200.72 | 203.23 202.18 | +2.10% +0.73% | +1.41% | 1641 / 1578 |
+| greedy code, 8 | 237.22 237.91 | 243.69 242.63 | +2.73% +1.98% | +2.35% | 2594 / 2502 |
+| sampled prose, 1 | 72.60 74.09 | 75.77 77.32 | +4.37% +4.36% | +4.37% | 438 / 420 |
+| sampled prose, 2 | 77.76 78.89 | 80.82 82.45 | +3.93% +4.51% | +4.22% | 1107 / 1068 |
+| sampled prose, 4 | 103.98 103.43 | 106.56 107.47 | +2.48% +3.91% | +3.20% | 2154 / 2088 |
+| sampled prose, 6 | 138.84 139.53 | 143.40 143.25 | +3.28% +2.67% | +2.98% | 3420 / 3351 |
+| sampled prose, 8 | 171.12 168.83 | 175.29 174.96 | +2.44% +3.63% | +3.03% | 4614 / 4512 |
+| sampled code, 1 | 101.27 102.57 | 110.68 112.16 | +9.29% +9.35% | +9.32% | 219 / 198 |
+| sampled code, 2 | 131.43 131.51 | 140.58 142.68 | +6.97% +8.49% | +7.73% | 465 / 405 |
+| sampled code, 4 | 151.34 152.91 | 156.11 158.45 | +3.15% +3.62% | +3.39% | 1041 / 981 |
+| sampled code, 6 | 177.42 178.83 | 188.58 188.57 | +6.29% +5.45% | +5.87% | 1659 / 1590 |
+| sampled code, 8 | 225.72 224.93 | 231.34 229.63 | +2.49% +2.09% | +2.29% | 2622 / 2490 |
+
+The recipe is at or above the old one in 18 of 20 means. The two greedy prose cells that read below, at 2 and 8 clients (-0.47% and -0.29%), sit inside the old recipe's own boot spread (1.3% and 0.5%) and the recipe's boots overlap it; no cell has both new boots under both old ones. The 24 prompts one at a time (replies equal across the four boots): all 24 1.0242 faster (1.0143 to 1.0369, 22 of 24 faster), the 9 code-like prompts 1.0416 (1.0185 to 1.0694, 8 of 9), the 15 prose-like 1.0139 (1.0098 to 1.0176, 14 of 15). The committed 23 switches stay as `DEFS`.
+
+**Cold first token, the prompt-pass arms** (block C: 14 boots, two requests a boot at 8k, 32k and 120k, one seed on every boot, so the reply must be one digest per size and request across all of them, and it is). The control pair `f1`, `f2` (the start and the end of the block) agrees within 0.21%, 0.04% and 0.06%; each arm below is one boot, so a number is a screen until its second boot, and the next window runs the candidates A B B A.
+
+| arm | what it sets | 8k ms | 32k ms | 120k ms | 8k | 32k | 120k |
+|---|---|---:|---:|---:|---:|---:|---:|
+| f1, f2 | the recipe | 3988, 3996 | 14897, 14891 | 55590, 55554 | - | - | - |
+| p2 | `TF_GLM_OVERLAP_PIECES=2` (production's) | 4006 | 15088 | 56357 | +0.33% | +1.30% | +1.41% |
+| p3 | `OVERLAP_PIECES=3` | 3936 | 14736 | 55074 | -1.41% | -1.06% | -0.90% |
+| p4 | `OVERLAP_PIECES=4` | 3942 | 14674 | 54872 | -1.27% | -1.47% | -1.26% |
+| p6 | `OVERLAP_PIECES=6` | 3978 | 14856 | 55626 | -0.37% | -0.26% | +0.10% |
+| nr | `TF_GLM_ROCE_MULTI=0` | 3956 | 14761 | 55240 | -0.90% | -0.89% | -0.60% |
+| mw | `TF_GLM_OVN_MM_WIDE=1` | 3904 | 14395 | 53802 | -2.21% | -3.35% | -3.19% |
+| sp | `TF_GLM_OVN_SIDE_PRIO=1` | 3922 | 14548 | 54482 | -1.77% | -2.32% | -1.96% |
+| lr2 | `TF_GLM_OVN_LATENT_ROWS=2` | 3972 | 14815 | 55344 | -0.52% | -0.53% | -0.41% |
+| lr4 | `TF_GLM_OVN_LATENT_ROWS=4` | 3978 | 14858 | 55392 | -0.36% | -0.24% | -0.32% |
+| rs | `TF_GLM_REQUEST_STARTS=1` (solo-cuts) | 4162 | 15927 | 59709 | +4.24% | +6.94% | +7.45% |
+| rs0 | request starts on `v129w` (no solo-cuts) | 4184 | 15956 | 59846 | +4.80% | +7.13% | +7.69% |
+| rsnp | request starts with `ONEPASS_PIPE=0` | 4417 | 17106 | 64308 | +10.64% | +14.85% | +15.72% |
+
+`MM_WIDE` (-2.2 to -3.4%) and `SIDE_PRIO` (-1.8 to -2.3%) are the two arms that move well past the control pair's spread. `MM_WIDE` was last measured neutral on a cold prompt (section 31, on a stack that had neither `ONEPASS_PIPE` nor solo passes); `SIDE_PRIO` is measured here for the first time. 3 and 4 row pieces read about -1.3% and 2 reads worse (+1.3%), so production's 2 is not the better setting here. `ROCE_MULTI=0` reads -0.6 to -0.9% on a cold prompt but the wire buys +1.4 to +1.8% of decode at 1 to 4 streams (section 21), so it stays. The latent rows are a decode lever: -0.3 to -0.5% cold, and on the decode screens (greedy, one boot, against the recipe's two boots of block A) `lr2` reads +1.06 / +1.68 / +0.58% on prose and +1.23 / +0.91 / +0.59% on code at 1 / 2 / 4 clients, `lr4` +0.18 / +1.00 / +0.56% and +0.60 / +0.64 / +0.84%, `sp` -1.49 / +1.01 / +0.50% and -0.24 / +1.05 / +0.15%; replies equal to both recipe boots in every cell. `glm-latent-rows` ran on a GB10 for the first time: rc 0, six PASS lines, no FAIL (byte equality of the absorb and expand kernels at 2 and 4 rows against today's launch). `ONEPASS_PIPE=0` costs 6.4 to 8.3 points more with request starts on (`rsnp` against `rs`), so the pipe stays on.
+
+**Request starts: the solo-cuts package took no solo step.** `rs` and `rs0` are the same arm to within 0.6 points (+4.24 / +6.94 / +7.45% against +4.80 / +7.13 / +7.69%), and so are their growing conversations' first turns (56,126 ms against 56,264 ms, ratio 0.998). Request starts cost 4.2 to 7.5% of a cold prompt with the package, as without it. The package's predicate (`cutInside`) counted every start between a step's first row and its end, and the server's chunk plan (`zig/src/server/chunk_plan.zig`, `Plan.starts`) lists a start at every grid step from the last start as well as at each message, so the cut at every solo step's middle grid point was always inside it: no step was ever solo. The package's host tests used start lists with a few message starts and no grid steps, a list the server never sends (section 50 of this file records the 4.1 / 6.5 / 7.2% cost the package was written to remove). Two more facts surfaced while reading the fix: the grid after a message start is off the 4-row pool's edge for three starts in four, and a solo step from such a row would have ended in `error.PastRing` (the index ring held a solo pass's rows only from a pool's edge), so lifting the predicate alone would have failed requests. Both are fixed in the revised package (section 52).
+
+What the starts buy is large. The ~113k growing conversation (`longctx.py chain`, one 100k turn and seven of about 1,300 new tokens):
+
+| arm | first turn ms | turns 2 to 8 ms | mean | new tokens a turn |
+|---|---:|---|---:|---|
+| f1 (recipe) | 52,403 | 805 1,578 1,033 1,766 1,407 873 1,611 | 1,296 | 1,328 2,617 1,841 3,110 2,307 1,491 2,737 |
+| rs (request starts, solo-cuts) | 56,126 | 872 859 842 839 832 833 839 | 845 | 1,327 1,290 1,273 1,270 1,246 1,249 1,269 |
+| rs0 (request starts, no solo-cuts) | 56,264 | 877 881 842 838 828 828 829 | 846 | 1,328 1,292 1,275 1,272 1,248 1,239 1,253 |
+
+A warm turn costs 0.652 of the recipe's (0.653 for `rs0`) because each turn resumes where the previous turn's history ends, not at the last 2,048-row point; the first turn costs 1.071 of it (1.074). The chains' replies are not comparable across these arms (each boot used its own salt); the next window sends one salt to every arm.
+
+**The disk tier with request starts kept one state in four** (block E, image `v129w`, `scripts/queue-disk-tier.sh f73`: boots `k1`, `k2` after a SIGKILL of every rank, `k3` after a clean stop, a reference boot without the tier). Every resumed reply equals the cold reply to the same messages (all 17 turn rows `equal`): the tier is exact. It failed 15 of its checks, all one kind: a state expected on disk was not there (`SOURCE expected disk, resumed from cold`, or a resume `SHORT` of the newest kept state). The rank logs name it: `warning: prompt cache: imprint: saving 32035 tokens skipped (SnapshotShape)` (also 120,601, 2,946, 619,434 and again 32,035 and 120,601), six saves skipped in `k1`, four in `k2` (two more at its stop) and five in `k3`. `cuda_disk_image.parts` refused every state whose position is not a multiple of the 4-row pool, and a request start or a prompt's end lands on one such multiple in four. What that did:
+
+| conversation | the state the next turn needed | on disk | resumed from, after SIGKILL / clean restart |
+|---|---|---|---|
+| M32000 (about 32k) | 32,035 (the previous turn's end) | no (off the pool) | cold, 16.2 and 16.3 s first token |
+| M120000 (about 120k) | 120,601 | no | cold, 59.95 and 60.11 s |
+| L (about 596k, then 619k, 643k) | 619,434 (turn 2's end) | no | 595,968 (turn 1's state, a multiple of 4), 23,466 rows short |
+
+L turn 3 after the SIGKILL read 26.30 s of server prefill for 46,725 uncached tokens (production: 12.80 s from a state 619,392 rows in, for its own prompt) and 42.83 s for 69,943 uncached tokens after the clean restart (production 12.90 s); from RAM, turn 2 read 13.49 s (production 12.54 s from the pool), and the cold turn 1 beside three decoding streams 334.18 s (production 224.68 s, 1.49x). A save in flight at a clean stop was lost with the rest (`S120000` resumed at 116,736 of 118,784). The tier needs the endpoint states on disk: the restart cost above is mostly the rows that were not there, not the read. The fix (`patches/disk-any-position`, section 52) lets the image take any position; nothing in the store, the rows layer or the engine needed the pool alignment (the pooled-key kernel writes only a completed pool, `tf_glm_pool_keys` returns when `4 * p + 3 > pos + rows - 1`, so the pool in progress is not part of a prompt pass's state; `rows.image.valid` takes between `at / per` and `at / per + 1` pooled rows).
+
+**What stays.** `TF_GLM_REQUEST_STARTS` stays off in `DEFS`: its cost on a cold prompt is unchanged until the solo steps run, and its disk checks have not passed. `MM_WIDE`, `SIDE_PRIO`, 4 row pieces and `LATENT_ROWS=2` are candidates that need a second boot in the reverse order and a decode screen at 1, 2 and 4 clients before they are named switches of the recipe (`MM_WIDE` and `SIDE_PRIO` also at 6 and 8). Housekeeping: the smoke boot of `v129z` answered, and queue73's `rs0` arm ran on the older image, which is why it is the same arm without solo-cuts.
+

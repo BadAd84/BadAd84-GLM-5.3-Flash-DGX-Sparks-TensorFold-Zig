@@ -1,0 +1,80 @@
+[q73] 15:35:39 start; IMG=glm53-zig:v129z; deadline 22:35:39
+[q73] glm53-zig:v129z ids: sha256:e52646aa80381b2be1b987bfd877366f4679a7b160549f5e7072a2944d5a21c6 sha256:e52646aa80381b2be1b987bfd877366f4679a7b160549f5e7072a2944d5a21c6 sha256:e52646aa80381b2be1b987bfd877366f4679a7b160549f5e7072a2944d5a21c6
+[q73] glm53-zig:v129w ids: sha256:a21f675c17dfe84fbeb994a63e7cb0270e67ca7c018f2bc3042df2a933da0c96 sha256:a21f675c17dfe84fbeb994a63e7cb0270e67ca7c018f2bc3042df2a933da0c96 sha256:a21f675c17dfe84fbeb994a63e7cb0270e67ca7c018f2bc3042df2a933da0c96
+[q73] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 15:35:43 production stopped on spark1-3
+[q73] 16:35:34 disk tier rc=0 [disktier] 16:35:34 both GLM watchdogs are still stopped: the window closer starts glm-watchdog-system.service (sudo) DISKTIER-DONE 16:35:34 
+[q73] 16:35:36 glm-latent-rows rc=0: 6 PASS, 0 FAIL lines
+[q73] 16:37:44 smoke boot of glm53-zig:v129z ok
+[q73] 16:40:25 a73-R1 1 greedy prose rc=0 "agg_tok_s": 79.08 code rc=0 "agg_tok_s": 102.42
+[q73] 16:41:15 a73-R1 2 greedy prose rc=0 "agg_tok_s": 83.41 code rc=0 "agg_tok_s": 130.69
+[q73] 16:42:32 a73-R1 4 greedy prose rc=0 "agg_tok_s": 110.28 code rc=0 "agg_tok_s": 159.36
+[q73] 16:43:02 a73-R1 1 sampled prose rc=0 "agg_tok_s": 72.49 code rc=0 "agg_tok_s": 101.12
+[q73] 16:43:53 a73-R1 2 sampled prose rc=0 "agg_tok_s": 77.55 code rc=0 "agg_tok_s": 131.43
+[q73] 16:45:14 a73-R1 4 sampled prose rc=0 "agg_tok_s": 103.88 code rc=0 "agg_tok_s": 150.58
+[q73] 16:47:41 a73-R1 24 prompts rc=0
+[q73] 16:50:22 a73-F2 1 greedy prose rc=0 "agg_tok_s": 80.82 code rc=0 "agg_tok_s": 112.29
+[q73] 16:51:10 a73-F2 2 greedy prose rc=0 "agg_tok_s": 83.52 code rc=0 "agg_tok_s": 136.56
+[q73] 16:52:27 a73-F2 4 greedy prose rc=0 "agg_tok_s": 110.43 code rc=0 "agg_tok_s": 164.43
+[q73] 16:52:54 a73-F2 1 sampled prose rc=0 "agg_tok_s": 75.77 code rc=0 "agg_tok_s": 111.31
+[q73] 16:53:43 a73-F2 2 sampled prose rc=0 "agg_tok_s": 79.98 code rc=0 "agg_tok_s": 140.27
+[q73] 16:55:02 a73-F2 4 sampled prose rc=0 "agg_tok_s": 106.22 code rc=0 "agg_tok_s": 155.89
+[q73] 16:57:26 a73-F2 24 prompts rc=0
+[q73] 17:00:07 a73-F3 1 greedy prose rc=0 "agg_tok_s": 79.96 code rc=0 "agg_tok_s": 113.08
+[q73] 17:00:55 a73-F3 2 greedy prose rc=0 "agg_tok_s": 83.81 code rc=0 "agg_tok_s": 135.74
+[q73] 17:02:10 a73-F3 4 greedy prose rc=0 "agg_tok_s": 112.88 code rc=0 "agg_tok_s": 167.35
+[q73] 17:02:38 a73-F3 1 sampled prose rc=0 "agg_tok_s": 77.44 code rc=0 "agg_tok_s": 112.2
+[q73] 17:03:26 a73-F3 2 sampled prose rc=0 "agg_tok_s": 82.58 code rc=0 "agg_tok_s": 142.62
+[q73] 17:04:44 a73-F3 4 sampled prose rc=0 "agg_tok_s": 107.3 code rc=0 "agg_tok_s": 158.23
+[q73] 17:07:06 a73-F3 24 prompts rc=0
+[q73] 17:09:48 a73-R4 1 greedy prose rc=0 "agg_tok_s": 79.47 code rc=0 "agg_tok_s": 102.29
+[q73] 17:10:37 a73-R4 2 greedy prose rc=0 "agg_tok_s": 84.29 code rc=0 "agg_tok_s": 132.13
+[q73] 17:11:53 a73-R4 4 greedy prose rc=0 "agg_tok_s": 112.2 code rc=0 "agg_tok_s": 161.26
+[q73] 17:12:22 a73-R4 1 sampled prose rc=0 "agg_tok_s": 74.05 code rc=0 "agg_tok_s": 102.52
+[q73] 17:13:13 a73-R4 2 sampled prose rc=0 "agg_tok_s": 79.06 code rc=0 "agg_tok_s": 131.52
+[q73] 17:14:34 a73-R4 4 sampled prose rc=0 "agg_tok_s": 103.4 code rc=0 "agg_tok_s": 152.96
+[q73] 17:16:58 a73-R4 24 prompts rc=0
+[q73] 17:21:44 f1 cold rc=0 3981 14782 55386 3995 15012 55793 
+[q73] 17:22:54 c73f1 chain: 52403 805 1578 1033 1766 1407 873 1611
+[q73] 17:27:42 p2 cold rc=0 4004 14963 56201 4007 15213 56513 
+[q73] 17:32:26 p3 cold rc=0 3931 14629 54905 3941 14842 55242 
+[q73] 17:37:10 p4 cold rc=0 3932 14592 54646 3951 14757 55097 
+[q73] 17:41:55 p6 cold rc=0 3947 14673 55173 4008 15038 56078 
+[q73] 17:46:40 nr cold rc=0 3952 14671 55078 3961 14851 55402 
+[q73] 17:51:21 mw cold rc=0 3900 14337 53578 3908 14453 54025 
+[q73] sp boot log: 1 priority line(s)
+[q73] 17:56:04 sp cold rc=0 3914 14483 54249 3929 14614 54715 
+[q73] 17:56:31 dec-sp 1 greedy prose rc=0 "agg_tok_s": 79.24 code rc=0 "agg_tok_s": 112.47
+[q73] 17:57:19 dec-sp 2 greedy prose rc=0 "agg_tok_s": 84.44 code rc=0 "agg_tok_s": 137.18
+[q73] 17:58:34 dec-sp 4 greedy prose rc=0 "agg_tok_s": 112.15 code rc=0 "agg_tok_s": 166.07
+[q73] 18:03:26 rs cold rc=0 4148 15854 59562 4175 16000 59856 
+[q73] 18:04:37 c73rs chain: 56126 872 859 842 839 832 833 839
+[q73] 18:09:39 rs0 cold rc=0 4176 15886 59702 4192 16027 59990 
+[q73] 18:10:50 c73rs0 chain: 56264 877 881 842 838 828 828 829
+[q73] 18:15:58 rsnp cold rc=0 4413 17037 64255 4421 17175 64362 
+[q73] 18:20:43 lr2 cold rc=0 3968 14734 55116 3975 14896 55572 
+[q73] 18:21:09 dec-lr2 1 greedy prose rc=0 "agg_tok_s": 81.76 code rc=0 "agg_tok_s": 114.03
+[q73] 18:21:57 dec-lr2 2 greedy prose rc=0 "agg_tok_s": 84.68 code rc=0 "agg_tok_s": 137.41
+[q73] 18:23:13 dec-lr2 4 greedy prose rc=0 "agg_tok_s": 112.42 code rc=0 "agg_tok_s": 166.6
+[q73] 18:27:58 lr4 cold rc=0 3961 14769 55209 3995 14947 55575 
+[q73] 18:28:24 dec-lr4 1 greedy prose rc=0 "agg_tok_s": 80.75 code rc=0 "agg_tok_s": 113.53
+[q73] 18:29:13 dec-lr4 2 greedy prose rc=0 "agg_tok_s": 84.68 code rc=0 "agg_tok_s": 136.34
+[q73] 18:30:28 dec-lr4 4 greedy prose rc=0 "agg_tok_s": 112.73 code rc=0 "agg_tok_s": 167.27
+[q73] 18:35:13 f2 cold rc=0 3992 14798 55307 4001 14984 55800 
+[q73] 18:38:56 b73-R1-P6 6 greedy prose rc=0 "agg_tok_s": 150.36 code rc=0 "agg_tok_s": 199.07
+[q73] 18:40:32 b73-R1-P6 6 sampled prose rc=0 "agg_tok_s": 138.91 code rc=0 "agg_tok_s": 177.34
+[q73] 18:44:13 b73-F2-P6 6 greedy prose rc=0 "agg_tok_s": 150.98 code rc=0 "agg_tok_s": 203.26
+[q73] 18:45:45 b73-F2-P6 6 sampled prose rc=0 "agg_tok_s": 143.26 code rc=0 "agg_tok_s": 188.39
+[q73] 18:49:27 b73-F3-P6 6 greedy prose rc=0 "agg_tok_s": 150.44 code rc=0 "agg_tok_s": 202.41
+[q73] 18:50:59 b73-F3-P6 6 sampled prose rc=0 "agg_tok_s": 143.25 code rc=0 "agg_tok_s": 188.59
+[q73] 18:54:41 b73-R4-P6 6 greedy prose rc=0 "agg_tok_s": 151.43 code rc=0 "agg_tok_s": 201.22
+[q73] 18:56:17 b73-R4-P6 6 sampled prose rc=0 "agg_tok_s": 139.47 code rc=0 "agg_tok_s": 178.66
+[q73] 19:00:07 b73-R1-P8 8 greedy prose rc=0 "agg_tok_s": 186.95 code rc=0 "agg_tok_s": 234.69
+[q73] 19:01:51 b73-R1-P8 8 sampled prose rc=0 "agg_tok_s": 170.49 code rc=0 "agg_tok_s": 225.46
+[q73] 19:05:41 b73-F2-P8 8 greedy prose rc=0 "agg_tok_s": 185.91 code rc=0 "agg_tok_s": 243.85
+[q73] 19:07:22 b73-F2-P8 8 sampled prose rc=0 "agg_tok_s": 176.48 code rc=0 "agg_tok_s": 230.82
+[q73] 19:11:12 b73-F3-P8 8 greedy prose rc=0 "agg_tok_s": 186.6 code rc=0 "agg_tok_s": 241.89
+[q73] 19:12:53 b73-F3-P8 8 sampled prose rc=0 "agg_tok_s": 174.41 code rc=0 "agg_tok_s": 228.6
+[q73] 19:16:44 b73-R4-P8 8 greedy prose rc=0 "agg_tok_s": 186.5 code rc=0 "agg_tok_s": 242.48
+[q73] 19:18:28 b73-R4-P8 8 sampled prose rc=0 "agg_tok_s": 168.13 code rc=0 "agg_tok_s": 227.37
+QUEUE73-DONE 19:18:40

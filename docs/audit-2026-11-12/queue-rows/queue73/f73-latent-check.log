@@ -1,0 +1,6 @@
+PASS glm-latent-rows: absorb_q at 2 rows a step equals today's launch, 76 cases
+PASS glm-latent-rows: absorb_q at 4 rows a step equals today's launch, 76 cases
+PASS glm-latent-rows: expand_v at 2 rows a step equals today's launch, 76 cases
+PASS glm-latent-rows: expand_v at 4 rows a step equals today's launch, 76 cases
+PASS glm-latent-rows: the planted control: written bytes, a one-bit reference change, a changed input
+PASS glm-latent-rows: every case equals today's launches byte for byte
