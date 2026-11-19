@@ -12,7 +12,9 @@
 # Output: ~/nsys/pf-TAG.nsys-rep, pf-TAG.sqlite, pf-TAG_cuda_gpu_kern_sum.csv; ~/bench/pf-TAG/ (rows.jsonl, clocks-r*.csv,
 # trace-r*.log, stages.txt, stages.json, kern.txt, trace.txt, provenance.txt). PREFILL-DONE closes the log.
 # Env: IMAGE (glm53-zig:rs2x3), KNOBS (measured), XENV (an arm's extra -e list), P (4), CTX (1048576), SIZES
-# ("8192 32768"), WARM (4096), PHASES ("nsys prof"), WORKERS (the ssh targets of ranks 1 and 2, required), and every
+# ("8192 32768"), WARM (4096), PHASES ("nsys prof"), WORKERS (the ssh targets of ranks 1 and 2, required), WARMCHAIN (0: that many
+# turns of a growing conversation are captured after the cold sizes, ~1,300 rows each, its first turn of CHAIN_T1 tokens, default
+# 100000, running before the capture starts; needs TF_GLM_REQUEST_STARTS=1 in XENV to resume at the previous turn's end), and every
 # command it drives as a variable (ZTP3, ZSTOP, DOCKER, SSH, PY, CURL, NVSMI, SYSTEMCTL, SLEEP) for dry runs.
 set -uo pipefail
 TAG=${1:?usage: nsys-prefill.sh TAG}
@@ -25,6 +27,8 @@ CTX=${CTX:-1048576}
 SIZES=${SIZES:-8192 32768}
 WARM=${WARM:-4096}
 PHASES=${PHASES:-nsys prof}
+WARMCHAIN=${WARMCHAIN:-0}
+CHAIN_T1=${CHAIN_T1:-100000}
 ZPORT=${ZPORT:-8300}
 PROD_PORT=${PROD_PORT:-8888}
 NS=${NS:-$HOME/nsys}
@@ -60,12 +64,17 @@ mkdir -p "$OUT" "$NS" || abort "cannot make $OUT or $NS"
 ROWS=$OUT/rows.jsonl
 { sha256sum "$0" "$ZTP3" "$G/serve.sh" "$G/longctx.py" "$G/prefill_stages.py" "$G/prompt_trace.py" 2>&1
   $DOCKER image inspect --format '{{.Id}} {{.RepoTags}}' "$IMAGE" 2>&1
-  echo "TAG=$TAG IMAGE=$IMAGE KNOBS=$KNOBS P=$P CTX=$CTX SIZES='$SIZES' WARM=$WARM XENV='$XENV'"; } > "$OUT/provenance.txt"
+  echo "TAG=$TAG IMAGE=$IMAGE KNOBS=$KNOBS P=$P CTX=$CTX SIZES='$SIZES' WARM=$WARM WARMCHAIN=$WARMCHAIN CHAIN_T1=$CHAIN_T1 XENV='$XENV'"; } > "$OUT/provenance.txt"
 trap '$ZSTOP > /dev/null 2>&1; say "serve stopped; production stays down"' EXIT
 
 probe() { # probe SEED SIZE MAXTOK: one cold prompt of SIZE tokens, salted by SEED, its row in ROWS
   $PY "$G/longctx.py" probe "$ZPORT" --tag "pf-$TAG" --n "$P" --cold-sizes "$2" --reps 1 --warm-base 0 \
     --max-tokens "$3" --seed "$1" --out "$ROWS" --log-cmd "$LOGCMD" > "$OUT/probe-$1.out" 2>&1
+}
+
+chain_turn() { # chain_turn K: turn K of a growing conversation (a CHAIN_T1-token first turn, then about 1,300 new rows a turn), its row in chain.jsonl
+  $PY "$G/longctx.py" chain "$ZPORT" "$OUT/chain-$TAG.json" --t1 "$CHAIN_T1" --add 1000 --salt "pfw-$TAG" --tag "pfw-$TAG" --n "$P" \
+    --out "$OUT/chain.jsonl" --log-cmd "$LOGCMD" > "$OUT/chain-$1.out" 2>&1
 }
 
 boot() { # boot LABEL EXTRA_XENV: zig-tp3.sh at P, CTX; KNOBS and XENV as the arm sets them
@@ -100,6 +109,7 @@ phase_nsys() {
   boot nsys "" || { unset WRAP0 XRUN0; return 1; }
   unset WRAP0 XRUN0
   probe "pf-$TAG-warm" "$WARM" 16 || say "warm-up probe failed: $(tail -2 "$OUT/probe-pf-$TAG-warm.out")"
+  if [ "$WARMCHAIN" -gt 0 ]; then rm -f "$OUT/chain-$TAG.json"; chain_turn 1 || say "chain turn 1 failed: $(tail -2 "$OUT/chain-1.out")"; fi
   clocks_on
   $DOCKER exec glm53-zig-r0 nsys start --session=pf --sample=none --cpuctxsw=none -o "/out/pf-$TAG" \
     --force-overwrite=true > "$OUT/nsys-start.log" 2>&1 || say "nsys start failed: $(tail -2 "$OUT/nsys-start.log")"
@@ -109,6 +119,12 @@ phase_nsys() {
     first=0
     probe "pf-$TAG-nsys-$s" "$s" 4 || say "probe $s failed"
     say "cold $s: $(grep -o '"ttft_ms": [0-9]*' "$ROWS" | tail -1)"
+  done
+  local k
+  for k in $(seq 2 $((WARMCHAIN + 1))); do
+    $SLEEP 5
+    chain_turn "$k" || say "chain turn $k failed: $(tail -2 "$OUT/chain-$k.out")"
+    say "warm turn $k: $(grep -o '"ttft_ms": [0-9]*' "$OUT/chain.jsonl" | tail -1)"
   done
   $DOCKER exec glm53-zig-r0 nsys stop --session=pf > "$OUT/nsys-stop.log" 2>&1 || say "nsys stop failed"
   clocks_off

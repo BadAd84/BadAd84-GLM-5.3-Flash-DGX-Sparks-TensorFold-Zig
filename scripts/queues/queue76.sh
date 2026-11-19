@@ -4,8 +4,9 @@
 #  D  greedy decode at 1, 2 and 4 clients (the same prompt ids as production's cells, three rounds each) on eight fresh boots, f rs rs f f rs rs f: f is the
 #     recipe, rs the recipe with TF_GLM_REQUEST_STARTS=1. queue74's four boots (f rs rs f) read the rs boots 0.4 to 1.2% under the control mean with the two
 #     controls 0.6 to 1.1% apart, rounds and tokens a round equal in every cell, so the cells here settle whether that is a cost of the switch or boot-to-boot spread.
-#  N  rank 0 under Nsight Systems through zig-tp3.sh (scripts/nsys-rank0.sh): one decode cell of 400 tokens, 4 clients on code prompts and 1 client on prose, at
-#     production's shape, for the ranked per-kernel table of a decode round (the recipe plus request starts).
+#  N  rank 0 under Nsight Systems, first because the profiles feed the next patches: through zig-tp3.sh (scripts/nsys-rank0.sh) one decode cell of 400 tokens, 4 clients
+#     on code prompts and 1 client on prose, at production's shape, for the ranked per-kernel table of a decode round; then scripts/nsys-prefill.sh: a cold 8,192 and a
+#     cold 32,768 prompt and three warm turns (about 1,300 rows each, request starts) of a 100k conversation, stage by stage (the recipe plus request starts).
 # Env (queue76.env beside this file): IMG, WORKERS, HOURS (the time budget from the start, default 3).
 set -u
 G=$HOME/work/glm53-zig; cd "$G" || exit 1
@@ -50,14 +51,6 @@ arm() { # arm LABEL XENV: a boot and greedy decode at 1, 2 and 4 clients
   docker logs glm53-zig-r0 2>&1 | grep -a -E "^(info|warn|error)" | tail -n 400 > "$OUT/f76-d/r0-$label.log"
 }
 RS="-e TF_GLM_REQUEST_STARTS=1"
-arm f5 ""
-arm rs5 "$RS"
-arm rs6 "$RS"
-arm f6 ""
-arm f7 ""
-arm rs7 "$RS"
-arm rs8 "$RS"
-arm f8 ""
 
 # N: the decode round's kernels under nsys
 if room; then
@@ -69,4 +62,18 @@ if room; then
   IMAGE=$IMG KNOBS=measured XENV="$RS" KIND=prose TOKENS=400 CTX=1048576 bash nsys-rank0.sh dec1prose 1 > "$OUT/f76-n/dec1prose.out" 2>&1
   echo "[q76] $(date -u +%T) nsys decode 1 client prose: $(tail -3 "$OUT/f76-n/dec1prose.out" | tr '\n' ' ' | cut -c1-200)"
 fi
+if room; then
+  IMAGE=$IMG KNOBS=measured XENV="$RS" PHASES=nsys SIZES="8192 32768" WARMCHAIN=3 CTX=1048576 bash nsys-prefill.sh f76w > "$OUT/f76-n/prefill.out" 2>&1
+  echo "[q76] $(date -u +%T) nsys prefill (cold 8k, 32k, three warm turns): $(tail -3 "$OUT/f76-n/prefill.out" | tr '\n' ' ' | cut -c1-200)"
+fi
+
+# D: decode with and without request starts
+arm f5 ""
+arm rs5 "$RS"
+arm rs6 "$RS"
+arm f6 ""
+arm f7 ""
+arm rs7 "$RS"
+arm rs8 "$RS"
+arm f8 ""
 exit 0
