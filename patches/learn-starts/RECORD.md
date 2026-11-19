@@ -100,5 +100,8 @@ Measured on the shared gate host (x86_64, 16 threads) with `scripts/spark-gates.
 | m4 | `wordsOf` no longer writes the digest into the words | the same test as m3 |
 | m5 | the words' format number back to 1 | `GLM disk image: the words' digest round-trips, and a nine-word format 1 image is refused by name` |
 
-Not yet run: the GPU. Its check is a served one: `LEARN=1` with `TF_GLM_REQUEST_STARTS=1` through
-`scripts/queue-disk-tier.sh`, every resumed reply equal to a cold server's.
+GPU: the served check, `LEARN=1` with `TF_GLM_REQUEST_STARTS=1` through `scripts/queue-disk-tier.sh`, every resumed reply against a cold
+server's. With this package alone (queue73, image `v129w`) all 17 turns' replies were equal but 15 of the tool's checks failed, because the
+disk image refused three positions in four (`patches/disk-any-position`). With `patches/solo-cuts` and `patches/disk-any-position` on top
+(queue75 block E, image `glm53-zig:v129za`, OVERNIGHT-2026-11-12.md section 52) all 17 turns' replies are equal, no save was skipped, and
+every conversation resumed from the disk after a SIGKILL of every rank and after a clean restart at the endpoint its previous turn kept.

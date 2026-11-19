@@ -189,10 +189,11 @@ def load_conv(path):
 
 
 def newest_kept(conv):
-    """The position of the conversation's newest kept state: the grid point of its last turn that kept one (a pass
-    whose 'prompt cache:' line logged kept 0 left none; unknown counts as kept). 0 before any."""
-    grids = [p["grid"] for p in conv["prompts"] if p.get("kept") != 0]
-    return max(grids) if grids else 0
+    """The position of the conversation's newest kept state: over its turns that kept one (a pass whose 'prompt cache:' line
+    logged kept 0 left none; unknown counts as kept), the highest position the RAM store created during the turn ('newest': a
+    request start or the prompt's end under TF_GLM_REQUEST_STARTS), else the turn's grid point. 0 before any."""
+    at = [p.get("newest") or p["grid"] for p in conv["prompts"] if p.get("kept") != 0]
+    return max(at) if at else 0
 
 
 def save_conv(path, conv):
@@ -362,21 +363,23 @@ def cmd_turn(args):
     if not res["error"] and not args.quote:
         prompt = row["prompt_tokens"] or tokenized
         conv["messages"] = msgs + [{"role": "assistant", "content": res["text"]}]
+        made = ram_positions(c, since_ms=int(res["send_epoch"] * 1000))
         conv["prompts"].append({"case_id": case_id, "tokens": prompt, "grid": (prompt - 1) // GRID * GRID,
-                                "kept": row.get("kept_states")})
+                                "kept": row.get("kept_states"), "newest": max([a for a in made or [] if a], default=None)})
         save_conv(path, conv)
     return 1 if res["error"] else 0
 
 
-def ram_positions(c, before_ms=None):
+def ram_positions(c, before_ms=None, since_ms=None):
     """The positions of the states the RAM store holds (/stats' prompt_cache entries), only those created before
-    `before_ms` (epoch ms) when given, or None without an answer."""
+    `before_ms` and at or after `since_ms` (epoch ms) when given, or None without an answer."""
     try:
         j = c.get_json("/stats", 30)
     except (OSError, ValueError, urllib.error.URLError):
         return None
     entries = (j.get("prompt_cache") or {}).get("entries") or []
-    return [e.get("at") for e in entries if before_ms is None or (e.get("created_at_ms") or 0) < before_ms]
+    return [e.get("at") for e in entries if (before_ms is None or (e.get("created_at_ms") or 0) < before_ms)
+            and (since_ms is None or (e.get("created_at_ms") or 0) >= since_ms)]
 
 
 def cmd_evict(args):

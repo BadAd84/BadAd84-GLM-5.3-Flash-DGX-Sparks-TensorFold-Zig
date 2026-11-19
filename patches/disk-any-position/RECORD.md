@@ -80,3 +80,10 @@ patches, series tree `d674e199cf6d97f7ac84a374c83153baabc911ed`), `patches/pr141
 
 - The GPU image is `glm53-zig:v129za`, built from tree `9d7f1de0488a`, which differs from this stack's tree in test files and
   comment text only (`patches/solo-cuts/RECORD.md`, Gate).
+- GPU, queue75 block E (`scripts/queue-disk-tier.sh f75` with `TF_GLM_REQUEST_STARTS=1 --learn-conversations`: boots `k1`, `k2` after a
+  SIGKILL of every rank, `k3` after a clean stop, a reference boot without the tier; OVERNIGHT-2026-11-12.md, section 52): all 17 turns'
+  replies equal a cold server's (token digests), `save_skipped`, `write_failed`, `restore_failed` and `check_failed` 0 on every rank in
+  every boot. After the SIGKILL the 32k and 120k conversations resumed at 32,035 and 120,601 rows from the disk (first token 0.57 and
+  0.93 s; 16.18 and 59.95 s on the stack without this package) and the 596k one at 619,434 rows, the endpoint its second turn kept
+  (14.93 s; 595,968 rows and 28.73 s without it). The tool's two failed checks were its eviction step clearing the 2,048-row grid
+  states while the states a turn resumes from sit at the previous prompt's end; `scripts/disk.py` now clears the real ones.

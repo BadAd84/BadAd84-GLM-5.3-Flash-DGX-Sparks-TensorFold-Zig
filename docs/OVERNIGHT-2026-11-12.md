@@ -1519,3 +1519,65 @@ L turn 3 after the SIGKILL read 26.30 s of server prefill for 46,725 uncached to
 
 **What stays.** `TF_GLM_REQUEST_STARTS` stays off in `DEFS`: its cost on a cold prompt is unchanged until the solo steps run, and its disk checks have not passed. `MM_WIDE`, `SIDE_PRIO`, 4 row pieces and `LATENT_ROWS=2` are candidates that need a second boot in the reverse order and a decode screen at 1, 2 and 4 clients before they are named switches of the recipe (`MM_WIDE` and `SIDE_PRIO` also at 6 and 8). Housekeeping: the smoke boot of `v129z` answered, and queue73's `rs0` arm ran on the older image, which is why it is the same arm without solo-cuts.
 
+
+## 52. The two fixes on a GPU: solo steps run between request starts (cold +0.2 to +1.2% with them), and the disk tier resumes every state it is asked to, each reply equal to a cold server's
+
+2026-11-19 20:17 to 21:50 UTC: queue74's block C1 (`scripts/queues/queue74.sh`) and queue75's block E (`scripts/queues/queue75.sh`), scored by `scripts/queue-scores/score74.py` and `score75.py`; rows in `docs/audit-2026-11-12/queue-rows/queue74` and `queue75` once those queues end. Image `glm53-zig:v129za` (44 patches), the same image id on spark1, spark2 and spark3: it was built from tree `9d7f1de0488a`, which differs from the committed stack (tree `7656da6d8139`) in three test files and comment text only, no line of engine code (`patches/solo-cuts/RECORD.md`, Gate). Every boot `--parallel 4 --context 1048576`, `KNOBS=measured`; production stayed down.
+
+**The two fixes** (both found by section 51's window).
+
+- `patches/solo-cuts`, revised. The server's chunk plan lists a start every 2,048 rows from the last start, so a request's cut at a solo step's middle grid point is always there, and the first version counted it as a start inside the step: no solo step ran. The revision leaves that point out of `cutInside` and tests with start lists shaped as `Plan.starts` and `withCut` build them (the first version's host tests used a few message starts and no grid steps). Lifting the predicate alone would have failed differently: a solo pass from a row off the 4-row pool's edge floors its index ring's base to the pool below, so a ring of exactly a solo pass's rows (4,096) ends in `error.PastRing`. A Python model of that arithmetic over random prompts, with start lists built as the server builds them (scratch, not kept): 2,716 of 4,000 end in `PastRing` at 4,096 rows, 0 of 4,000 fresh passes and 0 of 3,000 resumed ones at 4,100. The ring is therefore one pool (4 rows) longer: 24 KiB a state at TP=2 (the arena sizes in `cuda_kv8_test.zig` moved by that), and the disk store's identity changes with it.
+- `patches/disk-any-position` (new). The disk image's `parts` refused a position off the pool's edge (`SnapshotShape`), so three states in four were never saved, and the staging floor priced only whole pools. The rows layer already takes `at / per` to `at / per + 1` rows, the pooled-key kernel writes only completed pools, and the probe's hash already zeroes the pool in progress, so `parts` takes any position from 1 to the capacity and `longest` is the capacity (`patches/disk-any-position/RECORD.md` has the read of each point).
+
+**Gates.** A full run on the gate host, `sg-20261119-210540`, the pristine pin (tree `4be51cc6beef`) against the 44-patch stack (tree `7656da6d8139`): every step rc 0 but `test-cuda-host`, which fails only the base's own `cli_config_test.test.serve --config` name (6,912 of 6,946 passed on the stack, 33 skipped, 1 failed; the base 6,716 of 6,750), lean 341 problems on both sides, 0 new, verdict PASS. The ten mutants of solo-cuts and the five of disk-any-position each fail only the tests written for them (the tables are in the two RECORD files). Two earlier attempts of the full run died 10 s after their start with `the runner exited early rc=143`: the gate host has no lingering, so its user manager stopped 10 s after the last login session ended and took the run's systemd scope with it. `scripts/spark-gates.py` now holds one session through a run's launch and wait.
+
+**Block C1: request starts with the revised package, boots f1 rs1 rs2 f2** (one seed on every boot, two requests a size; rs is `TF_GLM_REQUEST_STARTS=1`). Cold first token:
+
+| boot | 8k ms | 32k ms | 120k ms | 8k | 32k | 120k |
+|---|---:|---:|---:|---:|---:|---:|
+| f1 | 3977 | 14832 | 55568 | - | - | - |
+| f2 | 3985 | 14908 | 55718 | - | - | - |
+| rs1 | 4030 | 14943 | 55742 | +1.23% | +0.49% | +0.18% |
+| rs2 | 4028 | 14923 | 55736 | +1.19% | +0.35% | +0.17% |
+
+The percentages are against the mean of the two boots without request starts, which agree within 0.20%, 0.51% and 0.27%; both boots with them read slower at every size, so this is a cost, and a small one: +48, +63 and +96 ms a cold request (the two boots' mean against the controls'), down from +4.2%, +6.9% and +7.5% before the revision. Each cold request takes one more small pass at its prompt's end (the assistant header's cut) and splits the last step at its message starts, which is where the milliseconds go (an inference from the plan's shape, not a profile). One reply digest for every (size, request) over the four boots. The ~113k growing conversation (one salt, so every boot's turns are the same prompts):
+
+| boot | first turn ms | turns 2 to 8 ms | mean | cached tokens turns 2 to 8 |
+|---|---:|---|---:|---|
+| f1 | 52,344 | 813 1,577 1,033 1,774 1,405 883 1,622 | 1,301 | 112,640 112,640 114,688 114,688 116,736 118,784 118,784 |
+| rs1 | 52,403 | 886 869 851 846 835 835 845 | 852 | 112,640 113,963 115,252 116,524 117,793 119,038 120,286 |
+| rs2 | 52,370 | 873 872 848 846 835 836 842 | 850 | 112,640 113,963 115,252 116,524 117,793 119,038 120,286 |
+| f2 | 52,392 | 815 1,584 1,037 1,778 1,410 886 1,633 | 1,306 | 112,640 112,640 114,688 114,688 116,736 118,784 118,784 |
+
+All 8 turns have one reply digest and one prompt length over the four boots. With request starts the first turn costs 1.000 of the recipe's and turns 2 to 8 cost 0.653 (851 against 1,304 ms); each turn resumes at the previous prompt's end less its three header tokens (113,963, 115,252, ...), where the recipe resumes at the last 2,048-row point.
+
+Greedy decode at 1, 2 and 4 clients (the same prompt ids as production's cells, three rounds each):
+
+| cell | f1 | f2 | rs1 | rs2 | rs mean over controls | rounds f / rs | ms a round f1 f2 rs1 rs2 |
+|---|---:|---:|---:|---:|---:|---|---|
+| greedy prose, 1 | 81.74 | 81.20 | 80.93 | 79.99 | -1.24% | 381 / 381 | 37.50 37.73 37.87 38.33 |
+| greedy prose, 2 | 85.63 | 84.85 | 84.61 | 84.90 | -0.57% | 1029 / 1029 | 26.90 27.13 27.20 27.13 |
+| greedy prose, 4 | 113.74 | 112.71 | 112.31 | 111.66 | -1.10% | 1980 / 1980 | 21.17 21.30 21.40 21.50 |
+| greedy code, 1 | 114.52 | 113.81 | 114.06 | 113.42 | -0.37% | 195 / 195 | 51.03 51.37 51.23 51.50 |
+| greedy code, 2 | 138.24 | 136.70 | 136.66 | 136.68 | -0.58% | 411 / 411 | 40.97 41.43 41.40 41.43 |
+| greedy code, 4 | 168.23 | 167.04 | 166.85 | 166.42 | -0.60% | 930 / 930 | 30.13 30.33 30.33 30.47 |
+
+The rs boots read 0.4 to 1.2% under the controls' mean in all six cells, with the two controls 0.6 to 1.1% apart, rounds and tokens a round equal in every cell, and replies equal. The short bench prompts have no cuts (a 33-token prompt's assistant start is inside the first 256 rows, so the plan merges it), so the switch changes nothing on the decode path that a boot could carry; this is either boot-to-boot spread or a cost not yet found, and four boots do not settle it. Queue76 block D runs eight fresh boots, f rs rs f f rs rs f.
+
+**Block E: the disk tier with request starts** (`scripts/queue-disk-tier.sh f75`: boots `k1`, `k2` after a SIGKILL of every rank, `k3` after a clean stop, and a reference boot without the tier; 20:57 to 21:50). Every one of the 17 turns (cold, from RAM and from the disk) equals a cold server's reply (token digests), and no rank logged a skipped save, a failed write or restore, or a failed check in any boot (`save_skipped` 0, `staging_full` 0). Against queue73's window on `v129w` (the same conversations):
+
+| conversation | after | resumed from, rows (before / now) | first token s (before / now) | server prefill s (before / now) |
+|---|---|---|---|---:|
+| M32000 | SIGKILL | 0 (cold) / 32,035 (disk) | 16.18 / 0.57 | 16.18 / 0.28 |
+| M120000 | SIGKILL | 0 (cold) / 120,601 (disk) | 59.95 / 0.93 | 59.94 / 0.28 |
+| L | SIGKILL | 595,968 (disk) / 619,434 (disk) | 28.73 / 14.93 | 26.30 / 12.41 |
+| M32000 | clean restart | 0 (cold) / 32,035 (disk) | 16.30 / 0.67 | 16.30 / 0.38 |
+| M120000 | clean restart | 0 (cold) / 120,601 (disk) | 60.11 / 1.00 | 60.11 / 0.32 |
+| L | clean restart | 595,968 (disk) / 642,690 (disk) | 46.67 / 18.89 | 42.83 / 14.84 |
+| S120000 | clean stop (a save in flight) | 116,736 (disk) / 120,353 (disk) | 2.67 / 0.81 | 2.08 / 0.15 |
+
+Each state is now resumed at the exact endpoint its previous turn kept. Against production's tier chain (`PROD_CHAIN` in `scripts/disk_table.py`): L turn 2 from RAM 12.72 s against 12.54 s (1.01x), L turn 3 after the SIGKILL 12.41 s against 12.80 s (0.97x), L turn 4 after a clean restart beside three decoding streams 14.84 s against 12.90 s (1.15x; its state is 642,690 rows); the cold 596k turn 1 beside three decoding streams is 334.64 s against 224.68 s (1.49x), which this work did not touch. The 4,554 MiB state of L turn 3 reads from the store in 2,489 ms on rank 0, which is 2.49 s of the 12.41 s; the rest is the 23,259 uncached rows' prefill. A request of another `cache_salt` resumed nothing (cached 0 of 32,228; the control without a salt 32,035), and the save in flight at a clean stop was written. The store held 8,580 MiB in 3,058 files after `k1`, 9,521 MiB after `k2` and 12,680 MiB in 3,716 files after `k3`, against a 131,072 MiB cap. A saved state's own part on rank 0 is 435 MiB at 2,912 rows and 811 MiB at 665,908 rows (the log's `imprint:` lines), so most of a save is fixed per state and the daily write budget (`--learn-daily-gib`) is spent by the count of states more than by their length; a request keeps one or two states.
+
+The window's tool reported 2 failed checks, both of one kind and neither the engine's: the `after eviction` rows of `k1` (M32000 and M120000 turn 3) expected the disk and resumed from RAM, equal replies in 0.23 and 0.24 s. `queue-disk-tier.sh` clears the states at the conversation's last 2,048-row grid point (`disk.newest_kept`), but with request starts the state a turn resumes from is at the previous prompt's end, so the loop found nothing to evict and the endpoint states stayed in RAM. The harness now records the highest position the RAM store created during each turn (`scripts/disk.py`, with `scripts/tests/test_disk_newest.py`), so the eviction clears the real state and `SHORT` compares with the real newest one; the live-eviction resume is part of queue77's disk block.
+
+**What stays.** `TF_GLM_REQUEST_STARTS` stays off in `DEFS`: with the revision it costs a cold prompt +1.2%, +0.4% and +0.2% at 8k, 32k and 120k (a measured cost at every size, so a trade the owner takes) and buys 0.653 of a warm turn on a growing conversation and every resume at its previous turn's endpoint after a restart; its decode reading is under queue76 block D. The disk tier with `patches/learn-starts` and `patches/disk-any-position` passes its check. Queue75 continues with the row-piece arms for warm turns (B) and the candidates `MM_WIDE`, `SIDE_PRIO`, 4 pieces and `LATENT_ROWS=2` against four request-starts controls (A).
