@@ -53,6 +53,8 @@ ST_COLD_MS = {"st-A1": {8000: 3647, 32000: 13640, 120000: 50990}, "st-A2": {8000
 ST_C3K_MS = {"st-A1": 1653.8, "st-A2": 1654.2, "st-B1a": 1475.9, "st-B1b": 1476.5, "st-B0": 1654.0, "st-B1x": 1655.0}
 ST_C3K_T2 = {"st-A1": 1681, "st-A2": 1682, "st-B1a": 1684, "st-B1b": 1686, "st-B0": 1682, "st-B1x": 1683}
 ST_C74_MS = {"st-A1": 811.0, "st-A2": 811.7, "st-B1a": 812.0, "st-B1b": 810.3, "st-B0": 811.5, "st-B1x": 811.2}
+WARM_ENGINE = {"st-A1": 3.60, "st-A2": 3.61, "st-B1a": 3.45, "st-B1b": 3.46, "st-B0": 3.61, "st-B1x": 3.62}
+WARM_WIDTHS = {"A": [4096, 2048, 2036, 3], "B1": [4096, 4084, 3], "B0": [4096, 2048, 2036, 3], "B1x": [4096, 2048, 2036, 3]}
 
 
 def c3k_default(label):
@@ -121,6 +123,16 @@ class Fixture:
         (self.d(label) / "ours-rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines), encoding="utf-8")
         return self
 
+    def put_warm(self, label, size, client, engine, widths, qualified=True, tokens=None):
+        """One boot's tools/bench_warm_turns.py report, phase cold, in the shape the tool writes."""
+        rep = {"schema_version": 1, "phase": "cold", "case_id": f"q94-{size}", "repeat_lines": 1, "seed": 1,
+               "first_prompt_tokens_tokenizer": tokens,
+               "first_turn": {"client_ttft_seconds": client, "engine_time_to_first_token_seconds": engine, "prefill_widths": widths,
+                              "cached_tokens": 0, "prompt_tokens": tokens, "complete": True},
+               "continuation": {"complete": True}, "assertions": {"first_turn_starts_cold": True}, "qualified": qualified}
+        (self.d(label) / f"warm-{size}.json").write_text(json.dumps(rep), encoding="utf-8")
+        return self
+
     def put_check(self, rel, body):
         p = self.root / "checks" / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +188,19 @@ class Base(unittest.TestCase):
 
     def st(self):
         return self.fx().st()
+
+    def warm_clean(self, f):
+        """Every st boot's upstream warm-turn report at the three sizes: B1's widths are the lever's, the others are A's, and B1's engine TTFT is 4.16% under A's."""
+        for arm, labels in s94.ST.items():
+            for label in labels:
+                for size, target in s94.WARM:
+                    e = WARM_ENGINE[label]
+                    f.put_warm(label, size, round(e + 0.02, 3), e, list(WARM_WIDTHS[arm]), tokens=target)
+        return f
+
+    def run_scorer(self, root):
+        r = subprocess.run([sys.executable, str(SCORER), "--dir", str(root)], capture_output=True, text=True, timeout=900)
+        return r.returncode, r.stdout
 
 
 class HeadSkip(Base):
@@ -521,15 +546,73 @@ class SoloToStart(Base):
         self.assertTrue(v.startswith("SOLO TO START: FAILS"), v)
 
 
-class ExitCode(Base):
-    def run_main(self, root):
-        r = subprocess.run([sys.executable, str(SCORER), "--dir", str(root)], capture_output=True, text=True, timeout=900)
-        return r.returncode, r.stdout
+class WarmReport(Base):
+    """The report-only block: figures and widths per arm, missing files never numbers, and no verdict or exit code moved."""
 
+    def test_prints_each_boot_s_figures_and_the_widths_per_arm(self):
+        f = self.warm_clean(self.st())
+        rc, out = self.run_scorer(f.root)
+        self.assertEqual(rc, 0)
+        self.assertIn("== warm turns: upstream's tools/bench_warm_turns.py", out)
+        self.assertIn("st-B1a warm-8k: client_ttft_s 3.47, engine_ttft_s 3.45, prefill_widths [4096, 4084, 3], qualified True, prompt_tokens 8192 (target 8192)", out)
+        self.assertIn("== warm 8k (target 8192) engine TTFT: A mean 3.605 s, +0.00% against A (faster positive); B1 mean 3.455 s, +4.16% against A (faster positive)", out)
+        self.assertIn("   A prefill_widths: [4096, 2048, 2036, 3]", out)
+        self.assertIn("   B1 prefill_widths: [4096, 4084, 3]", out)
+        self.assertIn("st-A1 warm-120k:", out)
+        self.assertIn("== warm 120k (target 122880) engine TTFT:", out)
+
+    def test_a_missing_report_prints_no_numbers(self):
+        f = self.warm_clean(self.st())
+        (f.root / "st-B1b" / "warm-32k.json").unlink()
+        rc, out = self.run_scorer(f.root)
+        self.assertEqual(rc, 0)
+        self.assertIn("st-B1b: no warm-32k.json", out)
+        self.assertNotIn("st-B1b warm-32k:", out)
+        self.assertIn("st-B1b warm-8k:", out)
+
+    def test_the_widths_keep_every_boot_s_distinct_set(self):
+        f = self.warm_clean(self.st())
+        f.put_warm("st-B1b", "32k", 3.48, 3.46, [4096, 4084, 4], tokens=32768)
+        rc, out = self.run_scorer(f.root)
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("== warm 32k"))
+        block = "\n".join(lines[at:at + 8])
+        self.assertIn("   B1 prefill_widths: [4096, 4084, 3], [4096, 4084, 4]", block)
+        self.assertIn("   A prefill_widths: [4096, 2048, 2036, 3]", block)
+
+    def test_a_report_that_did_not_qualify_is_printed(self):
+        f = self.warm_clean(self.st())
+        f.put_warm("st-B0", "8k", 3.63, 3.61, [4096, 2048, 2036, 3], qualified=False, tokens=8192)
+        rc, out = self.run_scorer(f.root)
+        self.assertEqual(rc, 0)
+        self.assertIn("st-B0 warm-8k: client_ttft_s 3.63, engine_ttft_s 3.61, prefill_widths [4096, 2048, 2036, 3], qualified False", out)
+
+    def test_the_block_decides_nothing_with_no_warm_files(self):
+        f = self.st()
+        self.assertTrue(self.stv(f).startswith("SOLO TO START: HOLDS"), self.stv(f))
+        rc, out = self.run_scorer(f.root)
+        self.assertEqual(rc, 0)
+        self.assertIn("st-A1: no warm-8k.json", out)
+        self.assertIn("SOLO TO START: HOLDS", out)
+
+    def test_a_slower_b1_in_the_block_still_holds_and_exits_zero(self):
+        f = self.warm_clean(self.st())
+        for label in s94.ST["B1"]:
+            for size, target in s94.WARM:
+                f.put_warm(label, size, 4.02, 4.0, list(WARM_WIDTHS["B1"]), tokens=target)
+        self.assertTrue(self.stv(f).startswith("SOLO TO START: HOLDS"), self.stv(f))
+        rc, out = self.run_scorer(f.root)
+        self.assertEqual(rc, 0)
+        self.assertIn("B1 mean 4.000 s", out)
+        self.assertIn("-10.96% against A", out)
+
+
+class ExitCode(Base):
     def test_the_exit_code_is_one_when_a_lever_fails(self):
         f = self.hk()
         f.put_headlog("hk-B0", 1)
-        rc, out = self.run_main(f.root)
+        rc, out = self.run_scorer(f.root)
         self.assertEqual(rc, 1)
         self.assertIn("HEAD SKIP: FAILS", out)
 
@@ -538,7 +621,7 @@ class ExitCode(Base):
         for label in ("hk-B1a", "hk-B1b"):
             for size in s94.HK_CACHE:
                 f.put_cache(label, size, 100.0)
-        rc, out = self.run_main(f.root)
+        rc, out = self.run_scorer(f.root)
         self.assertEqual(rc, 0)
         self.assertIn("HEAD SKIP: NEUTRAL", out)
         self.assertIn("SOLO TO START: NOT DECIDED", out)

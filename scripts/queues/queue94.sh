@@ -17,6 +17,11 @@
 #   (/metrics) in metrics-after.txt and every rank 0 log line that names TF_GLM_HEAD_SKIP in head-skip-line.txt; solo-to-start boots also run OUR cells, the ones upstream has no driver for
 #   because it sends completion ids: queue89's cold chat first token at 8k / 32k / 120k (longctx.py probe, salt pf74, two requests a size) and its two conversations, c74 (8 turns, about
 #   1,290 rows a turn) and c3k (10 turns, --add 2500, about 3,000), rows in <boot>/ours-rows.jsonl as longctx.py writes them (and <boot>/chain.jsonl for decide84.py and score91.py).
+#   solo-to-start boots also run UPSTREAM'S chat-turn tool, tools/bench_warm_turns.py --phase cold, at about 8,192 / 32,768 / 122,880 prompt tokens (warm-8k.json, warm-32k.json,
+#   warm-120k.json): one chat turn plus a short continuation, the shape whose message structure carries request starts, so the report's first_turn.prefill_widths are this lever's chunk
+#   widths straight from the server. Its line counts come from two calibration runs on the first st boot (400 and 800 lines, tokens = a + b*lines), kept in $OUT/warm-lines.json and reused
+#   on every later boot; each size's first turn must be cold (cached_tokens 0, printed) and a tool failure prints its rc and never stops the queue. Our cells stay: they cover the cold
+#   sizes and conversations upstream's tool does not send. score94.py prints the warm reports as a report only.
 #   Before the boots, the device checks: glm-synth's 2-layer checkpoint once, then queue93-style glm-lanes-concurrent and glm-lanes-cover on phsk with and without the switch (no drafter on
 #   those checks, so the head runs either way: they show the switch leaves the default path's bytes alone, which is all a synthetic checkpoint can show), then queue89's glm-solo-check on
 #   psts, one GPU with the switch off and on and the three ranks on the real checkpoint with it off and on. A check that fails drops that image's arms and the queue says so.
@@ -184,7 +189,54 @@ ours() { # ours DIR LABEL: queue89's cold chat cells and its two conversations; 
   grep -a '"case": "chain"' "$d/ours-rows.jsonl" > "$d/chain.jsonl"  # where decide84.py and score91.py read a boot's conversation
   grep -a '"case": "cold"' "$d/ours-rows.jsonl" >> "$OUT/rows.jsonl"  # where score91.py reads a boot's cold cells (tag = label)
 }
-unit() { # unit LABEL TAG XENV MODE: a fresh boot and every cell; MODE hk keeps the prompt cache's gauges and the switch's log lines, st adds our own cells
+warm_lines() { # warm_lines: the line counts for the three warm sizes, calibrated once per queue (the first st boot) into $OUT/warm-lines.json and reused on every later boot; 0 when the file is ready
+  if [ -s "$OUT/warm-lines.json" ]; then
+    echo "[q94] $(date -u +%T) warm lines reused: $(python3 -c "import json; r = json.load(open('$OUT/warm-lines.json')); print('lines', r['lines'], 'from', r['calibration'])" 2>&1 | tail -1)"
+    return 0
+  fi
+  local n rc
+  for n in 400 800; do
+    python3 "$TOOLS/bench_warm_turns.py" "$URL" "$MODEL" --phase cold --case-id "q94-cal-$n" --repeat-lines "$n" --max-tokens 8 --seed 4100 --output "$OUT/warm-cal-$n.json" > "$OUT/warm-cal-$n.out" 2>&1
+    rc=$?
+    if [ ! -s "$OUT/warm-cal-$n.json" ]; then
+      echo "[q94] $(date -u +%T) warm calibration at $n lines: rc=$rc no report ($(tail -1 "$OUT/warm-cal-$n.out" | cut -c1-160))"
+      return 1
+    fi
+    echo "[q94] $(date -u +%T) warm calibration at $n lines: rc=$rc $(python3 -c "import json; print('prompt_tokens', json.load(open('$OUT/warm-cal-$n.json'))['first_prompt_tokens_tokenizer'])" 2>&1 | tail -1)"
+  done
+  # tokens = a + b*lines from the two runs; the line count for a target token count is (target - a) / b
+  python3 -c "
+import json
+p = {n: json.load(open('$OUT/warm-cal-%d.json' % n))['first_prompt_tokens_tokenizer'] for n in (400, 800)}
+b = (p[800] - p[400]) / 400.0
+a = p[400] - b * 400
+targets = {'8k': 8192, '32k': 32768, '120k': 122880}
+lines = {size: int(round((target - a) / b)) for size, target in targets.items()}
+json.dump({'targets': targets, 'lines': lines, 'calibration': {'400': p[400], '800': p[800]}, 'a': a, 'b': b}, open('$OUT/warm-lines.json', 'w'))
+print('a', round(a, 2), 'b', round(b, 4), 'lines', lines)" > "$OUT/warm-lines.out" 2>&1
+  if [ -s "$OUT/warm-lines.json" ]; then echo "[q94] $(date -u +%T) warm lines calibrated: $(tail -1 "$OUT/warm-lines.out")"; return 0; fi
+  echo "[q94] $(date -u +%T) warm calibration failed: $(tail -2 "$OUT/warm-lines.out" | tr '\n' ' ' | cut -c1-300)"
+  return 1
+}
+warm() { # warm DIR LABEL: upstream's chat-turn tool at the three sizes, a report only; a tool failure prints its rc and never stops the queue
+  local d=$1 label=$2 size target seed lines rc
+  warm_lines || { echo "[q94] $(date -u +%T) $label warm cells skipped: no $OUT/warm-lines.json"; return 0; }
+  for spec in "8k 8192 8192" "32k 32768 32768" "120k 122880 122880"; do
+    read -r size target seed <<< "$spec"
+    lines=$(python3 -c "import json; print(json.load(open('$OUT/warm-lines.json'))['lines']['$size'])" 2>/dev/null)
+    [ -n "$lines" ] || { echo "[q94] $label warm $size: no line count in $OUT/warm-lines.json"; continue; }
+    python3 "$TOOLS/bench_warm_turns.py" "$URL" "$MODEL" --phase cold --case-id "q94-$size" --repeat-lines "$lines" --max-tokens 8 --seed "$seed" --output "$d/warm-$size.json" > "$d/warm-$size.out" 2>&1
+    rc=$?
+    if [ -s "$d/warm-$size.json" ]; then
+      echo "[q94] $(date -u +%T) $label warm $size: rc=$rc $(python3 -c "
+import json
+r = json.load(open('$d/warm-$size.json'))
+f = r['first_turn']
+print('prompt_tokens', r['first_prompt_tokens_tokenizer'], 'of target $target;', 'repeat_lines', r['repeat_lines'], '; cached_tokens', f.get('cached_tokens'), '; engine_ttft_s', f.get('engine_time_to_first_token_seconds'), '; widths', f.get('prefill_widths'), '; qualified', r['qualified'])" 2>&1 | tail -1)"
+    else echo "[q94] $(date -u +%T) $label warm $size: rc=$rc no report ($(tail -1 "$d/warm-$size.out" | cut -c1-160))"; fi
+  done
+}
+unit() { # unit LABEL TAG XENV MODE: a fresh boot and every cell; MODE hk keeps the prompt cache's gauges and the switch's log lines, st adds our own cells and upstream's warm turns
   local label=$1 tag=$2 xenv=$3 mode=$4
   room || return
   case "$HAVE" in *" $tag "*) ;; *) echo "[q94] $label: image glm53-zig:$tag is not in the window (absent, unbuilt or dropped by a device check): skipped"; return ;; esac
@@ -203,6 +255,7 @@ unit() { # unit LABEL TAG XENV MODE: a fresh boot and every cell; MODE hk keeps 
       echo "[q94] $(date -u +%T) $label head-skip line: $(grep -a -c 'TF_GLM_HEAD_SKIP=1: the MTP head absorbs no prompt rows' "$d/head-skip-line.txt") line(s) in the whole rank 0 log" ;;
     st)
       ours "$d" "$label"
+      warm "$d" "$label"
       echo "[q94] $label solo-to-start boot line: $(docker logs glm53-zig-r0 2>&1 | grep -a -m1 'a solo prompt step may end' | cut -c1-160)" ;;
   esac
   mem "$d/mem-after.txt"

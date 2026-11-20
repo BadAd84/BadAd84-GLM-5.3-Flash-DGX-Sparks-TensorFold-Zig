@@ -38,6 +38,13 @@ THE SOLO TO START RULE, written before queue94's rows existed.
   S5 device checks: every psts check log under DIR/checks has a PASS line and no FAIL; none found is NOT DECIDED for this clause only (named).
   Verdict: FAILS if S1, S2, S3's no-slower clause, S4's no-slower clauses or S5 is violated; HOLDS when the cold 8k mean is faster in B1 by at least 1.0% (both B1 boots below both A
   boots) AND S4's gain clause holds; else NEUTRAL. A missing boot or report is NOT DECIDED for that lever, never a pass.
+
+WARM TURNS, a REPORT and nothing more. The st boots also run upstream's tools/bench_warm_turns.py --phase cold at about 8,192, 32,768 and 122,880 prompt tokens (warm-8k.json,
+warm-32k.json, warm-120k.json): one chat turn, the shape whose message structure carries the request starts this lever cuts, plus a short continuation. This block prints, per boot,
+first_turn.client_ttft_seconds, first_turn.engine_time_to_first_token_seconds, first_turn.prefill_widths (the chunk widths the lever changes, straight from the server) and the report's
+qualified flag; then each arm's mean engine time to first token against A's (faster positive) and the distinct prefill_widths per arm, so A's widths against B1's are visible. It changes
+NO verdict and NO exit code: the lever's verdict is the S1-S5 rules above, written before the rows existed, and this block is upstream-tool evidence for the pull request, not a sixth
+rule. A missing or unreadable report prints "no warm-8k.json" and no number.
 """
 import argparse
 import importlib.util
@@ -57,6 +64,7 @@ HK_CACHE = (2048, 8192, 32768, 65536)
 HK_HOLD_SIZES = (8192, 32768)
 ST_COLD = (8000, 32000, 120000)
 C3K, C74 = "c3k", "c74"  # the ~3,000-row-turn conversation and the ~113k one (~1,290 rows a turn), queue89's salts
+WARM = (("8k", 8192), ("32k", 32768), ("120k", 122880))  # queue94's warm-<size>.json, upstream's bench_warm_turns.py, and the prompt-token target of each
 HEAD_LINE = "TF_GLM_HEAD_SKIP=1: the MTP head absorbs no prompt rows"
 CHUNK = re.compile(r"glm prompt chunk rank=\d+ slot=\d+ start=\d+ rows=\d+ wall_ms=[\d.]+ spans=\d+")
 MTP = re.compile(r"glm prompt stage rank=\d+ slot=\d+ start=\d+ rows=\d+ layer=\S+ piece=\S+ site=\S+ stage=mtp stream=\S+ ms=([\d.]+)")
@@ -385,6 +393,59 @@ def checks(d):
     return out
 
 
+def warm(d, label, size):
+    """(client ttft s, engine ttft s, prefill widths tuple, qualified, prompt tokens) of one boot's warm-<size>.json, or None when it is missing or unreadable."""
+    try:
+        rep = s93().read(f"{d}/{label}/warm-{size}.json")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rep, dict):
+        return None
+    first = rep.get("first_turn")
+    first = first if isinstance(first, dict) else {}
+    widths = first.get("prefill_widths")
+    return (first.get("client_ttft_seconds"), first.get("engine_time_to_first_token_seconds"),
+            tuple(widths) if isinstance(widths, list) else None, rep.get("qualified"),
+            rep.get("first_prompt_tokens_tokenizer"))
+
+
+def warm_report(d):
+    """The st boots' upstream bench_warm_turns.py reports: printed only, never a verdict (the lever's verdict is the S1-S5 rules)."""
+    out = ["== warm turns: upstream's tools/bench_warm_turns.py --phase cold, one chat turn a size (REPORT ONLY: no verdict and no exit code depends on this block; the solo lever's verdict is S1-S5's)"]
+    for size, target in WARM:
+        timings = {arm: [] for arm in ST}
+        widths = {arm: set() for arm in ST}
+        for arm in ST:
+            for label in ST[arm]:
+                got = warm(d, label, size)
+                if got is None:
+                    out.append(f"{label}: no warm-{size}.json")
+                    continue
+                client, engine, w, qual, tokens = got
+                if isinstance(engine, (int, float)):
+                    timings[arm].append(engine)
+                widths[arm].add(w)
+                out.append(f"{label} warm-{size}: client_ttft_s {client}, engine_ttft_s {engine}, "
+                           f"prefill_widths {list(w) if w is not None else None}, qualified {qual}, prompt_tokens {tokens} (target {target})")
+        base = timings["A"]
+        parts = []
+        for arm in ST:
+            v = timings[arm]
+            if not v:
+                parts.append(f"{arm} no numbers")
+            elif base:
+                parts.append(f"{arm} mean {st.mean(v):.3f} s, {1 - st.mean(v) / st.mean(base):+.2%} against A (faster positive)")
+            else:
+                parts.append(f"{arm} mean {st.mean(v):.3f} s (A has no numbers)")
+        out.append(f"== warm {size} (target {target}) engine TTFT: " + "; ".join(parts))
+        for arm in ST:
+            seen = sorted((w for w in widths[arm] if w is not None), key=lambda w: (len(w), w))
+            gone = sum(1 for w in widths[arm] if w is None)
+            out.append(f"   {arm} prefill_widths: " + (", ".join(str(list(w)) for w in seen) if seen else "none")
+                       + (f" ({gone} boot(s) without widths)" if gone else ""))
+    return out
+
+
 def solo(d):
     out, reasons, undecided = [], [], []
     cb, miss = cells_by_boot(d, [x for a in ("A", "B1", "B0", "B1x") for x in ST[a]])
@@ -494,6 +555,7 @@ def main(argv):
         print("\n".join(lines))
         print(verdict)
         failed = failed or bad
+    print("\n".join(warm_report(a.dir)))  # a report: it decides nothing and never touches `failed`
     return 1 if failed else 0
 
 

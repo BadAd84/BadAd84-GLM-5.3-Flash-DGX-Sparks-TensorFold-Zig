@@ -69,6 +69,22 @@ MUTANTS = [
      "new": '    if 0:\n        return out, "HEAD SKIP: NOT DECIDED: ', "expect": "test_a_missing_cache_report_is_not_decided"},
     {"name": "exit-always-zero", "old": "return 1 if failed else 0", "new": "return 0", "expect": "test_the_exit_code_is_one_when_a_lever_fails"},
     {"name": "exit-last-lever-only", "old": "failed = failed or bad", "new": "failed = bad", "expect": "test_the_exit_code_is_one_when_a_lever_fails"},
+    # the warm-turn report block
+    {"name": "warm-reference-group", "old": '        base = timings["A"]', "new": '        base = timings["B1"]',
+     "expect": "test_prints_each_boot_s_figures_and_the_widths_per_arm"},
+    {"name": "warm-sign", "old": "{1 - st.mean(v) / st.mean(base):+.2%}", "new": "{st.mean(v) / st.mean(base) - 1:+.2%}",
+     "expect": "test_prints_each_boot_s_figures_and_the_widths_per_arm"},
+    {"name": "warm-sizes-drop-120k", "old": 'WARM = (("8k", 8192), ("32k", 32768), ("120k", 122880))', "new": 'WARM = (("8k", 8192), ("32k", 32768))',
+     "expect": "test_prints_each_boot_s_figures_and_the_widths_per_arm"},
+    {"name": "warm-widths-last-boot-only", "old": "widths[arm].add(w)", "new": "widths[arm] = {w}",
+     "expect": "test_the_widths_keep_every_boot_s_distinct_set"},
+    {"name": "warm-missing-silent", "old": '                    out.append(f"{label}: no warm-{size}.json")\n                    continue',
+     "new": "                    continue", "expect": "test_a_missing_report_prints_no_numbers"},
+    {"name": "warm-missing-numbers", "old": "    if not isinstance(rep, dict):\n        return None",
+     "new": "    if not isinstance(rep, dict):\n        return (0.0, 0.0, None, False, None)", "expect": "test_a_missing_report_prints_no_numbers"},
+    {"name": "warm-verdict-leak", "old": '    print("\\n".join(warm_report(a.dir)))',
+     "new": '    failed = failed or any("no warm-" in x for x in warm_report(a.dir))\n    print("\\n".join(warm_report(a.dir)))',
+     "expect": "test_the_block_decides_nothing_with_no_warm_files"},
 ]
 
 
