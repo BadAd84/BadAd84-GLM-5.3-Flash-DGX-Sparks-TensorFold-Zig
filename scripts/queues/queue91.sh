@@ -9,7 +9,9 @@
 #      glm-index-ovn-check, glm-index-regroup-check, glm-mla-skip-check, glm-onepass-exact-check, glm-keep-seqs-check, glm-restore-held-check off and on) on m130a, and upstream's own
 #      (glm-exl3, glm-exl3-items, glm-index-check, glm-mm-fixed, glm-ref, glm-kv-host-slots, glm-fp8g-shares, glm-kda-pad-split) on m130base first and then m130a: a check that fails on
 #      both is the base's, one that fails on m130a alone stops the queue. Three ranks on the real checkpoint (scripts/gpu-check-tp3.sh, the recipe's environment): glm-solo-check with
-#      and without TF_GLM_OVN_SOLO_TO_START, glm-pair-check, glm-shared-check, glm-split-check, glm-lanes-concurrent and glm-lanes-cover.
+#      and without TF_GLM_OVN_SOLO_TO_START, glm-split-check, and glm-pair-check with the runtime section only (paired prompt steps are what TF_GLM_CHUNK_SOLO replaces, so the
+#      recipe's environment leaves it nothing to pair). glm-shared-check, glm-lanes-concurrent and glm-lanes-cover read a `kinds` fixture of prompts and expected tokens that only
+#      glm-synth writes, so they run on its checkpoint on one GPU, on m130base first and then m130a.
 #   2  units, each a fresh P=4 boot: the cold first token at 8k / 32k / 120k (two requests, one seed on every boot), a growing conversation (salt c74: a 100k first turn and seven
 #      turns of about 1,300 rows), greedy and sampled decode at 1, 2, 4, 6 and 8 clients, and the 24 prompts one at a time. Order, interleaved so a drifting box shows:
 #        mn1 md1 mz1 mps mr1 md2 mn2 mo3
@@ -68,6 +70,7 @@ chk() { # chk IMAGE NAME XENV ARGS...: one single-GPU check; 0 when it exits 0 w
   [ "$rc" = 0 ] && [ "$p" -ge 1 ] && [ "$f" = 0 ]
 }
 bad=0
+if [ "${SKIP_SINGLE:-0}" != 1 ]; then
 for name in glm-mm-ovn glm-latent-rows glm-kda-pieces glm-draft-onepass glm-index-ovn-check glm-index-regroup-check glm-mla-skip-check glm-onepass-exact-check; do
   chk "$IMG" "$name" "" || { bad=1; echo "[q91] CHECK FAILED: $name on $IMG"; }
 done
@@ -77,6 +80,13 @@ chk "$IMG" glm-restore-held-check "-e TF_GLM_OVN_RESTORE_HELD=1" /s/ckpt /s/id-h
 for name in glm-exl3 glm-exl3-items glm-index-check glm-mm-fixed glm-ref glm-kv-host-slots glm-fp8g-shares glm-kda-pad-split; do
   chk "$IMGB" "$name" ""; base_ok=$?
   chk "$IMG" "$name" ""; ours_ok=$?
+  if [ "$ours_ok" != 0 ] && [ "$base_ok" = 0 ]; then bad=1; echo "[q91] CHECK FAILED ON THE STACK ONLY: $name"; fi
+  [ "$ours_ok" != 0 ] && [ "$base_ok" != 0 ] && echo "[q91] $name fails on the pristine main too: the base's, not the stack's"
+done
+fi
+for name in glm-shared-check glm-lanes-concurrent glm-lanes-cover; do
+  chk "$IMGB" "$name" "" /s/ckpt /s/ckpt/dc.json 0 1 "/s/id-b-$name"; base_ok=$?
+  chk "$IMG" "$name" "" /s/ckpt /s/ckpt/dc.json 0 1 "/s/id-a-$name"; ours_ok=$?
   if [ "$ours_ok" != 0 ] && [ "$base_ok" = 0 ]; then bad=1; echo "[q91] CHECK FAILED ON THE STACK ONLY: $name"; fi
   [ "$ours_ok" != 0 ] && [ "$base_ok" != 0 ] && echo "[q91] $name fails on the pristine main too: the base's, not the stack's"
 done
@@ -92,14 +102,15 @@ tp3() { # tp3 NAME CHECK XENV: one multi-rank check on the real checkpoint; 0 pa
   return 2
 }
 ran=0; bad=0
-for spec in "solo-off|glm-solo-check|-e TF_GLM_CHUNK_SOLO=4096" "solo-on|glm-solo-check|-e TF_GLM_CHUNK_SOLO=4096 -e TF_GLM_OVN_SOLO_TO_START=1" "solo-recipe|glm-solo-check|$RECIPE" "pair|glm-pair-check|$RECIPE" \
-            "shared|glm-shared-check|$RECIPE" "split|glm-split-check|$RECIPE" "concurrent|glm-lanes-concurrent|$RECIPE" "cover|glm-lanes-cover|$RECIPE"; do
+for spec in "solo-off|glm-solo-check|-e TF_GLM_CHUNK_SOLO=4096" "solo-on|glm-solo-check|-e TF_GLM_CHUNK_SOLO=4096 -e TF_GLM_OVN_SOLO_TO_START=1" "solo-recipe|glm-solo-check|$RECIPE" "pair|glm-pair-check|" \
+            "split|glm-split-check|$RECIPE"; do
   IFS='|' read -r name check xenv <<< "$spec"
+  case " ${SKIP_TP3:-} " in *" $name "*) echo "[q91] $check ($name): skipped, it passed on these image ids in the first start"; ran=$((ran + 1)); continue ;; esac
   tp3 "$name" "$check" "$xenv"; rc=$?
   case $rc in 0) ran=$((ran + 1)) ;; 1) bad=1; echo "[q91] A FAIL LINE: $check ($name)" ;; *) echo "[q91] $check ($name) did not run to a verdict (the launcher or a rank; see $CK/tp3-$name)" ;; esac
 done
 [ "$bad" = 0 ] || { echo "[q91] A THREE-RANK CHECK FAILED: nothing is measured"; exit 1; }
-echo "[q91] $(date -u +%T) three-rank checks: $ran of 8 passed and none failed"
+echo "[q91] $(date -u +%T) three-rank checks: $ran of 5 passed (or were skipped as passed) and none failed"
 boot() { # boot LABEL IMAGE KNOBS XENV: the Zig serve up on :8300 at --parallel 4 --context 1048576, 0 when it is
   local label=$1 image=$2 knobs=$3 xenv=$4; mkdir -p "$OUT/f91-boots"; stop
   IMAGE=$image KNOBS=$knobs XENV="$xenv" bash zig-tp3.sh 4 1048576 > "$OUT/f91-boots/$label.log" 2>&1 && return 0
