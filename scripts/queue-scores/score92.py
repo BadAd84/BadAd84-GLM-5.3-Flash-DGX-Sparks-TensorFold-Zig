@@ -12,7 +12,7 @@ boot of the rung lies beyond every boot of the rung before it (faster or slower)
 A reply digest that differs between two rungs is a numerics change by upstream and is listed.
 
 THE PR RULE, written before queue92's rows existed. An arm of an open pull request (smr: request starts on main; pd: #3616, the drafter's MLP split; pm: #3659, MoE without row
-copies; pg: #2279, verify windows as CUDA graphs) is a CANDIDATE against the main group (mps, sm2, sm3) when
+copies) is a CANDIDATE against the main group (mps, sm2, sm3) when
   - no cell reads more than 1.0% slower than the main group's mean, and
   - at least one cell of the cold first tokens, the conversation's warm turns or the decode at 1, 2 and 4 clients is faster than the main group's best boot by more than 1.0%, and
   - every reply digest equals the main group's one digest.
@@ -129,8 +129,7 @@ def arm(label_boots, ref_boots):
     return lines, f"CANDIDATE: faster than the best reference boot by more than {LIMIT:.0%} on {len(gain_cells)} cell(s) ({'; '.join(gain_cells[:6])}), no cell slower, every digest equal"
 
 
-ARMS = (("smr", "request starts on stock main (TF_GLM_REQUEST_STARTS=1)"), ("pd", "#3616 TF_GLM_DRAFT_SPLIT=1"), ("pm", "#3659 TF_GLM_MOE_DIRECT=1"),
-        ("pg", "#2279 TF_GLM_GRAPHS=1"))
+ARMS = (("smr", "request starts on stock main (TF_GLM_REQUEST_STARTS=1)"), ("pd", "#3616 TF_GLM_DRAFT_SPLIT=1"), ("pm", "#3659 TF_GLM_MOE_DIRECT=1"))
 ATTRIBUTION = (("smz", "stock main with TF_GLM_PDL=0: the dependent launches off, so PDL's share is the negative of these cells"),)
 
 

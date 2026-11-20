@@ -3,7 +3,7 @@
 # clients queue on it), every arm KNOBS=off (the runtime section of env/prod.env, no knob of ours), so a rung is what a user of upstream gets.
 # queue92.env: WORKERS, HOURS, IMGB (the pristine main of queue91, glm53-zig:m130base). Production is down for the campaign and stays down. QUEUE92-DONE.
 # ARMS (env, default the stock ladder): the units to run, in order; only the images those arms need are built. WAIT_FOR (default queue91.sh): the process to wait out first, so the pull
-# request arms can be run later as their own start (ARMS="pd pm pg" WAIT_FOR=queue93.sh) and the pilots' receipts go between.
+# request arms can be run later as their own start (ARMS="pd pm" WAIT_FOR=queue93.sh, from a copy named queue92b.sh so queue93's wait on queue92.sh does not see it) and the pilots' receipts go between.
 #
 #   0  wait for QUEUE91-DONE in ~/bench/queue91.log, then build from stage/src-TAG.tar when the image is absent and copy it to the other two ranks, one image id on all three:
 #        u129 u1210 u130   pristine upstream v1.2.9, v1.2.10 and v1.3.0 (git archive of the tag)
@@ -11,11 +11,12 @@
 #        p3616 p3659 p2279 the pin 1ece6e6db plus one open pull request's own change (work/pr-trees/RECORD.md); an arm whose tar is not staged is skipped and logged
 #   1  units, each a fresh P=4 boot: the cold first token at 8k / 32k / 120k (two requests, one seed on every boot), a growing conversation (salt c74: a 100k first turn and seven
 #      turns of about 1,300 rows), greedy and sampled decode at 1, 2, 4, 6 and 8 clients, and the 24 prompts one at a time. Order, interleaved so a drifting box shows:
-#        s9a sm2 smz s13a ud1 ui1 smr pd pm pg s10a s9b s13b sm3
+#        s9a sm2 smz s13a ud1 ui1 smr pd pm s10a s9b s13b sm3
 #      s9 s10 s13  the stock tags v1.2.9 v1.2.10 v1.3.0                     sm  the pristine main (m130base), beside queue91's mps
 #      ud1 ui1     the two main commits between v1.3.0 and the pin            smz sm with TF_GLM_PDL=0 (the dependent launches off)
 #      smr         sm with TF_GLM_REQUEST_STARTS=1 (upstream's own warm-turn setting)
-#      pd pm pg    the pin plus #3616 (TF_GLM_DRAFT_SPLIT=1), #3659 (TF_GLM_MOE_DIRECT=1) and #2279 (TF_GLM_GRAPHS=1), each with its switch on
+#      pd pm       the pin plus #3616 (TF_GLM_DRAFT_SPLIT=1) and #3659 (TF_GLM_MOE_DIRECT=1), each with its switch on; pg (#2279, TF_GLM_GRAPHS=1) is not run: with a drafter
+#                  loaded the graphs path refuses every window (graphed() returns false when taps are set), so it would measure nothing on this serve
 #   scripts/queue-scores/score92.py reads the rows; its rules were written before they existed.
 set -u
 G=$HOME/work/glm53-zig; cd "$G" || exit 1
