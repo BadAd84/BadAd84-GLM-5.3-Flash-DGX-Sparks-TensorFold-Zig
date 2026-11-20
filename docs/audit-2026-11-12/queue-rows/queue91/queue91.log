@@ -1,0 +1,129 @@
+[q91] 18:47:40 start; IMG=glm53-zig:m130a IMGB=glm53-zig:m130base IMGO=glm53-zig:v129zg; deadline 01:47:40; 268G free
+[q91] glm53-zig:m130a ids: sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527 sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527 sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527
+[q91] glm53-zig:m130base ids: sha256:c9453b1830141349db482e7f03a0c3f886a86207067d7b7a142ae062d1b78b54 sha256:c9453b1830141349db482e7f03a0c3f886a86207067d7b7a142ae062d1b78b54 sha256:c9453b1830141349db482e7f03a0c3f886a86207067d7b7a142ae062d1b78b54
+[q91] glm53-zig:v129zg ids: sha256:52a1f0ce250a9cbfa866681f7ef97a6e127ae39990d3ad828678d1c3a23c7e82 sha256:52a1f0ce250a9cbfa866681f7ef97a6e127ae39990d3ad828678d1c3a23c7e82 sha256:52a1f0ce250a9cbfa866681f7ef97a6e127ae39990d3ad828678d1c3a23c7e82
+[q91] serve.sh sha256 (first 12): f1b2266976ad; env: d0160e2e9291
+[q91] check-env rc=0: check-env: CLEAN
+[prod-stop] 18:47:43 production stopped on spark1-3
+[q91] 18:47:57 glm-synth rc=0: PASS glm-synth: 330 tensors, 2095 MiB, config 2 layers 16 experts vocabulary 8192, dc.json in /s/ckpt
+[q91] 18:48:04 m130base glm-shared-check rc=0: 1 PASS, 0 FAIL lines; PASS shared windows at TP=1: 108 rows of 5 streams over 12 rounds (2 to 5 streams a forward, 1 to 4 rows each,
+[q91] 18:48:11 m130a glm-shared-check rc=0: 1 PASS, 0 FAIL lines; PASS shared windows at TP=1: 108 rows of 5 streams over 12 rounds (2 to 5 streams a forward, 1 to 4 rows each,
+[q91] 18:48:52 m130base glm-lanes-concurrent rc=0: 38 PASS, 0 FAIL lines; PASS all at once: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+[q91] 18:49:35 m130a glm-lanes-concurrent rc=0: 38 PASS, 0 FAIL lines; PASS all at once: stream 0 (prompt 0) against its solo run: 128 ids equal, finished by length (127 rounds)
+[q91] 18:50:04 m130base glm-lanes-cover rc=0: 46 PASS, 0 FAIL lines; PASS copy drafts, greedy: 256 ids equal, finished by length (107 rounds)
+[q91] 18:50:34 m130a glm-lanes-cover rc=0: 46 PASS, 0 FAIL lines; PASS copy drafts, greedy: 256 ids equal, finished by length (107 rounds)
+[q91] 18:50:34 the single-GPU checks passed
+[q91] glm-solo-check (solo-off): skipped, it passed on these image ids in the first start
+[q91] glm-solo-check (solo-on): skipped, it passed on these image ids in the first start
+[q91] glm-solo-check (solo-recipe): skipped, it passed on these image ids in the first start
+[check] 18:50:36 glm-pair-check on glm53-zig:m130a, XENV=''
+[check] 18:52:57 glm-pair-check on glm53-zig:m130a: rc 0 0 0 (ranks 0 1 2) in 141 s; rank 0: 1 PASS, 0 FAIL lines
+PASS paired prompt steps at TP=3: 6 prompts, one with a mark at chunk 1, equal their twins a chunk a step in the first token, the next window's logits and tokens, the rings' bases and every state byte
+[q91] 18:52:57 glm-pair-check (pair) on three ranks: rc=0, 1 PASS, 0 FAIL lines
+[q91] glm-split-check (split): skipped, it passed on these image ids in the first start
+[q91] 18:52:57 three-rank checks: 5 of 5 passed (or were skipped as passed) and none failed
+[q91] 18:57:53 mn1 cold rc=0 3964 14795 55351 4010 15016 55865 
+[q91] 18:59:04 mn1 chain: 52372 817 1589 1045 1788 1417 885 1647
+[q91] 18:59:29 dec-mn1 1 greedy prose rc=0 "agg_tok_s": 83.06 code rc=0 "agg_tok_s": 115.82
+[q91] 19:00:17 dec-mn1 2 greedy prose rc=0 "agg_tok_s": 85.14 code rc=0 "agg_tok_s": 137.62
+[q91] 19:01:32 dec-mn1 4 greedy prose rc=0 "agg_tok_s": 113.5 code rc=0 "agg_tok_s": 167.61
+[q91] 19:03:21 dec-mn1 6 greedy prose rc=0 "agg_tok_s": 119.43 code rc=0 "agg_tok_s": 173.83
+[q91] 19:05:36 dec-mn1 8 greedy prose rc=0 "agg_tok_s": 137.99 code rc=0 "agg_tok_s": 181.91
+[q91] 19:06:03 dec-mn1 1 sampled prose rc=0 "agg_tok_s": 79.0 code rc=0 "agg_tok_s": 114.65
+[q91] 19:06:50 dec-mn1 2 sampled prose rc=0 "agg_tok_s": 84.05 code rc=0 "agg_tok_s": 142.69
+[q91] 19:08:07 dec-mn1 4 sampled prose rc=0 "agg_tok_s": 109.82 code rc=0 "agg_tok_s": 159.09
+[q91] 19:09:56 dec-mn1 6 sampled prose rc=0 "agg_tok_s": 103.69 code rc=0 "agg_tok_s": 192.96
+[q91] 19:12:18 dec-mn1 8 sampled prose rc=0 "agg_tok_s": 121.04 code rc=0 "agg_tok_s": 161.91
+[q91] 19:14:39 dec-mn1 24 prompts rc=0
+[q91] 19:19:25 md1 cold rc=0 3657 13623 51097 3697 13794 51689 
+[q91] 19:20:31 md1 chain: 48240 768 1482 961 1646 1345 819 1514
+[q91] 19:20:57 dec-md1 1 greedy prose rc=0 "agg_tok_s": 80.73 code rc=0 "agg_tok_s": 114.71
+[q91] 19:21:45 dec-md1 2 greedy prose rc=0 "agg_tok_s": 84.73 code rc=0 "agg_tok_s": 136.79
+[q91] 19:23:00 dec-md1 4 greedy prose rc=0 "agg_tok_s": 111.82 code rc=0 "agg_tok_s": 167.1
+[q91] 19:24:50 dec-md1 6 greedy prose rc=0 "agg_tok_s": 137.08 code rc=0 "agg_tok_s": 156.46
+[q91] 19:27:07 dec-md1 8 greedy prose rc=0 "agg_tok_s": 116.03 code rc=0 "agg_tok_s": 179.56
+[q91] 19:27:35 dec-md1 1 sampled prose rc=0 "agg_tok_s": 77.3 code rc=0 "agg_tok_s": 113.07
+[q91] 19:28:23 dec-md1 2 sampled prose rc=0 "agg_tok_s": 82.72 code rc=0 "agg_tok_s": 141.63
+[q91] 19:29:41 dec-md1 4 sampled prose rc=0 "agg_tok_s": 108.39 code rc=0 "agg_tok_s": 157.89
+[q91] 19:31:38 dec-md1 6 sampled prose rc=0 "agg_tok_s": 103.75 code rc=0 "agg_tok_s": 168.36
+[q91] 19:34:00 dec-md1 8 sampled prose rc=0 "agg_tok_s": 110.93 code rc=0 "agg_tok_s": 178.84
+[q91] 19:36:23 dec-md1 24 prompts rc=0
+[q91] 19:41:21 mz1 cold rc=0 3983 14871 55896 4028 15096 56332 
+[q91] 19:42:33 mz1 chain: 52767 819 1584 1038 1783 1428 886 1652
+[q91] 19:43:00 dec-mz1 1 greedy prose rc=0 "agg_tok_s": 79.37 code rc=0 "agg_tok_s": 111.35
+[q91] 19:43:48 dec-mz1 2 greedy prose rc=0 "agg_tok_s": 83.22 code rc=0 "agg_tok_s": 134.61
+[q91] 19:45:05 dec-mz1 4 greedy prose rc=0 "agg_tok_s": 110.25 code rc=0 "agg_tok_s": 165.2
+[q91] 19:46:55 dec-mz1 6 greedy prose rc=0 "agg_tok_s": 115.34 code rc=0 "agg_tok_s": 155.07
+[q91] 19:49:12 dec-mz1 8 greedy prose rc=0 "agg_tok_s": 129.16 code rc=0 "agg_tok_s": 163.99
+[q91] 19:49:39 dec-mz1 1 sampled prose rc=0 "agg_tok_s": 75.73 code rc=0 "agg_tok_s": 109.58
+[q91] 19:50:28 dec-mz1 2 sampled prose rc=0 "agg_tok_s": 81.07 code rc=0 "agg_tok_s": 139.62
+[q91] 19:51:48 dec-mz1 4 sampled prose rc=0 "agg_tok_s": 105.67 code rc=0 "agg_tok_s": 154.71
+[q91] 19:53:49 dec-mz1 6 sampled prose rc=0 "agg_tok_s": 101.96 code rc=0 "agg_tok_s": 166.19
+[q91] 19:56:20 dec-mz1 8 sampled prose rc=0 "agg_tok_s": 116.46 code rc=0 "agg_tok_s": 154.31
+[q91] 19:58:46 dec-mz1 24 prompts rc=0
+[q91] 20:04:40 mps cold rc=0 5273 21052 79014 5441 21133 79085 
+[q91] 20:06:21 mps chain: 74125 991 1985 1289 2245 1821 1104 2072
+[q91] 20:07:01 dec-mps 1 greedy prose rc=0 "agg_tok_s": 53.36 code rc=0 "agg_tok_s": 75.64
+[q91] 20:08:09 dec-mps 2 greedy prose rc=0 "agg_tok_s": 59.42 code rc=0 "agg_tok_s": 95.53
+[q91] 20:09:58 dec-mps 4 greedy prose rc=0 "agg_tok_s": 78.99 code rc=0 "agg_tok_s": 116.04
+[q91] 20:12:47 dec-mps 6 greedy prose rc=0 "agg_tok_s": 74.86 code rc=0 "agg_tok_s": 106.07
+[q91] 20:16:19 dec-mps 8 greedy prose rc=0 "agg_tok_s": 81.58 code rc=0 "agg_tok_s": 116.36
+[q91] 20:16:57 dec-mps 1 sampled prose rc=0 "agg_tok_s": 55.7 code rc=0 "agg_tok_s": 80.1
+[q91] 20:18:07 dec-mps 2 sampled prose rc=0 "agg_tok_s": 57.45 code rc=0 "agg_tok_s": 94.85
+[q91] 20:20:02 dec-mps 4 sampled prose rc=0 "agg_tok_s": 75.64 code rc=0 "agg_tok_s": 110.03
+[q91] 20:22:50 dec-mps 6 sampled prose rc=0 "agg_tok_s": 71.98 code rc=0 "agg_tok_s": 110.8
+[q91] 20:26:26 dec-mps 8 sampled prose rc=0 "agg_tok_s": 82.55 code rc=0 "agg_tok_s": 118.07
+[q91] 20:29:45 dec-mps 24 prompts rc=0
+[q91] 20:34:30 mr1 cold rc=0 3538 13538 51227 3600 13718 51565 
+[q91] 20:35:33 mr1 chain: 47755 821 811 796 792 783 778 785
+[q91] 20:35:59 dec-mr1 1 greedy prose rc=0 "agg_tok_s": 81.26 code rc=0 "agg_tok_s": 114.66
+[q91] 20:36:46 dec-mr1 2 greedy prose rc=0 "agg_tok_s": 86.85 code rc=0 "agg_tok_s": 139.11
+[q91] 20:38:00 dec-mr1 4 greedy prose rc=0 "agg_tok_s": 114.96 code rc=0 "agg_tok_s": 169.06
+[q91] 20:39:45 dec-mr1 6 greedy prose rc=0 "agg_tok_s": 120.33 code rc=0 "agg_tok_s": 160.31
+[q91] 20:42:03 dec-mr1 8 greedy prose rc=0 "agg_tok_s": 127.46 code rc=0 "agg_tok_s": 168.43
+[q91] 20:42:30 dec-mr1 1 sampled prose rc=0 "agg_tok_s": 79.02 code rc=0 "agg_tok_s": 114.67
+[q91] 20:43:17 dec-mr1 2 sampled prose rc=0 "agg_tok_s": 84.2 code rc=0 "agg_tok_s": 144.63
+[q91] 20:44:33 dec-mr1 4 sampled prose rc=0 "agg_tok_s": 110.28 code rc=0 "agg_tok_s": 160.87
+[q91] 20:46:23 dec-mr1 6 sampled prose rc=0 "agg_tok_s": 129.39 code rc=0 "agg_tok_s": 157.82
+[q91] 20:48:50 dec-mr1 8 sampled prose rc=0 "agg_tok_s": 114.46 code rc=0 "agg_tok_s": 162.2
+[q91] 20:51:11 dec-mr1 24 prompts rc=0
+[q91] 20:55:54 md2 cold rc=0 3645 13377 50317 3643 13568 50838 
+[q91] 20:56:59 md2 chain: 47397 749 1450 967 1631 1299 818 1479
+[q91] 20:57:25 dec-md2 1 greedy prose rc=0 "agg_tok_s": 82.9 code rc=0 "agg_tok_s": 114.99
+[q91] 20:58:12 dec-md2 2 greedy prose rc=0 "agg_tok_s": 86.84 code rc=0 "agg_tok_s": 137.31
+[q91] 20:59:26 dec-md2 4 greedy prose rc=0 "agg_tok_s": 114.44 code rc=0 "agg_tok_s": 168.63
+[q91] 21:01:12 dec-md2 6 greedy prose rc=0 "agg_tok_s": 108.81 code rc=0 "agg_tok_s": 159.44
+[q91] 21:03:29 dec-md2 8 greedy prose rc=0 "agg_tok_s": 117.79 code rc=0 "agg_tok_s": 181.69
+[q91] 21:03:55 dec-md2 1 sampled prose rc=0 "agg_tok_s": 79.22 code rc=0 "agg_tok_s": 114.61
+[q91] 21:04:43 dec-md2 2 sampled prose rc=0 "agg_tok_s": 83.42 code rc=0 "agg_tok_s": 142.96
+[q91] 21:06:00 dec-md2 4 sampled prose rc=0 "agg_tok_s": 107.93 code rc=0 "agg_tok_s": 159.24
+[q91] 21:07:50 dec-md2 6 sampled prose rc=0 "agg_tok_s": 112.61 code rc=0 "agg_tok_s": 156.09
+[q91] 21:10:09 dec-md2 8 sampled prose rc=0 "agg_tok_s": 119.85 code rc=0 "agg_tok_s": 176.8
+[q91] 21:12:29 dec-md2 24 prompts rc=0
+[q91] 21:17:27 mn2 cold rc=0 3974 14820 55520 4012 15010 55877 
+[q91] 21:18:37 mn2 chain: 52354 816 1593 1045 1792 1415 891 1646
+[q91] 21:19:03 dec-mn2 1 greedy prose rc=0 "agg_tok_s": 82.63 code rc=0 "agg_tok_s": 115.82
+[q91] 21:19:50 dec-mn2 2 greedy prose rc=0 "agg_tok_s": 86.43 code rc=0 "agg_tok_s": 138.92
+[q91] 21:21:05 dec-mn2 4 greedy prose rc=0 "agg_tok_s": 114.45 code rc=0 "agg_tok_s": 167.86
+[q91] 21:22:56 dec-mn2 6 greedy prose rc=0 "agg_tok_s": 109.16 code rc=0 "agg_tok_s": 172.72
+[q91] 21:25:16 dec-mn2 8 greedy prose rc=0 "agg_tok_s": 124.93 code rc=0 "agg_tok_s": 166.33
+[q91] 21:25:43 dec-mn2 1 sampled prose rc=0 "agg_tok_s": 78.34 code rc=0 "agg_tok_s": 113.24
+[q91] 21:26:30 dec-mn2 2 sampled prose rc=0 "agg_tok_s": 84.1 code rc=0 "agg_tok_s": 144.09
+[q91] 21:27:47 dec-mn2 4 sampled prose rc=0 "agg_tok_s": 109.92 code rc=0 "agg_tok_s": 160.52
+[q91] 21:29:38 dec-mn2 6 sampled prose rc=0 "agg_tok_s": 114.99 code rc=0 "agg_tok_s": 155.61
+[q91] 21:32:04 dec-mn2 8 sampled prose rc=0 "agg_tok_s": 111.25 code rc=0 "agg_tok_s": 172.88
+[q91] 21:34:24 dec-mn2 24 prompts rc=0
+[q91] 21:39:11 mo3 cold rc=0 3961 14760 55320 3992 14962 55783 
+[q91] 21:40:22 mo3 chain: 52226 808 1580 1038 1774 1410 880 1628
+[q91] 21:40:48 dec-mo3 1 greedy prose rc=0 "agg_tok_s": 80.94 code rc=0 "agg_tok_s": 112.79
+[q91] 21:41:36 dec-mo3 2 greedy prose rc=0 "agg_tok_s": 84.36 code rc=0 "agg_tok_s": 136.64
+[q91] 21:42:52 dec-mo3 4 greedy prose rc=0 "agg_tok_s": 111.53 code rc=0 "agg_tok_s": 166.39
+[q91] 21:44:43 dec-mo3 6 greedy prose rc=0 "agg_tok_s": 108.14 code rc=0 "agg_tok_s": 171.98
+[q91] 21:47:02 dec-mo3 8 greedy prose rc=0 "agg_tok_s": 120.5 code rc=0 "agg_tok_s": 166.39
+[q91] 21:47:30 dec-mo3 1 sampled prose rc=0 "agg_tok_s": 77.5 code rc=0 "agg_tok_s": 112.49
+[q91] 21:48:17 dec-mo3 2 sampled prose rc=0 "agg_tok_s": 83.04 code rc=0 "agg_tok_s": 142.29
+[q91] 21:49:35 dec-mo3 4 sampled prose rc=0 "agg_tok_s": 108.55 code rc=0 "agg_tok_s": 159.54
+[q91] 21:51:29 dec-mo3 6 sampled prose rc=0 "agg_tok_s": 112.58 code rc=0 "agg_tok_s": 155.92
+[q91] 21:53:58 dec-mo3 8 sampled prose rc=0 "agg_tok_s": 110.89 code rc=0 "agg_tok_s": 160.31
+[q91] 21:56:21 dec-mo3 24 prompts rc=0
+QUEUE91-DONE 21:56:33

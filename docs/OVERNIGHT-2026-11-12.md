@@ -2013,3 +2013,43 @@ Variants (cold and warm turns against P): MM_WIDE=2 (V1) 8.0 / 8.6 / 8.2% faster
 Disk tier (`scripts/queue-disk-tier.sh f77`, N with request starts, `--learn-conversations`): all 17 turns' replies equal a cold server's (4 are cold primes, 13 were resumed: from RAM, after a live eviction, after a SIGKILL of every rank, after a clean restart, and from a flushed store); no disk-tier fault counter above 0 on any rank. The 596k conversation against production's: turn 2 from RAM 11.68 s (0.93 of production's 12.54), turn 3 after SIGKILL from disk 11.45 s (0.89 of 12.80), turn 4 after a clean restart 13.96 s (1.08 of 12.90), the cold first turn 307.91 s beside three decoding streams (1.37 of 224.68).
 
 What this decides: nothing is promoted. The ten candidates stay in `scripts/env/dev.env` and queue91's `md` against `mn` arms are the evidence on main, which is the base `prod.env` will run on. Queue77 says they pass on the old base; the promotion rule for main is queue91's.
+
+## 72. Queue91, the stack on upstream main: level with the v1.2.9 stack on cold and 1 to 3% faster on decode, one cell over the limit; the ten dev candidates cost decode on main; stock main is about a third slower
+
+Queue91 is the first queue on the new base: the 47-patch series re-seated on upstream main `1ece6e6db` (image `m130a`), the pristine main (`m130base`) and the v1.2.9 stack (`v129zg`), under `score91.py`'s sync rule, which was written before any row existed. Its first start (18:35 UTC) stopped at its own checks with nothing measured: the pair check verifies paired prompt steps, which `TF_GLM_CHUNK_SOLO=4096` in the recipe replaces, and three lane checks parse a kinds fixture that only `glm-synth` writes. The checks were corrected (commit `72820a7`), the restart ran from 18:47 UTC and finished at 21:56 UTC. All single-GPU checks passed on `m130base` and on `m130a` (38 and 46 PASS lines for the two lane checks) and the three-rank checks passed. Eight boots at `--parallel 4 --context 1048576`, in this order: `mn1` (recipe as committed, `KNOBS=prod`), `md1` (`KNOBS=dev`, the ten candidates), `mz1` (`mn` with `TF_GLM_PDL=0`), `mps` (stock main, `KNOBS=off`), `mr1` (`md` with `TF_GLM_REQUEST_STARTS=1`), `md2`, `mn2`, `mo3` (the v1.2.9 stack, one more boot beside queue77's `P1` and `P2`).
+
+**The sync rule.** The stack on main (`mn1`, `mn2`) against the v1.2.9 stack (`P1`, `P2`, `mo3`), 24 cells, every cell a mean of its group's boots:
+
+| cell | v1.2.9 stack (P1, P2, mo3), mean | stack on main (mn1, mn2), mean | main against v1.2.9 |
+|---|---|---|---|
+| cold 8k first token | 3,986.2 ms | 3,990.0 ms | 0.10% slower |
+| cold 32k first token | 14,925.3 ms | 14,910.2 ms | 0.10% faster |
+| cold 120k first token | 55,776.2 ms | 55,653.2 ms | 0.22% faster |
+| conversation turns 2+ first token | 1,308.5 ms | 1,313.3 ms | 0.37% slower |
+| greedy prose at 1 clients | 80.2 tok/s | 82.7 tok/s | 3.10% faster |
+| greedy prose at 4 clients | 111.1 tok/s | 114.3 tok/s | 2.81% faster |
+| greedy prose at 8 clients | 119.7 tok/s | 125.3 tok/s | 4.72% faster |
+| greedy code at 1 clients | 112.7 tok/s | 115.8 tok/s | 2.76% faster |
+| greedy code at 4 clients | 165.6 tok/s | 168.3 tok/s | 1.66% faster |
+| greedy code at 8 clients | 176.8 tok/s | 174.0 tok/s | **1.63% slower** |
+
+Of the 20 decode cells 19 are faster, by 1.07% to 9.54%; at 1, 2 and 4 clients all 12 are faster, by 1.07% to 3.10% (mean 2.16%). The cold first tokens are within 0.22% and the warm turns 0.37% slower. All 58 reply digests are one digest across the boots. One cell is over the rule's 1.0% limit and none of its new boots lies inside the old boots' range: greedy code at 8 clients, new 177.2 and 170.8 tok/s against old 172.5, 178.7 and 179.3. Those two groups' boot-to-boot spreads (3.7% and 3.9%, largest over smallest) are larger than the 1.6% gap, and the other three 8-client cells read 1.6% to 4.7% faster, so I read it as boot noise, but the rule says NOT accepted until a rerun settles it: queue95 adds a third boot of the new group and a fourth of the old.
+
+**Where the decode gain comes from.** Every unit has the same tokens a round (`rounds_split.py`: code 6.14, prose 3.14 at one client; acceptance 0.872 and 0.690), so each decode difference below is ms a round. The v1.2.9 stack's rounds are 2.5% (code) and 2.3% (prose) longer than the stack on main's at one client (51.6 against 50.3 ms and 37.9 against 37.0 ms). `mz1` (PDL off) is 4.2% and 4.1% longer (52.5 and 38.6 ms), and at 1, 2 and 4 clients its decode is 2.48% to 4.02% lower in all 12 cells (mean 3.34%) with the cold first tokens 0.39% to 0.83% slower: upstream's dependent launches are worth about 2.5 to 4% of decode on this stack.
+
+**The arms beside it** (faster is positive; the stack on main as the reference, `mr` against `md`):
+
+| arm | cold 8k / 32k / 120k | conversation warm turns | decode, 12 cells at 1, 2, 4 clients |
+|---|---|---|---|
+| `md` (ten candidates), against `mn` | +8.26 / +8.85 / +8.39% | +7.93% | -0.86% mean, -0.25% to -1.72%, all 12 negative |
+| `mz1` (PDL off), against `mn` | -0.39 / -0.49 / -0.83% | +0.03% | -3.34% mean, -2.48% to -4.02%, all 12 negative |
+| `mps` (stock main), against `mn` | -34.26 / -41.46 / -42.04% | -25.17% | -31.72% mean, -29.20% to -35.73% |
+| `mr1` (`md` with request starts), against `md` | +2.50 / -0.28 / -0.81% | +34.24% | +1.18% mean, -0.43% to +2.26% |
+
+Digests: `md1`, `md2`, `mz1` and `mr1` are equal to `mn`'s in every cell; `mps` is not (stock main lacks the recipe, and the recipe's `KDA_PAD` changes the numerics). `mps` has 13.4% fewer tokens a round on code at one client (5.32 against 6.14) and 9.2% fewer on prose (2.85 against 3.14), and its rounds are 33.8% and 42.3% longer (67.3 and 52.7 ms): which of the recipe's knobs does what is queue92's job.
+
+**The candidates.** The ten gain 8% to 9% on every cold prompt and 7.9% on warm turns, as on the old stack (section 71: 9.3, 9.9, 9.6 and 8.6%), but their decode at 1, 2 and 4 clients is below the recipe's in all 12 cells, where queue77 read it level on the old stack. The two dev boots differ from each other as much as the first one differs from `mn` (`md1` -1.9% and `md2` -0.8% on code at one client, with `mn1` and `mn2` 0.3% apart), so the size is not settled by two boots, but the sign is the same in every cell. By the owner's rule a change ships with no measured regression at any level, and this is a trade until it is shown not to be one. From their notes in `docs/KNOBS.md` I class four of the ten as able to touch decode (`MM_WIDE`, `SIDE_PRIO`, `LATENT_ROWS=2`, `NCCL_NCHANNELS_PER_NET_PEER=4`) and six as prompt-only (`OVERLAP_PIECES=4`, the three `PIECE_*`, `SOLO_TO_START`, `RESTORE_HELD`); that split is a reading, and the queue95 boots test it. Queue95 boots each set on its own (two boots each, with a third `mn` and a fourth old-stack boot) under `score95.py`'s rules, written first. Nothing is promoted.
+
+**Request starts.** `mr1` against `md`: the warm turns 34.24% faster, cold level (+2.50% at 8k, -0.28% at 32k, -0.81% at 120k, one boot against two), every reply equal, decode mean +1.18%. The old stack read 39.2% (section 71). The trade the dev file names (a cold prompt pays a little) is under the noise on main, so I recommend `TF_GLM_REQUEST_STARTS=1` for `prod.env`; it stays the owner's call.
+
+**What this decides.** The stack on main is accepted by every cell but one, the one is queue95's to settle, and the ten candidates stay in `dev.env`.
