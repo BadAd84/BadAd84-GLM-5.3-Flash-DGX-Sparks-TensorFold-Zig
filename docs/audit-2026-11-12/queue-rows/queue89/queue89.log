@@ -1,0 +1,43 @@
+[q89] 10:54:28 start; IMG=glm53-zig:v129zf; NEWX='-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e NCCL_NCHANNELS_PER_NET_PEER=4'; deadline 13:54:28; 280G free
+[q89] 11:01:56 built glm53-zig:v129zf: 112d31581f2f
+[q89] 11:10:58 distributed: 112d31581f2f 112d31581f2f 112d31581f2f DIST-DONE v129zf
+[q89] glm53-zig:v129zf ids: sha256:112d31581f2f5e4d04b6d3996b1fb09dd934d80738af056338fd430c8ba82ccc sha256:112d31581f2f5e4d04b6d3996b1fb09dd934d80738af056338fd430c8ba82ccc sha256:112d31581f2f5e4d04b6d3996b1fb09dd934d80738af056338fd430c8ba82ccc
+[q89] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 11:11:00 production stopped on spark1-3
+[q89] 11:11:14 glm-synth rc=0: PASS glm-synth: 330 tensors, 2095 MiB, config 2 layers 16 experts vocabulary 8192, dc.json in /s/ckpt
+[q89] 11:11:27 glm-solo-check, one rank, synthetic, switch off: rc=0, 1 PASS, 0 FAIL lines
+[q89] 11:11:40 glm-solo-check, one rank, synthetic, switch on: rc=0, 1 PASS, 0 FAIL lines
+[check] 11:11:42 glm-solo-check on glm53-zig:v129zf, XENV='-e TF_GLM_CHUNK_SOLO=4096'
+[check] 11:14:43 glm-solo-check on glm53-zig:v129zf: rc 0 0 0 (ranks 0 1 2) in 181 s; rank 0: 1 PASS, 0 FAIL lines
+PASS solo prompt passes at TP=3: 10 prompts, one with a mark at chunk 1 and two with request starts (a solo step to a start: off), equal their twins a chunk a step in the first token, the next window's logits and tokens, the rings' bases and every state byte
+[check] 11:14:45 glm-solo-check on glm53-zig:v129zf, XENV='-e TF_GLM_CHUNK_SOLO=4096 -e TF_GLM_OVN_SOLO_TO_START=1'
+[check] 11:17:46 glm-solo-check on glm53-zig:v129zf: rc 0 0 0 (ranks 0 1 2) in 181 s; rank 0: 1 PASS, 0 FAIL lines
+PASS solo prompt passes at TP=3: 10 prompts, one with a mark at chunk 1 and two with request starts (a solo step to a start: on), equal their twins a chunk a step in the first token, the next window's logits and tokens, the rings' bases and every state byte
+[check] 11:17:47 glm-solo-check on glm53-zig:v129zf, XENV='-e TF_GLM_KDA_PAD=1 -e TF_GLM_OVN_KEPT_WALK=1 -e TF_GLM_OVN_DRAFT_ONEPASS=1 -e TF_GLM_OVN_DRAFT_DOWN4=1 -e TF_GLM_OVN_DRAFT_MLPSPLIT=4 -e TF_GLM_OVN_MLA_FUSEMERGE=1 -e TF_GLM_OVN_DRAFT_EDGE=0.6 -e TF_GLM_OVN_DRAFT_BETA=2 -e TF_GLM_OVN_DRAFT_CUTS=1:0.3 -e TF_EXL3_DEC_ORDER=1 -e TF_GLM_OVN_EXL3_ITEMS=1 -e TF_GLM_OVN_X3_NC=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1 -e TF_GLM_OVN_KEEP_SEQS=1 -e TF_GLM_OVN_OFF_EFFORT_LINE=1 -e TF_GLM_OVN_NO_COPY=1 -e TF_GLM_OVN_MM_DECTILE=100000 -e TF_GLM_OVN_SWIGLU_REDUCE=1 -e TF_GLM_OVN_ONEPASS_PIPE=1 -e TF_GLM_CHUNK_SOLO=4096 -e TF_GLM_OVN_HOST_ONCE=1 -e TF_GLM_OVN_DRAFT_NOISE=1 -e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e NCCL_NCHANNELS_PER_NET_PEER=4'
+[check] 11:20:39 glm-solo-check on glm53-zig:v129zf: rc 0 0 0 (ranks 0 1 2) in 172 s; rank 0: 1 PASS, 0 FAIL lines
+PASS solo prompt passes at TP=3: 10 prompts, one with a mark at chunk 1 and two with request starts (a solo step to a start: off), equal their twins a chunk a step in the first token, the next window's logits and tokens, the rings' bases and every state byte
+[check] 11:20:40 glm-solo-check on glm53-zig:v129zf, XENV='-e TF_GLM_KDA_PAD=1 -e TF_GLM_OVN_KEPT_WALK=1 -e TF_GLM_OVN_DRAFT_ONEPASS=1 -e TF_GLM_OVN_DRAFT_DOWN4=1 -e TF_GLM_OVN_DRAFT_MLPSPLIT=4 -e TF_GLM_OVN_MLA_FUSEMERGE=1 -e TF_GLM_OVN_DRAFT_EDGE=0.6 -e TF_GLM_OVN_DRAFT_BETA=2 -e TF_GLM_OVN_DRAFT_CUTS=1:0.3 -e TF_EXL3_DEC_ORDER=1 -e TF_GLM_OVN_EXL3_ITEMS=1 -e TF_GLM_OVN_X3_NC=1 -e TF_GLM_OVN_X3_XROW=1 -e TF_GLM_OVN_X3_FUSEDOWN=1 -e TF_GLM_OVN_KEEP_SEQS=1 -e TF_GLM_OVN_OFF_EFFORT_LINE=1 -e TF_GLM_OVN_NO_COPY=1 -e TF_GLM_OVN_MM_DECTILE=100000 -e TF_GLM_OVN_SWIGLU_REDUCE=1 -e TF_GLM_OVN_ONEPASS_PIPE=1 -e TF_GLM_CHUNK_SOLO=4096 -e TF_GLM_OVN_HOST_ONCE=1 -e TF_GLM_OVN_DRAFT_NOISE=1 -e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e NCCL_NCHANNELS_PER_NET_PEER=4 -e TF_GLM_OVN_SOLO_TO_START=1'
+[check] 11:23:32 glm-solo-check on glm53-zig:v129zf: rc 0 0 0 (ranks 0 1 2) in 172 s; rank 0: 1 PASS, 0 FAIL lines
+PASS solo prompt passes at TP=3: 10 prompts, one with a mark at chunk 1 and two with request starts (a solo step to a start: on), equal their twins a chunk a step in the first token, the next window's logits and tokens, the rings' bases and every state byte
+[q89] 11:23:32 glm-solo-check: passed on the synthetic checkpoint without the switch and with it; on the three ranks 4 of 4 runs passed and none failed
+[q89] s0a solo-to-start boot line: 
+[q89] 11:28:04 s0a cold rc=0 3667 13509 50656 3714 13744 51170 
+[q89] 11:29:07 s0a chain: 47814 844 821 811 806 801 786 808
+[q89] 11:30:20 s0a chain: 47949 1672 1697 1659 1657 1637 1649 1648 1655 1612
+[q89] 11:30:47 dec-s0a 1 greedy prose rc=0 "agg_tok_s": 79.13 code rc=0 "agg_tok_s": 112.3
+[q89] s1a solo-to-start boot line: info: glm: a solo prompt step may end at a request start
+[q89] 11:35:20 s1a cold rc=0 3530 13398 50711 3566 13556 51312 
+[q89] 11:36:23 s1a chain: 47954 862 817 806 807 787 800 805
+[q89] 11:37:35 s1a chain: 47841 1682 1482 1466 1481 1466 1470 1477 1494 1429
+[q89] 11:38:02 dec-s1a 1 greedy prose rc=0 "agg_tok_s": 79.32 code rc=0 "agg_tok_s": 111.8
+[q89] s1b solo-to-start boot line: info: glm: a solo prompt step may end at a request start
+[q89] 11:42:40 s1b cold rc=0 3541 13381 50823 3563 13559 51325 
+[q89] 11:43:43 s1b chain: 47981 824 823 810 802 798 803 812
+[q89] 11:44:55 s1b chain: 47968 1687 1496 1475 1499 1471 1481 1480 1501 1447
+[q89] 11:45:22 dec-s1b 1 greedy prose rc=0 "agg_tok_s": 79.12 code rc=0 "agg_tok_s": 111.68
+[q89] s0b solo-to-start boot line: 
+[q89] 11:49:56 s0b cold rc=0 3713 13579 50852 3720 13731 51285 
+[q89] 11:50:59 s0b chain: 47904 832 826 794 804 806 805 815
+[q89] 11:52:13 s0b chain: 48138 1681 1683 1672 1660 1641 1648 1652 1669 1621
+[q89] 11:52:40 dec-s0b 1 greedy prose rc=0 "agg_tok_s": 78.29 code rc=0 "agg_tok_s": 110.47
+QUEUE89-DONE 11:52:52

@@ -195,5 +195,8 @@ On the 8-prompt version, image `glm53-zig:v129zd`, three ranks, real checkpoint,
 PASS line, 156 s (10:13 UTC). On the image with this patch, `glm53-zig:v129zf` (id `112d31581f2f` on all three ranks, built from
 tree `9297755c6943` by `scripts/queues/queue89.sh`): one GPU on glm-synth's 2-layer checkpoint, switch off and on, PASS and PASS;
 three ranks on the real checkpoint, four runs (the check's plain environment, then the recipe's `DEFS` and `NEWX`, each with the
-switch off and on): rc 0 0 0 and one PASS line each, 172 to 181 s each; every one names the setting it ran. The speed result is
-queue89's (OVERNIGHT section 64).
+switch off and on): rc 0 0 0 and one PASS line each, 172 to 181 s each; every one names the setting it ran. Speed, queue89 (OVERNIGHT
+section 68; four boots A B B A on that image, every reply one digest): the cold first token 4.14% faster at 8k (3,690 and 3,716 ms
+against 3,548 and 3,552), 1.23% at 32k, 0.10% slower at 120k; a conversation adding 2,900 to 3,069 rows a turn 10.75% faster on turns
+3 to 10 (1,653.8 against 1,475.9 ms, 178 ms a turn; turn 2 level); the ~113k conversation (about 1,290 rows a turn) and greedy decode
+at one client level. It passed its pre-written rule (`scripts/queue-scores/decide84.py`, block `solo`) and is in the recipe's env files.

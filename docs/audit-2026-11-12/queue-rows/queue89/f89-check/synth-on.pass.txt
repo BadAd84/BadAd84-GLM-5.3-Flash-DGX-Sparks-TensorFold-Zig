@@ -1,0 +1,1 @@
+PASS solo prompt passes at TP=1: 10 prompts, one with a mark at chunk 1 and two with request starts (a solo step to a start: on), equal their twins a chunk a step in the first token, the next window's logits and tokens, the rings' bases and every state byte
