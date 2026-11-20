@@ -1,0 +1,53 @@
+[zig-tp3] 2026-11-19T23:59:43+00:00 glm53-zig:v129za P=4 ctx=1048576 knobs=measured drafter=1 comm=<lan>:29561
+[zig-tp3] up in 121 s
+{"tag": "nsys-dec4code", "n": 4, "round": 0, "agg_tok_s": 165.81, "decode_agg_tok_s": 168.51, "wall_s": 9.65, "per_stream": [45.81, 46.76, 42.84, 43.63], "ttft_ms": [178, 682, 335, 504], "tokens": [40
+Generated:
+	/out/dec4code.nsys-rep
+67 kernels, 11389.7 ms of kernel time, 210493 launches
+ share   total ms  launches   mean us   med us  name
+ 60.1%     6840.9      7644     894.9    756.3  tf_exl3_ovn_nc1
+  5.6%      643.2       336    1914.2   1829.3  tf_exl3_prompt_gu
+  4.6%      522.1      7150      73.0     58.0  ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<(unsigned lon
+  4.3%      490.8     20250      24.2     17.1  glm_mm4_32
+  3.8%      429.6      8099      53.0     62.2  dsv41_l2pace::paced_kernel(const long *, int, unsigned int, unsigned l
+  2.8%      319.6       336     951.3    907.2  tf_exl3_prompt_down
+  2.2%      250.9      3116      80.5     58.0  void tf_qmm_group::group_kernel<(int)64, (int)16, (int)64, (int)1, (in
+  1.9%      212.1     11628      18.2     14.5  tf_glm_kda_step
+  1.6%      182.7      8910      20.5     19.3  tf_glm_hc_partial8
+  1.4%      156.0      2160      72.2     59.9  glm_mm4_128
+  1.0%      108.5      3094      35.1     34.8  void tfl2pf::segments_kernel<(bool)1>(const long *, int, unsigned int)
+  0.8%       95.1      4320      22.0     12.3  glm_mm4_16n32
+  0.7%       75.0        75    1000.4    999.7  glm_mm8_32
+  0.7%       74.9      1448      51.8     47.2  ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<(unsigned long)4096>)
+  0.7%       74.5      2497      29.8     29.3  tf_glm_chunks_32_fp8_skip
+  0.6%       72.8      1089      66.9     66.2  tf_glm_absorb_q_x2
+  0.6%       70.3      1972      35.7     18.0  tp_roce_multi
+  0.6%       68.0      1089      62.4     59.6  tf_glm_expand_v_x2
+  0.6%       64.2      8910       7.2      7.2  tf_glm_hc_finish
+  0.5%       57.7      8910       6.5      6.2  tf_glm_hc_post
+  0.4%       50.3      5247       9.6      7.9  tf_glm_router_tile
+  0.4%       46.8       272     172.1    175.3  tf_glm_kda_chain
+  0.4%       45.7     11628       3.9      3.6  tf_glm_kda_prep
+  0.3%       33.4      3822       8.7      8.6  tf_exl3_gateup_epilogue
+  0.3%       30.5      1353      22.5     22.0  tf_glm_chunks_16_fp8_skip
+  0.3%       29.2       485      60.2     59.3  df_attn_part
+  0.2%       26.6       485      54.7     55.7  void tf_qmm_group::group_kernel<(int)64, (int)16, (int)64, (int)1, (in
+  0.2%       26.4     10562       2.5      2.4  glm_mm_reduce
+  0.2%       24.5        55     445.9    439.0  tf_glm_kda_replay_layers
+  0.2%       21.2      4158       5.1      3.1  tf_glm_combine
+  0.2%       21.2     11628       1.8      1.6  tf_glm_kda_out
+  0.2%       21.2      4158       5.1      5.0  tf_glm_topk
+  0.1%       16.3      4158       3.9      3.7  tf_experts::plan_kernel(const int *, int, int, int, int *, int *, int 
+  0.1%       16.1      4158       3.9      3.7  tf_exl3_prompt_rotate
+  0.1%       15.8        16     987.8    985.1  glm_mm8_16n32
+  0.1%       13.7      3850       3.5      3.4  tf_glm_lat_write_fp8
+  0.1%       11.3      4095       2.8      2.1  glm_mm_reduce_swiglu
+  0.1%       11.2      3504       3.2      2.9  df_gsum
+  0.1%       11.0      5247       2.1      2.0  tf_glm_slice_sum
+  0.1%       10.8        16     674.8    579.0  ncclDevKernel_AllReduce_Sum_f64_TREE_LL(ncclDevKernelArgsStorage<(unsi
+  0.1%        9.8      1850       5.3      5.2  tf_glm_top1
+  0.1%        9.1      3850       2.4      2.2  tf_glm_index_write
+  0.1%        8.8      3850       2.3      2.3  tf_glm_pool_keys
+  0.1%        8.5      4158       2.0      1.9  tf_glm_put_slot
+  0.1%        8.4         8    1044.3   1016.4  glm_mm8_w2x4
+NSYS-DONE

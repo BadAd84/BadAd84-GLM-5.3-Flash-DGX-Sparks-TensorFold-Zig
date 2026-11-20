@@ -1,0 +1,224 @@
+~/nsys/pf-f76w.sqlite: main stream 18, side streams [19], 5 requests
+
+request 1: 3 passes, 8197 rows (4096, 4096, 5), GPU span 3767.1 ms = 459.6 us a row; passes 3767.1 ms, between passes 0.0 ms; 3/3 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)               4.7       1.58      0.58   0.1%
+  host gap after the gate                           0.1       0.03      0.01   0.0%
+  step marker (put_words, broadcast)                0.0       0.01      0.01   0.0%
+  front: embed, layer 0's hc_pre                    4.5       1.49      0.55   0.1%
+  KDA mixer: projections, o_proj                  458.6     152.88     55.95  12.2%
+  KDA mixer: chain                                287.0      95.66     35.01   7.6%
+  KDA mixer: other                                  0.8       0.28      0.10   0.0%
+  MLA mixer: projections, norms, o_proj           161.2      53.74     19.67   4.3%
+  MLA mixer: indexer                               27.9       9.29      3.40   0.7%
+  MLA mixer: attention, absorb, expand            583.1     194.36     71.13  15.5%
+  MLA mixer: NCCL (index split)                     3.0       1.00      0.37   0.1%
+  MLA mixer: other                                  0.8       0.27      0.10   0.0%
+  dense FFN: MLP                                   43.2      14.39      5.27   1.1%
+  MoE FFN: router                                  62.8      20.94      7.67   1.7%
+  MoE FFN: routed experts                        1106.6     368.87    135.00  29.4%
+  MoE FFN: shared expert                          153.1      51.03     18.68   4.1%
+  MoE FFN: combine                                303.1     101.02     36.97   8.0%
+  MoE FFN: other                                    1.5       0.49      0.18   0.0%
+  glue (hc_post, hc_pre)                          198.2      66.07     24.18   5.3%
+  wait: partials exchange                         150.0      49.99     18.29   4.0%
+  wait: glued rows share                          200.5      66.83     24.46   5.3%
+  launch gaps                                       4.2       1.40      0.51   0.1%
+  tail: head, draw, drafter, commit                38.8      12.92      4.73   1.0%
+  main-stream copies and memsets                    3.5       1.17      0.43   0.1%
+  main-stream busy / idle                        3411.9 / 355.2 ms
+  side-stream NCCL: 1620 kernels, 976.4 ms (976.4 ms union), exposed while the main stream idles 327.3 ms
+  host synchronizes inside the passes: 12 (1084.7 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+    KDA mixer       273.17 ms ( 8.034 a layer, 34 layers); waits   28.51 +   25.26 ms
+    MLA mixer       267.17 ms (24.288 a layer, 11 layers); waits    3.01 +    8.21 ms
+    dense FFN        16.56 ms ( 5.520 a layer, 3 layers); waits    2.01 +    2.25 ms
+    MoE FFN         573.41 ms (13.653 a layer, 42 layers); waits   16.45 +   31.11 ms
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   4096       0.0    1902.7    1.26     0.02   69.40   99.24  170.77    482.41  158.40        91
+      1   4096    1902.7    1802.4    0.62     0.06   76.43   98.67  176.90    489.16  164.03        91
+      2      5    3705.2      62.0    2.85     0.02    4.13    2.59    7.53      4.83    4.83        91
+  pass at 0.0 ms, 4096 rows: 0:dense=7.98 0:kda=11.37 1:dense=8.11 1:kda=11.39 2:dense=7.88 2:kda=12.29 3:mla=42.05 3:moe=19.99 4:kda=11.98 4:moe=20.13 5:kda=12.31 5:moe=19.93 6:kda=11.31 6:moe=20.71 7:mla=41.46 7:moe=19.90 8:kda=12.23 8:moe=20.25 9:kda=11.46 9:moe=19.59 10:kda=11.80 10:moe=20.22 11:mla=41.93 11:moe=19.68 12:kda=11.70 12:moe=20.37 13:kda=12.08 13:moe=19.42 14:kda=12.25 14:moe=20.11 15:mla=42.41 15:moe=20.25 16:kda=12.39 16:moe=20.86 17:kda=12.22 17:moe=19.84 18:kda=11.36 18:moe=20.93 19:mla=42.06 19:moe=20.08 20:kda=11.49 20:moe=19.74 21:kda=11.53 21:moe=19.78 22:kda=12.15 22:moe=20.56 23:mla=41.30 23:moe=20.33 24:kda=12.67 24:moe=20.50 25:kda=12.16 25:moe=20.60 26:kda=12.29 26:moe=20.32 27:mla=42.34 27:moe=20.78 28:kda=12.35 28:moe=20.46 29:kda=11.99 29:moe=20.01 30:kda=11.47 30:moe=21.01 31:mla=42.26 31:moe=20.59 32:kda=11.42 32:moe=20.25 33:kda=11.51 33:moe=20.52 34:kda=12.09 34:moe=20.30 35:mla=41.47 35:moe=21.20 36:kda=11.49 36:moe=20.40 37:kda=12.14 37:moe=19.88 38:kda=12.27 38:moe=20.97 39:mla=41.79 39:moe=19.81 40:kda=12.27 40:moe=20.43 41:kda=11.26 41:moe=20.30 42:kda=12.62 42:moe=19.62 43:mla=42.40 43:moe=20.02 44:kda=11.54 44:moe=19.49
+  pass at 1902.7 ms, 4096 rows: 0:dense=8.79 0:kda=11.46 1:dense=8.13 1:kda=11.62 2:dense=7.87 2:kda=12.16 3:mla=29.98 3:moe=20.25 4:kda=11.67 4:moe=19.70 5:kda=11.52 5:moe=19.77 6:kda=12.01 6:moe=19.72 7:mla=29.95 7:moe=19.98 8:kda=12.04 8:moe=19.99 9:kda=11.53 9:moe=19.55 10:kda=11.49 10:moe=21.20 11:mla=30.17 11:moe=20.24 12:kda=12.31 12:moe=19.44 13:kda=11.28 13:moe=19.55 14:kda=11.72 14:moe=20.03 15:mla=30.40 15:moe=19.87 16:kda=12.11 16:moe=20.02 17:kda=12.17 17:moe=19.61 18:kda=11.72 18:moe=20.01 19:mla=29.77 19:moe=19.97 20:kda=12.11 20:moe=19.57 21:kda=11.59 21:moe=19.88 22:kda=12.06 22:moe=19.48 23:mla=31.12 23:moe=20.29 24:kda=11.74 24:moe=19.99 25:kda=11.74 25:moe=19.50 26:kda=12.18 26:moe=20.29 27:mla=30.28 27:moe=20.39 28:kda=11.72 28:moe=19.77 29:kda=11.43 29:moe=21.10 30:kda=11.68 30:moe=19.51 31:mla=30.74 31:moe=20.22 32:kda=12.05 32:moe=19.94 33:kda=11.52 33:moe=19.63 34:kda=12.02 34:moe=20.28 35:mla=29.93 35:moe=20.68 36:kda=12.52 36:moe=20.29 37:kda=11.51 37:moe=19.94 38:kda=11.64 38:moe=20.32 39:mla=30.16 39:moe=20.34 40:kda=12.27 40:moe=19.75 41:kda=11.47 41:moe=19.83 42:kda=11.64 42:moe=21.08 43:mla=30.45 43:moe=20.83 44:kda=12.26 44:moe=18.97
+  pass at 3705.2 ms, 5 rows: 0:dense=0.30 0:kda=0.35 1:dense=0.31 1:kda=0.36 2:dense=0.31 2:kda=0.35 3:mla=0.61 3:moe=0.75 4:kda=0.36 4:moe=0.96 5:kda=0.36 5:moe=0.87 6:kda=0.37 6:moe=0.79 7:mla=0.85 7:moe=0.82 8:kda=0.36 8:moe=0.74 9:kda=0.69 9:moe=0.78 10:kda=0.46 10:moe=0.81 11:mla=0.60 11:moe=0.79 12:kda=0.36 12:moe=0.72 13:kda=0.37 13:moe=0.70 14:kda=0.36 14:moe=0.64 15:mla=0.80 15:moe=0.65 16:kda=0.36 16:moe=0.68 17:kda=0.36 17:moe=0.67 18:kda=0.37 18:moe=0.64 19:mla=0.60 19:moe=0.59 20:kda=0.36 20:moe=0.68 21:kda=0.36 21:moe=0.66 22:kda=0.36 22:moe=0.66 23:mla=0.60 23:moe=0.62 24:kda=0.36 24:moe=0.68 25:kda=0.36 25:moe=0.63 26:kda=0.37 26:moe=0.68 27:mla=0.60 27:moe=0.56 28:kda=0.36 28:moe=0.67 29:kda=0.36 29:moe=0.65 30:kda=0.36 30:moe=0.71 31:mla=0.61 31:moe=0.70 32:kda=0.36 32:moe=0.65 33:kda=0.36 33:moe=0.64 34:kda=0.36 34:moe=0.66 35:mla=0.60 35:moe=0.65 36:kda=0.36 36:moe=0.65 37:kda=0.36 37:moe=0.66 38:kda=0.37 38:moe=0.65 39:mla=0.60 39:moe=0.68 40:kda=0.36 40:moe=0.69 41:kda=0.35 41:moe=0.68 42:kda=0.37 42:moe=0.69 43:mla=0.60 43:moe=0.75 44:kda=0.36 44:moe=0.74
+  kernels by time: tf_exl3_prompt_gu 632.3, glm_mm4_w2x4 613.0, tf_exl3_prompt_down 439.0, tf_glm_combine 256.6, glm_mm4_128 193.3, tf_glm_chunks_32_fp8_fused 173.2, tf_glm_kda_step 168.8, tf_glm_expand_v_x2 150.1, tf_glm_onepass_pipe_exact 135.9, tf_glm_absorb_q_x2 123.0, tf_glm_hc_post 117.3, tf_glm_kda_prep 93.7
+
+request 2: 10 passes, 32794 rows (4096, 4096, 4096, 4096, 4096, 4096, 4096, 2048 ...), GPU span 19648.9 ms = 599.2 us a row; passes 19648.7 ms, between passes 0.2 ms; 10/10 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              18.0       1.80      0.55   0.1%
+  host gap after the gate                           0.2       0.02      0.00   0.0%
+  step marker (put_words, broadcast)                0.2       0.02      0.00   0.0%
+  front: embed, layer 0's hc_pre                   17.5       1.75      0.53   0.1%
+  KDA mixer: projections, o_proj                 1823.8     182.38     55.62   9.3%
+  KDA mixer: chain                               1162.9     116.29     35.46   5.9%
+  KDA mixer: other                                  0.5       0.05      0.01   0.0%
+  MLA mixer: projections, norms, o_proj           639.6      63.96     19.50   3.3%
+  MLA mixer: indexer                              128.3      12.83      3.91   0.7%
+  MLA mixer: attention, absorb, expand           1939.5     193.95     59.14   9.9%
+  MLA mixer: NCCL (index split)                    37.1       3.71      1.13   0.2%
+  MLA mixer: other                                  0.8       0.08      0.02   0.0%
+  dense FFN: MLP                                  173.5      17.35      5.29   0.9%
+  MoE FFN: router                                 240.7      24.07      7.34   1.2%
+  MoE FFN: routed experts                        4422.2     442.22    134.85  22.5%
+  MoE FFN: shared expert                          603.8      60.38     18.41   3.1%
+  MoE FFN: combine                               1206.5     120.65     36.79   6.1%
+  MoE FFN: other                                    6.2       0.62      0.19   0.0%
+  glue (hc_post, hc_pre)                          789.1      78.91     24.06   4.0%
+  wait: partials exchange                         584.0      58.40     17.81   3.0%
+  wait: glued rows share                          821.7      82.17     25.06   4.2%
+  launch gaps                                      15.9       1.59      0.48   0.1%
+  tail: head, draw, drafter, commit                45.7       4.57      1.39   0.2%
+  main-stream copies and memsets                    9.2       0.92      0.28   0.0%
+  main-stream busy / idle                       13139.5 / 6509.2 ms
+  side-stream NCCL: 6660 kernels, 3887.1 ms (3887.1 ms union), exposed while the main stream idles 1318.3 ms
+  host synchronizes inside the passes: 41 (4869.7 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+    KDA mixer       327.75 ms ( 9.640 a layer, 34 layers); waits   33.02 +   30.11 ms
+    MLA mixer       284.69 ms (25.881 a layer, 11 layers); waits    3.12 +   10.35 ms
+    dense FFN        20.01 ms ( 6.668 a layer, 3 layers); waits    2.49 +    2.74 ms
+    MoE FFN         685.01 ms (16.310 a layer, 42 layers); waits   19.78 +   38.97 ms
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   4096       0.0    6986.1    1.25     0.02   66.34   98.57 5253.25    478.57  154.96        91
+      1   4096    6986.1    1760.1    0.90     0.02   72.88  100.33  174.94    487.55  162.20        91
+      2   4096    8746.2    1760.5    0.95     0.02   70.84   99.04  171.67    485.54  159.43        91
+      3   4096   10506.8    1755.2    1.26     0.02   72.34   98.64  172.69    483.79  160.41        91
+      4   4096   12262.1    1766.8    0.94     0.02   70.16  101.08  172.96    484.80  160.71        91
+      5   4096   14028.8    1760.6    0.89     0.02   63.76   98.46  163.95    475.77  152.53        91
+      6   4096   15789.4    1769.8    0.74     0.01   71.36  101.02  174.12    486.80  161.82        91
+      7   2048   17559.2     960.5    0.89     0.02   45.98   59.75  107.44    248.41   99.44        91
+      8   2048   18519.7    1003.0    4.89     0.02   45.42   60.82  108.25    248.87   99.83        91
+      9     26   19522.7     126.2    5.23     0.01    4.94    4.03    9.89      7.00    7.00        91
+  pass at 0.0 ms, 4096 rows: 0:dense=7.91 0:kda=12.36 1:dense=8.31 1:kda=12.08 2:dense=8.05 2:kda=11.47 3:mla=41.45 3:moe=20.03 4:kda=11.88 4:moe=19.46 5:kda=11.44 5:moe=19.96 6:kda=11.97 6:moe=20.60 7:mla=41.25 7:moe=19.83 8:kda=11.95 8:moe=20.25 9:kda=12.41 9:moe=20.00 10:kda=12.15 10:moe=19.98 11:mla=41.52 11:moe=20.20 12:kda=11.68 12:moe=19.72 13:kda=12.16 13:moe=19.38 14:kda=11.84 14:moe=20.24 15:mla=41.77 15:moe=19.14 16:kda=11.87 16:moe=19.53 17:kda=12.20 17:moe=20.12 18:kda=12.91 18:moe=20.10 19:mla=42.02 19:moe=20.62 20:kda=12.29 20:moe=20.01 21:kda=11.33 21:moe=19.81 22:kda=11.51 22:moe=20.49 23:mla=42.33 23:moe=20.08 24:kda=11.43 24:moe=20.94 25:kda=12.48 25:moe=20.65 26:kda=12.22 26:moe=20.56 27:mla=42.13 27:moe=20.43 28:kda=12.20 28:moe=20.56 29:kda=12.30 29:moe=21.37 30:kda=11.93 30:moe=20.26 31:mla=42.38 31:moe=20.97 32:kda=12.36 32:moe=20.64 33:kda=12.13 33:moe=20.25 34:kda=11.36 34:moe=19.40 35:mla=41.95 35:moe=20.07 36:kda=11.51 36:moe=21.17 37:kda=11.67 37:moe=20.71 38:kda=12.19 38:moe=20.58 39:mla=41.65 39:moe=19.97 40:kda=12.18 40:moe=20.59 41:kda=12.31 41:moe=19.79 42:kda=11.97 42:moe=20.14 43:mla=42.02 43:moe=20.27 44:kda=12.27 44:moe=19.34
+  pass at 6986.1 ms, 4096 rows: 0:dense=7.94 0:kda=12.24 1:dense=7.93 1:kda=12.20 2:dense=8.58 2:kda=11.80 3:mla=30.12 3:moe=19.60 4:kda=11.45 4:moe=20.47 5:kda=12.31 5:moe=19.80 6:kda=11.43 6:moe=19.41 7:mla=30.16 7:moe=19.86 8:kda=12.14 8:moe=20.12 9:kda=12.79 9:moe=19.72 10:kda=11.60 10:moe=19.68 11:mla=30.74 11:moe=20.22 12:kda=11.42 12:moe=19.86 13:kda=12.16 13:moe=19.70 14:kda=11.63 14:moe=19.42 15:mla=30.17 15:moe=19.89 16:kda=11.51 16:moe=19.92 17:kda=11.98 17:moe=19.89 18:kda=11.75 18:moe=19.58 19:mla=30.09 19:moe=19.85 20:kda=11.47 20:moe=19.65 21:kda=11.40 21:moe=20.22 22:kda=11.57 22:moe=20.48 23:mla=30.12 23:moe=20.09 24:kda=13.15 24:moe=20.59 25:kda=11.91 25:moe=19.97 26:kda=11.53 26:moe=19.51 27:mla=30.11 27:moe=20.17 28:kda=11.45 28:moe=20.19 29:kda=12.07 29:moe=19.37 30:kda=11.39 30:moe=21.21 31:mla=29.98 31:moe=19.92 32:kda=12.34 32:moe=19.98 33:kda=12.07 33:moe=19.55 34:kda=11.55 34:moe=19.39 35:mla=30.07 35:moe=19.83 36:kda=12.12 36:moe=20.45 37:kda=12.23 37:moe=19.84 38:kda=11.49 38:moe=19.40 39:mla=29.59 39:moe=20.24 40:kda=11.48 40:moe=20.12 41:kda=11.67 41:moe=20.02 42:kda=11.51 42:moe=19.85 43:mla=30.41 43:moe=19.53 44:kda=12.22 44:moe=18.83
+  pass at 8746.2 ms, 4096 rows: 0:dense=7.87 0:kda=12.20 1:dense=7.92 1:kda=12.21 2:dense=8.69 2:kda=11.69 3:mla=30.34 3:moe=19.96 4:kda=12.23 4:moe=20.00 5:kda=12.12 5:moe=20.76 6:kda=11.68 6:moe=19.44 7:mla=30.06 7:moe=19.95 8:kda=12.23 8:moe=20.14 9:kda=12.28 9:moe=19.60 10:kda=11.50 10:moe=19.89 11:mla=30.23 11:moe=20.37 12:kda=11.89 12:moe=19.72 13:kda=12.25 13:moe=19.70 14:kda=11.47 14:moe=19.15 15:mla=31.12 15:moe=19.83 16:kda=12.38 16:moe=19.97 17:kda=12.18 17:moe=19.60 18:kda=11.59 18:moe=20.65 19:mla=30.56 19:moe=19.86 20:kda=12.31 20:moe=19.76 21:kda=12.07 21:moe=19.53 22:kda=11.44 22:moe=20.21 23:mla=30.40 23:moe=19.77 24:kda=11.48 24:moe=21.08 25:kda=12.40 25:moe=19.94 26:kda=11.48 26:moe=19.21 27:mla=29.54 27:moe=20.80 28:kda=12.39 28:moe=20.23 29:kda=12.30 29:moe=19.49 30:kda=11.32 30:moe=19.15 31:mla=30.71 31:moe=19.75 32:kda=12.31 32:moe=19.81 33:kda=12.06 33:moe=19.50 34:kda=11.63 34:moe=19.52 35:mla=30.49 35:moe=19.79 36:kda=12.26 36:moe=19.32 37:kda=11.99 37:moe=19.73 38:kda=11.98 38:moe=18.98 39:mla=29.96 39:moe=19.91 40:kda=12.86 40:moe=20.12 41:kda=11.43 41:moe=19.62 42:kda=11.49 42:moe=18.88 43:mla=30.20 43:moe=19.47 44:kda=13.15 44:moe=19.23
+  pass at 10506.8 ms, 4096 rows: 0:dense=7.89 0:kda=11.22 1:dense=7.97 1:kda=12.26 2:dense=8.79 2:kda=11.68 3:mla=30.57 3:moe=18.88 4:kda=12.22 4:moe=20.09 5:kda=12.29 5:moe=19.09 6:kda=11.55 6:moe=20.77 7:mla=30.06 7:moe=20.04 8:kda=11.45 8:moe=20.95 9:kda=12.26 9:moe=19.67 10:kda=11.56 10:moe=19.48 11:mla=30.39 11:moe=20.11 12:kda=12.26 12:moe=20.66 13:kda=11.57 13:moe=20.00 14:kda=11.55 14:moe=19.59 15:mla=30.55 15:moe=19.87 16:kda=12.18 16:moe=20.19 17:kda=12.20 17:moe=19.41 18:kda=11.58 18:moe=19.51 19:mla=31.25 19:moe=19.74 20:kda=12.20 20:moe=19.09 21:kda=13.03 21:moe=19.54 22:kda=11.55 22:moe=19.59 23:mla=29.95 23:moe=20.08 24:kda=12.36 24:moe=20.42 25:kda=12.25 25:moe=20.17 26:kda=11.70 26:moe=19.00 27:mla=30.56 27:moe=19.80 28:kda=12.31 28:moe=19.91 29:kda=11.85 29:moe=19.19 30:kda=11.61 30:moe=19.69 31:mla=30.42 31:moe=19.61 32:kda=13.10 32:moe=19.05 33:kda=11.63 33:moe=19.77 34:kda=11.58 34:moe=18.71 35:mla=30.28 35:moe=19.82 36:kda=12.20 36:moe=19.64 37:kda=11.46 37:moe=19.35 38:kda=11.36 38:moe=19.61 39:mla=30.59 39:moe=20.05 40:kda=12.09 40:moe=19.66 41:kda=11.57 41:moe=20.01 42:kda=11.87 42:moe=19.90 43:mla=30.06 43:moe=18.72 44:kda=11.33 44:moe=18.53
+  pass at 12262.1 ms, 4096 rows: 0:dense=8.40 0:kda=12.63 1:dense=7.92 1:kda=12.29 2:dense=7.95 2:kda=12.69 3:mla=30.56 3:moe=19.96 4:kda=12.31 4:moe=20.03 5:kda=11.84 5:moe=19.44 6:kda=11.50 6:moe=19.83 7:mla=31.12 7:moe=20.01 8:kda=12.25 8:moe=20.16 9:kda=12.07 9:moe=19.65 10:kda=11.48 10:moe=19.57 11:mla=30.77 11:moe=20.20 12:kda=12.31 12:moe=20.04 13:kda=11.42 13:moe=20.59 14:kda=11.76 14:moe=20.15 15:mla=30.94 15:moe=19.85 16:kda=12.18 16:moe=20.14 17:kda=12.27 17:moe=19.63 18:kda=11.56 18:moe=19.72 19:mla=30.50 19:moe=20.12 20:kda=12.47 20:moe=19.67 21:kda=12.31 21:moe=19.67 22:kda=11.43 22:moe=19.72 23:mla=30.78 23:moe=20.00 24:kda=12.35 24:moe=20.45 25:kda=11.37 25:moe=19.73 26:kda=11.54 26:moe=20.85 27:mla=30.97 27:moe=19.96 28:kda=12.31 28:moe=19.85 29:kda=12.26 29:moe=19.78 30:kda=11.87 30:moe=19.74 31:mla=30.15 31:moe=19.75 32:kda=11.49 32:moe=20.67 33:kda=12.29 33:moe=19.67 34:kda=11.42 34:moe=19.07 35:mla=30.65 35:moe=19.87 36:kda=12.19 36:moe=20.03 37:kda=12.15 37:moe=18.97 38:kda=11.44 38:moe=19.10 39:mla=31.22 39:moe=20.82 40:kda=11.58 40:moe=20.12 41:kda=11.48 41:moe=20.09 42:kda=11.61 42:moe=19.13 43:mla=30.31 43:moe=19.82 44:kda=11.54 44:moe=19.32
+  pass at 14028.8 ms, 4096 rows: 0:dense=8.40 0:kda=12.30 1:dense=8.44 1:kda=12.50 2:dense=8.77 2:kda=11.54 3:mla=30.97 3:moe=19.84 4:kda=12.19 4:moe=19.14 5:kda=12.33 5:moe=19.94 6:kda=12.19 6:moe=19.67 7:mla=31.40 7:moe=20.61 8:kda=12.19 8:moe=20.20 9:kda=12.30 9:moe=20.01 10:kda=11.38 10:moe=19.17 11:mla=31.09 11:moe=20.42 12:kda=12.04 12:moe=19.87 13:kda=11.52 13:moe=19.93 14:kda=12.35 14:moe=20.44 15:mla=30.97 15:moe=19.37 16:kda=11.76 16:moe=19.02 17:kda=12.37 17:moe=19.93 18:kda=12.25 18:moe=19.38 19:mla=31.00 19:moe=19.75 20:kda=12.09 20:moe=21.32 21:kda=11.43 21:moe=19.54 22:kda=11.53 22:moe=19.75 23:mla=31.00 23:moe=19.97 24:kda=12.15 24:moe=20.36 25:kda=12.26 25:moe=19.06 26:kda=11.93 26:moe=19.27 27:mla=31.70 27:moe=19.72 28:kda=12.14 28:moe=19.60 29:kda=12.40 29:moe=19.74 30:kda=12.17 30:moe=19.32 31:mla=30.76 31:moe=19.86 32:kda=12.02 32:moe=19.63 33:kda=12.85 33:moe=20.50 34:kda=12.00 34:moe=19.12 35:mla=31.08 35:moe=19.68 36:kda=12.14 36:moe=19.92 37:kda=11.49 37:moe=18.80 38:kda=11.54 38:moe=19.08 39:mla=30.98 39:moe=20.65 40:kda=12.39 40:moe=20.20 41:kda=12.24 41:moe=19.86 42:kda=11.58 42:moe=18.66 43:mla=30.82 43:moe=19.53 44:kda=12.35 44:moe=18.70
+  pass at 15789.4 ms, 4096 rows: 0:dense=7.86 0:kda=11.35 1:dense=8.76 1:kda=12.39 2:dense=8.83 2:kda=12.88 3:mla=31.06 3:moe=19.60 4:kda=11.65 4:moe=20.02 5:kda=12.29 5:moe=20.13 6:kda=12.32 6:moe=19.86 7:mla=31.33 7:moe=19.45 8:kda=11.59 8:moe=21.13 9:kda=12.07 9:moe=18.89 10:kda=12.37 10:moe=19.40 11:mla=31.30 11:moe=19.94 12:kda=11.54 12:moe=20.07 13:kda=12.08 13:moe=19.18 14:kda=12.82 14:moe=19.73 15:mla=32.12 15:moe=19.73 16:kda=11.50 16:moe=19.55 17:kda=11.75 17:moe=19.88 18:kda=12.20 18:moe=19.83 19:mla=31.43 19:moe=19.42 20:kda=11.33 20:moe=18.82 21:kda=12.01 21:moe=18.77 22:kda=12.22 22:moe=20.02 23:mla=31.47 23:moe=19.45 24:kda=11.53 24:moe=19.96 25:kda=11.90 25:moe=18.74 26:kda=12.36 26:moe=20.65 27:mla=30.95 27:moe=20.28 28:kda=11.46 28:moe=19.06 29:kda=11.77 29:moe=19.68 30:kda=12.34 30:moe=19.52 31:mla=31.06 31:moe=19.46 32:kda=11.55 32:moe=19.77 33:kda=12.06 33:moe=19.40 34:kda=13.08 34:moe=18.89 35:mla=31.21 35:moe=19.76 36:kda=13.35 36:moe=20.39 37:kda=12.03 37:moe=19.05 38:kda=12.40 38:moe=20.19 39:mla=32.46 39:moe=20.19 40:kda=11.59 40:moe=20.57 41:kda=11.81 41:moe=19.45 42:kda=12.33 42:moe=19.60 43:mla=31.31 43:moe=18.75 44:kda=11.44 44:moe=18.66
+  pass at 17559.2 ms, 2048 rows: 0:dense=4.07 0:kda=6.10 1:dense=4.27 1:kda=6.59 2:dense=4.79 2:kda=5.79 3:mla=15.63 3:moe=11.73 4:kda=6.79 4:moe=12.32 5:kda=5.82 5:moe=12.41 6:kda=5.82 6:moe=11.22 7:mla=16.01 7:moe=11.18 8:kda=6.37 8:moe=11.46 9:kda=6.38 9:moe=11.13 10:kda=6.51 10:moe=11.45 11:mla=15.94 11:moe=12.31 12:kda=5.76 12:moe=12.59 13:kda=5.88 13:moe=11.65 14:kda=5.77 14:moe=11.79 15:mla=16.32 15:moe=12.18 16:kda=6.41 16:moe=11.05 17:kda=6.45 17:moe=10.86 18:kda=5.87 18:moe=10.44 19:mla=15.97 19:moe=11.33 20:kda=5.75 20:moe=10.96 21:kda=5.88 21:moe=11.04 22:kda=5.94 22:moe=11.33 23:mla=15.63 23:moe=11.13 24:kda=5.77 24:moe=11.80 25:kda=5.80 25:moe=10.97 26:kda=5.78 26:moe=10.98 27:mla=16.59 27:moe=10.10 28:kda=6.57 28:moe=10.26 29:kda=6.51 29:moe=10.21 30:kda=6.50 30:moe=10.12 31:mla=15.99 31:moe=10.99 32:kda=5.91 32:moe=11.21 33:kda=5.92 33:moe=10.69 34:kda=6.11 34:moe=10.40 35:mla=15.26 35:moe=11.29 36:kda=5.82 36:moe=11.51 37:kda=5.86 37:moe=10.74 38:kda=5.73 38:moe=11.24 39:mla=16.39 39:moe=10.79 40:kda=5.85 40:moe=11.12 41:kda=6.30 41:moe=10.70 42:kda=6.33 42:moe=10.43 43:mla=15.98 43:moe=10.77 44:kda=6.10 44:moe=10.09
+  pass at 18519.7 ms, 2048 rows: 0:dense=4.51 0:kda=5.84 1:dense=4.15 1:kda=5.83 2:dense=4.15 2:kda=6.55 3:mla=16.54 3:moe=11.17 4:kda=6.29 4:moe=11.52 5:kda=6.25 5:moe=11.62 6:kda=6.00 6:moe=12.61 7:mla=15.69 7:moe=12.04 8:kda=5.87 8:moe=11.65 9:kda=5.82 9:moe=11.88 10:kda=5.77 10:moe=12.32 11:mla=15.91 11:moe=11.47 12:kda=5.86 12:moe=11.22 13:kda=6.65 13:moe=11.02 14:kda=6.60 14:moe=11.81 15:mla=16.04 15:moe=11.80 16:kda=5.77 16:moe=12.00 17:kda=5.77 17:moe=10.73 18:kda=6.77 18:moe=10.52 19:mla=16.35 19:moe=10.59 20:kda=5.94 20:moe=10.73 21:kda=6.00 21:moe=10.79 22:kda=5.83 22:moe=11.36 23:mla=16.41 23:moe=10.66 24:kda=6.15 24:moe=11.00 25:kda=5.96 25:moe=10.50 26:kda=6.54 26:moe=10.37 27:mla=15.81 27:moe=11.01 28:kda=5.88 28:moe=11.04 29:kda=5.89 29:moe=10.77 30:kda=6.79 30:moe=11.18 31:mla=16.39 31:moe=10.89 32:kda=5.84 32:moe=10.68 33:kda=5.80 33:moe=10.70 34:kda=5.91 34:moe=11.24 35:mla=16.48 35:moe=10.70 36:kda=6.45 36:moe=10.87 37:kda=6.74 37:moe=10.70 38:kda=6.54 38:moe=10.70 39:mla=15.89 39:moe=11.79 40:kda=5.78 40:moe=12.12 41:kda=5.75 41:moe=11.67 42:kda=5.75 42:moe=10.23 43:mla=15.95 43:moe=10.27 44:kda=5.81 44:moe=9.78
+  pass at 19522.7 ms, 26 rows: 0:dense=0.32 0:kda=0.43 1:dense=0.32 1:kda=0.43 2:dense=0.31 2:kda=0.43 3:mla=0.73 3:moe=3.02 4:kda=0.43 4:moe=3.20 5:kda=0.51 5:moe=2.79 6:kda=0.44 6:moe=2.68 7:mla=0.77 7:moe=2.49 8:kda=0.43 8:moe=2.34 9:kda=0.42 9:moe=2.28 10:kda=0.42 10:moe=2.40 11:mla=0.71 11:moe=2.47 12:kda=0.44 12:moe=2.29 13:kda=0.43 13:moe=2.02 14:kda=0.42 14:moe=1.80 15:mla=0.72 15:moe=1.89 16:kda=0.42 16:moe=2.06 17:kda=0.54 17:moe=1.95 18:kda=0.43 18:moe=1.67 19:mla=0.72 19:moe=1.69 20:kda=0.43 20:moe=1.62 21:kda=0.43 21:moe=1.57 22:kda=0.43 22:moe=1.81 23:mla=0.71 23:moe=1.66 24:kda=0.42 24:moe=2.00 25:kda=0.43 25:moe=1.63 26:kda=0.43 26:moe=1.80 27:mla=0.71 27:moe=1.91 28:kda=0.43 28:moe=1.83 29:kda=0.42 29:moe=1.72 30:kda=0.43 30:moe=1.74 31:mla=0.70 31:moe=1.77 32:kda=0.42 32:moe=1.92 33:kda=0.42 33:moe=1.76 34:kda=0.43 34:moe=1.96 35:mla=0.72 35:moe=1.67 36:kda=0.42 36:moe=2.03 37:kda=0.42 37:moe=1.94 38:kda=0.42 38:moe=1.65 39:mla=0.74 39:moe=1.86 40:kda=0.43 40:moe=1.80 41:kda=0.43 41:moe=1.72 42:kda=0.43 42:moe=1.67 43:mla=0.71 43:moe=1.98 44:kda=0.42 44:moe=2.07
+  kernels by time: tf_exl3_prompt_gu 2519.1, glm_mm4_w2x4 2484.9, tf_exl3_prompt_down 1762.1, tf_glm_combine 1028.4, glm_mm4_128 716.9, tf_glm_onepass_pipe_exact 694.4, tf_glm_kda_step 680.1, tf_glm_expand_v_x2 592.7, tf_glm_absorb_q_x2 475.3, tf_glm_hc_post 464.8, tf_glm_kda_prep 386.9, tf_glm_hc_partial 241.1
+
+request 3: 2 passes, 1329 rows (1326, 3), GPU span 5930.5 ms = 4462.4 us a row; passes 5930.5 ms, between passes 0.0 ms; 2/2 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              11.6       5.80      8.74   0.2%
+  host gap after the gate                           0.1       0.03      0.04   0.0%
+  step marker (put_words, broadcast)                0.1       0.03      0.04   0.0%
+  front: embed, layer 0's hc_pre                    0.7       0.36      0.54   0.0%
+  KDA mixer: projections, o_proj                   97.3      48.65     73.21   1.6%
+  KDA mixer: chain                                 46.1      23.07     34.72   0.8%
+  KDA mixer: other                                  0.3       0.15      0.23   0.0%
+  MLA mixer: projections, norms, o_proj            35.0      17.49     26.33   0.6%
+  MLA mixer: indexer                               18.4       9.22     13.88   0.3%
+  MLA mixer: attention, absorb, expand             75.8      37.92     57.06   1.3%
+  MLA mixer: NCCL (index split)                     3.7       1.84      2.77   0.1%
+  MLA mixer: other                                  0.2       0.10      0.15   0.0%
+  dense FFN: MLP                                    8.7       4.35      6.55   0.1%
+  MoE FFN: router                                   7.8       3.90      5.86   0.1%
+  MoE FFN: routed experts                         313.0     156.49    235.49   5.3%
+  MoE FFN: shared expert                           33.3      16.66     25.07   0.6%
+  MoE FFN: combine                                 49.8      24.89     37.46   0.8%
+  MoE FFN: other                                    0.4       0.21      0.32   0.0%
+  glue (hc_post, hc_pre)                           34.6      17.29     26.03   0.6%
+  wait: partials exchange                          26.2      13.10     19.71   0.4%
+  wait: glued rows share                           43.8      21.90     32.96   0.7%
+  launch gaps                                       2.3       1.15      1.74   0.0%
+  tail: head, draw, drafter, commit                23.7      11.83     17.81   0.4%
+  main-stream copies and memsets                   19.4       9.71     14.61   0.3%
+  main-stream busy / idle                         765.2 / 5165.3 ms
+  side-stream NCCL: 900 kernels, 146.7 ms (146.7 ms union), exposed while the main stream idles 64.4 ms
+  host synchronizes inside the passes: 9 (186.0 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+    KDA mixer        78.06 ms ( 2.296 a layer, 34 layers); waits    9.65 +    8.70 ms
+    MLA mixer        68.84 ms ( 6.258 a layer, 11 layers); waits    1.01 +    2.58 ms
+    dense FFN         4.90 ms ( 1.634 a layer, 3 layers); waits    0.41 +    0.74 ms
+    MoE FFN         210.45 ms ( 5.011 a layer, 42 layers); waits    2.02 +    9.87 ms
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   1326       0.0    5862.6    1.36     0.02   22.89   40.98 5157.92    142.55   60.27        91
+      1      3    5862.6      67.9   10.25     0.04    3.30    2.82    7.37      4.18    4.18        91
+  pass at 0.0 ms, 1326 rows: 0:dense=2.98 0:kda=4.67 1:dense=2.97 1:kda=4.00 2:dense=2.93 2:kda=4.01 3:mla=12.02 3:moe=9.58 4:kda=4.12 4:moe=10.32 5:kda=4.01 5:moe=9.91 6:kda=4.38 6:moe=9.29 7:mla=11.81 7:moe=8.96 8:kda=4.67 8:moe=9.38 9:kda=4.01 9:moe=9.96 10:kda=4.00 10:moe=9.67 11:mla=11.59 11:moe=10.18 12:kda=4.91 12:moe=9.66 13:kda=4.28 13:moe=9.24 14:kda=4.66 14:moe=8.91 15:mla=12.35 15:moe=8.93 16:kda=4.05 16:moe=9.97 17:kda=4.05 17:moe=9.25 18:kda=4.16 18:moe=8.88 19:mla=11.66 19:moe=8.94 20:kda=4.57 20:moe=8.62 21:kda=4.01 21:moe=9.49 22:kda=4.04 22:moe=9.05 23:mla=11.33 23:moe=9.70 24:kda=4.05 24:moe=9.28 25:kda=4.59 25:moe=9.02 26:kda=4.02 26:moe=9.06 27:mla=12.16 27:moe=10.22 28:kda=4.03 28:moe=10.11 29:kda=4.00 29:moe=9.74 30:kda=4.29 30:moe=9.13 31:mla=12.26 31:moe=9.32 32:kda=4.51 32:moe=9.22 33:kda=4.03 33:moe=9.92 34:kda=4.12 34:moe=9.31 35:mla=11.72 35:moe=10.12 36:kda=4.04 36:moe=9.78 37:kda=4.30 37:moe=9.57 38:kda=4.89 38:moe=9.58 39:mla=11.65 39:moe=9.77 40:kda=4.16 40:moe=9.69 41:kda=4.03 41:moe=10.21 42:kda=4.02 42:moe=9.73 43:mla=12.17 43:moe=9.75 44:kda=4.09 44:moe=9.05
+  pass at 5862.6 ms, 3 rows: 0:dense=0.30 0:kda=0.37 1:dense=0.32 1:kda=0.35 2:dense=0.30 2:kda=0.37 3:mla=0.60 3:moe=0.62 4:kda=0.36 4:moe=0.66 5:kda=0.35 5:moe=0.64 6:kda=0.37 6:moe=0.64 7:mla=0.60 7:moe=0.46 8:kda=0.36 8:moe=0.47 9:kda=0.35 9:moe=0.63 10:kda=0.37 10:moe=0.63 11:mla=0.60 11:moe=0.64 12:kda=0.37 12:moe=0.63 13:kda=0.36 13:moe=0.57 14:kda=0.36 14:moe=0.46 15:mla=0.59 15:moe=0.53 16:kda=0.36 16:moe=0.71 17:kda=0.42 17:moe=0.61 18:kda=0.36 18:moe=0.59 19:mla=0.68 19:moe=0.48 20:kda=0.36 20:moe=0.47 21:kda=0.36 21:moe=0.45 22:kda=0.35 22:moe=0.45 23:mla=0.59 23:moe=0.42 24:kda=0.36 24:moe=0.46 25:kda=0.35 25:moe=0.43 26:kda=0.36 26:moe=0.40 27:mla=0.60 27:moe=0.43 28:kda=0.35 28:moe=0.42 29:kda=0.35 29:moe=0.43 30:kda=0.35 30:moe=0.45 31:mla=0.82 31:moe=0.42 32:kda=0.36 32:moe=0.39 33:kda=0.36 33:moe=0.44 34:kda=0.37 34:moe=0.44 35:mla=0.59 35:moe=0.49 36:kda=0.44 36:moe=0.60 37:kda=0.36 37:moe=0.45 38:kda=0.36 38:moe=0.61 39:mla=0.68 39:moe=0.43 40:kda=0.36 40:moe=0.46 41:kda=0.35 41:moe=0.57 42:kda=0.35 42:moe=0.43 43:mla=0.60 43:moe=0.45 44:kda=0.35 44:moe=0.45
+  kernels by time: tf_exl3_prompt_gu 187.3, tf_exl3_prompt_down 120.8, glm_mm4_w2x4 104.8, glm_mm4_128 67.7, tf_glm_combine 44.2, tf_glm_onepass_pipe_exact 30.5, tf_glm_kda_step 27.3, tf_glm_expand_v_x2 24.2, tf_glm_absorb_q_x2 20.3, group_kernel 18.7, tf_glm_hc_post 17.1, tf_glm_kda_prep 15.0
+
+request 4: 2 passes, 1292 rows (1289, 3), GPU span 5897.7 ms = 4564.8 us a row; passes 5897.7 ms, between passes 0.0 ms; 2/2 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              10.2       5.11      7.91   0.2%
+  host gap after the gate                           0.1       0.04      0.05   0.0%
+  step marker (put_words, broadcast)                0.0       0.02      0.04   0.0%
+  front: embed, layer 0's hc_pre                    0.7       0.35      0.54   0.0%
+  KDA mixer: projections, o_proj                   95.3      47.65     73.77   1.6%
+  KDA mixer: chain                                 44.0      22.00     34.06   0.7%
+  KDA mixer: other                                  0.3       0.13      0.21   0.0%
+  MLA mixer: projections, norms, o_proj            35.3      17.63     27.29   0.6%
+  MLA mixer: indexer                               18.2       9.11     14.11   0.3%
+  MLA mixer: attention, absorb, expand             74.3      37.13     57.47   1.3%
+  MLA mixer: NCCL (index split)                     3.2       1.59      2.47   0.1%
+  MLA mixer: other                                  0.2       0.08      0.12   0.0%
+  dense FFN: MLP                                    9.0       4.52      7.00   0.2%
+  MoE FFN: router                                   7.7       3.87      5.98   0.1%
+  MoE FFN: routed experts                         306.3     153.16    237.08   5.2%
+  MoE FFN: shared expert                           32.1      16.04     24.83   0.5%
+  MoE FFN: combine                                 48.4      24.21     37.48   0.8%
+  MoE FFN: other                                    0.4       0.21      0.33   0.0%
+  glue (hc_post, hc_pre)                           33.5      16.75     25.93   0.6%
+  wait: partials exchange                          24.8      12.38     19.17   0.4%
+  wait: glued rows share                           42.5      21.27     32.93   0.7%
+  launch gaps                                       2.3       1.16      1.79   0.0%
+  tail: head, draw, drafter, commit                22.9      11.47     17.75   0.4%
+  main-stream copies and memsets                   20.9      10.43     16.15   0.4%
+  main-stream busy / idle                         748.4 / 5149.3 ms
+  side-stream NCCL: 900 kernels, 141.8 ms (141.8 ms union), exposed while the main stream idles 61.9 ms
+  host synchronizes inside the passes: 9 (179.8 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+    KDA mixer        75.75 ms ( 2.228 a layer, 34 layers); waits    9.32 +    8.43 ms
+    MLA mixer        67.67 ms ( 6.152 a layer, 11 layers); waits    0.97 +    2.51 ms
+    dense FFN         5.08 ms ( 1.694 a layer, 3 layers); waits    0.30 +    0.70 ms
+    MoE FFN         205.58 ms ( 4.895 a layer, 42 layers); waits    1.78 +    9.63 ms
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   1289       0.0    5829.4    0.25     0.05   21.46   39.76 5141.98    137.67   57.78        91
+      1      3    5829.4      68.3    9.96     0.02    3.30    2.79    7.31      4.12    4.12        91
+  pass at 0.0 ms, 1289 rows: 0:dense=2.95 0:kda=4.01 1:dense=3.27 1:kda=4.48 2:dense=3.02 2:kda=4.07 3:mla=11.94 3:moe=9.15 4:kda=4.01 4:moe=10.21 5:kda=3.99 5:moe=9.90 6:kda=4.14 6:moe=9.27 7:mla=12.05 7:moe=8.71 8:kda=4.42 8:moe=9.25 9:kda=3.96 9:moe=9.57 10:kda=3.96 10:moe=9.23 11:mla=11.58 11:moe=10.65 12:kda=4.09 12:moe=8.96 13:kda=3.99 13:moe=8.85 14:kda=4.19 14:moe=9.25 15:mla=11.95 15:moe=8.66 16:kda=3.95 16:moe=9.69 17:kda=3.93 17:moe=8.28 18:kda=3.96 18:moe=8.59 19:mla=11.75 19:moe=8.62 20:kda=4.15 20:moe=9.05 21:kda=3.96 21:moe=8.58 22:kda=3.98 22:moe=8.81 23:mla=11.42 23:moe=8.93 24:kda=4.57 24:moe=9.07 25:kda=4.05 25:moe=9.74 26:kda=3.98 26:moe=9.52 27:mla=11.71 27:moe=10.10 28:kda=3.97 28:moe=9.14 29:kda=4.34 29:moe=9.09 30:kda=4.01 30:moe=9.63 31:mla=11.32 31:moe=9.48 32:kda=3.94 32:moe=10.10 33:kda=3.94 33:moe=9.58 34:kda=4.35 34:moe=9.08 35:mla=11.48 35:moe=9.07 36:kda=4.01 36:moe=9.15 37:kda=3.95 37:moe=10.52 38:kda=4.00 38:moe=9.13 39:mla=11.00 39:moe=9.26 40:kda=3.98 40:moe=9.45 41:kda=4.64 41:moe=9.09 42:kda=3.97 42:moe=9.83 43:mla=11.58 43:moe=8.52 44:kda=3.97 44:moe=8.80
+  pass at 5829.4 ms, 3 rows: 0:dense=0.31 0:kda=0.36 1:dense=0.31 1:kda=0.36 2:dense=0.30 2:kda=0.35 3:mla=0.66 3:moe=0.63 4:kda=0.35 4:moe=0.66 5:kda=0.36 5:moe=0.63 6:kda=0.35 6:moe=0.59 7:mla=0.88 7:moe=0.45 8:kda=0.36 8:moe=0.57 9:kda=0.35 9:moe=0.64 10:kda=0.35 10:moe=0.57 11:mla=0.59 11:moe=0.64 12:kda=0.35 12:moe=0.65 13:kda=0.53 13:moe=0.65 14:kda=0.35 14:moe=0.56 15:mla=0.77 15:moe=0.59 16:kda=0.39 16:moe=0.45 17:kda=0.36 17:moe=0.60 18:kda=0.35 18:moe=0.45 19:mla=0.60 19:moe=0.55 20:kda=0.35 20:moe=0.46 21:kda=0.35 21:moe=0.56 22:kda=0.36 22:moe=0.48 23:mla=0.81 23:moe=0.39 24:kda=0.36 24:moe=0.56 25:kda=0.35 25:moe=0.45 26:kda=0.35 26:moe=0.41 27:mla=0.76 27:moe=0.39 28:kda=0.36 28:moe=0.43 29:kda=0.36 29:moe=0.47 30:kda=0.35 30:moe=0.42 31:mla=0.60 31:moe=0.50 32:kda=0.58 32:moe=0.60 33:kda=0.36 33:moe=0.44 34:kda=0.44 34:moe=0.55 35:mla=0.67 35:moe=0.42 36:kda=0.35 36:moe=0.46 37:kda=0.36 37:moe=0.45 38:kda=0.36 38:moe=0.42 39:mla=0.61 39:moe=0.44 40:kda=0.35 40:moe=0.45 41:kda=0.35 41:moe=0.57 42:kda=0.36 42:moe=0.48 43:mla=0.60 43:moe=0.46 44:kda=0.36 44:moe=0.45
+  kernels by time: tf_exl3_prompt_gu 184.0, tf_exl3_prompt_down 117.7, glm_mm4_w2x4 103.9, glm_mm4_128 66.0, tf_glm_combine 43.2, tf_glm_onepass_pipe_exact 29.8, tf_glm_kda_step 25.7, tf_glm_expand_v_x2 24.0, tf_glm_absorb_q_x2 19.7, group_kernel 18.2, tf_glm_hc_post 16.5, tf_glm_kda_prep 14.5
+
+request 5: 2 passes, 1234 rows (1231, 3), GPU span 5888.4 ms = 4771.8 us a row; passes 5888.4 ms, between passes 0.0 ms; 2/2 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              11.2       5.60      9.08   0.2%
+  host gap after the gate                           0.0       0.02      0.03   0.0%
+  step marker (put_words, broadcast)                0.0       0.02      0.04   0.0%
+  front: embed, layer 0's hc_pre                    0.7       0.33      0.53   0.0%
+  KDA mixer: projections, o_proj                   93.6      46.78     75.82   1.6%
+  KDA mixer: chain                                 42.7      21.37     34.64   0.7%
+  KDA mixer: other                                  0.2       0.12      0.20   0.0%
+  MLA mixer: projections, norms, o_proj            32.7      16.34     26.48   0.6%
+  MLA mixer: indexer                               17.6       8.81     14.28   0.3%
+  MLA mixer: attention, absorb, expand             70.5      35.24     57.12   1.2%
+  MLA mixer: NCCL (index split)                     3.0       1.48      2.39   0.1%
+  MLA mixer: other                                  0.2       0.08      0.13   0.0%
+  dense FFN: MLP                                    8.7       4.36      7.06   0.1%
+  MoE FFN: router                                   7.4       3.72      6.02   0.1%
+  MoE FFN: routed experts                         298.3     149.16    241.75   5.1%
+  MoE FFN: shared expert                           31.7      15.84     25.67   0.5%
+  MoE FFN: combine                                 45.5      22.73     36.85   0.8%
+  MoE FFN: other                                    0.4       0.21      0.35   0.0%
+  glue (hc_post, hc_pre)                           31.6      15.79     25.60   0.5%
+  wait: partials exchange                          25.5      12.74     20.65   0.4%
+  wait: glued rows share                           42.9      21.44     34.75   0.7%
+  launch gaps                                       2.3       1.13      1.84   0.0%
+  tail: head, draw, drafter, commit                22.2      11.08     17.96   0.4%
+  main-stream copies and memsets                   20.5      10.23     16.58   0.3%
+  main-stream busy / idle                         723.6 / 5164.7 ms
+  side-stream NCCL: 900 kernels, 138.1 ms (138.1 ms union), exposed while the main stream idles 62.8 ms
+  host synchronizes inside the passes: 9 (175.9 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+    KDA mixer        73.76 ms ( 2.169 a layer, 34 layers); waits    8.86 +    8.28 ms
+    MLA mixer        63.80 ms ( 5.800 a layer, 11 layers); waits    1.52 +    2.69 ms
+    dense FFN         4.86 ms ( 1.619 a layer, 3 layers); waits    0.43 +    0.72 ms
+    MoE FFN         199.62 ms ( 4.753 a layer, 42 layers); waits    1.93 +    9.74 ms
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   1231       0.0    5819.9    1.57     0.02   21.41   40.24 5156.76    133.32   58.07        91
+      1      3    5819.9      68.5    9.64     0.02    4.07    2.64    7.96      4.74    4.74        91
+  pass at 0.0 ms, 1231 rows: 0:dense=2.72 0:kda=3.75 1:dense=2.79 1:kda=3.76 2:dense=3.29 2:kda=3.76 3:mla=10.44 3:moe=9.39 4:kda=4.02 4:moe=9.28 5:kda=3.74 5:moe=9.21 6:kda=3.81 6:moe=9.70 7:mla=10.45 7:moe=9.48 8:kda=3.87 8:moe=10.08 9:kda=4.74 9:moe=8.83 10:kda=4.50 10:moe=9.04 11:mla=11.50 11:moe=9.04 12:kda=3.74 12:moe=8.88 13:kda=3.74 13:moe=8.96 14:kda=4.05 14:moe=8.63 15:mla=11.26 15:moe=8.45 16:kda=3.99 16:moe=9.00 17:kda=3.77 17:moe=8.58 18:kda=4.02 18:moe=8.47 19:mla=10.92 19:moe=8.35 20:kda=3.76 20:moe=8.59 21:kda=3.74 21:moe=9.19 22:kda=3.75 22:moe=8.43 23:mla=10.88 23:moe=8.75 24:kda=4.43 24:moe=8.90 25:kda=4.71 25:moe=9.32 26:kda=3.78 26:moe=8.98 27:mla=10.65 27:moe=9.33 28:kda=4.57 28:moe=8.91 29:kda=3.74 29:moe=8.96 30:kda=3.75 30:moe=9.51 31:mla=10.87 31:moe=9.51 32:kda=3.77 32:moe=8.84 33:kda=3.77 33:moe=8.54 34:kda=3.84 34:moe=9.25 35:mla=11.27 35:moe=9.06 36:kda=3.76 36:moe=9.69 37:kda=3.74 37:moe=8.89 38:kda=4.39 38:moe=8.78 39:mla=11.42 39:moe=8.97 40:kda=3.79 40:moe=9.90 41:kda=4.46 41:moe=8.76 42:kda=3.78 42:moe=8.43 43:mla=11.03 43:moe=8.50 44:kda=3.78 44:moe=8.42
+  pass at 5819.9 ms, 3 rows: 0:dense=0.31 0:kda=0.36 1:dense=0.31 1:kda=0.36 2:dense=0.30 2:kda=0.36 3:mla=0.62 3:moe=0.63 4:kda=0.36 4:moe=0.66 5:kda=0.35 5:moe=0.68 6:kda=0.36 6:moe=0.98 7:mla=0.60 7:moe=0.48 8:kda=0.65 8:moe=0.45 9:kda=0.48 9:moe=0.64 10:kda=0.35 10:moe=0.57 11:mla=0.58 11:moe=0.63 12:kda=0.36 12:moe=0.58 13:kda=0.36 13:moe=0.57 14:kda=0.36 14:moe=0.61 15:mla=0.71 15:moe=0.54 16:kda=0.36 16:moe=0.44 17:kda=0.36 17:moe=0.55 18:kda=0.36 18:moe=0.45 19:mla=0.59 19:moe=0.57 20:kda=0.36 20:moe=0.46 21:kda=0.35 21:moe=0.47 22:kda=0.35 22:moe=0.44 23:mla=0.59 23:moe=0.37 24:kda=0.36 24:moe=0.53 25:kda=0.68 25:moe=0.59 26:kda=0.35 26:moe=0.43 27:mla=0.79 27:moe=0.40 28:kda=0.47 28:moe=0.41 29:kda=0.35 29:moe=0.45 30:kda=0.35 30:moe=0.42 31:mla=0.60 31:moe=0.41 32:kda=0.35 32:moe=0.42 33:kda=0.35 33:moe=0.44 34:kda=0.35 34:moe=0.44 35:mla=0.59 35:moe=0.44 36:kda=0.35 36:moe=0.43 37:kda=0.35 37:moe=0.48 38:kda=0.35 38:moe=0.44 39:mla=0.62 39:moe=0.44 40:kda=0.35 40:moe=0.46 41:kda=0.35 41:moe=0.56 42:kda=0.36 42:moe=0.60 43:mla=0.60 43:moe=0.42 44:kda=0.36 44:moe=0.48
+  kernels by time: tf_exl3_prompt_gu 179.8, tf_exl3_prompt_down 114.3, glm_mm4_w2x4 101.6, glm_mm4_128 63.4, tf_glm_combine 40.3, tf_glm_onepass_pipe_exact 28.6, tf_glm_kda_step 24.8, tf_glm_expand_v_x2 22.5, tf_glm_absorb_q_x2 18.7, group_kernel 17.5, tf_glm_hc_post 16.2, tf_glm_kda_prep 14.3

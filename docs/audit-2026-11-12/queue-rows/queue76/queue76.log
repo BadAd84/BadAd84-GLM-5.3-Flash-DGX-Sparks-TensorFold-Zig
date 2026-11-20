@@ -1,0 +1,31 @@
+[q76] 23:59:41 start; IMG=glm53-zig:v129za; deadline 02:59:41
+[q76] glm53-zig:v129za ids: sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573
+[prod-stop] 23:59:43 production stopped on spark1-3
+[q76] 00:02:07 nsys decode 4 clients code:   0.1%        8.5      4158       2.0      1.9  tf_glm_put_slot   0.1%        8.4         8    1044.3   1016.4  glm_mm8_w2x4 NSYS-DONE 
+[q76] 00:04:22 nsys decode 1 client prose:   0.1%        3.5       135      25.8     25.6  df_top16_part   0.1%        3.1       559       5.5      5.4  tf_glm_top1 NSYS-DONE 
+[q76] 00:08:11 nsys prefill (cold 8k, 32k, three warm turns):   dense FFN: MLP                                  173.5      17.35      5.29   0.9% PREFILL-DONE 00:08:10 [prefill] 00:08:11 serve stopped; production stays down 
+[q76] 00:10:50 dec-f5 1 greedy prose rc=0 "agg_tok_s": 81.21 code rc=0 "agg_tok_s": 113.31
+[q76] 00:11:38 dec-f5 2 greedy prose rc=0 "agg_tok_s": 84.31 code rc=0 "agg_tok_s": 137.08
+[q76] 00:12:54 dec-f5 4 greedy prose rc=0 "agg_tok_s": 112.27 code rc=0 "agg_tok_s": 166.14
+[q76] 00:15:34 dec-rs5 1 greedy prose rc=0 "agg_tok_s": 81.66 code rc=0 "agg_tok_s": 114.67
+[q76] 00:16:22 dec-rs5 2 greedy prose rc=0 "agg_tok_s": 84.81 code rc=0 "agg_tok_s": 137.2
+[q76] 00:17:37 dec-rs5 4 greedy prose rc=0 "agg_tok_s": 112.7 code rc=0 "agg_tok_s": 166.92
+[q76] 00:20:17 dec-rs6 1 greedy prose rc=0 "agg_tok_s": 81.68 code rc=0 "agg_tok_s": 114.3
+[q76] 00:21:05 dec-rs6 2 greedy prose rc=0 "agg_tok_s": 84.3 code rc=0 "agg_tok_s": 136.4
+[q76] 00:22:20 dec-rs6 4 greedy prose rc=0 "agg_tok_s": 112.59 code rc=0 "agg_tok_s": 167.15
+[q76] 00:25:01 dec-f6 1 greedy prose rc=0 "agg_tok_s": 80.33 code rc=0 "agg_tok_s": 114.32
+[q76] 00:25:49 dec-f6 2 greedy prose rc=0 "agg_tok_s": 83.64 code rc=0 "agg_tok_s": 135.68
+[q76] 00:27:05 dec-f6 4 greedy prose rc=0 "agg_tok_s": 111.82 code rc=0 "agg_tok_s": 166.03
+[q76] 00:29:45 dec-f7 1 greedy prose rc=0 "agg_tok_s": 80.25 code rc=0 "agg_tok_s": 112.94
+[q76] 00:30:34 dec-f7 2 greedy prose rc=0 "agg_tok_s": 84.08 code rc=0 "agg_tok_s": 137.27
+[q76] 00:31:49 dec-f7 4 greedy prose rc=0 "agg_tok_s": 111.69 code rc=0 "agg_tok_s": 165.9
+[q76] 00:34:29 dec-rs7 1 greedy prose rc=0 "agg_tok_s": 81.67 code rc=0 "agg_tok_s": 114.14
+[q76] 00:35:17 dec-rs7 2 greedy prose rc=0 "agg_tok_s": 85.14 code rc=0 "agg_tok_s": 137.63
+[q76] 00:36:32 dec-rs7 4 greedy prose rc=0 "agg_tok_s": 112.84 code rc=0 "agg_tok_s": 166.95
+[q76] 00:39:12 dec-rs8 1 greedy prose rc=0 "agg_tok_s": 80.89 code rc=0 "agg_tok_s": 113.19
+[q76] 00:40:00 dec-rs8 2 greedy prose rc=0 "agg_tok_s": 84.82 code rc=0 "agg_tok_s": 136.47
+[q76] 00:41:15 dec-rs8 4 greedy prose rc=0 "agg_tok_s": 112.39 code rc=0 "agg_tok_s": 167.08
+[q76] 00:44:01 dec-f8 1 greedy prose rc=0 "agg_tok_s": 81.8 code rc=0 "agg_tok_s": 114.69
+[q76] 00:44:49 dec-f8 2 greedy prose rc=0 "agg_tok_s": 84.92 code rc=0 "agg_tok_s": 137.35
+[q76] 00:46:04 dec-f8 4 greedy prose rc=0 "agg_tok_s": 113.21 code rc=0 "agg_tok_s": 166.78
+QUEUE76-DONE 00:46:15
