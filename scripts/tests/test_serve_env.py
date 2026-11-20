@@ -152,6 +152,13 @@ class ServeEnv(unittest.TestCase):
         self.assertEqual({n for n, _ in env_words("dev")} - {n for n, _ in env_words("prod")}, extra)
         self.assertTrue(extra, "dev.env adds no candidate")
 
+    def test_the_check_launcher_takes_its_runtime_settings_from_prod_env(self):
+        text = (ROOT / "scripts/gpu-check-tp3.sh").read_text(encoding="utf-8")
+        self.assertIn('env/words.sh" prod runtime', text)
+        runtime = {n for n, _ in env_words("prod", "runtime")}
+        carried = sorted(n for n in runtime if re.search(rf"-e {n}=", text))
+        self.assertEqual([], carried, "gpu-check-tp3.sh carries its own copy of a runtime setting")
+
     def test_a_bad_mode_is_refused(self):
         r = subprocess.run(["bash", "-c", f"cd {wsl(ROOT)} && DRYRUN=1 KNOBS=nope COMM_ID=x:1 bash scripts/serve.sh 0 4"], capture_output=True, text=True)
         self.assertEqual(2, r.returncode)

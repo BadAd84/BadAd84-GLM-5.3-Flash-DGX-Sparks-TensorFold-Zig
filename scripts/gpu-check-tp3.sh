@@ -17,11 +17,19 @@ DIR=glm53-zig-check
 NAME=glm53-chk
 HOSTDIR=$HOME/.cache/huggingface/$DIR
 SSH="ssh -n -o BatchMode=yes -o ConnectTimeout=15"
+# the runtime section of scripts/env/prod.env (the production NCCL shape, head and dense bits, offline Hugging Face), as serve.sh applies it; a caller's own
+# NCCL_IB_HCA wins, and NCCL_SOCKET_IFNAME is the interface the bootstrap address came from
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+RT=""
+for kv in $(bash "$HERE/env/words.sh" prod runtime); do
+  n=${kv%%=*}; v=${kv#*=}
+  case $n in NCCL_SOCKET_IFNAME) v=$IF ;; NCCL_IB_HCA) v=${NCCL_IB_HCA:-$v} ;; esac
+  RT="$RT -e $n=$v"
+done
+[ -n "$RT" ] || { echo "[check] no runtime section in $HERE/env/prod.env"; exit 2; }
 cmd() { # cmd RANK: the docker command line of one rank ($HOME is left for the box that runs it)
   echo "docker run -d --name $NAME-r$1 --gpus all --ipc=host --network host --shm-size 16g --cap-add IPC_LOCK --ulimit memlock=-1 --ulimit stack=67108864 --device /dev/infiniband" \
-    "-v \$HOME/.cache/huggingface:$HF -e HF_HUB_OFFLINE=1 -e TENSORFOLD_NO_UPDATE_CHECK=1 -e TENSORFOLD_MEMORY_RESERVE_GIB=13.0 -e TF_GLM_RANK=$1 -e TF_GLM_WORLD=3" \
-    "-e TF_GLM_HEAD_BITS=8 -e TF_GLM_DENSE_BITS=4 -e NCCL_COMM_ID=$ADDR:29571 -e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_MIN_NCHANNELS=4 -e NCCL_MAX_NCHANNELS=4" \
-    "-e NCCL_CROSS_NIC=1 -e NCCL_IB_SUBNET_AWARE_ROUTING=1 -e NCCL_IB_GID_INDEX=3 -e NCCL_IB_HCA=roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1 -e NCCL_SOCKET_IFNAME=$IF" \
+    "-v \$HOME/.cache/huggingface:$HF -e TENSORFOLD_MEMORY_RESERVE_GIB=13.0 -e TF_GLM_RANK=$1 -e TF_GLM_WORLD=3 -e NCCL_COMM_ID=$ADDR:29571$RT" \
     "$XENV --entrypoint /opt/tensorfold/bin/tf-cuda-test $IMG $CHECK $MODEL $HF/$DIR/dc.json $1 3 $HF/$DIR/id.hex"
 }
 clean() { docker rm -f $NAME-r0 > /dev/null 2>&1; for h in "$W1" "$W2"; do $SSH "$h" "docker rm -f $NAME-r1 $NAME-r2 > /dev/null 2>&1"; done; }
