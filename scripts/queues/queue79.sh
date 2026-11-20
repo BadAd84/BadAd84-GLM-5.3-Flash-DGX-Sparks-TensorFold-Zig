@@ -1,11 +1,13 @@
 #!/bin/bash
 # queue79.sh - on spark1, detached, after queue76 and before queue77: decode screens on the final recipe N (queue79.env: IMG, WORKERS, HOURS, NEWX, the same -e list as
 # queue77's N). The nsys capture of queue76 puts 75% of a four-client verify round in one kernel, tf_exl3_ovn_nc1 (the routed experts' decode GEMM), so the decode
-# switches that touch it or the round around it are read first, each on eight boots in the order n x i d | d i x n (a symmetric order, so a drift of the box cancels):
+# switches that touch it or the round around it are read first, each on ten boots in the order n x i d u | u d i x n (a symmetric order, so a drift of the box cancels):
 #     n   N alone (the control; two boots)
 #     x   TF_GLM_OVN_X3_NC=2   the trellis loads 2 k steps ahead instead of 1 (never measured on this stack; DEFS sets 1)
 #     i   TF_GLM_INDEX_CUDA=all  decode windows' index scoring on the GPU too (earlier cells +0.7 to +2.0%, inside the boot spread)
 #     d   TF_GLM_OVN_DECODE_INDEX=33  (earlier cells +0.5 to +1.5%, inside the boot spread)
+#     u   TF_GLM_OVN_DRAFT_CUTS=1:0.15  the draft chain's cut at every stream count, half the recipe's 0.3: a four-client verify window holds 22 rows (5.5 a stream) at an
+#         acceptance of 0.92 on code, against a stream's seven drafts at one client, so a deeper chain may buy tokens at three to four ms a row (replies cannot change)
 # Greedy decode at 1, 2, 4, 6 and 8 clients (production's prompt ids, three rounds each) at the deployed shape (--parallel 4 --context 1048576; 6 and 8 clients queue),
 # KNOBS=measured, one image. decide79.py (the rule, written before the rows) turns a candidate that wins into an addition to queue77.env and queue78.env.
 # Production is down for the campaign and stays down. QUEUE79-DONE.
@@ -56,6 +58,8 @@ arm n1 "$NEWX"
 arm x1 "$NEWX -e TF_GLM_OVN_X3_NC=2"
 arm i1 "$NEWX -e TF_GLM_INDEX_CUDA=all"
 arm d1 "$NEWX -e TF_GLM_OVN_DECODE_INDEX=33"
+arm u1 "$NEWX -e TF_GLM_OVN_DRAFT_CUTS=1:0.15"
+arm u2 "$NEWX -e TF_GLM_OVN_DRAFT_CUTS=1:0.15"
 arm d2 "$NEWX -e TF_GLM_OVN_DECODE_INDEX=33"
 arm i2 "$NEWX -e TF_GLM_INDEX_CUDA=all"
 arm x2 "$NEWX -e TF_GLM_OVN_X3_NC=2"
