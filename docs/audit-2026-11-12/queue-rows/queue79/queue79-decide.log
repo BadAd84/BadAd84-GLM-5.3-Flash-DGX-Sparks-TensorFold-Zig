@@ -1,0 +1,15 @@
+cell | n1 n2 | candidates' two boots | candidates' pair mean over the n mean
+P1 | 79.64 81.86 | 79.04 80.22 | 79.60 78.90 | 80.09 79.53 | 80.68 77.99 | x -1.39% i -1.86% d -1.16% u -1.75%
+P2 | 83.34 85.17 | 83.45 83.59 | 83.09 83.24 | 83.42 83.49 | 84.04 81.74 | x -0.87% i -1.29% d -0.95% u -1.62%
+P4 | 110.28 113.22 | 111.05 110.54 | 110.47 110.18 | 110.96 110.90 | 112.22 109.93 | x -0.86% i -1.28% d -0.74% u -0.60%
+P6 | 114.26 111.96 | 109.50 120.45 | 112.36 114.29 | 111.64 111.31 | 125.68 118.43 | x +1.65% i +0.19% d -1.45% u +7.91%
+P8 | 115.75 116.40 | 115.51 122.49 | 120.15 119.05 | 117.74 123.76 | 124.85 117.26 | x +2.52% i +3.03% d +4.02% u +4.29%
+C1 | 111.85 114.79 | 112.32 112.60 | 111.89 110.81 | 112.33 112.08 | 114.57 111.91 | x -0.76% i -1.74% d -0.98% u -0.07%
+C2 | 133.92 137.56 | 134.73 135.10 | 134.55 134.63 | 134.84 134.70 | 138.59 135.39 | x -0.61% i -0.85% d -0.71% u +0.92%
+C4 | 163.26 167.90 | 164.83 163.98 | 164.43 164.42 | 164.50 164.18 | 167.12 164.13 | x -0.71% i -0.70% d -0.75% u +0.03%
+C6 | 168.20 167.92 | 163.29 159.20 | 163.58 165.80 | 164.09 163.13 | 169.38 169.80 | x -4.06% i -2.00% d -2.65% u +0.91%
+C8 | 170.75 172.40 | 168.82 172.83 | 175.70 176.82 | 178.86 175.80 | 171.79 167.54 | x -0.43% i +2.73% d +3.36% u -1.11%
+x (-e TF_GLM_OVN_X3_NC=2): no | replies equal True | mean over cells -0.55% | each boot at or above False | cells above 2/10 | cells below the slower control 2
+i (-e TF_GLM_INDEX_CUDA=all): no | replies equal True | mean over cells -0.38% | each boot at or above False | cells above 3/10 | cells below the slower control 4
+d (-e TF_GLM_OVN_DECODE_INDEX=33): no | replies equal True | mean over cells -0.20% | each boot at or above False | cells above 2/10 | cells below the slower control 2
+u (-e TF_GLM_OVN_DRAFT_CUTS=1:0.15): no | replies equal True | mean over cells +0.89% | each boot at or above False | cells above 5/10 | cells below the slower control 3

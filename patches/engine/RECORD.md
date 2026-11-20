@@ -70,6 +70,7 @@ serve --config test; no new failing name; lean 0 new).
 | 0036 | - | glm latent: TF_GLM_OVN_LATENT_ROWS, absorb_q and expand_v two and four rows a loop step | `TF_GLM_OVN_LATENT_ROWS` |
 | 0037 | - | glm cuda: TF_GLM_OVN_SIDE_PRIO, the prompt exchanges' side stream at the highest priority without a pair | `TF_GLM_OVN_SIDE_PRIO` |
 | 0038 | - | glm cuda: TF_GLM_OVN_PIECE_FRONT, _MLA, _FFN and FRONT_ROWS, the next block's row-by-row front run piece by piece as the rows land | `TF_GLM_OVN_PIECE_FRONT`, `TF_GLM_OVN_PIECE_MLA`, `TF_GLM_OVN_PIECE_FFN`, `TF_GLM_OVN_FRONT_ROWS` |
+| 0039 | - | glm cuda: TF_GLM_OVN_PIECE_KDA, a KDA mixer site's chain run in the ranges the pieces cut, each ahead of its pieces' o_proj and exchange | `TF_GLM_OVN_PIECE_KDA` |
 
 0033 is not a re-seat of a v1.2.7 patch: it is new here (2026-11-16), written on this base. Its row in
 `zig/src/platform/environment.zig` sits after `TF_GLM_OVN_HOST_ONCE` rather than at the end of the `.glm` rows, so
@@ -137,7 +138,19 @@ the whole range). The host test is `cuda_piece_front_test.zig` (listed in `cuda.
 a full run on the shared x86_64 gate host, `sg-20261120-042953`, passes against the pristine pin for that stack: every step rc 0 but `test-cuda-host`, which
 fails only the base's own `cli_config_test.test.serve --config` name (6,917 of 6,951 tests passed, 33 skipped, against the base's 6,716 of 6,750), and lean
 341 problems against the base's 341, 0 new. Nine mutants of `handsFront`, `frontRanges` (the short-last merge, the join bookkeeping, the minimum) and the four switch readers each fail one of the new tests and nothing else but the base's own name.
-Queue83 read the three schedule switches on a GPU (OVERNIGHT section 58: -3.6% cold, every reply equal); `TF_GLM_OVN_FRONT_ROWS` is queue84's (sections 59 and 60).
+Queue83 read the three schedule switches on a GPU (OVERNIGHT section 58: -3.6% cold, every reply equal); `TF_GLM_OVN_FRONT_ROWS` was read in queue84 and gains nothing (section 61: 512 and 768 level inside the controls' spread, 2048 3.2% to 3.8% slower on warm turns), so it stays 0.
+
+0039 is new here too (2026-11-20): at a KDA mixer site of a prompt chunk the whole chain (`kda_prep`, `kda_step`, `kda_out`: 4.06 ms for 4,096 rows, 34 of the 45 sites) runs before the first
+piece's o_proj, so the first partials exchange starts only after it, and the side stream's exchanges, glue and shares (4.10 ms of NCCL kernels) outlast the main stream's work: in queue85's timeline the
+main stream idles 1.54 ms of the 5.05 ms after the chain. `TF_GLM_OVN_PIECE_KDA=1` runs the chain in the ranges the pieces cut (`cuda_kda_block.chainRange`, every row-indexed buffer moved down by
+`fromRow`; `cuda_forward_chain.exchange` and `opening` say which range's chain precedes which piece; `exchangePieces` is split into `exchangePiece` per piece), each ahead of the first piece it covers. A range at row
+`lo` reads its three conv rows from a window of the projected rows (the layer's `conv_shift` kernel into a scratch window), the recurrent state hops between the layer's other buffer and a scratch one
+(`hop`), and the layer commits after the last range as the whole chain does; `cuda_state.make` gains that scratch (`twin_checked` 76 to 77). The schedule is today's for a chunk under 64 rows,
+a profiled pass, `TF_GLM_L2PF`, shared segments and the chunked chain. The host tests are `cuda_piece_kda_test.zig` (the switch, `hop` for 1 to 16 ranges, `fromRow`, and the range bookkeeping for every chunk
+size and piece count); the GPU check is `tf-cuda-test glm-kda-pieces` (byte equality of the chain by ranges against the whole chain, seven cases, two planted controls), which queue87 runs on the image before it
+measures. The 39-patch series with the packages is the 46-patch stack, tree `7ccb3385fcfd587178a0def044174a14575641b8`; the full run `sg-20261120-081755` on the shared x86_64 gate host passes against the pristine pin: every step rc 0 but `test-cuda-host`, which fails only the base's own
+`cli_config_test.test.serve --config` name (6,922 of 6,956 tests passed, 33 skipped, against the base's 6,716 of 6,750), `compile-cuda-tests` builds the GPU check, and lean is 341 problems against the base's 341, 0 new.
+No GPU run has read it yet: queue87 does (OVERNIGHT sections 61 and 62).
 
 Every switch still defaults off and is a row of the `.glm` scope of `zig/src/platform/environment.zig` (TF_GLM_OVN_*
 through `cuda/ovn.zig`), with a line in `docs/environment.md`. Every kept patch keeps its own header (source, what

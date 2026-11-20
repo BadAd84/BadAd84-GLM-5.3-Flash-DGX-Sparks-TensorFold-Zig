@@ -1,0 +1,681 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: TF_GLM_OVN_PIECE_KDA, a KDA mixer site's chain run piece by piece ahead of each piece's o_proj and exchange
+
+A KDA mixer site of a prompt chunk runs its whole chain (kda_prep, kda_step and kda_out: 4.1 ms for 4,096 rows, 34 of the 45 sites)
+before the first piece's o_proj, so the first partials exchange starts only after the chain, and the site's side-stream work (four
+exchanges, the glue and four shares) then outlasts the 1.9 ms of o_proj fills: in queue85's timeline the main stream is 5.0 ms from
+the chain's end to the next router's start, 2.2 ms of it waiting.
+
+TF_GLM_OVN_PIECE_KDA=1 runs the chain in ranges of rows instead: cuda_forward_chain.exchange takes the chunk's pieces as cut (a last
+piece under 128 rows joined to the one before, cuda_forward_pieces.frontRanges with no minimum), and ahead of the first piece of each
+range it launches that range's chain (cuda_kda_block.chainRange: kda_prep, kda_step and kda_out over rows lo..hi, every row-indexed
+buffer moved down lo rows by fromRow), then the range's pieces' o_proj and partials exchange as before (exchangePieces split into a
+loop and a per-piece function, exchangePiece). The projections still run first over every row, or were run by the previous ffn
+site's front. The bits are the same: kda_prep and kda_out work on one row each; kda_step walks its rows in order, carrying the
+recurrent state in registers and storing it in fp32 at the end, so a range reading the state the range before it stored is the same
+sequence of operations; a range at lo reads the three conv rows before it from a window of projected rows lo - 3 .. lo - 1 (the
+layer's own conv_shift kernel, into a scratch window) where the whole chain reads them in place. The state hops between the
+committed buffer and a second one, so no range reads the buffer it writes and the layer's old state is untouched until the commit
+(cuda_kda_block.hop); cuda_state.make gains that size (the second state buffer and the window, twin_checked 76 to 77). After the
+last range the layer commits as the whole chain does: the conv window of the chunk's last three rows and the buffer flip.
+
+Default off: with the switch unset nothing launches differently. The schedule is today's, switch or not, for a chunk under 64
+rows (the whole chain takes the fused kernel there), a profiled pass, TF_GLM_L2PF, a shared window's segments and the chunked chain
+(cuda_forward_chain.handsChain).
+
+Host test: the switch, the state hops (never a read of what a range writes, the first buffer never written, the last range into the
+committed one, for 1 to 16 ranges), the row offsets and the range bookkeeping (cuda_forward_chain.opening: for every chunk size and piece
+count, each range opens at its first piece, the ranges come in order and cover the rows once, and each piece lies inside its range)
+(cuda_piece_kda_test.zig, listed in cuda.zig's test block). The registry row
+and the docs line follow TF_GLM_OVN_PIECE_FRONT's. The engine logs the switch at boot.
+
+GPU check: `tf-cuda-test glm-kda-pieces` (zig/tests/cuda/glm_kda_pieces_check.zig, registered in glm_ovn_checks.zig): synthetic rows
+through production's own chainRows, commitConv, chainRange, convWindow and hop, seven cases at 11 and 10 heads (4,096 rows in 4 and
+8 pieces, 2,048 in 3, 1,326 in 4, 1,160 in 4 with an 8-row last piece, 129 and 300 rows), the chain by ranges against the whole
+chain in out, the final state, the saved k, v and decay rows and the conv window, byte for byte (the ranges are the production cut,
+cuda_forward.ranges then frontRanges), and two planted controls (a wrong conv window, a wrong start state) that must differ. Not run on a GPU yet.
+
+New here, not a re-seat: written on this series at v1.2.9.
+
+---
+
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -141,10 +141,12 @@
+ pub const row_step = pieces_mod.row_step;
+ pub const max_pieces = pieces_mod.max_pieces;
+ pub const ranges = pieces_mod.ranges;
++pub const frontRanges = pieces_mod.frontRanges;
+ pub const Pieces = pieces_mod.Pieces;
+ pub const pieceFront = pieces_mod.pieceFront;
+ pub const pieceMla = pieces_mod.pieceMla;
+ pub const pieceFfn = pieces_mod.pieceFfn;
++pub const pieceKda = pieces_mod.pieceKda;
+ pub const pieceFrontRows = pieces_mod.frontRows;
+ 
+ /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
+@@ -349,6 +351,7 @@
+     const exchangeGlue = @import("cuda_forward_pair.zig").exchangeGlue;
+     const gluePiecesAsync = @import("cuda_forward_pieces.zig").gluePiecesAsync;
+     const fronts = @import("cuda_forward_front.zig");
++    const chains = @import("cuda_forward_chain.zig");
+ 
+     /// forward.pieced_layers: a prompt chunk's layers with exchanges in row pieces; same kernels and bits as unpieced.
+     fn pieced(f: *const Forward, p: *const Pieces, R: usize, cut: []const [2]usize) !void {
+@@ -357,16 +360,18 @@
+         const mla_front = pieces_mod.pieceMla();
+         const route = pieces_mod.pieceFfn();
+         const front_rows = try pieces_mod.frontRows();
++        const kda_pieces = pieces_mod.pieceKda();
+         for (f.ranks) |r| try f.pre(r, r.w.layers[0].attn_hc, r.w.layers[0].in_norm, R);
+         var li: usize = 0;
+         var di: usize = 0;
+         var fronted = false; // the layer's row-by-row part was done by the previous layer's ffn site
+         for (layers, 0..) |_, j| {
+             prof_mod.context(f.prof, j, null, .mixer);
+-            for (f.ranks) |r| if (r.segs.len > 0) try shared.mixer(f, r, r.w.layers[j], li, di, R, null) else try f.mixerFrom(r, r.w.layers[j], li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), null, fronted);
++            const chained = chains.handsChain(f, kda_pieces, j, R); // a KDA mixer's chain runs by pieces inside the site's exchange
++            for (f.ranks) |r| if (chained) try chains.project(f, r, r.w.layers[j], R, fronted) else if (r.segs.len > 0) try shared.mixer(f, r, r.w.layers[j], li, di, R, null) else try f.mixerFrom(r, r.w.layers[j], li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), null, fronted);
+             fronted = false;
+             const routed = fronts.handsRoute(f, route, j);
+-            try f.exchangePieces(p, j, .mixer, cut);
++            if (chained) try chains.exchange(f, p, j, li, cut) else try f.exchangePieces(p, j, .mixer, cut);
+             if (routed) {
+                 const sent = try f.gluePiecesAsync(p, j, .mixer, cut);
+                 try fronts.route(f, p, layers[j], cut, sent, front_rows);
+diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm/cuda_forward_pieces.zig
+--- a/zig/src/families/glm/cuda_forward_pieces.zig
++++ b/zig/src/families/glm/cuda_forward_pieces.zig
+@@ -46,6 +46,11 @@
+     return enabled and !profiled and !segments and has_front;
+ }
+ 
++/// TF_GLM_OVN_PIECE_KDA: a KDA mixer site runs its chain piece by piece, each ahead of its piece's o_proj.
++pub fn pieceKda() bool {
++    return cuda.ovn.on("PIECE_KDA");
++}
++
+ /// TF_GLM_OVN_FRONT_ROWS: the rows a hand-over's front range takes at least (0: a range a piece).
+ pub fn frontRows() error{BadOvnKnob}!usize {
+     return @intCast(try cuda.ovn.int("FRONT_ROWS", 0));
+@@ -120,22 +125,25 @@
+ /// overlap.Overlap.partials: each piece filled on the main stream, exchanged on the second (gathered or split).
+ pub fn exchangePieces(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: []const [2]usize) !void {
+     defer prof.context(f.prof, j, null, if (site == .mixer) .mixer else .ffn);
++    for (cut, 0..) |piece, q| try exchangePiece(f, p, j, site, q, piece);
++}
++
++/// One piece `q` of exchangePieces: its fill on the main stream, then its partials on the second.
++pub fn exchangePiece(f: *const Forward, p: *const Pieces, j: usize, site: Site, q: usize, piece: [2]usize) !void {
+     const D = f.ranks[0].w.config.hidden;
+-    for (cut, 0..) |piece, q| {
+-        prof.context(f.prof, j, q, if (site == .mixer) .mixer else .ffn);
+-        const lo = piece[0];
+-        const n = piece[1] - lo;
+-        const split = f.splits(n);
+-        for (f.ranks) |r| try f.fillRows(r, r.w.layers[j], site, lo, piece[1], if (split) r.b.part + lo * D * 4 else room(r, lo) + r.w.share.rank * n * D * 4);
+-        try p.filled[q].record(f.stream);
+-        var stamp = prof.span(f.prof, p.side, .wait_filled);
+-        try p.side.wait(p.filled[q]);
+-        stamp.end();
+-        stamp = prof.span(f.prof, p.side, .partials);
+-        try partials(f, p, lo, n, split);
+-        stamp.end();
+-        try p.gathered[q].record(p.side);
+-    }
++    prof.context(f.prof, j, q, if (site == .mixer) .mixer else .ffn);
++    const lo = piece[0];
++    const n = piece[1] - lo;
++    const split = f.splits(n);
++    for (f.ranks) |r| try f.fillRows(r, r.w.layers[j], site, lo, piece[1], if (split) r.b.part + lo * D * 4 else room(r, lo) + r.w.share.rank * n * D * 4);
++    try p.filled[q].record(f.stream);
++    var stamp = prof.span(f.prof, p.side, .wait_filled);
++    try p.side.wait(p.filled[q]);
++    stamp.end();
++    stamp = prof.span(f.prof, p.side, .partials);
++    try partials(f, p, lo, n, split);
++    stamp.end();
++    try p.gathered[q].record(p.side);
+ }
+ 
+ /// overlap.Overlap.glue: each piece's glue once its exchange is in, its rows then shared on the second stream.
+diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
+--- a/zig/src/families/glm/cuda_kda_block.zig
++++ b/zig/src/families/glm/cuda_kda_block.zig
+@@ -65,8 +65,8 @@
+     return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
+ }
+ 
+-/// The block's scratch for `rows` rows: projection, decay and gate rows, chain saves, B16 partials, a split's tmp.
+-pub const Scratch = struct { p: u64, ka: u64, kg: u64, saves: kda.Saves, wide: kda.Wide, mm_part: u64, tmp: u64 = 0 };
++/// The block's scratch for `rows` rows: projection, decay and gate rows, chain saves, partials, a split's tmp, a state.
++pub const Scratch = struct { p: u64, ka: u64, kg: u64, saves: kda.Saves, wide: kda.Wide, mm_part: u64, tmp: u64 = 0, state: u64 = 0 };
+ 
+ /// forward.kda_block: out [rows][dims] fp32 partial; `wide`: three-kernel chain; `prompt`: commits the conv window.
+ pub fn block(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, out: u64) !void {
+@@ -99,7 +99,7 @@
+ /// The block after its projections: the chain over `rows` projected rows and a prompt chunk's conv window commit.
+ pub fn bodyRest(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool, chunked: ?kda_chunk.Prompt) !void {
+     try chainRows(ks, stream, l, s, rows, conv_state, state_in, wide, chunked);
+-    if (prompt) try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.matWidth(), l.matWidth(), 1, 3 * l.heads * kda.dk);
++    if (prompt) try commitConv(set, stream, l, s, rows, conv_state);
+ }
+ 
+ /// TF_GLM_OVN_PIECE_FRONT: the projections of rows lo..hi alone, into those rows of s.p, s.ka and s.kg.
+@@ -174,6 +174,47 @@
+     try kda.chain(ks, stream, c, rows, s.saves, if (wide or rows >= kda.wide_rows) s.wide else null);
+ }
+ 
++/// The scratch from row `lo` on: each row-indexed buffer moved down `lo` rows (`row_width`: the fused stack's).
++pub fn fromRow(heads: usize, row_width: usize, s: Scratch, lo: usize) Scratch {
++    const n = heads * kda.dk;
++    var v = s;
++    v.p += lo * row_width * 2;
++    v.ka += lo * n * 2;
++    v.kg += lo * n * 2;
++    v.saves.out += lo * n * 2;
++    v.saves.k += lo * n * 4;
++    v.saves.v += lo * n * 2;
++    v.saves.g += lo * n * 4;
++    v.saves.b += lo * heads * 4;
++    v.wide.q += lo * n * 4;
++    v.wide.y += lo * n * 2;
++    return v;
++}
++
++/// TF_GLM_OVN_PIECE_KDA: the chain over rows lo..hi alone, bits as the whole chain's; `conv`: the three rows before lo.
++pub fn chainRange(ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi: usize, conv: u64, state_in: u64, state_out: u64) !void {
++    var v = fromRow(l.heads, l.matWidth(), s, lo);
++    v.saves.state_out = state_out;
++    try chainRows(ks, stream, l, v, hi - lo, conv, state_in, true, null);
++}
++
++/// The conv window a chain range at `lo` (three rows or more) reads: the projected rows before it.
++pub fn convWindow(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize) !u64 {
++    const window = s.state + l.heads * kda.dk * kda.dv * 4;
++    try commitConv(set, stream, l, s, lo, window);
++    return window;
++}
++
++/// A prompt chunk's conv window commit: the layer's window takes the chunk's last three projected rows.
++pub fn commitConv(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, rows: usize, conv_state: u64) !void {
++    try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.matWidth(), l.matWidth(), 1, 3 * l.heads * kda.dk);
++}
++
++/// Chain range `i` of `n`: the first reads `first`, the last writes `out`, the others alternate with `other`.
++pub fn hop(i: usize, n: usize, first: u64, out: u64, other: u64) struct { from: u64, to: u64 } {
++    return .{ .from = if (i == 0) first else if ((n - i) % 2 == 0) out else other, .to = if ((n - 1 - i) % 2 == 0) out else other };
++}
++
+ test {
+     _ = @import("cuda_kda_tp3_test.zig");
+ }
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -205,6 +205,7 @@
+         if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
+         if (world > 1 and rank == 0 and side_high and !pair) std.log.info("glm: the exchanges' side stream runs at the highest priority", .{});
+         if (world > 1 and rank == 0 and (fw.pieceFront() or fw.pieceMla() or fw.pieceFfn())) std.log.info("glm: pieced sites hand the next block's front its glued rows piece by piece (kda {}, mla {}, ffn {}, front rows {d})", .{ fw.pieceFront(), fw.pieceMla(), fw.pieceFfn(), fw.pieceFrontRows() catch 0 });
++        if (world > 1 and rank == 0 and fw.pieceKda()) std.log.info("glm: a KDA mixer site's chain runs piece by piece, each ahead of its piece's o_proj and exchange", .{});
+         if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+         errdefer if (e.pair) |*p| p.deinit();
+         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -64,6 +64,7 @@
+     _ = @import("cuda_keep_seqs_test.zig");
+     _ = @import("cuda_side_prio_test.zig");
+     _ = @import("cuda_piece_front_test.zig");
++    _ = @import("cuda_piece_kda_test.zig");
+     _ = @import("cuda_snapshot_layout_test.zig");
+     _ = @import("cuda_ranks_test.zig");
+     _ = @import("cuda_ranks_roce_test.zig");
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -218,7 +218,7 @@
+     /// The fields a twin holds apart, by their index in make's sizes (make reads the fields from these indexes too).
+     const twin_at = .{ .ids = 0, .x = 1, .normed = 2, .xs = 3, .post = 4, .comb = 5, .hcpart = 6, .gathered = 7, .hidden = 62, .fnormed = 63, .fxs = 64, .logits = 65, .part = 70 };
+     /// make's size count when twin_at's indexes were last checked: adding or removing a size fails the build.
+-    const twin_checked = 76;
++    const twin_checked = 77;
+ 
+     /// Whether make's size `i` is one a twin holds apart.
+     fn twinHolds(i: usize) bool {
+@@ -296,6 +296,7 @@
+             rows * D * 4, // part: this rank's fp32 partial rows a split exchange sends from
+             x3[0], x3[1], x3[2], x3[3], // EXL3 experts: prompt rotations and activations, or compact decode picks and partials
+             if (split) rows * @max(3 * n, kw - 3 * n) * 2 else 4, // a split KDA stack's part rows
++            LL * kda.dk * kda.dv * 4 + 3 * 3 * n * 2, // a chunk's chain by pieces (PIECE_KDA): the recurrent state's second buffer, then a conv window
+         };
+         var held = sizes;
+         if (twin != null) for (&held, 0..) |*bytes, i| { // a twin allocates its own rows only
+@@ -355,6 +356,7 @@
+         };
+         out.moe.x3 = .{ .picks = p[71], .xg = p[72], .xu = p[73], .z = p[74] };
+         out.kda.tmp = p[75];
++        out.kda.state = p[76];
+         if (twin) |of| {
+             var t = of.*;
+             t.arena = out.arena;
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -121,6 +121,7 @@
+     .{ .name = "TF_GLM_OVN_PIECE_FFN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },
++    .{ .name = "TF_GLM_OVN_PIECE_KDA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
+     .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -79,6 +79,7 @@
+ | `TF_GLM_OVN_PIECE_FFN` | Exactly `0` or `1`; default off (a prompt chunk's mixer site, before a MoE ffn, runs the router and top-k pick piece by piece as each piece's rows land, with the glue on the main stream as before; the bits are the same) |
+ | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
+ | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
++| `TF_GLM_OVN_PIECE_KDA` | Exactly `0` or `1`; default off (a prompt chunk's KDA mixer site runs its chain piece by piece, each range of rows ahead of its pieces' o_proj and exchange, instead of the whole chain before the first piece; the bits are the same) |
+ | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
+ | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
+ | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -5,6 +5,7 @@
+ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
+ const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
+ const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
++const glm_kda_pieces_check = @import("glm_kda_pieces_check.zig");
+ const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
+ const glm_latent_rows = @import("glm_latent_rows_tests.zig");
+ const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
+@@ -17,6 +18,7 @@
+     \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
++    \\  glm-kda-pieces            TF_GLM_OVN_PIECE_KDA: a KDA chain by ranges of rows against the whole chain, byte for byte (synthetic)
+     \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
+     \\  glm-latent-rows           TF_GLM_OVN_LATENT_ROWS: absorb_q and expand_v at 2 and 4 rows a loop step against today's, byte for byte
+     \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
+@@ -35,6 +37,8 @@
+         try glm_index_ovn_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-index-regroup-check")) {
+         try glm_index_regroup_check.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-kda-pieces")) {
++        try glm_kda_pieces_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-keep-seqs-check")) {
+         try glm_keep_seqs_check.run(gpu, rest);
+     } else if (std.mem.eql(u8, cmd, "glm-latent-rows")) {
+diff --git a/zig/src/families/glm/cuda_forward_chain.zig b/zig/src/families/glm/cuda_forward_chain.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_forward_chain.zig
+@@ -0,0 +1,71 @@
++//! A KDA mixer site's chain run piece by piece, each range's rows chained ahead of their pieces' o_proj and exchange.
++const std = @import("std");
++const weights = @import("cuda_weights.zig");
++const kda_block = @import("cuda_kda_block.zig");
++const kda_chunk = @import("cuda_kda_chunk.zig");
++const kda = @import("cuda").kda;
++const fw = @import("cuda_forward.zig");
++const pieces = @import("cuda_forward_pieces.zig");
++const Forward = fw.Forward;
++const Pieces = fw.Pieces;
++
++/// Whether layer j's mixer site runs its chain by pieces: a KDA layer, a chunk the whole chain takes the wide way.
++pub fn handsChain(f: *const Forward, enabled: bool, j: usize, rows: usize) bool {
++    if (!enabled or f.prof != null or f.l2pfFor() != null or rows < kda.wide_rows) return false;
++    if (std.meta.activeTag(f.ranks[0].w.layers[j].mixer) != .kda) return false;
++    for (f.ranks) |r| {
++        if (r.segs.len > 0 or kda_chunk.prompt(&f.m.chunked, r.st.pos) != null) return false;
++    }
++    return true;
++}
++
++/// What a KDA mixer does before its chain: the projections of every row, none when the previous ffn site fronted them.
++pub fn project(f: *const Forward, r: fw.Rank, l: weights.Layer, rows: usize, fronted: bool) !void {
++    if (fronted) return;
++    var s = r.b.kda;
++    s.p = r.b.kproj;
++    try kda_block.project(f.set(), f.stream, l.mixer.kda, s, r.b.normed, r.w.config.hidden, rows);
++}
++
++/// Range `i` of `n` (rows `span`) of layer j's chain on every rank: its conv window and the states it reads and writes.
++fn chainRange(f: *const Forward, j: usize, li: usize, i: usize, n: usize, span: [2]usize) !void {
++    for (f.ranks) |r| {
++        const k = r.w.layers[j].mixer.kda;
++        const st = r.st;
++        const cur = st.cur[li];
++        var s = r.b.kda;
++        s.p = r.b.kproj;
++        const hop = kda_block.hop(i, n, st.recAt(cur, li), st.recAt(1 - cur, li), s.state);
++        const conv = if (span[0] == 0) st.conv + li * 3 * st.conv_c * 2 else try kda_block.convWindow(f.set(), f.stream, k, s, span[0]);
++        try kda_block.chainRange(&f.m.kda, f.stream, k, s, span[0], span[1], conv, hop.from, hop.to);
++    }
++}
++
++/// Per piece, the range whose chain runs just before it (`last[r]`: range r's last piece), null inside a range.
++pub fn opening(cut_len: usize, last: []const usize, out: *[fw.max_pieces]?usize) void {
++    @memset(out[0..cut_len], null);
++    var piece: usize = 0;
++    for (last, 0..) |end, range| {
++        out[piece] = range;
++        piece = end + 1;
++    }
++}
++
++/// A KDA mixer site with its chain by pieces: each range's chain, its pieces' o_proj and exchanges, then the commit.
++pub fn exchange(f: *const Forward, p: *const Pieces, j: usize, li: usize, cut: []const [2]usize) !void {
++    var spans: [fw.max_pieces][2]usize = undefined;
++    var last: [fw.max_pieces]usize = undefined;
++    const n = pieces.frontRanges(cut, 0, &spans, &last);
++    var opens: [fw.max_pieces]?usize = undefined;
++    opening(cut.len, last[0..n], &opens);
++    for (cut, 0..) |piece, q| {
++        if (opens[q]) |range| try chainRange(f, j, li, range, n, spans[range]);
++        try pieces.exchangePiece(f, p, j, .mixer, q, piece);
++    }
++    for (f.ranks) |r| {
++        var s = r.b.kda;
++        s.p = r.b.kproj;
++        try kda_block.commitConv(f.set(), f.stream, r.w.layers[j].mixer.kda, s, cut[cut.len - 1][1], r.st.conv + li * 3 * r.st.conv_c * 2);
++        r.st.cur[li] = 1 - r.st.cur[li]; // the last range wrote the other buffer: the layer commits now
++    }
++}
+diff --git a/zig/src/families/glm/cuda_piece_kda_test.zig b/zig/src/families/glm/cuda_piece_kda_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_piece_kda_test.zig
+@@ -0,0 +1,112 @@
++//! TF_GLM_OVN_PIECE_KDA: a KDA site's chain by pieces: the switch, the opening pieces, the state hops, the row offsets.
++const std = @import("std");
++const cuda = @import("cuda");
++const pieces = @import("cuda_forward_pieces.zig");
++const kda_block = @import("cuda_kda_block.zig");
++const chain = @import("cuda_forward_chain.zig");
++const kda = cuda.kda;
++
++test "TF_GLM_OVN_PIECE_KDA: off unless set to 1" {
++    defer cuda.ovn.fake("PIECE_KDA", null);
++    cuda.ovn.fake("PIECE_KDA", null);
++    try std.testing.expect(!pieces.pieceKda());
++    cuda.ovn.fake("PIECE_KDA", "1");
++    try std.testing.expect(pieces.pieceKda());
++    cuda.ovn.fake("PIECE_KDA", "0");
++    try std.testing.expect(!pieces.pieceKda());
++}
++
++test "cuda_forward_chain.opening: a range opens at its first piece, a piece of the range before opens nothing" {
++    var out: [pieces.max_pieces]?usize = undefined;
++    const cases = [_]struct { len: usize, last: []const usize, want: []const ?usize }{
++        .{ .len = 4, .last = &.{ 0, 1, 2, 3 }, .want = &.{ 0, 1, 2, 3 } },
++        .{ .len = 4, .last = &.{ 0, 1, 3 }, .want = &.{ 0, 1, 2, null } }, // a short last piece joined to the one before it
++        .{ .len = 2, .last = &.{1}, .want = &.{ 0, null } },
++        .{ .len = 1, .last = &.{0}, .want = &.{0} },
++    };
++    for (cases) |c| {
++        @memset(&out, 99); // a piece the function leaves alone would read 99, not null
++        chain.opening(c.len, c.last, &out);
++        try std.testing.expectEqualSlices(?usize, c.want, out[0..c.len]);
++    }
++}
++
++test "cuda_forward_chain.opening: for every chunk and piece count, the ranges open in order, cover the rows once, and hold their pieces" {
++    var rows: usize = 1;
++    while (rows <= 6000) : (rows += 37) {
++        for (1..pieces.max_pieces + 1) |count| {
++            var cut: [pieces.max_pieces][2]usize = undefined;
++            const piece_count = pieces.ranges(rows, count, &cut);
++            var spans: [pieces.max_pieces][2]usize = undefined;
++            var last: [pieces.max_pieces]usize = undefined;
++            const n = pieces.frontRanges(cut[0..piece_count], 0, &spans, &last);
++            var opens: [pieces.max_pieces]?usize = undefined;
++            chain.opening(piece_count, last[0..n], &opens);
++            var seen: usize = 0;
++            var next_row: usize = 0;
++            for (cut[0..piece_count], 0..) |piece, q| {
++                if (opens[q]) |range| {
++                    try std.testing.expectEqual(seen, range);
++                    try std.testing.expectEqual(next_row, spans[range][0]);
++                    try std.testing.expectEqual(piece[0], spans[range][0]);
++                    next_row = spans[range][1];
++                    seen += 1;
++                }
++                try std.testing.expect(seen > 0);
++                try std.testing.expect(piece[0] >= spans[seen - 1][0] and piece[1] <= spans[seen - 1][1]);
++            }
++            try std.testing.expectEqual(n, seen);
++            try std.testing.expectEqual(rows, next_row);
++        }
++    }
++}
++
++test "kda_block.hop: the first range reads the layer's state, the last writes the committed buffer, none reads what it writes" {
++    const first: u64 = 1000;
++    const out: u64 = 2000;
++    const other: u64 = 3000;
++    var n: usize = 1;
++    while (n <= pieces.max_pieces) : (n += 1) {
++        var wrote: u64 = first;
++        for (0..n) |i| {
++            const h = kda_block.hop(i, n, first, out, other);
++            try std.testing.expectEqual(wrote, h.from); // it reads what the range before it wrote
++            try std.testing.expect(h.from != h.to);
++            try std.testing.expect(h.to != first); // the layer's old state survives until the commit
++            wrote = h.to;
++        }
++        try std.testing.expectEqual(out, wrote);
++    }
++}
++
++test "kda_block.fromRow: each row-indexed buffer moves down by its own row size" {
++    const s: kda_block.Scratch = .{
++        .p = 1 << 20,
++        .ka = 2 << 20,
++        .kg = 3 << 20,
++        .saves = .{ .out = 4 << 20, .state_out = 99, .k = 5 << 20, .v = 6 << 20, .g = 7 << 20, .b = 8 << 20 },
++        .wide = .{ .q = 9 << 20, .y = 10 << 20 },
++        .mm_part = 11 << 20,
++        .tmp = 12 << 20,
++        .state = 13 << 20,
++    };
++    const heads = 11;
++    const width = 4296;
++    const n = heads * kda.dk;
++    const v = kda_block.fromRow(heads, width, s, 384);
++    try std.testing.expectEqual(s.p + 384 * width * 2, v.p); // the fused stack's bf16 rows
++    try std.testing.expectEqual(s.ka + 384 * n * 2, v.ka);
++    try std.testing.expectEqual(s.kg + 384 * n * 2, v.kg);
++    try std.testing.expectEqual(s.saves.out + 384 * n * 2, v.saves.out); // bf16
++    try std.testing.expectEqual(s.saves.k + 384 * n * 4, v.saves.k); // fp32
++    try std.testing.expectEqual(s.saves.v + 384 * n * 2, v.saves.v); // bf16
++    try std.testing.expectEqual(s.saves.g + 384 * n * 4, v.saves.g); // fp32
++    try std.testing.expectEqual(s.saves.b + 384 * heads * 4, v.saves.b); // fp32, a value a head
++    try std.testing.expectEqual(s.wide.q + 384 * n * 4, v.wide.q); // fp32
++    try std.testing.expectEqual(s.wide.y + 384 * n * 2, v.wide.y); // bf16
++    try std.testing.expectEqual(s.saves.state_out, v.saves.state_out); // not row-indexed
++    try std.testing.expectEqual(s.mm_part, v.mm_part);
++    try std.testing.expectEqual(s.tmp, v.tmp);
++    try std.testing.expectEqual(s.state, v.state);
++    try std.testing.expect(std.meta.eql(s, kda_block.fromRow(heads, width, s, 0)));
++}
+diff --git a/zig/tests/cuda/glm_kda_pieces_check.zig b/zig/tests/cuda/glm_kda_pieces_check.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/glm_kda_pieces_check.zig
+@@ -0,0 +1,170 @@
++//! glm-kda-pieces: TF_GLM_OVN_PIECE_KDA's chain by ranges of rows against the whole chain, byte for byte (synthetic).
++const std = @import("std");
++const cuda = @import("cuda");
++const check = @import("check.zig");
++const qr = @import("quant_ref_tests.zig");
++const glm = @import("glm_cuda");
++const Rig = qr.RigT;
++
++const kb = glm.kda_block;
++const kda = glm.kda;
++const dk = kda.dk;
++
++/// What a planted control gets wrong: nothing (the schedule as built), the conv window, or each range's start state.
++const Wrong = enum { none, window, state };
++
++const Case = struct { heads: usize, rows: usize, pieces: usize };
++const cases = [_]Case{
++    .{ .heads = 11, .rows = 4096, .pieces = 4 },
++    .{ .heads = 11, .rows = 4096, .pieces = 8 },
++    .{ .heads = 10, .rows = 2048, .pieces = 3 },
++    .{ .heads = 11, .rows = 1326, .pieces = 4 },
++    .{ .heads = 10, .rows = 1160, .pieces = 4 }, // the last piece is 8 rows and joins the one before it
++    .{ .heads = 11, .rows = 129, .pieces = 4 }, // one range of every row
++    .{ .heads = 11, .rows = 300, .pieces = 3 },
++};
++
++fn floats(r: *Rig, count: usize, lo: f32, hi: f32) ![]f32 {
++    const out = try r.a.alloc(f32, count);
++    for (out) |*v| v.* = lo + r.rng.float(f32) * (hi - lo);
++    return out;
++}
++
++/// One layer's inputs on the device, shared by the whole chain and the ranges (read only).
++const Inputs = struct { layer: kb.Layer, p: u64, a: u64, g: u64, state: u64, window: []const u8 };
++
++fn inputs(r: *Rig, heads: usize, rows: usize) !Inputs {
++    const n = heads * dk;
++    const w = kb.rowWidth(heads);
++    const layer: kb.Layer = .{
++        .proj = .{ .bf16 = 0 },
++        .fb = 0,
++        .gb = 0,
++        .o = .{ .bf16 = 0 },
++        .conv_w = try r.dev(std.mem.sliceAsBytes(try floats(r, 3 * n * 4, -0.5, 0.5))),
++        .a_log = try r.dev(std.mem.sliceAsBytes(try floats(r, heads, -1, 1))),
++        .dt_bias = try r.dev(std.mem.sliceAsBytes(try floats(r, n, -0.5, 0.5))),
++        .norm_w = try r.dev(std.mem.sliceAsBytes(try r.bfs(dk, 1.0))),
++        .eps = 1e-6,
++        .lower = -5.0,
++        .heads = heads,
++        .dims = 64,
++    };
++    return .{
++        .layer = layer,
++        .p = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * w, 1.0))),
++        .a = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * n, 2.0))),
++        .g = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * n, 2.0))),
++        .state = try r.dev(std.mem.sliceAsBytes(try floats(r, heads * kda.dv * dk, -0.05, 0.05))),
++        .window = std.mem.sliceAsBytes(try r.bfs(3 * 3 * n, 1.0)),
++    };
++}
++
++/// A layer's chain scratch for `rows` rows, every byte 0xff until a kernel writes it.
++fn scratch(r: *Rig, in: Inputs, rows: usize) !kb.Scratch {
++    const heads = in.layer.heads;
++    const n = heads * dk;
++    return .{
++        .p = in.p,
++        .ka = in.a,
++        .kg = in.g,
++        .saves = .{ .out = try r.zeros(rows * n * 2), .state_out = try r.zeros(heads * kda.dv * dk * 4), .k = try r.zeros(rows * n * 4), .v = try r.zeros(rows * n * 2), .g = try r.zeros(rows * n * 4), .b = try r.zeros(rows * heads * 4) },
++        .wide = .{ .q = try r.zeros(rows * n * 4), .y = try r.zeros(rows * n * 2) },
++        .mm_part = 0,
++        .state = try r.zeros(heads * dk * kda.dv * 4 + 3 * 3 * n * 2),
++    };
++}
++
++/// The whole chain and the conv window commit of production's path (bodyRest), into `s`; `conv` is the layer's window.
++fn whole(r: *Rig, ks: *const kda.Kernels, set: glm.glue.Set, in: Inputs, s: kb.Scratch, rows: usize, conv: u64) !void {
++    try kb.chainRows(ks, r.s, in.layer, s, rows, conv, in.state, true, null);
++    try kb.commitConv(set, r.s, in.layer, s, rows, conv);
++}
++
++/// The ranges as cuda_forward_chain.exchange runs them (the pieces as cut, a last one under a row step joined).
++fn byRanges(r: *Rig, ks: *const kda.Kernels, set: glm.glue.Set, in: Inputs, s: kb.Scratch, rows: usize, pieces: usize, conv: u64, wrong: Wrong) !void {
++    var cut: [glm.forward.max_pieces][2]usize = undefined;
++    const pieces_cut = glm.forward.ranges(rows, pieces, &cut);
++    var spans: [glm.forward.max_pieces][2]usize = undefined;
++    var last: [glm.forward.max_pieces]usize = undefined;
++    const n = glm.forward.frontRanges(cut[0..pieces_cut], 0, &spans, &last);
++    for (spans[0..n], 0..) |span, i| {
++        const hop = kb.hop(i, n, in.state, s.saves.state_out, s.state);
++        const from = if (wrong == .state) in.state else hop.from;
++        const window = if (span[0] == 0 or wrong == .window) conv else try kb.convWindow(set, r.s, in.layer, s, span[0]);
++        try kb.chainRange(ks, r.s, in.layer, s, span[0], span[1], window, from, hop.to);
++    }
++    try kb.commitConv(set, r.s, in.layer, s, rows, conv);
++}
++
++/// The bytes a scratch's chain wrote, in the order compared: out, the final state, saved k, v and decay, the window.
++fn written(r: *Rig, in: Inputs, s: kb.Scratch, rows: usize, conv: u64) ![6][]u8 {
++    const heads = in.layer.heads;
++    const n = heads * dk;
++    return .{
++        try r.back(s.saves.out, rows * n * 2),
++        try r.back(s.saves.state_out, heads * kda.dv * dk * 4),
++        try r.back(s.saves.k, rows * n * 4),
++        try r.back(s.saves.v, rows * n * 2),
++        try r.back(s.saves.g, rows * n * 4),
++        try r.back(conv, in.window.len),
++    };
++}
++
++const labels = [6][]const u8{ "out", "the final state", "saved k", "saved v", "saved decay", "the conv window" };
++
++fn runCase(r: *Rig, ks: *const kda.Kernels, set: glm.glue.Set, c: Case, wrong: Wrong) !struct { whole: [6][]u8, ranges: [6][]u8 } {
++    const in = try inputs(r, c.heads, c.rows);
++    const sa = try scratch(r, in, c.rows);
++    const ca = try r.dev(in.window);
++    try whole(r, ks, set, in, sa, c.rows, ca);
++    const sb = try scratch(r, in, c.rows);
++    const cb = try r.dev(in.window);
++    try byRanges(r, ks, set, in, sb, c.rows, c.pieces, cb, wrong);
++    return .{ .whole = try written(r, in, sa, c.rows, ca), .ranges = try written(r, in, sb, c.rows, cb) };
++}
++
++/// The planted control: a wrong window or a wrong state is a difference, and the chain writes what it compares.
++fn planted(r: *Rig, ks: *const kda.Kernels, set: glm.glue.Set) !void {
++    const c = Case{ .heads = 11, .rows = 1326, .pieces = 4 };
++    for ([_]Wrong{ .window, .state }) |wrong| {
++        const got = try runCase(r, ks, set, c, wrong);
++        var differs = false;
++        for (got.whole, got.ranges) |w, g| differs = differs or !std.mem.eql(u8, w, g);
++        try check.expect(differs, "glm-kda-pieces: the control with a wrong {s} is a difference", .{@tagName(wrong)});
++        var wrote: usize = 0;
++        for (got.whole[0]) |v| wrote += @intFromBool(v != 0xff);
++        try check.expect(wrote > got.whole[0].len / 2, "glm-kda-pieces: the whole chain writes its output", .{});
++    }
++    check.pass("glm-kda-pieces: the planted controls: a wrong conv window and a wrong state each change the bytes, the chain writes its output", .{});
++}
++
++pub fn run(gpu: check.Gpu) !void {
++    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
++    defer arena.deinit();
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var prng = std.Random.DefaultPrng.init(7077);
++    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = s, .rng = prng.random() };
++    defer {
++        for (r.bufs.items) |*b| b.free();
++        r.bufs.deinit(gpu.gpa);
++    }
++    var kda_mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_kda);
++    defer kda_mod.unload();
++    const ks = try kda.Kernels.load(kda_mod);
++    var glue_mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer glue_mod.unload();
++    const gk = try glm.glue.Kernels.load(glue_mod);
++    const set: glm.glue.Set = .{ .glue = &gk };
++    try planted(&r, &ks, set);
++    for (cases) |c| {
++        const got = try runCase(&r, &ks, set, c, .none);
++        var name: [128]u8 = undefined;
++        for (got.whole, got.ranges, labels) |w, g, label| {
++            const text = try std.fmt.bufPrint(&name, "glm-kda-pieces: {d} heads, {d} rows in {d} pieces: {s}", .{ c.heads, c.rows, c.pieces, label });
++            try check.sameBytes(text, g, w);
++        }
++    }
++    check.pass("glm-kda-pieces: {d} cases: the chain by ranges equals the whole chain in out, state, saved rows and conv window", .{cases.len});
++}

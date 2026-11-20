@@ -1,0 +1,87 @@
+[q84] 05:16:11 start; IMG=glm53-zig:v129zd; NEWX='-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e NCCL_NCHANNELS_PER_NET_PEER=4'; deadline 10:16:11; 286G free
+[q84] 05:23:39 built glm53-zig:v129zd: 3a9ec4925eaf
+[q84] 05:32:18 distributed: 3a9ec4925eaf 3a9ec4925eaf 3a9ec4925eaf DIST-DONE v129zd
+[q84] glm53-zig:v129zd ids: sha256:3a9ec4925eaf0b8e7bedbbe4d0c8d087f725d280cbc837aa2a92a69400a021c6 sha256:3a9ec4925eaf0b8e7bedbbe4d0c8d087f725d280cbc837aa2a92a69400a021c6 sha256:3a9ec4925eaf0b8e7bedbbe4d0c8d087f725d280cbc837aa2a92a69400a021c6
+[q84] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 05:32:20 production stopped on spark1-3
+[q84] r4a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 05:36:51 r4a cold rc=0 3647 13444 50279 3678 13578 50879 
+[q84] 05:37:53 r4a chain: 47541 837 819 810 800 797 783 801
+[q84] 05:38:20 dec-r4a 1 greedy prose rc=0 "agg_tok_s": 78.97 code rc=0 "agg_tok_s": 111.57
+[q84] r5a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 512)
+[q84] 05:42:54 r5a cold rc=0 3667 13490 50705 3708 13687 51219 
+[q84] 05:43:57 r5a chain: 47895 837 825 860 806 798 800 807
+[q84] 05:44:24 dec-r5a 1 greedy prose rc=0 "agg_tok_s": 79.56 code rc=0 "agg_tok_s": 112.31
+[q84] r7a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 768)
+[q84] 05:48:58 r7a cold rc=0 3693 13575 50809 3730 13742 51409 
+[q84] 05:50:01 r7a chain: 48104 843 831 827 813 805 791 804
+[q84] 05:50:28 dec-r7a 1 greedy prose rc=0 "agg_tok_s": 79.4 code rc=0 "agg_tok_s": 112.6
+[q84] r2a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 2048)
+[q84] 05:55:03 r2a cold rc=0 3784 13765 51406 3825 13977 51942 
+[q84] 05:56:07 r2a chain: 48496 886 852 837 835 825 823 824
+[q84] 05:56:34 dec-r2a 1 greedy prose rc=0 "agg_tok_s": 78.08 code rc=0 "agg_tok_s": 111.2
+[q84] r2b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 2048)
+[q84] 06:01:08 r2b cold rc=0 3747 13616 50845 3775 13785 51454 
+[q84] 06:02:11 r2b chain: 48104 871 844 834 828 817 825 828
+[q84] 06:02:38 dec-r2b 1 greedy prose rc=0 "agg_tok_s": 79.75 code rc=0 "agg_tok_s": 110.16
+[q84] r7b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 768)
+[q84] 06:07:12 r7b cold rc=0 3659 13530 50707 3716 13719 51157 
+[q84] 06:08:14 r7b chain: 47796 837 823 817 813 795 797 804
+[q84] 06:08:41 dec-r7b 1 greedy prose rc=0 "agg_tok_s": 79.55 code rc=0 "agg_tok_s": 110.61
+[q84] r5b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 512)
+[q84] 06:13:16 r5b cold rc=0 3688 13625 50984 3729 13775 51539 
+[q84] 06:14:19 r5b chain: 48185 832 837 824 802 800 803 812
+[q84] 06:14:46 dec-r5b 1 greedy prose rc=0 "agg_tok_s": 79.11 code rc=0 "agg_tok_s": 111.13
+[q84] r4b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 06:19:20 r4b cold rc=0 3685 13548 50688 3710 13713 51287 
+[q84] 06:20:23 r4b chain: 48011 835 843 809 809 798 796 794
+[q84] 06:20:50 dec-r4b 1 greedy prose rc=0 "agg_tok_s": 79.42 code rc=0 "agg_tok_s": 112.01
+[q84] k4a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 06:25:23 k4a cold rc=0 3678 13524 50731 3716 13724 51329 
+[q84] 06:26:26 k4a chain: 47838 834 825 811 803 797 797 805
+[q84] 06:26:53 dec-k4a 1 greedy prose rc=0 "agg_tok_s": 78.58 code rc=0 "agg_tok_s": 110.81
+[q84] k2a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 06:31:29 k2a cold rc=0 3718 13826 51833 3768 13987 52324 
+[q84] 06:32:33 k2a chain: 49003 827 816 793 790 792 786 792
+[q84] 06:33:00 dec-k2a 1 greedy prose rc=0 "agg_tok_s": 78.77 code rc=0 "agg_tok_s": 110.75
+[q84] k3a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 06:37:34 k3a cold rc=0 3661 13577 50997 3715 13775 51426 
+[q84] 06:38:37 k3a chain: 48044 824 804 785 797 786 787 794
+[q84] 06:39:04 dec-k3a 1 greedy prose rc=0 "agg_tok_s": 79.03 code rc=0 "agg_tok_s": 110.41
+[q84] k6a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 06:43:38 k6a cold rc=0 3691 13571 50717 3737 13772 51377 
+[q84] 06:44:41 k6a chain: 48016 842 826 811 806 794 796 792
+[q84] 06:45:08 dec-k6a 1 greedy prose rc=0 "agg_tok_s": 79.59 code rc=0 "agg_tok_s": 111.07
+[q84] k8a piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 06:49:42 k8a cold rc=0 3730 13633 50935 3763 13817 51488 
+[q84] 06:50:45 k8a chain: 48076 839 827 811 804 802 803 800
+[q84] 06:51:12 dec-k8a 1 greedy prose rc=0 "agg_tok_s": 78.84 code rc=0 "agg_tok_s": 111.66
+[q84] k8b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 06:55:47 k8b cold rc=0 3743 13645 51017 3789 13817 51626 
+[q84] 06:56:50 k8b chain: 48338 870 826 814 805 795 805 811
+[q84] 06:57:17 dec-k8b 1 greedy prose rc=0 "agg_tok_s": 78.78 code rc=0 "agg_tok_s": 111.46
+[q84] k6b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 07:01:51 k6b cold rc=0 3706 13564 50737 3741 13707 51278 
+[q84] 07:02:54 k6b chain: 47925 892 831 804 811 797 798 806
+[q84] 07:03:21 dec-k6b 1 greedy prose rc=0 "agg_tok_s": 78.18 code rc=0 "agg_tok_s": 110.08
+[q84] k3b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 07:07:55 k3b cold rc=0 3655 13527 50779 3696 13689 51215 
+[q84] 07:08:57 k3b chain: 47842 827 809 794 794 779 787 793
+[q84] 07:09:24 dec-k3b 1 greedy prose rc=0 "agg_tok_s": 79.18 code rc=0 "agg_tok_s": 111.17
+[q84] k2b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 07:14:05 k2b cold rc=0 3687 13729 51506 3733 13902 52088 
+[q84] 07:15:08 k2b chain: 48730 818 809 798 784 788 787 788
+[q84] 07:15:35 dec-k2b 1 greedy prose rc=0 "agg_tok_s": 79.05 code rc=0 "agg_tok_s": 111.38
+[q84] k4b piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 07:20:09 k4b cold rc=0 3658 13548 50766 3708 13721 51317 
+[q84] 07:21:12 k4b chain: 47964 836 856 808 809 795 797 801
+[q84] 07:21:39 dec-k4b 1 greedy prose rc=0 "agg_tok_s": 78.52 code rc=0 "agg_tok_s": 110.61
+[q84] kca piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 07:26:11 kca cold rc=0 3643 13390 49976 3667 13543 50481 
+[q84] 07:27:12 kca chain: 47156 826 815 803 834 792 782 797
+[q84] 07:27:40 dec-kca 1 greedy prose rc=0 "agg_tok_s": 72.31 code rc=0 "agg_tok_s": 117.1
+[q84] kva piece-front boot lines: info: glm: pieced sites hand the next block's front its glued rows piece by piece (kda true, mla true, ffn true, front rows 0)
+[q84] 07:32:13 kva cold rc=0 3652 13468 50444 3689 13652 51087 
+[q84] 07:33:15 kva chain: 47726 843 822 806 801 797 780 793
+[q84] 07:33:41 dec-kva 1 greedy prose rc=0 "agg_tok_s": 82.4 code rc=0 "agg_tok_s": 116.81
+QUEUE84-DONE 07:33:52

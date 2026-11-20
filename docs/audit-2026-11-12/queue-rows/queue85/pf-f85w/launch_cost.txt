@@ -1,0 +1,15 @@
+cold: 6 warmed 4096-row passes of request 2; warm: the 1289-row pass of request 4; 4 row pieces, so 1024 and 322 rows a piece
+kernel                                cold n  us each  warm n  us each  us a row  fixed us  fixed ms a warm pass
+tf_exl3_prompt_gu                         42   7377.7      42   4148.6     4.601    2665.7                 112.0
+tf_exl3_prompt_down                       42   5203.0      42   2753.2     3.491    1628.3                  68.4
+glm_mm4_w2x4                             460    759.1     346    324.6     0.619     125.1                  43.3
+glm_mm4_128                              646    173.2     760     92.0     0.116      54.7                  41.6
+tf_glm_combine                           168    771.8     168    266.6     0.720      34.6                   5.8
+tf_glm_onepass_pipe_exact                 11   8745.2      11   2701.0     8.613     -74.5                  -0.8
+tf_glm_kda_step                           34   2499.1      34    764.9     2.471     -31.4                  -1.1
+tf_glm_expand_v_x2                        11   6777.5      11   2143.5     6.603      15.6                   0.2
+tf_glm_absorb_q_x2                        44   1529.1      44    472.5     1.506     -12.7                  -0.6
+tf_glm_kda_prep                           34   1437.6      34    444.7     1.415     -11.3                  -0.4
+tf_glm_index_scores                       33    205.8      11   1172.8    -1.378    1616.9                  17.8
+tf_glm_router_tile                       212    123.6     212     37.3     0.123      -2.4                  -0.5
+ncclDevKernel_SendRecv                   720    651.4     720    211.1     0.627       8.9                   6.4

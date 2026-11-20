@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""test_decide84.py - scripts/queue-scores/decide84.py: a FRONT_ROWS value joins on a warm gain of 1.0% with the cold mean not worse than 0.3%, a piece count on a cold gain of 0.5% with
-the warm mean not worse than 0.3%; a changed reply, a boot over the slower control by more than 1.0%, a decode slower by more than 1.0%, missing boots and fewer than two controls
+"""test_decide84.py - scripts/queue-scores/decide84.py: a FRONT_ROWS value joins on a warm gain of 1.0% with the cold mean not worse than 0.3%, a piece count (and PIECE_KDA, queue87's
+block, which then names the image with patch 0039) on a cold gain of 0.5% with the warm mean not worse than 0.3%; a changed reply, a boot over the slower control by more than 1.0%, a decode slower by more than 1.0%, missing boots and fewer than two controls
 keep a setting out; the larger sum of cold and warm gains wins a block; the numerics boots join nothing; --apply edits NEWX once and names the image.
 Plain asserts: python scripts/tests/test_decide84.py"""
 import json
@@ -14,11 +14,13 @@ SCRIPT = os.environ.get("DECIDE84") or os.path.join(HERE, "..", "queue-scores", 
 SIZES = (8000, 32000, 120000)
 FRONT_CTL, FRONT = ("r4a", "r4b"), {"512": ("r5a", "r5b"), "768": ("r7a", "r7b"), "2048": ("r2a", "r2b")}
 PIECE_CTL, PIECES = ("k4a", "k4b"), {"2": ("k2a", "k2b"), "3": ("k3a", "k3b"), "6": ("k6a", "k6b"), "8": ("k8a", "k8b")}
-ALL = list(FRONT_CTL) + [b for v in FRONT.values() for b in v] + list(PIECE_CTL) + [b for v in PIECES.values() for b in v] + ["kca", "kva"]
+KDA_CTL, KDA = ("n9a", "n9b"), ("d9a", "d9b")
+W_CTL, W3 = ("w4a", "w4b", "w4c", "w4d"), ("w3a", "w3b", "w3c", "w3d")
+ALL = list(FRONT_CTL) + [b for v in FRONT.values() for b in v] + list(PIECE_CTL) + [b for v in PIECES.values() for b in v] + list(KDA_CTL) + list(KDA) + list(W_CTL) + list(W3) + ["kca", "kva"]
 
 
 def write(root, plan=None, drop=(), sha=lambda b, k: "a"):
-    """plan: boot -> dict(cold=factor, warm=factor, first=factor, speed=tok/s); a boot not in it is a control."""
+    """plan: boot -> dict(cold=factor, warm=factor, first=factor, speed=tok/s, late=factor of the ~250k conversation's turns 2 on: written only when given)."""
     plan = plan or {}
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, "rows.jsonl"), "w", encoding="utf-8") as f:
@@ -36,6 +38,9 @@ def write(root, plan=None, drop=(), sha=lambda b, k: "a"):
         with open(os.path.join(root, b, "chain.jsonl"), "w", encoding="utf-8") as f:
             for k in range(8):
                 f.write(json.dumps({"tag": "c74", "ttft_ms": 50000.0 * p.get("first", 1.0) if k == 0 else 800.0 * p.get("warm", 1.0), "token_sha": sha(b, ("turn", k))}) + "\n")
+            if p.get("late") is not None or any(plan.get(o, {}).get("late") is not None for o in ALL):
+                for k in range(6):
+                    f.write(json.dumps({"tag": "c250", "ttft_ms": 120000.0 if k == 0 else 1000.0 * p.get("late", 1.0), "token_sha": sha(b, ("turn250", k))}) + "\n")
         d = os.path.join(root, f"dec-{b}")
         os.makedirs(d, exist_ok=True)
         for kind in ("P", "C"):
@@ -173,5 +178,99 @@ with tempfile.TemporaryDirectory() as t:  # --apply adds FRONT_ROWS once (and re
     run(t, "--apply", env2)
     run(t, "--apply", env2)
     assert open(env2, encoding="utf-8").read() == 'IMG=glm53-zig:v129zd\nNEWX="-e TF_GLM_OVERLAP_PIECES=6 -e TF_GLM_OVN_FRONT_ROWS=768"\n', open(env2, encoding="utf-8").read()
+
+with tempfile.TemporaryDirectory() as t:  # PIECE_KDA (queue87's block) reads like a piece count: -1.0% cold passes, -0.3% does not, a warm turn 0.5% slower does not, a changed reply does not
+    write(t, both(KDA, cold=0.99))
+    out = run(t)
+    assert verdict(out, "kda", "1") == "passes" and "kda: 1 JOINS" in out, out
+    write(t, both(KDA, cold=0.997))
+    assert verdict(run(t), "kda", "1") == "no"
+    write(t, both(KDA, cold=0.99, warm=1.005))
+    assert verdict(run(t), "kda", "1") == "no"
+    write(t, both(KDA, cold=0.99), sha=lambda b, k: "b" if (b == "d9b" and k == ("dec", "P")) else "a")
+    assert verdict(run(t), "kda", "1") == "no"
+
+with tempfile.TemporaryDirectory() as t:  # --apply: PIECE_KDA is added once, with the image that carries patch 0039; without it the image stays zd
+    write(t, both(KDA, cold=0.99))
+    env = os.path.join(t, "queue77.env")
+    open(env, "w", encoding="utf-8").write('IMG=glm53-zig:v129zd\nNEWX="-e TF_GLM_OVN_MM_WIDE=1"\nHOURS=6\n')
+    run(t, "--apply", env)
+    run(t, "--apply", env)
+    want = 'IMG=glm53-zig:v129ze\nNEWX="-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_PIECE_KDA=1"\nHOURS=6\n'
+    assert open(env, encoding="utf-8").read() == want, open(env, encoding="utf-8").read()
+
+def warm3_plan(warm, **rest):
+    """The four controls at 1.0 (or `rest` on the controls by name) and the four 3-piece boots at `warm` (a factor, or one per boot)."""
+    plan = {b: dict(rest.get(b, {})) for b in W_CTL}
+    for i, b in enumerate(W3):
+        plan[b] = {"warm": warm[i] if isinstance(warm, (list, tuple)) else warm}
+    return plan
+
+
+with tempfile.TemporaryDirectory() as t:  # warm3: all four boots 2% under the four controls on turns 2 to 8, cold level: joins, and --apply makes the pieces 3 with the image that needs no new patch
+    write(t, warm3_plan(0.98))
+    out = run(t)
+    assert verdict(out, "warm3", "3") == "passes" and "warm3: 3 JOINS" in out, out
+    assert "every boot's turns 2+ under every control's True" in out, out
+    env = os.path.join(t, "queue77.env")
+    open(env, "w", encoding="utf-8").write('IMG=glm53-zig:v129zc\nNEWX="-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_PIECE_KDA=0"\nHOURS=6\n')
+    run(t, "--apply", env)
+    run(t, "--apply", env)
+    want = 'IMG=glm53-zig:v129zd\nNEWX="-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVERLAP_PIECES=3 -e TF_GLM_OVN_PIECE_KDA=0"\nHOURS=6\n'
+    assert open(env, encoding="utf-8").read() == want, open(env, encoding="utf-8").read()
+
+with tempfile.TemporaryDirectory() as t:  # warm3's ordering: three boots 3% under and one level with the controls average 2.25% under, yet one boot is not under every control: out
+    write(t, warm3_plan([0.97, 0.97, 0.97, 1.0]))
+    out = run(t)
+    assert verdict(out, "warm3", "3") == "no" and "under every control's False" in out and "turns 2+ +2.25%" in out, out
+
+with tempfile.TemporaryDirectory() as t:  # a control faster than the 3-piece boots breaks the ordering though the mean is 1.26% under: out
+    write(t, warm3_plan(0.98, w4c={"warm": 0.97}))
+    out = run(t)
+    assert verdict(out, "warm3", "3") == "no" and "under every control's False" in out and "turns 2+ +1.26%" in out, out
+
+with tempfile.TemporaryDirectory() as t:  # warm3 needs 1.0% on turns 2 to 8: 0.5% is out, and the cold mean may be 0.2% over but not 0.4% over
+    write(t, warm3_plan(0.995))
+    assert verdict(run(t), "warm3", "3") == "no"
+    for cold, want in ((1.002, "passes"), (1.004, "no")):
+        plan = warm3_plan(0.98)
+        for b in W3:
+            plan[b]["cold"] = cold
+        write(t, plan)
+        assert verdict(run(t), "warm3", "3") == want, (cold, run(t))
+
+with tempfile.TemporaryDirectory() as t:  # the ~250k conversation is printed against the controls and decides nothing: -3% there is reported, a failing warm3 stays out with -10% there
+    plan = warm3_plan(0.98)
+    for b in W_CTL:
+        plan[b]["late"] = 1.0
+    for b in W3:
+        plan[b]["late"] = 0.97
+    write(t, plan)
+    out = run(t)
+    assert "~250k conversation, turns 2+ +3.00% (report only)" in out and verdict(out, "warm3", "3") == "passes", out
+    plan = warm3_plan(0.995)
+    for b in W_CTL:
+        plan[b]["late"] = 1.0
+    for b in W3:
+        plan[b]["late"] = 0.9
+    write(t, plan)
+    out = run(t)
+    assert "+10.00% (report only)" in out and verdict(out, "warm3", "3") == "no", out
+    write(t, warm3_plan(0.98))
+    assert "no ~250k conversation rows" in run(t)
+
+with tempfile.TemporaryDirectory() as t:  # a changed reply in the ~250k conversation of one 3-piece boot keeps warm3 out
+    plan = warm3_plan(0.98)
+    for b in W_CTL + W3:
+        plan[b]["late"] = 1.0
+    write(t, plan, sha=lambda b, k: "b" if (b == "w3d" and k == ("turn250", 2)) else "a")
+    out = run(t)
+    assert verdict(out, "warm3", "3") == "no" and "replies equal False" in out, out
+
+with tempfile.TemporaryDirectory() as t:  # warm3 with fewer than two controls or a boot missing is undecided
+    write(t, warm3_plan(0.98), drop=("w3b",))
+    assert "warm3 3: NOT DECIDED (boots missing)" in run(t)
+    write(t, warm3_plan(0.98), drop=("w4a", "w4b", "w4c"))
+    assert "warm3: NOT DECIDED (fewer than two controls" in run(t)
 
 print("ok")
