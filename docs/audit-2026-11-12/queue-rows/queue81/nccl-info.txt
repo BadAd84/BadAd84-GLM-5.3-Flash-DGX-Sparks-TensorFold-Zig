@@ -1,0 +1,700 @@
+spark1:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+spark1:1:1 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+spark1:1:1 [0] NCCL INFO cudaDriverVersion 13030
+spark1:1:1 [0] NCCL INFO NCCL version 2.30.7+cuda13.3
+spark1:1:1 [0] NCCL INFO NCCL git version HEAD a5187fa2e
+spark1:1:1 [0] NCCL INFO NCCL_NET_PLUGIN set by environment to spcx
+spark1:1:1 [0] NCCL INFO ncclOsDlopen(spcx) failed: spcx: cannot open shared object file: No such file or directory
+spark1:1:1 [0] NCCL INFO NET/Plugin: Loaded net plugin SPCX (v12)
+spark1:1:1 [0] NCCL INFO NET/Plugin: Loaded collnet plugin SPCX (v12)
+spark1:1:1 [0] NCCL INFO Successfully loaded external network plugin /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so
+spark1:1:1 [0] NCCL INFO Registering new plugin entry for commId: 8248557584350349298
+spark1:1:1 [0] NCCL INFO Plugin Path : /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so (SPCX Ver. 1.4-0)
+spark1:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set to enP7s7
+spark1:1:1 [0] NCCL INFO NCCL_IB_HCA set to roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1
+spark1:1:1 [0] NCCL INFO NET/DEVX : device:rocep1s0f0 hcaCaps=0xd
+spark1:1:1 [0] NCCL INFO NET/DEVX : device:rocep1s0f1 hcaCaps=0xd
+spark1:1:1 [0] NCCL INFO NET/DEVX : device:roceP2p1s0f0 hcaCaps=0xd
+spark1:1:1 [0] NCCL INFO NET/DEVX : device:roceP2p1s0f1 hcaCaps=0xd
+spark1:1:1 [0] NCCL INFO NET/IB : No device found.
+spark1:1:1 [0] NCCL INFO NET/IB : Using [RO]; OOB enP7s7:<lan><0>
+spark1:1:1 [0] NCCL INFO Failed to initialize NET plugin SPCX
+spark1:1:1 [0] NCCL INFO Deregistering plugin entry for commId: 8248557584350349298
+spark1:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set to enP7s7
+spark1:1:1 [0] NCCL INFO NCCL_IB_HCA set to roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1
+spark1:1:1 [0] NCCL INFO NET/IB: [0] rocep1s0f0:uverbs0:1/RoCE provider=Mlx5 speed=128000 context=0x409ff910 pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 ar=0 oooRqSize=0
+spark1:1:1 [0] NCCL INFO NET/IB: [1] rocep1s0f1:uverbs1:1/RoCE provider=Mlx5 speed=128000 context=0x40a41060 pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 ar=0 oooRqSize=0
+spark1:1:1 [0] NCCL INFO NET/IB: [2] roceP2p1s0f0:uverbs2:1/RoCE provider=Mlx5 speed=128000 context=0x40a827b0 pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 ar=0 oooRqSize=0
+spark1:1:1 [0] NCCL INFO NET/IB: [3] roceP2p1s0f1:uverbs3:1/RoCE provider=Mlx5 speed=128000 context=0x40ac3f00 pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 ar=0 oooRqSize=0
+spark1:1:1 [0] NCCL INFO NET/IB : Made virtual device [0] name=rocep1s0f0 speed=128000 ndevs=1 rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : Made virtual device [1] name=rocep1s0f1 speed=128000 ndevs=1 rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : Made virtual device [2] name=roceP2p1s0f0 speed=128000 ndevs=1 rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : Made virtual device [3] name=roceP2p1s0f1 speed=128000 ndevs=1 rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : Using [0]rocep1s0f0:1/RoCE [1]rocep1s0f1:1/RoCE [2]roceP2p1s0f0:1/RoCE [3]roceP2p1s0f1:1/RoCE [RO]; OOB enP7s7:<lan><0>
+spark1:1:1 [0] NCCL INFO Initialized NET plugin IB
+spark1:1:1 [0] NCCL INFO Assigned NET plugin IB to comm
+spark1:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-rma.so) failed: libnccl-rma.so: cannot open shared object file: No such file or directory
+spark1:1:1 [0] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+spark1:1:1 [0] NCCL INFO RMA/Plugin: Failed to load external plugin /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so, dlHandle: (nil), ncclRma: (nil)
+spark1:1:1 [0] NCCL INFO RMA/Plugin: Loaded rma plugin SPCX_RMA (v13)
+spark1:1:1 [0] NCCL INFO RMA/Plugin: Successfully loaded external plugin /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so
+spark1:1:1 [0] NCCL INFO Registering new plugin entry for commId: 8248557584350349298
+spark1:1:1 [0] NCCL INFO Plugin Path : /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so (SPCX Ver. 1.4-0)
+spark1:1:1 [0] NCCL INFO GIN: no IB devices found
+spark1:1:1 [0] NCCL INFO plugin/rma/rma_v13.cc:18 (ncclRma_init) -> 3
+spark1:1:1 [0] NCCL INFO RMA/Plugin: Assigned plugin RMA_IB_PROXY to comm
+spark1:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+spark1:1:1 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+spark1:1:1 [0] NCCL INFO GIN/Plugin: Failed to load external plugin /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so, dlHandle: (nil), ncclGin: (nil)
+spark1:1:1 [0] NCCL INFO GIN/Plugin: Loaded gin plugin SPCX_GIN (v13)
+spark1:1:1 [0] NCCL INFO GIN/Plugin: Successfully loaded external plugin /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so
+spark1:1:1 [0] NCCL INFO Plugin Path : /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so (SPCX Ver. 1.4-0)
+spark1:1:1 [0] NCCL INFO GIN: no IB devices found
+spark1:1:1 [0] NCCL INFO GIN/Plugin: Assigned plugin GIN_IB_GDAKI type 3 to comm
+spark1:1:1 [0] NCCL INFO Using network IB
+spark1:1:1 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+spark1:1:1 [0] NCCL INFO [Rank 0] ncclCommInitRank comm 0x3ddcc010 rank 0 nranks 3 cudaDev 0 nvmlDev 0 busId f01000 commId 0x7278c36b948e87f2 - Init START
+spark1:1:1 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+spark1:1:1 [0] NCCL INFO NCCL_P2P_DISABLE set by environment to 1
+spark1:1:1 [0] NCCL INFO Topology detection: could not read /sys/devices/system/node/node4294967295/cpumap, using empty affinity
+spark1:1:1 [0] NCCL INFO TOPO/NET : Importing network plugins to topology
+spark1:1:1 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f0'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled rocep1s0f0 in topo with pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 net=0 gin=1 rma=(null) keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Disabled for HCA 1 'rocep1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled rocep1s0f1 in topo with pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 net=0 gin=1 rma=(null) keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Disabled for HCA 2 'roceP2p1s0f0'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled roceP2p1s0f0 in topo with pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 net=0 gin=1 rma=(null) keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/GIN_IB_GDAKI : GPU Direct RDMA Disabled for HCA 3 'roceP2p1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled roceP2p1s0f1 in topo with pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 net=0 gin=1 rma=(null) keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f0'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled rocep1s0f0 in topo with pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 net=0 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Disabled for HCA 1 'rocep1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled rocep1s0f1 in topo with pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 net=0 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Disabled for HCA 2 'roceP2p1s0f0'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled roceP2p1s0f0 in topo with pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 net=0 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/RMA_IB_PROXY : GPU Direct RDMA Disabled for HCA 3 'roceP2p1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled roceP2p1s0f1 in topo with pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 net=0 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'rocep1s0f0'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled rocep1s0f0 in topo with pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 net=1 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 1 'rocep1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled rocep1s0f1 in topo with pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 net=1 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 2 'roceP2p1s0f0'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled roceP2p1s0f0 in topo with pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 net=1 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 3 'roceP2p1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled roceP2p1s0f1 in topo with pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 net=1 gin=1 rma=1 keep=1 coll=(null) rail=-1 plane=-1
+spark1:1:1 [0] NCCL INFO NET/IB : Made virtual device [4] name=rocep1s0f0+rocep1s0f1 speed=256000 ndevs=2 rail=-1 plane=16385
+spark1:1:1 [0] NCCL INFO TOPO/NET : Made vNic 4
+spark1:1:1 [0] NCCL INFO NET/IB : Made virtual device [5] name=roceP2p1s0f0+roceP2p1s0f1 speed=256000 ndevs=2 rail=-1 plane=16385
+spark1:1:1 [0] NCCL INFO TOPO/NET : Made vNic 5
+spark1:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 4 'rocep1s0f0+rocep1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled rocep1s0f0+rocep1s0f1 in topo with pciPath=/sys/devices/pci0000:00/0000:00:00.0/0000:01:00.0 net=1 gin=(null) rma=(null) keep=1 coll=(null) rail=-1 plane=16385
+spark1:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 5 'roceP2p1s0f0+roceP2p1s0f1'
+spark1:1:1 [0] NCCL INFO ncclTopoPopulateNics : Filled roceP2p1s0f0+roceP2p1s0f1 in topo with pciPath=/sys/devices/pci0002:00/0002:00:00.0/0002:01:00.0 net=1 gin=(null) rma=(null) keep=1 coll=(null) rail=-1 plane=16385
+spark1:1:1 [0] NCCL INFO === System : maxBw 12.0 totalBw 0.2 ===
+spark1:1:1 [0] NCCL INFO CPU/0-ffffffffffffff (3/-1/-1)
+spark1:1:1 [0] NCCL INFO + C2C[345.0] - DEV/0-f01000
+spark1:1:1 [0] NCCL INFO + PCI[12.0] - NIC/0-1000
+spark1:1:1 [0] NCCL INFO               + NET[32.0] - NET/0-4 (0/aaddc00039fada0/1/32.000000)
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - GIN/0-0
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - RMA/0-0
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - GIN/0-1
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - RMA/0-1
+spark1:1:1 [0] NCCL INFO + PCI[12.0] - NIC/0-201000
+spark1:1:1 [0] NCCL INFO               + NET[32.0] - NET/0-5 (0/aaddc00039fada0/1/32.000000)
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - GIN/0-2
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - RMA/0-2
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - GIN/0-3
+spark1:1:1 [0] NCCL INFO               + NET[16.0] - RMA/0-3
+spark1:1:1 [0] NCCL INFO + PCI[0.2] - DEV/0-f01000 (10de2e1210de0000)
+spark1:1:1 [0] NCCL INFO              + LOC[5000.0] - GPU/0-f01000
+spark1:1:1 [0] NCCL INFO              + C2C[345.0] - CPU/0-ffffffffffffff
+spark1:1:1 [0] NCCL INFO ==========================================
+spark1:1:1 [0] NCCL INFO GPU/0-f01000 :GPU/0-f01000 (0/5000.0/LOC) CPU/0-ffffffffffffff (2/345.0/C2C) NET/0-4 (4/12.0/P2C) NET/0-5 (4/12.0/P2C) GIN/0-0 (4/12.0/PHB) GIN/0-1 (4/12.0/PHB) GIN/0-2 (4/12.0/PHB) GIN/0-3 (4/12.0/PHB) RMA/0-0 (4/12.0/PHB) RMA/0-1 (4/12.0/PHB) RMA/0-2 (4/12.0/PHB) RMA/0-3 (4/12.0/PHB) DEV/0-f01000 (1/5000.0/LOC) 
+spark1:1:1 [0] NCCL INFO NET/0-4 :GPU/0-f01000 (4/12.0/P2C) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (0/5000.0/LOC) NET/0-5 (4/12.0/PHB) GIN/0-0 (2/16.0/LOC) GIN/0-1 (2/16.0/LOC) GIN/0-2 (4/12.0/PHB) GIN/0-3 (4/12.0/PHB) RMA/0-0 (2/16.0/LOC) RMA/0-1 (2/16.0/LOC) RMA/0-2 (4/12.0/PHB) RMA/0-3 (4/12.0/PHB) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO NET/0-5 :GPU/0-f01000 (4/12.0/P2C) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (4/12.0/PHB) NET/0-5 (0/5000.0/LOC) GIN/0-0 (4/12.0/PHB) GIN/0-1 (4/12.0/PHB) GIN/0-2 (2/16.0/LOC) GIN/0-3 (2/16.0/LOC) RMA/0-0 (4/12.0/PHB) RMA/0-1 (4/12.0/PHB) RMA/0-2 (2/16.0/LOC) RMA/0-3 (2/16.0/LOC) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO GIN/0-0 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (2/16.0/LOC) NET/0-5 (4/12.0/PHB) GIN/0-0 (0/5000.0/LOC) GIN/0-1 (2/16.0/LOC) GIN/0-2 (4/12.0/PHB) GIN/0-3 (4/12.0/PHB) RMA/0-0 (2/16.0/LOC) RMA/0-1 (2/16.0/LOC) RMA/0-2 (4/12.0/PHB) RMA/0-3 (4/12.0/PHB) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO GIN/0-1 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (2/16.0/LOC) NET/0-5 (4/12.0/PHB) GIN/0-0 (2/16.0/LOC) GIN/0-1 (0/5000.0/LOC) GIN/0-2 (4/12.0/PHB) GIN/0-3 (4/12.0/PHB) RMA/0-0 (2/16.0/LOC) RMA/0-1 (2/16.0/LOC) RMA/0-2 (4/12.0/PHB) RMA/0-3 (4/12.0/PHB) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO GIN/0-2 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (4/12.0/PHB) NET/0-5 (2/16.0/LOC) GIN/0-0 (4/12.0/PHB) GIN/0-1 (4/12.0/PHB) GIN/0-2 (0/5000.0/LOC) GIN/0-3 (2/16.0/LOC) RMA/0-0 (4/12.0/PHB) RMA/0-1 (4/12.0/PHB) RMA/0-2 (2/16.0/LOC) RMA/0-3 (2/16.0/LOC) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO GIN/0-3 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (4/12.0/PHB) NET/0-5 (2/16.0/LOC) GIN/0-0 (4/12.0/PHB) GIN/0-1 (4/12.0/PHB) GIN/0-2 (2/16.0/LOC) GIN/0-3 (0/5000.0/LOC) RMA/0-0 (4/12.0/PHB) RMA/0-1 (4/12.0/PHB) RMA/0-2 (2/16.0/LOC) RMA/0-3 (2/16.0/LOC) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO RMA/0-0 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (2/16.0/LOC) NET/0-5 (4/12.0/PHB) GIN/0-0 (2/16.0/LOC) GIN/0-1 (2/16.0/LOC) GIN/0-2 (4/12.0/PHB) GIN/0-3 (4/12.0/PHB) RMA/0-0 (0/5000.0/LOC) RMA/0-1 (2/16.0/LOC) RMA/0-2 (4/12.0/PHB) RMA/0-3 (4/12.0/PHB) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO RMA/0-1 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (2/16.0/LOC) NET/0-5 (4/12.0/PHB) GIN/0-0 (2/16.0/LOC) GIN/0-1 (2/16.0/LOC) GIN/0-2 (4/12.0/PHB) GIN/0-3 (4/12.0/PHB) RMA/0-0 (2/16.0/LOC) RMA/0-1 (0/5000.0/LOC) RMA/0-2 (4/12.0/PHB) RMA/0-3 (4/12.0/PHB) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO RMA/0-2 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (4/12.0/PHB) NET/0-5 (2/16.0/LOC) GIN/0-0 (4/12.0/PHB) GIN/0-1 (4/12.0/PHB) GIN/0-2 (2/16.0/LOC) GIN/0-3 (2/16.0/LOC) RMA/0-0 (4/12.0/PHB) RMA/0-1 (4/12.0/PHB) RMA/0-2 (0/5000.0/LOC) RMA/0-3 (2/16.0/LOC) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO RMA/0-3 :GPU/0-f01000 (4/12.0/PHB) CPU/0-ffffffffffffff (2/12.0/PHB) NET/0-4 (4/12.0/PHB) NET/0-5 (2/16.0/LOC) GIN/0-0 (4/12.0/PHB) GIN/0-1 (4/12.0/PHB) GIN/0-2 (2/16.0/LOC) GIN/0-3 (2/16.0/LOC) RMA/0-0 (4/12.0/PHB) RMA/0-1 (4/12.0/PHB) RMA/0-2 (2/16.0/LOC) RMA/0-3 (0/5000.0/LOC) DEV/0-f01000 (3/12.0/PHB) 
+spark1:1:1 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-19).
+spark1:1:1 [0] NCCL INFO Pattern 4, crossNic 1, nChannels 32, bw 0.240000/0.240000, type LOC/P2C, sameChannels 1
+spark1:1:1 [0] NCCL INFO  0 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  1 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  2 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  3 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  4 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  5 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  6 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  7 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  8 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  9 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 10 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 11 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 12 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 13 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 14 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 15 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 16 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 17 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 18 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 19 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 20 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 21 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 22 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 23 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 24 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 25 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 26 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 27 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 28 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 29 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 30 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 31 : NET/0-5 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO Pattern 3, crossNic 1, nChannels 32, bw 0.240000/0.120000, type LOC/P2C, sameChannels 1
+spark1:1:1 [0] NCCL INFO  0 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  1 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO  2 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  3 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO  4 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  5 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO  6 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  7 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO  8 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO  9 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 10 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 11 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 12 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 13 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 14 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 15 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 16 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 17 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 18 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 19 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 20 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 21 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 22 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 23 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 24 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 25 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 26 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 27 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 28 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 29 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO 30 : NET/0-4 GPU/0-f01000 NET/0-4
+spark1:1:1 [0] NCCL INFO 31 : NET/0-5 GPU/0-f01000 NET/0-5
+spark1:1:1 [0] NCCL INFO Rank 0: 6 Net devices
+spark1:1:1 [0] NCCL INFO Rank 0: 0 CollNet devices
+spark1:1:1 [0] NCCL INFO Local Net device counts across ranks: min 6 max 6
+spark1:1:1 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+spark1:1:1 [0] NCCL INFO comm 0x3ddcc010 rank 0 nRanks 3 nNodes 3 localRanks 1 localRank 0 MNNVL 0
+spark1:1:1 [0] NCCL INFO Tree 0 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 32 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 1 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 33 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 2 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 34 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 3 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 35 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 4 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 36 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 5 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 37 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 6 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 38 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 7 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 39 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 8 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 40 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 9 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 41 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 10 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 42 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 11 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 43 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 12 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 44 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 13 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 45 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 14 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 46 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 15 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 47 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 16 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 48 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 17 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 49 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 18 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 50 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 19 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 51 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 20 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 52 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 21 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 53 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 22 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 54 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 23 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 55 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 24 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 56 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 25 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 57 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 26 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 58 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 27 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 59 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 28 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 60 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 29 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 61 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 30 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 62 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 31 : -1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Tree 63 : 1 -> 0 -> 2/-1/-1
+spark1:1:1 [0] NCCL INFO Channel 00/04 : 0 1 2
+spark1:1:1 [0] NCCL INFO Channel 01/04 : 0 1 2
+spark1:1:1 [0] NCCL INFO Channel 02/04 : 0 1 2
+spark1:1:1 [0] NCCL INFO Channel 03/04 : 0 1 2
+spark1:1:1 [0] NCCL INFO Ring 00 : 2 -> 0 -> 1
+spark1:1:1 [0] NCCL INFO Ring 01 : 2 -> 0 -> 1
+spark1:1:1 [0] NCCL INFO Ring 02 : 2 -> 0 -> 1
+spark1:1:1 [0] NCCL INFO Ring 03 : 2 -> 0 -> 1
+spark1:1:1 [0] NCCL INFO Trees [0] 2/-1/-1->0->-1 [1] 2/-1/-1->0->-1 [2] 2/-1/-1->0->-1 [3] 2/-1/-1->0->-1
+spark1:1:1 [0] NCCL INFO P2P Chunksize set to 262144
+spark1:1:1 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 3
+spark1:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+spark1:1:1 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+spark1:1:1 [0] NCCL INFO ncclOsDlsym(ncclProfiler_v6) failed: /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so: undefined symbol: ncclProfiler_v6
+spark1:1:1 [0] NCCL INFO ncclOsDlsym(ncclProfiler_v5) failed: /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so: undefined symbol: ncclProfiler_v5
+spark1:1:1 [0] NCCL INFO ncclOsDlsym(ncclProfiler_v4) failed: /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so: undefined symbol: ncclProfiler_v4
+spark1:1:1 [0] NCCL INFO ncclOsDlsym(ncclProfiler_v3) failed: /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so: undefined symbol: ncclProfiler_v3
+spark1:1:1 [0] NCCL INFO ncclOsDlsym(ncclProfiler_v2) failed: /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so: undefined symbol: ncclProfiler_v2
+spark1:1:1 [0] NCCL INFO ncclOsDlsym(ncclProfiler_v1) failed: /opt/hpcx/nccl_spectrum-x_plugin/lib/libnccl-net-spcx.so: undefined symbol: ncclProfiler_v1
+spark1:1:1 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+spark1:1:1 [0] NCCL INFO ncclP2pSchedule: group size used is 1
+spark1:1:193 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 14
+spark1:1:192 [0] NCCL INFO [Proxy Service] Device 0 CPU core 19
+spark1:1:192 [0] NCCL INFO proxy listening socket at <lan><51741>
+spark1:1:1 [0] NCCL INFO Channel 00/0 : 2[0] -> 0[0] [receive] via NET/IB/4
+spark1:1:1 [0] NCCL INFO Channel 01/0 : 2[0] -> 0[0] [receive] via NET/IB/5
+spark1:1:1 [0] NCCL INFO Channel 02/0 : 2[0] -> 0[0] [receive] via NET/IB/4
+spark1:1:1 [0] NCCL INFO Channel 03/0 : 2[0] -> 0[0] [receive] via NET/IB/5
+spark1:1:1 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/4
+spark1:1:1 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/5
+spark1:1:1 [0] NCCL INFO Channel 02/0 : 0[0] -> 1[0] [send] via NET/IB/4
+spark1:1:1 [0] NCCL INFO Channel 03/0 : 0[0] -> 1[0] [send] via NET/IB/5
+spark1:1:194 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 10
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xf85078010000)
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xf85078080000)
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xf85078100000)
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xf85078170000)
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=1 devName=rocep1s0f1 ndevs=4 nmdevs=6 qp_num=48753 pkey=0 pd=0xf85078070b90 oooRq=0
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=1 devName=rocep1s0f1 ndevs=4 nmdevs=6 qp_num=48754 pkey=0 pd=0xf85078070b90 oooRq=0
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 1 IbDev 1 Port 1 qp_num 48753 mtu 5 GID 3 (0/117000AFFFF0000) ctsFifoRkey=0x1b2421 ctsFifoLkey=0x1b2421
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 1 Port 1 qp_num 48753 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 1 IbDev 1 Port 1 qp_num 48754 mtu 5 GID 3 (0/117000AFFFF0000) ctsFifoRkey=0x1b2421 ctsFifoLkey=0x1b2421
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbConnectImpl: IbDev 1 Port 1 qp_num 48754 query_ece={supported=1, vendor_id=0x15b3, options=0x30000002, comp_mask=0x0}
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xf85078290000)
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xf85078300000)
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0xf85078380000)
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 0
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=rocep1s0f0 ndevs=4 nmdevs=6 qp_num=90141 pkey=0 pd=0xf8507807ff40 oooRq=0
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=rocep1s0f0 ndevs=4 nmdevs=6 qp_num=90142 pkey=0 pd=0xf8507807ff40 oooRq=0
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: Flush QP created: port=1 dev=0 devName=rocep1s0f0 ndevs=4 nmdevs=6 qp_num=90143 pkey=0 pd=0xf8507807ff40
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0xf850784f0000)
+spark1:1:192 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 5 with dev 3
+spark1:1:192 [0] NCCL INFO NET/IB: Subnet-aware routing: overriding dev 4 with dev 1

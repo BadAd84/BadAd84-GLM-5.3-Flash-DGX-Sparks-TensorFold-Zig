@@ -69,6 +69,7 @@ serve --config test; no new failing name; lean 0 new).
 | 0035 | - | glm cuda tests: glm-mm-ovn, the matmul launch variants against the default launch byte for byte | - |
 | 0036 | - | glm latent: TF_GLM_OVN_LATENT_ROWS, absorb_q and expand_v two and four rows a loop step | `TF_GLM_OVN_LATENT_ROWS` |
 | 0037 | - | glm cuda: TF_GLM_OVN_SIDE_PRIO, the prompt exchanges' side stream at the highest priority without a pair | `TF_GLM_OVN_SIDE_PRIO` |
+| 0038 | - | glm cuda: TF_GLM_OVN_PIECE_FRONT, _MLA and _FFN, the next block's row-by-row front run piece by piece as the rows land | `TF_GLM_OVN_PIECE_FRONT`, `TF_GLM_OVN_PIECE_MLA`, `TF_GLM_OVN_PIECE_FFN` |
 
 0033 is not a re-seat of a v1.2.7 patch: it is new here (2026-11-16), written on this base. Its row in
 `zig/src/platform/environment.zig` sits after `TF_GLM_OVN_HOST_ONCE` rather than at the end of the `.glm` rows, so
@@ -123,6 +124,19 @@ stack: every step rc 0 but `test-cuda-host`, which fails only the base's own `cl
 6,946 tests passed, 33 skipped), and lean 341 problems against the base's 341, 0 new. Three mutants of `Pieces.high` (the switch
 ignored, a pair ignored, always high) each fail the new test and nothing else. `TF_GLM_OVN_SIDE_PRIO=1` read 1.8%, 2.3% and 2.0% under
 the control pair's cold first token at 8k, 32k and 120k on one boot (queue73); the A B B A that decides it is queue75.
+
+0038 is new here too (2026-11-20): a prompt chunk's pieced site ends in a tail (the last piece's exchange, glue and share on the side stream while the main
+stream waits, 18.3 + 24.5 us a row of a cold pass in queue76's nsys capture) before the next block's row-by-row front starts. `TF_GLM_OVN_PIECE_FRONT=1` and
+`TF_GLM_OVN_PIECE_MLA=1` glue an ffn site's pieces on the side stream (`cuda_forward_pair.exchangeGlue`, now public) and run the next KDA or DSA layer's front
+range by range behind each range's share (`cuda_kda_block.projectRows`, `cuda_dsa_block.prepareRows`, then each block's `bodyRest`); `TF_GLM_OVN_PIECE_FFN=1`
+splits `gluePieces`' closing waits off and runs a MoE router range by range (`cuda_moe.routeRows`, `bodyRest`). The schedule-picking code is
+`cuda_forward_front.zig`; a last piece under 128 rows joins the one before it. Default off, the bits unchanged (the default path calls the same functions with
+the whole range). The host test is `cuda_piece_front_test.zig` (listed in `cuda.zig`'s test block); the registry rows follow `TF_GLM_OVN_SIDE_PRIO`'s, so
+`patches/pr1411`'s hunks still apply on top. The 38-patch series with the packages is the 45-patch stack, tree `59df816f6eac5f838f2e7bb728605331c23a44f2`;
+a full run on the shared x86_64 gate host, `sg-20261120-023532`, passes against the pristine pin for that stack: every step rc 0 but `test-cuda-host`, which
+fails only the base's own `cli_config_test.test.serve --config` name (6,915 of 6,949 tests passed, 33 skipped, against the base's 6,716 of 6,750), and lean
+341 problems against the base's 341, 0 new. Six mutants of `handsFront`, `frontRanges` and the three switch readers each fail the new tests and nothing else. No
+GPU run has read it yet: queue83 does (OVERNIGHT section 57).
 
 Every switch still defaults off and is a row of the `.glm` scope of `zig/src/platform/environment.zig` (TF_GLM_OVN_*
 through `cuda/ovn.zig`), with a line in `docs/environment.md`. Every kept patch keeps its own header (source, what

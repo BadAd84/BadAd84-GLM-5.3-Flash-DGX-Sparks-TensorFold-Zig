@@ -98,5 +98,8 @@ unit c2 "$B"
 unit bf "$B -e NCCL_BUFFSIZE=16777216"
 unit qn "$B -e NCCL_IB_QPS_PER_CONNECTION=4 -e NCCL_MIN_NCHANNELS=8 -e NCCL_MAX_NCHANNELS=8"
 unit n2 "$B -e NCCL_MIN_NCHANNELS=2 -e NCCL_MAX_NCHANNELS=2"
+# NCCL's point-to-point transfers over the network use NCCL_NCHANNELS_PER_NET_PEER channels a peer (2 by default): the exchanges are send and receive pairs to both peers
+unit pp "$B -e NCCL_NCHANNELS_PER_NET_PEER=4"
+unit p8 "$B -e NCCL_MIN_NCHANNELS=8 -e NCCL_MAX_NCHANNELS=8 -e NCCL_NCHANNELS_PER_NET_PEER=8"
 unit c3 "$B" "1 2 4 6 8"
 exit 0
