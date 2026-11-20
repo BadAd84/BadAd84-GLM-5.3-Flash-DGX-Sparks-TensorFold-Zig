@@ -7,6 +7,8 @@ import importlib.util
 import pathlib
 import shutil
 import tempfile
+import contextlib
+import io
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -113,6 +115,16 @@ class Score92(unittest.TestCase):
         f = self.fx(smz={"dec": 0.90})
         lines, verdict = s92.arm([(str(f.q92), "smz")], s92.main_boots(str(f.q91), str(f.q92)))
         self.assertIn("greedy prose at 1 clients: -10.00% against the mean", " ".join(lines))
+
+    def test_the_main_tip_arm_is_printed_beside_the_ladder_against_the_main_group(self):
+        f = self.fx(ut1={"dec": 1.05})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            s92.main(["--q91", str(f.q91), "--q92", str(f.q92)])
+        text = out.getvalue()
+        self.assertIn("== ut1:", text)
+        block = text[text.index("== ut1:"):]
+        self.assertIn("greedy prose at 1 clients: +5.00% against the mean", block)
 
     def test_missing_rung_is_not_decided(self):
         f = Fixture()

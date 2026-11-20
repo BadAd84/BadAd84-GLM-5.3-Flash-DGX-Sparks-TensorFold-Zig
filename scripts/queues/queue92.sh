@@ -7,6 +7,7 @@
 #
 #   0  wait for QUEUE91-DONE in ~/bench/queue91.log, then build from stage/src-TAG.tar when the image is absent and copy it to the other two ranks, one image id on all three:
 #        u129 u1210 u130   pristine upstream v1.2.9, v1.2.10 and v1.3.0 (git archive of the tag)
+#        ut                the main tip 46c6ee229 (git archive; what upstream merged after our pin 1ece6e6db: the KDA padding at TP=3, a default decode share for long fills, the sampler's small top_k)
 #        ud ui             main 3661a4281 (the dependent launches in, our 16-pair item plan out) and main 32c361db9 (the item plan in, the lanes' draft-depth hold out)
 #        p3616 p3659 p2279 the pin 1ece6e6db plus one open pull request's own change (work/pr-trees/RECORD.md); an arm whose tar is not staged is skipped and logged
 #   1  units, each a fresh P=4 boot: the cold first token at 8k / 32k / 120k (two requests, one seed on every boot), a growing conversation (salt c74: a 100k first turn and seven
@@ -15,6 +16,7 @@
 #      s9 s10 s13  the stock tags v1.2.9 v1.2.10 v1.3.0                     sm  the pristine main (m130base), beside queue91's mps
 #      ud1 ui1     the two main commits between v1.3.0 and the pin            smz sm with TF_GLM_PDL=0 (the dependent launches off)
 #      smr         sm with TF_GLM_REQUEST_STARTS=1 (upstream's own warm-turn setting)
+#      ut1         the main tip, KNOBS=off (not in the default ARMS: queue96.sh, a copy of this script, runs it alone after queue92.sh; score92.py reads it against the main group)
 #      pd pm       the pin plus #3616 (TF_GLM_DRAFT_SPLIT=1) and #3659 (TF_GLM_MOE_DIRECT=1), each with its switch on; pg (#2279, TF_GLM_GRAPHS=1) is not run: with a drafter
 #                  loaded the graphs path refuses every window (graphed() returns false when taps are set), so it would measure nothing on this serve
 #   scripts/queue-scores/score92.py reads the rows; its rules were written before they existed.
@@ -35,7 +37,7 @@ finish() { stop; docker rm -f glm53-zig-r0 > /dev/null 2>&1; echo "QUEUE92-DONE 
 ARMS=${ARMS:-"s9a sm2 smz s13a ud1 ui1 smr s10a s9b s13b sm3"}
 WAIT_FOR=${WAIT_FOR:-queue91.sh}
 want() { case " $ARMS " in *" $1 "*) return 0 ;; esac; return 1; }
-armtag() { case $1 in s9a|s9b) echo u129 ;; s10a) echo u1210 ;; s13a|s13b) echo u130 ;; ud1) echo ud ;; ui1) echo ui ;; pd) echo p3616 ;; pm) echo p3659 ;; pg) echo p2279 ;; esac; }
+armtag() { case $1 in s9a|s9b) echo u129 ;; s10a) echo u1210 ;; s13a|s13b) echo u130 ;; ud1) echo ud ;; ui1) echo ui ;; ut1) echo ut ;; pd) echo p3616 ;; pm) echo p3659 ;; pg) echo p2279 ;; esac; }
 NEED=""; for a in $ARMS; do t=$(armtag "$a"); [ -n "$t" ] && case " $NEED " in *" $t "*) ;; *) NEED="$NEED $t" ;; esac; done
 echo "[q92] $(date -u +%T) start; arms: $ARMS; images to build: ${NEED:- none}; waiting for $WAIT_FOR"
 while pgrep -f "$WAIT_FOR" > /dev/null; do sleep 60; done
@@ -129,6 +131,7 @@ want s13a && unit s13a glm53-zig:u130 off ""
 want ud1 && unit ud1 glm53-zig:ud off ""
 want ui1 && unit ui1 glm53-zig:ui off ""
 want smr && unit smr "$IMGB" off "$RSX"
+want ut1 && unit ut1 glm53-zig:ut off ""
 want pd && unit pd glm53-zig:p3616 off "-e TF_GLM_DRAFT_SPLIT=1" "${EXPECT_PD:-DRAFT_SPLIT}"
 want pm && unit pm glm53-zig:p3659 off "-e TF_GLM_MOE_DIRECT=1" "${EXPECT_PM:-MOE_DIRECT}"
 want pg && unit pg glm53-zig:p2279 off "-e TF_GLM_GRAPHS=1" "${EXPECT_PG:-GRAPHS}"

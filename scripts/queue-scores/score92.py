@@ -130,7 +130,8 @@ def arm(label_boots, ref_boots):
 
 
 ARMS = (("smr", "request starts on stock main (TF_GLM_REQUEST_STARTS=1)"), ("pd", "#3616 TF_GLM_DRAFT_SPLIT=1"), ("pm", "#3659 TF_GLM_MOE_DIRECT=1"))
-ATTRIBUTION = (("smz", "stock main with TF_GLM_PDL=0: the dependent launches off, so PDL's share is the negative of these cells"),)
+ATTRIBUTION = (("smz", "stock main with TF_GLM_PDL=0: the dependent launches off, so PDL's share is the negative of these cells"),
+               ("ut1", "the main tip 46c6ee229, KNOBS=off, what upstream merged after our pin 1ece6e6db (the KDA padding at TP=3, a default decode share for long fills, the sampler's small top_k); a report beside the ladder"))
 
 
 def stack(q91):
