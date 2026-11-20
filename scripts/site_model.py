@@ -88,16 +88,23 @@ def schedule(sizes, p, interleave, pieced_front, side_glue=False):
 
 
 def main():
-    layouts = {"4 equal": (1024,) * 4, "tapered 4": (1152, 1152, 1024, 768), "6 equal-ish": (768, 768, 768, 768, 512, 512)}
-    for name, p in PARAMS.items():
-        print(f"== {name}")
-        for lname, sizes in layouts.items():
-            base = schedule(sizes, p, False, False)
-            row = [f"{lname:12s} cur {base / 1000:.2f} ms"]
-            for label, il, pf, sg in (("il", True, False, False), ("pf", False, True, False), ("sg", False, False, True), ("sg+pf", False, True, True)):
-                v = schedule(sizes, p, il, pf, sg)
-                row.append(f"{label} {v / 1000:.2f} ({(v - base) / 1000:+.2f} ms)")
-            print("  " + "  ".join(row))
+    global R
+    cases = {
+        4096: {"4 equal": (1024,) * 4, "tapered 4": (1152, 1152, 1024, 768), "6 equal-ish": (768, 768, 768, 768, 512, 512)},
+        1326: {"4 pieces (a warm turn's 1,326 rows)": (384, 384, 384, 174), "6 pieces": (256,) * 5 + (46,)},
+    }
+    for rows, layouts in cases.items():
+        R = rows
+        print(f"#### {rows} rows")
+        for name, p in PARAMS.items():
+            print(f"== {name}")
+            for lname, sizes in layouts.items():
+                base = schedule(sizes, p, False, False)
+                row = [f"{lname:36s} cur {base / 1000:.2f} ms"]
+                for label, il, pf, sg in (("il", True, False, False), ("pf", False, True, False), ("sg", False, False, True), ("sg+pf", False, True, True)):
+                    v = schedule(sizes, p, il, pf, sg)
+                    row.append(f"{label} {v / 1000:.2f} ({(v - base) / 1000:+.2f} ms)")
+                print("  " + "  ".join(row))
     return 0
 
 

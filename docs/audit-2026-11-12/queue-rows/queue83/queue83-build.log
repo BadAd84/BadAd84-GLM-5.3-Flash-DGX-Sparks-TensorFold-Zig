@@ -1,0 +1,10 @@
+queue83.sh: line 25: 1795142001 + 2.3 * 3600 : syntax error: invalid arithmetic operator (error token is ".3 * 3600 ")
+queue83.sh: line 28: DEADLINE: unbound variable
+[q83] 02:33:21 start; IMG=glm53-zig:v129zc; NEWX='-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2'; deadline ; 289G free
+[q83] 02:40:31 built glm53-zig:v129zc: 96f9d19568f8
+[q83] 02:49:34 distributed: 96f9d19568f8 96f9d19568f8 96f9d19568f8 DIST-DONE v129zc
+[q83] glm53-zig:v129zc ids: sha256:96f9d19568f8f5599756b5320878ff2d58e670ebb83243909b8b8cd0210fb422 sha256:96f9d19568f8f5599756b5320878ff2d58e670ebb83243909b8b8cd0210fb422 sha256:96f9d19568f8f5599756b5320878ff2d58e670ebb83243909b8b8cd0210fb422
+[q83] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 02:49:36 production stopped on spark1-3
+queue83.sh: line 26: DEADLINE: unbound variable
+QUEUE83-DONE 02:49:46
