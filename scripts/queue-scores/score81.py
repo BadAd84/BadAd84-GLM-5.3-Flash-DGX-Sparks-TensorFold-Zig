@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""score81.py [ROWS_DIR] - queue81, the NCCL screen: arms q4 n8 ch bf qn n2 (one NCCL setting each on the final recipe with request starts) between controls c1 c2 c3.
+"""score81.py [ROWS_DIR] - queue81, the NCCL and wire screen: arms mb (TF_TP_MAILBOX_MAX_KB=1024, the decode wire's ceiling), q4 n8 ch bf qn n2 (one NCCL setting each) on the final
+recipe with request starts, between controls c1 c2 c3.
 
 Per arm: the cold first token at 8k / 32k / 120k (the mean of two requests on one seed), the growing conversation's first turn and turns 2 to 8, and greedy decode at
-1 and 4 clients (prose and code, aggregate tok/s); each against the mean of the three controls, with the controls' own spread. Replies: every cold request, every conversation
+1 and 4 clients (prose and code, aggregate tok/s; the controls c1 and c3 and the arm mb also at 2, 6 and 8); each against the mean of the three controls, with the controls' own spread. Replies: every cold request, every conversation
 turn and every decode cell must be one digest across all arms (NCCL moves bytes, it never changes a sum). One boot an arm is a screen: a setting is read only against the
 spread of the controls, and a gain larger than that goes to a pair of boots.
 """
@@ -12,9 +13,9 @@ import statistics as st
 import sys
 
 D = sys.argv[1] if len(sys.argv) > 1 else "docs/audit-2026-11-12/queue-rows/queue81/f81-c"
-ARMS = ("c1", "q4", "n8", "ch", "c2", "bf", "qn", "n2", "c3")
+ARMS = ("c1", "mb", "q4", "n8", "ch", "c2", "bf", "qn", "n2", "c3")
 CTL = ("c1", "c2", "c3")
-CELLS = (("P", 1), ("C", 1), ("P", 4), ("C", 4))
+CELLS = tuple((k, n) for n in (1, 2, 4, 6, 8) for k in ("P", "C"))
 
 
 def jl(p):

@@ -70,19 +70,27 @@ facts() { # facts LABEL XENV: longctx facts row for the boot just made
   python3 longctx.py facts 8300 --tag "$label" --n 4 --ctx 1048576 --boot-rc 0 --image "$IMG" "--xenv=$xenv" --out "$OUT/f81-c/rows.jsonl" --log-cmd "$ZLOG" > "$OUT/f81-c/$label-facts.out" 2>&1
 }
 mkdir -p "$OUT/f81-c"
-unit() { # unit LABEL XENV: a P=4 boot, the cold probe, the growing conversation and greedy decode at 1 and 4 clients
-  local label=$1 xenv=$2
+unit() { # unit LABEL XENV [LEVELS]: a P=4 boot, the cold probe, the growing conversation and greedy decode at LEVELS clients (default 1 and 4)
+  local label=$1 xenv=$2 levels=${3:-1 4}
   room || return
   boot "c81-$label" "$xenv" || return
   facts "$label" "$xenv"
   python3 longctx.py probe 8300 --tag "$label" --n 4 --out "$OUT/f81-c/rows.jsonl" --log-cmd "$ZLOG" --seed pf74 --cold-sizes 8000,32000,120000 --warm-base 0 --reps 2 --load 0 > "$OUT/f81-c/$label-probe.out" 2>&1
   echo "[q81] $(date -u +%T) $label cold rc=$? $(grep -o '"ttft_ms": [0-9]*' "$OUT/f81-c/$label-probe.out" | cut -d' ' -f2 | tr '\n' ' ')"
   chain "$OUT/f81-c/$label" "c74" 100000 8
-  greedy "$OUT/f81-c/dec-$label" 1 4
+  greedy "$OUT/f81-c/dec-$label" $levels
   keeplog "$OUT/f81-c/r0-$label.log"
 }
 B="$NEWX $RSX"
-unit c1 "$B"
+# what NCCL reports about its transport (GPU Direct RDMA or not, the HCAs, channels, the tuning tables' algorithm and protocol bandwidths): one boot, rank 0's lines
+if room && boot "c81-dbg" "$B -e NCCL_DEBUG=INFO -e NCCL_DEBUG_SUBSYS=INIT,NET,GRAPH,TUNING"; then
+  docker logs glm53-zig-r0 2>&1 | grep -a "NCCL INFO" | head -n 700 > "$OUT/f81-c/nccl-info.txt"
+  echo "[q81] $(date -u +%T) NCCL INFO captured: $(wc -l < "$OUT/f81-c/nccl-info.txt") lines; GDR: $(grep -a -c -i 'GDRDMA\|GPU Direct RDMA Enabled' "$OUT/f81-c/nccl-info.txt")"
+fi
+unit c1 "$B" "1 2 4 6 8"
+# the decode wire's ceiling: gathers up to TF_TP_MAILBOX_MAX_KB (default 256 KiB a rank) ride fabric/tp's RoCE, larger ones NCCL's LL all-gather; a verify window of 16 rows
+# or more has fp32 partials past 256 KiB (24 rows 393 KB), and the nsys capture of queue76 shows 90 NCCL all-gathers of 64 us a four-client round and almost no wire launches
+unit mb "$B -e TF_TP_MAILBOX_MAX_KB=1024" "1 2 4 6 8"
 unit q4 "$B -e NCCL_IB_QPS_PER_CONNECTION=4"
 unit n8 "$B -e NCCL_MIN_NCHANNELS=8 -e NCCL_MAX_NCHANNELS=8"
 unit ch "$B -e NCCL_P2P_NET_CHUNKSIZE=524288"
@@ -90,5 +98,5 @@ unit c2 "$B"
 unit bf "$B -e NCCL_BUFFSIZE=16777216"
 unit qn "$B -e NCCL_IB_QPS_PER_CONNECTION=4 -e NCCL_MIN_NCHANNELS=8 -e NCCL_MAX_NCHANNELS=8"
 unit n2 "$B -e NCCL_MIN_NCHANNELS=2 -e NCCL_MAX_NCHANNELS=2"
-unit c3 "$B"
+unit c3 "$B" "1 2 4 6 8"
 exit 0
