@@ -13,7 +13,7 @@
 # scripts/lean.sh. GATE_JOBS=N caps the jobs of every step.
 set -uo pipefail
 TREE=${1:?usage: gates.sh TREE [NAME]}; NAME=${2:-$(basename "$(dirname "$TREE")")}
-STANDALONE="test-glm-ring-host test-glm-logprobs-host test-glm-onepass-order-host test-rows-host"
+STANDALONE="test-glm-ring-host test-glm-logprobs-host test-glm-onepass-order-host test-rows-host test-glm-pdl-scan test-kernel-contract"
 [ -f "$TREE/.zig-version" ] || { echo "no tree at $TREE"; exit 2; }
 V=$(cat "$TREE/.zig-version")
 Z="$HOME/tools/zig-$(uname -m)-linux-$V/zig"

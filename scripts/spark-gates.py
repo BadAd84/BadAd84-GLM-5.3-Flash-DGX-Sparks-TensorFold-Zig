@@ -57,7 +57,7 @@ REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
 PATCH_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.patch$")
 TEST_STEP = "test-cuda-host"
 REQUIRED_STEPS = ("check-native-cuda-host", TEST_STEP, "fmt")  # gates.sh runs these on every tree of this engine
-ITER_STEPS = ("check", "fmt", "test", "lean", "ctest")
+ITER_STEPS = ("check", "fmt", "test", "lean", "ctest", "pdl", "contract")
 
 
 def die(msg, rc=2):
@@ -487,6 +487,14 @@ for s in @STEPS@; do
       echo "== compile-cuda-tests"
       HOME=$IT/home timeout -k 30 2400 "$Z" build compile-cuda-tests -j@JOBS@ --cache-dir "$C" --summary all > "$IT/ctest.log" 2>&1 < /dev/null; rc=$?
       grep -E "^error: |: error: |^Build Summary" "$IT/ctest.log" | awk '!seen[$0]++' | head -60 ;;
+    pdl)
+      echo "== test-glm-pdl-scan"
+      HOME=$IT/home timeout -k 30 1500 "$Z" build test-glm-pdl-scan -Dfixed-cpu -j@JOBS@ --cache-dir "$C" --summary all > "$IT/pdl.log" 2>&1 < /dev/null; rc=$?
+      grep -E "^error: |: error: |^Build Summary" "$IT/pdl.log" | awk '!seen[$0]++' | head -40 ;;
+    contract)
+      echo "== test-kernel-contract"
+      HOME=$IT/home timeout -k 30 2400 "$Z" build test-kernel-contract -Dfixed-cpu -j@JOBS@ --cache-dir "$C" --summary all > "$IT/contract.log" 2>&1 < /dev/null; rc=$?
+      grep -E "^error: |: error: |^Build Summary" "$IT/contract.log" | awk '!seen[$0]++' | head -40 ;;
     lean)
       echo "== lean, against the pristine pin"
       B=$HOME/spark-gates/pins/@COMMIT@
