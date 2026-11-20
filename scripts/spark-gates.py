@@ -19,8 +19,9 @@ run there goes under `nice -n 15` (--nice) and, where a systemd user scope exist
           the gate logs after a passing verdict.
   wait    [--run RUN]  Polls the run (default: the newest) every 60 s until the marker, then prints the log tail and
           the verdict table. Exit 0 only when every non-base tree passes, 1 on any failure, 2 when it could not tell.
-  iter    --pin REF --dir DIR[,DIR] [check] [fmt] [test] [lean] [ctest]  The fast loop: rebuilds one tree on the host and runs
-          the named steps there in the foreground (default: check fmt). Exit 0 when every step had rc 0.
+  iter    --pin REF --dir DIR[,DIR] [check] [fmt] [test] [lean] [ctest] [pdl] [contract] [zig:STEP]  The fast loop: rebuilds one tree on the
+          host and runs the named steps there in the foreground (default: check fmt); zig:STEP is `zig build STEP`, one standalone host step
+          of the tree. Exit 0 when every step had rc 0.
   verdict RUN_LOG  The verdict table of a run.log; the runner calls it on the host at the end of every run.
 """
 import argparse
@@ -58,6 +59,11 @@ PATCH_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.patch$")
 TEST_STEP = "test-cuda-host"
 REQUIRED_STEPS = ("check-native-cuda-host", TEST_STEP, "fmt")  # gates.sh runs these on every tree of this engine
 ITER_STEPS = ("check", "fmt", "test", "lean", "ctest", "pdl", "contract")
+ZIG_STEP_RE = re.compile(r"zig:[a-z0-9][a-z0-9-]*")  # zig:NAME runs `zig build NAME` on the iter tree: one standalone host step, for a mutant run
+
+
+def valid_step(s):
+    return s in ITER_STEPS or ZIG_STEP_RE.fullmatch(s) is not None
 
 
 def die(msg, rc=2):
@@ -495,6 +501,11 @@ for s in @STEPS@; do
       echo "== test-kernel-contract"
       HOME=$IT/home timeout -k 30 2400 "$Z" build test-kernel-contract -Dfixed-cpu -j@JOBS@ --cache-dir "$C" --summary all > "$IT/contract.log" 2>&1 < /dev/null; rc=$?
       grep -E "^error: |: error: |^Build Summary" "$IT/contract.log" | awk '!seen[$0]++' | head -40 ;;
+    zig:*)
+      st=${s#zig:}
+      echo "== zig build $st"
+      HOME=$IT/home timeout -k 30 2400 "$Z" build "$st" -j@JOBS@ --cache-dir "$C" --summary all > "$IT/zig-$st.log" 2>&1 < /dev/null; rc=$?
+      grep -E "^error: |: error: |^Build Summary" "$IT/zig-$st.log" | awk '!seen[$0]++' | head -60 ;;
     lean)
       echo "== lean, against the pristine pin"
       B=$HOME/spark-gates/pins/@COMMIT@
@@ -684,8 +695,8 @@ def cmd_iter(a):
         die(f"--name {a.name!r}: letters, digits, '.', '_' and '-'")
     steps = a.steps or ["check", "fmt"]
     for s in steps:
-        if s not in ITER_STEPS:
-            die(f"unknown step {s!r}; the steps are {' '.join(ITER_STEPS)}")
+        if not valid_step(s):
+            die(f"unknown step {s!r}; the steps are {' '.join(ITER_STEPS)} and zig:STEP for one build step of the tree")
     limits(a)
     commit, pin_tree, zig = resolve_pin(pin_repo, a.pin)
     dirs, lists, _ = collect_patches({"iter": split_dirs(a.dir)})
