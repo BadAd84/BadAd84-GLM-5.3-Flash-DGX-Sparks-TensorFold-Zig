@@ -1,15 +1,18 @@
 #!/bin/bash
-# queue84.sh - on spark1, detached, after queue82 and before queue79: the row-piece count of a prompt chunk (TF_GLM_OVERLAP_PIECES, 4 in N) with patch 0038's switches on. The timeline
-# model (scripts/site_model.py) puts the tail of a site at the last piece's exchange, glue and share, so more and smaller pieces shorten it (6 equal-ish pieces read 0.74 ms a KDA
-# site under the next block's front per piece); before 0038 row pieces 1, 2, 3 and 6 moved a warm turn by at most 1.4%. Arms are N' (the recipe with the switches decide83.py adopted,
-# in queue84.env's NEWX, which the chain copies from queue79.env) plus request starts at 4, 6 and 8 pieces, one boot each, in the order k4a k6a k8a k8b k6b k4b. Each: the cold first
-# token at 8k / 32k / 120k (two requests, ONE seed), the growing conversation (salt c74) and greedy decode at 1 and 4 clients. Replies must be one digest across the boots (row pieces
-# never change a bit). Score: score81.py DIR --arms k4a,k6a,k8a,k8b,k6b,k4b --controls k4a,k4b. Then, to size two switches that change numerics (so they need the owner, and their replies are
-# expected to differ from the controls'): kca (TF_GLM_OVN_KDA_CHUNKED=1: prompt chunks' KDA chain on production's chunked WY kernel) and kva (TF_GLM_OVN_KVB8=1: kv_b read as E4M3), one boot each.
-# queue84.env: IMG, WORKERS, HOURS, NEWX. Production is down for the campaign and stays down. QUEUE84-DONE.
+# queue84.sh - on spark1, detached, after queue78: a small chunk's front, and the row-piece count, with patch 0038's switches on. A warm turn (about 1,300 rows) cut in four pieces runs each
+# front matmul four times on 330 rows, re-reading its weights each time: queue85's capture has the main stream 12 to 30 ms busier on a warm turn with the switches than without while its waits
+# fall 41 to 49 ms. TF_GLM_OVN_FRONT_ROWS=N (the amended patch 0038, image glm53-zig:v129zd, built here from stage/src-v129zd.tar) lets a front range join pieces until it has N rows. Block 1:
+# r4a r5a r7a r2a r2b r7b r5b r4b, N' (the recipe with the switches decide83.py adopted and what decide81.py and decide79.py added, queue84.env's NEWX from queue79.env) plus request starts at FRONT_ROWS 0, 512, 768 and
+# 2048 (a cold chunk's four 1,024-row pieces become two ranges; the 4,096-row pass's main stream is 29 ms busier with the switches than without, queue85). Block 2: TF_GLM_OVERLAP_PIECES 4 / 2 / 3 / 6 / 8 in the order k4a k2a k3a k6a k8a k8b k6b k3b k2b k4b. Each boot: the cold first token at 8k / 32k / 120k (two requests, ONE seed), the growing
+# conversation (salt c74) and greedy decode at 1 client; replies must be one digest across the boots (neither knob changes a bit). Score: score81.py DIR --arms r4a,r5a,r7a,r2a,r2b,r7b,r5b,r4b --controls r4a,r4b
+# and again for the k boots. Then two boots that size switches that change numerics (so they need the owner, and their replies are expected to differ): kca (TF_GLM_OVN_KDA_CHUNKED=1: prompt chunks'
+# KDA chain on production's chunked WY kernel) and kva (TF_GLM_OVN_KVB8=1: kv_b read as E4M3).
+# queue84.env: IMG, WORKERS, HOURS, NEWX (IMG and HOURS are set again below). Production is down for the campaign and stays down. QUEUE84-DONE.
 set -u
 G=$HOME/work/glm53-zig; cd "$G" || exit 1
 . ./queue84.env
+IMG=glm53-zig:v129zd
+HOURS=5 # twenty boots of about nine minutes and the image
 WORKERS=${WORKERS:?set WORKERS}; export WORKERS
 W1=${WORKERS%% *}; W2=${WORKERS##* }
 LONGCTX_WORKERS=${LONGCTX_WORKERS:-${WORKERS// /,}}; export LONGCTX_WORKERS
@@ -26,6 +29,14 @@ DEADLINE=$(( $(date +%s) + ${HOURS:-5} * 3600 ))
 room() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 trap finish EXIT
 echo "[q84] $(date -u +%T) start; IMG=$IMG; NEWX='$NEWX'; deadline $(date -u -d @$DEADLINE +%T); $(df -h /home | tail -1 | awk '{print $4}') free"
+# the image: built on this box (queue78 is done, nothing else uses the GPUs or the memory bandwidth), then copied to the workers
+TAG=${IMG#glm53-zig:}
+if ! docker images --format '{{.ID}}' "$IMG" | grep -q .; then
+  bash build-image.sh "$TAG" "stage/src-$TAG.tar" > "stage/build-$TAG.out" 2>&1 || { echo "[q84] BUILD FAILED: $(tail -3 "stage/build-$TAG.out" | tr '\n' ' ' | cut -c1-300)"; exit 1; }
+  echo "[q84] $(date -u +%T) built $IMG: $(docker images --format '{{.ID}}' "$IMG" | head -1)"
+  bash dist-image.sh "$TAG" > "stage/dist-$TAG.out" 2>&1
+  echo "[q84] $(date -u +%T) distributed: $(tail -1 "stage/dist-$TAG.out" | cut -c1-200)"
+fi
 ids=$( { docker images --no-trunc --format '{{.ID}}' "$IMG" | head -1; for h in "$W1" "$W2"; do ssh -n -o BatchMode=yes -o ConnectTimeout=15 "$h" "docker images --no-trunc --format '{{.ID}}' $IMG | head -1"; done; } )
 echo "[q84] $IMG ids: $(echo $ids)"
 { [ "$(echo "$ids" | grep -c .)" = 3 ] && [ "$(echo "$ids" | sort -u | wc -l)" = 1 ]; } || { echo "[q84] IMAGE $IMG IS NOT THE SAME ON ALL THREE RANKS"; exit 1; }
@@ -83,15 +94,32 @@ unit() { # unit LABEL XENV [LEVELS]: a P=4 boot, the cold probe, the growing con
   keeplog "$OUT/f84-c/r0-$label.log"
 }
 B="$NEWX $RSX"
+FR5="$B -e TF_GLM_OVN_FRONT_ROWS=512"
+FR7="$B -e TF_GLM_OVN_FRONT_ROWS=768"
+FR2="$B -e TF_GLM_OVN_FRONT_ROWS=2048"
 P6="${NEWX//TF_GLM_OVERLAP_PIECES=4/TF_GLM_OVERLAP_PIECES=6} $RSX"
 P8="${NEWX//TF_GLM_OVERLAP_PIECES=4/TF_GLM_OVERLAP_PIECES=8} $RSX"
-{ [ "$P6" != "$B" ] && [ "$P8" != "$B" ]; } || { echo "[q84] TF_GLM_OVERLAP_PIECES=4 IS NOT IN NEWX: $NEWX"; exit 1; }
-unit k4a "$B" "1 4"
-unit k6a "$P6" "1 4"
-unit k8a "$P8" "1 4"
-unit k8b "$P8" "1 4"
-unit k6b "$P6" "1 4"
-unit k4b "$B" "1 4"
+P2="${NEWX//TF_GLM_OVERLAP_PIECES=4/TF_GLM_OVERLAP_PIECES=2} $RSX"
+P3="${NEWX//TF_GLM_OVERLAP_PIECES=4/TF_GLM_OVERLAP_PIECES=3} $RSX"
+{ [ "$P6" != "$B" ] && [ "$P8" != "$B" ] && [ "$P2" != "$B" ] && [ "$P3" != "$B" ]; } || { echo "[q84] TF_GLM_OVERLAP_PIECES=4 IS NOT IN NEWX: $NEWX"; exit 1; }
+unit r4a "$B" "1"
+unit r5a "$FR5" "1"
+unit r7a "$FR7" "1"
+unit r2a "$FR2" "1"
+unit r2b "$FR2" "1"
+unit r7b "$FR7" "1"
+unit r5b "$FR5" "1"
+unit r4b "$B" "1"
+unit k4a "$B" "1"
+unit k2a "$P2" "1"
+unit k3a "$P3" "1"
+unit k6a "$P6" "1"
+unit k8a "$P8" "1"
+unit k8b "$P8" "1"
+unit k6b "$P6" "1"
+unit k3b "$P3" "1"
+unit k2b "$P2" "1"
+unit k4b "$B" "1"
 unit kca "$B -e TF_GLM_OVN_KDA_CHUNKED=1" "1"
 unit kva "$B -e TF_GLM_OVN_KVB8=1" "1"
 exit 0

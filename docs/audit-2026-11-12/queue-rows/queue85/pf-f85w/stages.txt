@@ -1,0 +1,136 @@
+~/nsys/pf-f85w.sqlite: main stream 18, side streams [19], 5 requests
+
+request 1: 4 passes, 8183 rows (4096, 2048, 2036, 3), GPU span 3782.9 ms = 462.3 us a row; passes 3782.8 ms, between passes 0.1 ms; 0/4 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)               4.2       1.06      0.52   0.1%
+  host gap after the gate                           0.1       0.02      0.01   0.0%
+  step marker (put_words, broadcast)                0.1       0.02      0.01   0.0%
+  front: embed, layer 0's hc_pre                    1.4       0.34      0.17   0.0%
+  glue (hc_post, hc_pre)                          102.3      25.58     12.51   2.7%
+  wait: partials exchange                         103.1      25.78     12.60   2.7%
+  wait: glued rows share                           30.2       7.56      3.70   0.8%
+  launch gaps                                      74.9      18.73      9.15   2.0%
+  main-stream copies and memsets                    3.6       0.91      0.45   0.1%
+  unsegmented compute                            3543.4     885.86    433.02  93.7%
+  main-stream busy / idle                        3574.0 / 208.8 ms
+  side-stream NCCL: 2340 kernels, 970.8 ms (970.8 ms union), exposed while the main stream idles 185.2 ms
+  host synchronizes inside the passes: 16 (1020.9 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   4096       0.0    1833.4    0.90     0.02   39.00   13.41   79.99    474.49   71.69        47
+      1   2048    1833.4     933.4    0.38     0.02   30.54    7.73   60.13    245.11   54.20        47
+      2   2036    2766.8     965.3    0.34     0.01   31.64    7.70   61.19    247.09   55.11        47
+      3      3    3732.1      50.7    2.63     0.02    1.95    1.41    7.51      4.16    4.16        47
+  pass at 0.0 ms, 4096 rows: 
+  pass at 1833.4 ms, 2048 rows: 
+  pass at 2766.8 ms, 2036 rows: 
+  pass at 3732.1 ms, 3 rows: 
+  kernels by time: tf_exl3_prompt_gu 717.4, glm_mm4_w2x4 695.7, tf_exl3_prompt_down 499.8, glm_mm4_128 272.8, tf_glm_combine 264.3, tf_glm_chunks_32_fp8_fused 174.6, tf_glm_kda_step 170.1, tf_glm_expand_v_x2 149.1, tf_glm_onepass_pipe_exact 142.0, tf_glm_absorb_q_x2 133.3, tf_glm_kda_prep 95.7, tf_glm_hc_post 56.2
+
+request 2: 10 passes, 32756 rows (4096, 4096, 4096, 4096, 4096, 4096, 4096, 2048 ...), GPU span 19158.5 ms = 584.9 us a row; passes 19158.4 ms, between passes 0.2 ms; 0/10 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              12.8       1.28      0.39   0.1%
+  host gap after the gate                           0.2       0.02      0.01   0.0%
+  step marker (put_words, broadcast)                0.2       0.02      0.00   0.0%
+  front: embed, layer 0's hc_pre                    5.4       0.54      0.17   0.0%
+  glue (hc_post, hc_pre)                          425.8      42.58     13.00   2.2%
+  wait: partials exchange                         341.1      34.11     10.41   1.8%
+  wait: glued rows share                          104.3      10.43      3.18   0.5%
+  launch gaps                                     318.2      31.82      9.71   1.7%
+  main-stream copies and memsets                    8.8       0.88      0.27   0.0%
+  unsegmented compute                           13079.0    1307.90    399.29  68.3%
+  main-stream busy / idle                       13292.7 / 5865.6 ms
+  side-stream NCCL: 6660 kernels, 3871.1 ms (3871.1 ms union), exposed while the main stream idles 691.5 ms
+  host synchronizes inside the passes: 41 (3993.3 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   4096       0.0    7018.3    1.40     0.02   51.19   12.97 5268.81    558.46  158.19        47
+      1   4096    7018.3    1697.6    0.55     0.02   39.43   12.61   79.83    475.59   71.75        47
+      2   4096    8715.9    1695.9    0.31     0.02   39.30   12.02   80.48    472.54   72.25        47
+      3   4096   10411.8    1680.0    0.59     0.02   39.20   12.29   78.55    469.54   70.83        47
+      4   4096   12091.8    1701.7    0.27     0.02   35.40   12.35   74.59    466.02   66.69        47
+      5   4096   13793.6    1703.2    0.16     0.02   36.27   13.64   76.18    464.80   68.54        47
+      6   4096   15496.9    1705.5    0.12     0.02   37.74   12.16   76.96    465.47   68.83        47
+      7   2048   17202.4     937.3    4.42     0.02   29.49    7.50   60.47    246.89   54.26        47
+      8   2033   18139.7     963.3    0.68     0.02   31.01    7.31   62.19    247.81   56.21        47
+      9      3   19103.0      55.5    4.31     0.01    2.05    1.46    7.59      3.96    3.96        47
+  pass at 0.0 ms, 4096 rows: 
+  pass at 7018.3 ms, 4096 rows: 
+  pass at 8715.9 ms, 4096 rows: 
+  pass at 10411.8 ms, 4096 rows: 
+  pass at 12091.8 ms, 4096 rows: 
+  pass at 13793.6 ms, 4096 rows: 
+  pass at 15496.9 ms, 4096 rows: 
+  pass at 17202.4 ms, 2048 rows: 
+  pass at 18139.7 ms, 2033 rows: 
+  pass at 19103.0 ms, 3 rows: 
+  kernels by time: glm_mm4_w2x4 2786.7, tf_exl3_prompt_gu 2565.6, tf_exl3_prompt_down 1806.5, tf_glm_combine 1041.9, glm_mm4_128 947.5, tf_glm_onepass_pipe_exact 718.9, tf_glm_kda_step 678.3, tf_glm_expand_v_x2 597.0, tf_glm_absorb_q_x2 537.3, tf_glm_kda_prep 388.5, tf_glm_hc_post 241.2, tf_glm_router_tile 207.5
+
+request 3: 2 passes, 1329 rows (1326, 3), GPU span 5917.9 ms = 4452.9 us a row; passes 5917.9 ms, between passes 0.0 ms; 0/2 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              11.1       5.55      8.35   0.2%
+  host gap after the gate                           0.0       0.02      0.03   0.0%
+  step marker (put_words, broadcast)                0.1       0.03      0.05   0.0%
+  front: embed, layer 0's hc_pre                    0.2       0.12      0.18   0.0%
+  glue (hc_post, hc_pre)                           17.1       8.53     12.84   0.3%
+  wait: partials exchange                          21.6      10.79     16.23   0.4%
+  wait: glued rows share                            7.5       3.75      5.64   0.1%
+  launch gaps                                      21.8      10.90     16.40   0.4%
+  main-stream copies and memsets                   21.1      10.54     15.86   0.4%
+  unsegmented compute                             753.0     376.52    566.62  12.7%
+  main-stream busy / idle                         776.7 / 5141.2 ms
+  side-stream NCCL: 900 kernels, 161.0 ms (161.0 ms union), exposed while the main stream idles 41.4 ms
+  host synchronizes inside the passes: 9 (177.7 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   1326       0.0    5849.0    1.36     0.02   19.21    5.99 5132.55    156.28   36.70        47
+      1      3    5849.0      68.9    9.73     0.02    2.36    1.51    8.60      4.72    4.72        47
+  pass at 0.0 ms, 1326 rows: 
+  pass at 5849.0 ms, 3 rows: 
+  kernels by time: tf_exl3_prompt_gu 187.8, tf_exl3_prompt_down 122.9, glm_mm4_w2x4 113.1, glm_mm4_128 89.4, tf_glm_combine 45.8, tf_glm_onepass_pipe_exact 30.7, tf_glm_kda_step 27.0, tf_glm_expand_v_x2 24.6, tf_glm_absorb_q_x2 22.5, group_kernel 19.2, tf_glm_kda_prep 14.8, tf_glm_index_scores 13.1
+
+request 4: 2 passes, 1292 rows (1289, 3), GPU span 5893.7 ms = 4561.7 us a row; passes 5893.7 ms, between passes 0.0 ms; 0/2 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              10.9       5.43      8.41   0.2%
+  host gap after the gate                           0.1       0.04      0.06   0.0%
+  step marker (put_words, broadcast)                0.0       0.02      0.04   0.0%
+  front: embed, layer 0's hc_pre                    0.2       0.12      0.18   0.0%
+  glue (hc_post, hc_pre)                           17.0       8.52     13.18   0.3%
+  wait: partials exchange                          20.2      10.11     15.65   0.3%
+  wait: glued rows share                            7.7       3.85      5.96   0.1%
+  launch gaps                                      21.3      10.67     16.51   0.4%
+  main-stream copies and memsets                   20.8      10.42     16.13   0.4%
+  unsegmented compute                             740.1     370.05    572.84  12.6%
+  main-stream busy / idle                         763.2 / 5130.6 ms
+  side-stream NCCL: 900 kernels, 156.4 ms (156.4 ms union), exposed while the main stream idles 40.0 ms
+  host synchronizes inside the passes: 9 (171.9 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   1289       0.0    5824.8    0.14     0.06   18.09    6.28 5122.19    152.00   35.61        47
+      1      3    5824.8      68.9   10.73     0.02    2.13    1.42    8.37      4.40    4.40        47
+  pass at 0.0 ms, 1289 rows: 
+  pass at 5824.8 ms, 3 rows: 
+  kernels by time: tf_exl3_prompt_gu 184.9, tf_exl3_prompt_down 120.6, glm_mm4_w2x4 112.3, glm_mm4_128 89.8, tf_glm_combine 44.9, tf_glm_onepass_pipe_exact 29.7, tf_glm_kda_step 26.0, tf_glm_expand_v_x2 23.9, tf_glm_absorb_q_x2 21.1, group_kernel 17.9, tf_glm_kda_prep 15.1, tf_glm_index_scores 12.9
+
+request 5: 2 passes, 1275 rows (1272, 3), GPU span 5893.0 ms = 4622.0 us a row; passes 5893.0 ms, between passes 0.0 ms; 0/2 passes cut into 45 layers (91 glue runs or more)
+  stage                                              ms  ms a pass  us a row  share
+  gate (all-reduces at a pass's head)              10.0       5.01      7.86   0.2%
+  host gap after the gate                           0.0       0.02      0.03   0.0%
+  step marker (put_words, broadcast)                0.0       0.02      0.04   0.0%
+  front: embed, layer 0's hc_pre                    0.2       0.12      0.18   0.0%
+  glue (hc_post, hc_pre)                           16.9       8.44     13.23   0.3%
+  wait: partials exchange                          20.9      10.46     16.41   0.4%
+  wait: glued rows share                            8.0       3.99      6.26   0.1%
+  launch gaps                                      29.3      14.67     23.02   0.5%
+  main-stream copies and memsets                   22.1      11.03     17.30   0.4%
+  unsegmented compute                             728.5     364.24    571.36  12.4%
+  main-stream busy / idle                         754.7 / 5138.4 ms
+  side-stream NCCL: 900 kernels, 152.6 ms (152.6 ms union), exposed while the main stream idles 46.7 ms
+  host synchronizes inside the passes: 9 (177.9 ms); main-stream memset bytes 95.1 MiB
+  per layer kind, a pass: compute + glue (ms a layer); waits on the exchange and the share
+   pass   rows  start ms   span ms    gate gate gap  wait x  wait s    idle side NCCL exposed glue runs
+      0   1272       0.0    5822.5    0.32     0.02   18.24    6.45 5129.00    147.40   41.50        47
+      1      3    5822.5      70.5    9.70     0.02    2.69    1.52    9.37      5.23    5.23        47
+  pass at 0.0 ms, 1272 rows: 
+  pass at 5822.5 ms, 3 rows: 
+  kernels by time: tf_exl3_prompt_gu 184.8, tf_exl3_prompt_down 118.7, glm_mm4_w2x4 108.2, glm_mm4_128 81.5, tf_glm_combine 44.7, tf_glm_onepass_pipe_exact 31.0, tf_glm_kda_step 27.8, tf_glm_expand_v_x2 23.9, tf_glm_absorb_q_x2 21.9, group_kernel 19.3, tf_glm_kda_prep 14.9, tf_glm_index_scores 12.9

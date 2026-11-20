@@ -22,7 +22,8 @@ off (gluePiecesAsync returns the mask of pieces whose shares are in flight, awai
 (cuda_moe.routeRows: glue.router and glue.select over rows lo..hi, into those rows of mlog, pick and wts) run range by range behind
 each range's share; the block continues from its plan (cuda_moe.bodyRest, which body now calls for the same two steps).
 
-A front runs on the pieces as cut except that a last piece under 128 rows joins the one before it (cuda_forward_pieces.frontRanges),
+TF_GLM_OVN_FRONT_ROWS=N (default 0) lets a front range join pieces until it has N rows (a small chunk's pieces re-read a front's weights once a piece),
+the bits the same. A front runs on the pieces as cut except that a last piece under 128 rows joins the one before it (cuda_forward_pieces.frontRanges),
 so no front matmul or router sees fewer rows than a block (a short matmul can take another kernel than the whole chunk's). A range's
 rows are the same rows through the same kernels, K slices fixed by the shape, so the bits are the same. An ffn site before the last
 layer, a dense ffn, a profiled pass and a shared window's segments keep today's schedule (cuda_forward_pieces.handsFront).
@@ -38,17 +39,18 @@ New here, not a re-seat: written on this series at v1.2.9.
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -142,6 +142,9 @@
+@@ -142,6 +142,10 @@
  pub const max_pieces = pieces_mod.max_pieces;
  pub const ranges = pieces_mod.ranges;
  pub const Pieces = pieces_mod.Pieces;
 +pub const pieceFront = pieces_mod.pieceFront;
 +pub const pieceMla = pieces_mod.pieceMla;
 +pub const pieceFfn = pieces_mod.pieceFfn;
++pub const pieceFrontRows = pieces_mod.frontRows;
  
  /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
  pub const Exchange = union(enum) {
-@@ -219,6 +222,11 @@
+@@ -219,6 +223,11 @@
  
      /// forward._mixer: the layer's KDA or DSA block on b.normed; `li`/`di`: its index among loaded KDA / DSA layers.
      pub fn mixer(f: *const Forward, r: Rank, l: weights.Layer, li: usize, di: usize, rows: usize, nch: usize, out: ?u64) !void {
@@ -60,7 +62,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
          const c = &r.w.config;
          const b = r.b;
          const st = r.st;
-@@ -236,12 +244,15 @@
+@@ -236,12 +245,15 @@
                      s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                  }
                  const conv = st.conv + li * 3 * st.conv_c * 2;
@@ -78,7 +80,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
                  if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
              },
          }
-@@ -258,17 +269,23 @@
+@@ -258,17 +270,23 @@
  
      /// forward._ffn: the dense MLP or MoE block on b.normed into this rank's slot.
      pub fn ffn(f: *const Forward, r: Rank, l: weights.Layer, rows: usize, out: ?u64) !void {
@@ -103,7 +105,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
                  if (out) |o| try moe.fill(f.moeKernels(), f.stream, m, b.moe, b.normed, c.hidden, 0, rows, b.prefill, o);
              },
          }
-@@ -328,22 +345,40 @@
+@@ -328,22 +346,41 @@
      const gluePieces = @import("cuda_forward_pieces.zig").gluePieces;
      const tapPieces = @import("cuda_forward_pieces.zig").tapPieces;
      const shareTaps = @import("cuda_forward_pieces.zig").shareTaps;
@@ -117,6 +119,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
 +        const front = pieces_mod.pieceFront();
 +        const mla_front = pieces_mod.pieceMla();
 +        const route = pieces_mod.pieceFfn();
++        const front_rows = try pieces_mod.frontRows();
          for (f.ranks) |r| try f.pre(r, r.w.layers[0].attn_hc, r.w.layers[0].in_norm, R);
          var li: usize = 0;
          var di: usize = 0;
@@ -131,7 +134,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
 -            try f.gluePieces(p, j, .mixer, cut);
 +            if (routed) {
 +                const sent = try f.gluePiecesAsync(p, j, .mixer, cut);
-+                try fronts.route(f, p, layers[j], cut, sent);
++                try fronts.route(f, p, layers[j], cut, sent, front_rows);
 +            } else try f.gluePieces(p, j, .mixer, cut);
              prof_mod.context(f.prof, j, null, .ffn);
 -            for (f.ranks) |r| try f.ffn(r, r.w.layers[j], R, null);
@@ -140,7 +143,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
 +            for (f.ranks) |r| try f.ffnFrom(r, layers[j], R, null, routed);
 +            if (fronts.handsMixer(f, front, mla_front, j) != .none) {
 +                try f.exchangeGlue(p, j, .ffn, cut);
-+                try fronts.mixer(f, p, layers[j + 1], cut);
++                try fronts.mixer(f, p, layers[j + 1], cut, front_rows);
 +                fronted = true;
 +            } else {
 +                try f.exchangePieces(p, j, .ffn, cut);
@@ -196,10 +199,10 @@ new file mode 100644
 +}
 +
 +/// Layer `next`'s row-by-row part on each range of rows once its pieces' glued rows are in (every piece shared).
-+pub fn mixer(f: *const Forward, p: *const Pieces, next: weights.Layer, cut: []const [2]usize) !void {
++pub fn mixer(f: *const Forward, p: *const Pieces, next: weights.Layer, cut: []const [2]usize, min_rows: usize) !void {
 +    var spans: [fw.max_pieces][2]usize = undefined;
 +    var last: [fw.max_pieces]usize = undefined;
-+    const n = pieces.frontRanges(cut, &spans, &last);
++    const n = pieces.frontRanges(cut, min_rows, &spans, &last);
 +    const all = (@as(usize, 1) << @intCast(cut.len)) - 1;
 +    var from: usize = 0;
 +    for (spans[0..n], last[0..n]) |span, q| {
@@ -222,14 +225,14 @@ new file mode 100644
 +}
 +
 +/// Layer `l`'s MoE router on each range of rows once its pieces' glued rows are in (`sent`: gluePiecesAsync's mask).
-+pub fn route(f: *const Forward, p: *const Pieces, l: weights.Layer, cut: []const [2]usize, sent: usize) !void {
++pub fn route(f: *const Forward, p: *const Pieces, l: weights.Layer, cut: []const [2]usize, sent: usize, min_rows: usize) !void {
 +    const m = switch (l.ffn) {
 +        .moe => |moe_layer| moe_layer,
 +        .dense => return error.BadFront,
 +    };
 +    var spans: [fw.max_pieces][2]usize = undefined;
 +    var last: [fw.max_pieces]usize = undefined;
-+    const n = pieces.frontRanges(cut, &spans, &last);
++    const n = pieces.frontRanges(cut, min_rows, &spans, &last);
 +    var from: usize = 0;
 +    for (spans[0..n], last[0..n]) |span, q| {
 +        try waitShared(f, p, sent, from, q);
@@ -244,7 +247,7 @@ diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_en
          if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
          if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
          if (world > 1 and rank == 0 and side_high and !pair) std.log.info("glm: the exchanges' side stream runs at the highest priority", .{});
-+        if (world > 1 and rank == 0 and (fw.pieceFront() or fw.pieceMla() or fw.pieceFfn())) std.log.info("glm: pieced sites hand the next block's front its glued rows piece by piece (kda {}, mla {}, ffn {})", .{ fw.pieceFront(), fw.pieceMla(), fw.pieceFfn() });
++        if (world > 1 and rank == 0 and (fw.pieceFront() or fw.pieceMla() or fw.pieceFfn())) std.log.info("glm: pieced sites hand the next block's front its glued rows piece by piece (kda {}, mla {}, ffn {}, front rows {d})", .{ fw.pieceFront(), fw.pieceMla(), fw.pieceFfn(), fw.pieceFrontRows() catch 0 });
          if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
          errdefer if (e.pair) |*p| p.deinit();
          e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
@@ -365,7 +368,7 @@ diff --git a/zig/src/families/glm/cuda_forward_pair.zig b/zig/src/families/glm/c
 diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm/cuda_forward_pieces.zig
 --- a/zig/src/families/glm/cuda_forward_pieces.zig
 +++ b/zig/src/families/glm/cuda_forward_pieces.zig
-@@ -26,6 +26,42 @@
+@@ -26,6 +26,48 @@
      return n;
  }
  
@@ -389,11 +392,17 @@ diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm
 +    return enabled and !profiled and !segments and has_front;
 +}
 +
-+/// The row ranges a hand-over's front runs on: `cut`'s pieces, a last one under a row step joined to the one before it.
-+pub fn frontRanges(cut: []const [2]usize, out: *[max_pieces][2]usize, last_piece: *[max_pieces]usize) usize {
++/// TF_GLM_OVN_FRONT_ROWS: the rows a hand-over's front range takes at least (0: a range a piece).
++pub fn frontRows() error{BadOvnKnob}!usize {
++    return @intCast(try cuda.ovn.int("FRONT_ROWS", 0));
++}
++
++/// A hand-over's front ranges: `cut`'s pieces joined while a range has under `min_rows` rows, a short last piece too.
++pub fn frontRanges(cut: []const [2]usize, min_rows: usize, out: *[max_pieces][2]usize, last_piece: *[max_pieces]usize) usize {
 +    var n: usize = 0;
 +    for (cut, 0..) |piece, q| {
-+        if (n > 0 and q + 1 == cut.len and piece[1] - piece[0] < row_step) {
++        const short_last = q + 1 == cut.len and piece[1] - piece[0] < row_step;
++        if (n > 0 and (short_last or out[n - 1][1] - out[n - 1][0] < min_rows)) {
 +            out[n - 1][1] = piece[1];
 +            last_piece[n - 1] = q;
 +            continue;
@@ -408,7 +417,7 @@ diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm
  /// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
  pub const Pieces = struct {
      count: usize = 4,
-@@ -98,6 +134,12 @@
+@@ -98,6 +140,12 @@
  
  /// overlap.Overlap.glue: each piece's glue once its exchange is in, its rows then shared on the second stream.
  pub fn gluePieces(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: []const [2]usize) !void {
@@ -421,7 +430,7 @@ diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm
      defer prof.context(f.prof, j, null, if (site == .mixer) .mixer else .ffn);
      const world = f.ranks[0].w.share.world;
      const last = site == .ffn and j + 1 == f.ranks[0].w.layers.len;
-@@ -127,6 +169,12 @@
+@@ -127,6 +175,12 @@
          try p.shared[q].record(p.side);
          sent |= @as(usize, 1) << @intCast(q);
      }
@@ -478,7 +487,7 @@ diff --git a/zig/src/families/glm/cuda_piece_front_test.zig b/zig/src/families/g
 new file mode 100644
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_piece_front_test.zig
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,68 @@
 +//! TF_GLM_OVN_PIECE_FRONT, _FFN and _MLA: which sites hand the next block's front their glued rows piece by piece.
 +const std = @import("std");
 +const cuda = @import("cuda");
@@ -507,15 +516,19 @@ new file mode 100644
 +    try std.testing.expect(!pieces.handsFront(true, false, false, false));
 +}
 +
-+fn ranges(cut: []const [2]usize, want: []const [2]usize, want_last: []const usize) !void {
++fn rangesMin(cut: []const [2]usize, min_rows: usize, want: []const [2]usize, want_last: []const usize) !void {
 +    var out: [pieces.max_pieces][2]usize = undefined;
 +    var last: [pieces.max_pieces]usize = undefined;
-+    const n = pieces.frontRanges(cut, &out, &last);
++    const n = pieces.frontRanges(cut, min_rows, &out, &last);
 +    try std.testing.expectEqual(want.len, n);
 +    for (want, want_last, 0..) |w, l, i| {
 +        try std.testing.expectEqual(w, out[i]);
 +        try std.testing.expectEqual(l, last[i]);
 +    }
++}
++
++fn ranges(cut: []const [2]usize, want: []const [2]usize, want_last: []const usize) !void {
++    return rangesMin(cut, 0, want, want_last);
 +}
 +
 +test "pieces.frontRanges: the pieces as cut, a last piece under a row step joined to the one before it" {
@@ -526,29 +539,48 @@ new file mode 100644
 +    try ranges(&.{.{ 0, 3 }}, &.{.{ 0, 3 }}, &.{0});
 +    try ranges(&.{ .{ 0, 100 }, .{ 100, 150 } }, &.{.{ 0, 150 }}, &.{1});
 +}
++
++test "pieces.frontRanges: with a minimum, pieces join until a range has that many rows, and the last one never starts a short range" {
++    const warm: []const [2]usize = &.{ .{ 0, 384 }, .{ 384, 768 }, .{ 768, 1152 }, .{ 1152, 1326 } };
++    try rangesMin(warm, 768, &.{ .{ 0, 768 }, .{ 768, 1326 } }, &.{ 1, 3 });
++    try rangesMin(warm, 1024, &.{ .{ 0, 1152 }, .{ 1152, 1326 } }, &.{ 2, 3 });
++    try rangesMin(warm, 1326, &.{.{ 0, 1326 }}, &.{3});
++    try rangesMin(warm, 384, warm, &.{ 0, 1, 2, 3 });
++    try rangesMin(&.{ .{ 0, 1024 }, .{ 1024, 2048 }, .{ 2048, 3072 }, .{ 3072, 4096 } }, 1024, &.{ .{ 0, 1024 }, .{ 1024, 2048 }, .{ 2048, 3072 }, .{ 3072, 4096 } }, &.{ 0, 1, 2, 3 });
++}
++
++test "TF_GLM_OVN_FRONT_ROWS: 0 unless set, a whole number" {
++    defer cuda.ovn.fake("FRONT_ROWS", null);
++    cuda.ovn.fake("FRONT_ROWS", null);
++    try std.testing.expectEqual(@as(usize, 0), try pieces.frontRows());
++    cuda.ovn.fake("FRONT_ROWS", "768");
++    try std.testing.expectEqual(@as(usize, 768), try pieces.frontRows());
++}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -117,6 +117,9 @@
+@@ -117,6 +117,10 @@
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
      .{ .name = "TF_GLM_OVN_SIDE_PRIO", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_PIECE_FRONT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_PIECE_FFN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },
      .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
      .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
 diff --git a/docs/environment.md b/docs/environment.md
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -75,6 +75,9 @@
+@@ -75,6 +75,10 @@
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
  | `TF_GLM_OVN_SIDE_PRIO` | Exactly `0` or `1`; default off (the prompt chunk's exchanges run on a side stream at the highest priority, ahead of the main stream's grids, as they do with `TF_GLM_PROMPT_PAIR`; the bits are the same) |
 +| `TF_GLM_OVN_PIECE_FRONT` | Exactly `0` or `1`; default off (a prompt chunk's ffn site, when a KDA layer follows, glues on the side stream and the KDA projections run piece by piece as each piece's rows land; the bits are the same) |
 +| `TF_GLM_OVN_PIECE_FFN` | Exactly `0` or `1`; default off (a prompt chunk's mixer site, before a MoE ffn, runs the router and top-k pick piece by piece as each piece's rows land, with the glue on the main stream as before; the bits are the same) |
 +| `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
++| `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
  | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
  | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
  | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |

@@ -1,0 +1,73 @@
+prompt chunks of 2048 rows: rank 0 16 (wall 978.5 ms a chunk), rank 1 16 (wall 978.3 ms a chunk), rank 2 16 (wall 978.2 ms a chunk)
+  stream layer kind stage                   rank 0    rank 1    rank 2
+  main   chunk      control_reduce            0.89      0.56      0.38
+  main   chunk      drafter                   3.64      3.71      3.65
+  main   chunk      embed                     0.43      0.41      0.41
+  main   chunk      gate                      0.04      0.04      0.04
+  main   chunk      glue                      1.02      0.99      0.98
+  main   chunk      head                      1.52      1.47      1.47
+  main   dense      ffn                       8.71      8.84      8.49
+  main   dense      glue                      2.12      2.09      2.05
+  main   dense      output_projection         4.80      4.84      4.67
+  main   dense      wait_gathered             2.13      1.88      2.54
+  main   dense      wait_shared               2.52      2.62      2.48
+  main   kda        glue                     22.48     21.67     21.89
+  main   kda        kda                      87.68     85.04     84.52
+  main   kda        output_projection        39.50     38.11     37.82
+  main   kda        projections              98.79     97.83     96.88
+  main   kda        wait_gathered            32.70     38.34     39.95
+  main   kda        wait_shared              27.98     28.12     28.06
+  main   mla        cache_write               0.34      0.33      0.34
+  main   mla        glue                      8.17      7.45      7.37
+  main   mla        index_score               3.73      3.83      4.00
+  main   mla        index_select              6.92      8.21      9.63
+  main   mla        index_update              0.35      0.33      0.35
+  main   mla        mla                      73.50     72.65     72.10
+  main   mla        output_projection        22.65     21.65     21.25
+  main   mla        projections              99.85     97.01     95.03
+  main   mla        replicated_qakva          8.57      8.42      8.34
+  main   mla        wait_gathered             3.46      7.59      9.28
+  main   mla        wait_shared               9.25      9.27      9.07
+  main   moe        experts                 414.79    359.83    358.88
+  main   moe        ffn                       0.16      0.17      0.17
+  main   moe        glue                     31.06     26.74     26.65
+  main   moe        output_projection         0.56      0.53      0.51
+  main   moe        router                   15.13     16.37     14.81
+  main   moe        shared_expert           144.54    140.71    137.75
+  main   moe        wait_gathered             9.21     74.06     79.73
+  main   moe        wait_shared              38.24     35.41     35.21
+  side   dense      glued                     2.96      3.03      2.90
+  side   dense      partials                  7.40      7.19      7.65
+  side   dense      wait_filled               9.93     10.05      9.70
+  side   dense      wait_glues                0.02      0.02      0.02
+  side   kda        glued                    32.76     32.84     32.85
+  side   kda        partials                 80.10     83.80     85.50
+  side   kda        wait_filled             197.86    194.02    192.38
+  side   kda        wait_glues                0.19      0.19      0.19
+  side   mla        glued                    10.84     10.79     10.61
+  side   mla        partials                 26.33     29.45     30.83
+  side   mla        wait_filled             199.80    196.76    195.60
+  side   mla        wait_glues                0.06      0.06      0.06
+  side   moe        glued                    44.24     41.39     41.18
+  side   moe        partials                143.40    200.61    204.86
+  side   moe        wait_filled             465.62    411.65    407.57
+  side   moe        wait_glues                0.26      0.24      0.23
+  main total                               1227.43   1227.12   1226.79
+  side total                               1221.78   1222.07   1222.13
+  chunk start: wall ms by rank / main-stream waits by rank
+          0  2048:    970.2    968.9    968.5 /   189.1   324.3   344.0
+       2048  2048:   1101.6   1101.3   1101.3 /   204.6   312.6   328.2
+       4096  2048:    968.4    968.5    968.0 /   199.3   317.6   332.0
+       6144  2048:    959.7    959.2    959.3 /   200.0   308.1   324.6
+       8192  2048:    963.4    963.2    963.1 /   102.2   153.3   159.1
+      10240  2048:    965.9    965.8    965.8 /   100.6   155.1   162.4
+      12288  2048:    964.6    964.5    964.4 /    99.5   157.7   164.3
+      14336  2048:    964.2    964.0    963.9 /    97.4   155.0   160.3
+      16384  2048:    970.2    970.3    970.0 /   102.3   158.5   167.2
+      18432  2048:    972.4    972.2    972.1 /    99.2   158.5   169.7
+      20480  2048:    961.2    961.1    960.9 /   100.7   155.3   163.3
+      22528  2048:    965.6    965.3    965.2 /   102.0   155.6   160.9
+      24576  2048:    968.8    968.6    968.6 /   105.3   158.3   162.0
+      26624  2048:    969.5    969.5    969.3 /   101.6   159.6   167.8
+      28672  2048:    979.1    978.8    978.6 /   102.2   171.6   169.0
+      30720  2048:   1011.9   1012.5   1011.7 /   102.0   155.3   166.4

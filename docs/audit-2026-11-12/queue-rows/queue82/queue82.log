@@ -1,0 +1,33 @@
+[q82] 04:25:27 start; IMG=glm53-zig:v129za; NEWX='-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2'; deadline 06:25:27; 286G free
+[q82] glm53-zig:v129za ids: sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573
+[q82] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 04:25:29 production stopped on spark1-3
+[q82] 04:30:08 c4 cold rc=0 3838 14171 53036 3890 14367 53604 
+[q82] 04:31:13 c4 chain: 50140 857 845 833 842 823 825 832
+[q82] 04:31:40 dec-c4 1 greedy prose rc=0 "agg_tok_s": 77.46 code rc=0 "agg_tok_s": 110.53
+[q82] 04:32:29 dec-c4 2 greedy prose rc=0 "agg_tok_s": 82.66 code rc=0 "agg_tok_s": 133.41
+[q82] 04:33:46 dec-c4 4 greedy prose rc=0 "agg_tok_s": 109.81 code rc=0 "agg_tok_s": 163.01
+[q82] 04:35:39 dec-c4 6 greedy prose rc=0 "agg_tok_s": 105.7 code rc=0 "agg_tok_s": 165.51
+[q82] 04:38:04 dec-c4 8 greedy prose rc=0 "agg_tok_s": 112.99 code rc=0 "agg_tok_s": 181.93
+[q82] 04:42:45 rf cold rc=0 3867 14311 53430 3903 14453 53884 
+[q82] 04:43:51 rf chain: 50340 852 850 841 826 826 828 834
+[q82] 04:44:18 dec-rf 1 greedy prose rc=0 "agg_tok_s": 79.34 code rc=0 "agg_tok_s": 112.41
+[q82] 04:45:07 dec-rf 2 greedy prose rc=0 "agg_tok_s": 82.27 code rc=0 "agg_tok_s": 135.33
+[q82] 04:46:23 dec-rf 4 greedy prose rc=0 "agg_tok_s": 110.72 code rc=0 "agg_tok_s": 165.52
+[q82] 04:48:16 dec-rf 6 greedy prose rc=0 "agg_tok_s": 115.48 code rc=0 "agg_tok_s": 167.38
+[q82] 04:50:35 dec-rf 8 greedy prose rc=0 "agg_tok_s": 122.47 code rc=0 "agg_tok_s": 176.39
+[q82] 04:55:15 mf cold rc=0 3855 14197 53105 3879 14361 53613 
+[q82] 04:56:20 mf chain: 50136 860 848 837 828 825 814 820
+[q82] 04:56:47 dec-mf 1 greedy prose rc=0 "agg_tok_s": 79.25 code rc=0 "agg_tok_s": 113.0
+[q82] 04:57:36 dec-mf 2 greedy prose rc=0 "agg_tok_s": 83.49 code rc=0 "agg_tok_s": 135.2
+[q82] 04:58:52 dec-mf 4 greedy prose rc=0 "agg_tok_s": 110.98 code rc=0 "agg_tok_s": 164.19
+[q82] 05:00:43 dec-mf 6 greedy prose rc=0 "agg_tok_s": 121.18 code rc=0 "agg_tok_s": 167.1
+[q82] 05:03:02 dec-mf 8 greedy prose rc=0 "agg_tok_s": 113.27 code rc=0 "agg_tok_s": 163.69
+[q82] 05:07:51 c5 cold rc=0 3842 14159 52783 3865 14287 53246 
+[q82] 05:08:56 c5 chain: 49794 857 850 837 830 821 826 828
+[q82] 05:09:23 dec-c5 1 greedy prose rc=0 "agg_tok_s": 77.82 code rc=0 "agg_tok_s": 111.87
+[q82] 05:10:12 dec-c5 2 greedy prose rc=0 "agg_tok_s": 82.81 code rc=0 "agg_tok_s": 133.97
+[q82] 05:11:29 dec-c5 4 greedy prose rc=0 "agg_tok_s": 110.33 code rc=0 "agg_tok_s": 165.26
+[q82] 05:13:20 dec-c5 6 greedy prose rc=0 "agg_tok_s": 106.68 code rc=0 "agg_tok_s": 190.56
+[q82] 05:15:37 dec-c5 8 greedy prose rc=0 "agg_tok_s": 133.03 code rc=0 "agg_tok_s": 177.16
+QUEUE82-DONE 05:15:48
