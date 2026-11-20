@@ -84,8 +84,8 @@ unit() { # unit LABEL XENV: a P=4 boot and everything block A measures on it
   python3 longctx.py probe 8300 --tag "$label" --n 4 --out "$OUT/f77-c/rows.jsonl" --log-cmd "$ZLOG" --seed pf74 --cold-sizes 8000,32000,120000 --warm-base 0 --reps 2 --load 0 > "$OUT/f77-c/$label-probe.out" 2>&1
   echo "[q77] $(date -u +%T) $label cold rc=$? $(grep -o '"ttft_ms": [0-9]*' "$OUT/f77-c/$label-probe.out" | cut -d' ' -f2 | tr '\n' ' ')"
   chain "$OUT/f77-c/$label" "c74" 100000 8
-  greedy "$OUT/f77-c/dec-$label" 1 2 4
-  sampled "$OUT/f77-c/dec-$label" 1 2 4
+  greedy "$OUT/f77-c/dec-$label" 1 2 4 6 8 # 6 and 8 clients queue on this --parallel 4 boot: production's deployed shape, the cells to set beside its own
+  sampled "$OUT/f77-c/dec-$label" 1 2 4 6 8
   prompts "$OUT/f77-c/dec-$label"
   keeplog "$OUT/f77-c/r0-$label.log"
 }
@@ -113,6 +113,8 @@ unitlite X1 "$NEWX -e TF_GLM_PREFILL_REDUCE=ring"
 unitlite X2 "$NEWX -e TF_GLM_PREFILL_REDUCE=gather"
 NEWXY="${NEWX//TF_GLM_OVERLAP_PIECES=4/TF_GLM_OVERLAP_PIECES=8}"
 [ "$NEWXY" != "$NEWX" ] && unitlite Y1 "$NEWXY"
+NEWXZ="${NEWX//TF_GLM_OVERLAP_PIECES=4/TF_GLM_OVERLAP_PIECES=3}" # three pieces read -2.2% and -1.3% on one boot in queue75 block B, beside four pieces' two boots
+[ "$NEWXZ" != "$NEWX" ] && unitlite Y2 "$NEWXZ"
 unit R1 "$NEWX $RSX"
 unit R2 "$NEWX $RSX"
 

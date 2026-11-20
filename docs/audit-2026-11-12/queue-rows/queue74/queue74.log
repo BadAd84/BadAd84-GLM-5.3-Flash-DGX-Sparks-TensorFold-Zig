@@ -1,0 +1,26 @@
+[q74] 20:17:40 start; IMG=glm53-zig:v129za; deadline 03:17:40
+[q74] glm53-zig:v129za ids: sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573
+[q74] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 20:17:42 production stopped on spark1-3
+[q74] 20:19:59 smoke boot ok: {"id": "chatcmpl-af08259115d33a15efb772834f863350", "object": "chat.completion", "created": 1795119599, "model": "GLM-5.3-Flash-EXL3", "choices": [{"index": 0, "message": {"role": "assistant", "content": "", "reasoning_content": "The user has sent a very simple request: \"Say hello.\"\n\nThis is a s
+[q74] 20:24:40 f1 cold rc=0 3954 14747 55319 4000 14917 55816 
+[q74] 20:25:51 f1 chain: 52344 813 1577 1033 1774 1405 883 1622
+[q74] 20:26:17 dec-f1 1 greedy prose rc=0 "agg_tok_s": 81.76 code rc=0 "agg_tok_s": 114.17
+[q74] 20:27:04 dec-f1 2 greedy prose rc=0 "agg_tok_s": 85.47 code rc=0 "agg_tok_s": 138.37
+[q74] 20:28:19 dec-f1 4 greedy prose rc=0 "agg_tok_s": 113.53 code rc=0 "agg_tok_s": 167.54
+[q74] 20:33:05 rs1 cold rc=0 4010 14865 55489 4050 15021 55996 
+[q74] 20:34:13 rs1 chain: 52403 886 869 851 846 835 835 845
+[q74] 20:34:39 dec-rs1 1 greedy prose rc=0 "agg_tok_s": 80.67 code rc=0 "agg_tok_s": 113.96
+[q74] 20:35:27 dec-rs1 2 greedy prose rc=0 "agg_tok_s": 84.39 code rc=0 "agg_tok_s": 136.99
+[q74] 20:36:43 dec-rs1 4 greedy prose rc=0 "agg_tok_s": 112.39 code rc=0 "agg_tok_s": 166.6
+[q74] 20:41:29 rs2 cold rc=0 4010 14834 55504 4047 15012 55969 
+[q74] 20:42:36 rs2 chain: 52370 873 872 848 846 835 836 842
+[q74] 20:43:03 dec-rs2 1 greedy prose rc=0 "agg_tok_s": 80.27 code rc=0 "agg_tok_s": 113.64
+[q74] 20:43:51 dec-rs2 2 greedy prose rc=0 "agg_tok_s": 84.62 code rc=0 "agg_tok_s": 136.38
+[q74] 20:45:07 dec-rs2 4 greedy prose rc=0 "agg_tok_s": 111.54 code rc=0 "agg_tok_s": 166.77
+[q74] 20:49:53 f2 cold rc=0 3964 14808 55494 4006 15009 55942 
+[q74] 20:51:03 f2 chain: 52392 815 1584 1037 1778 1410 886 1633
+[q74] 20:51:30 dec-f2 1 greedy prose rc=0 "agg_tok_s": 81.07 code rc=0 "agg_tok_s": 113.97
+[q74] 20:52:18 dec-f2 2 greedy prose rc=0 "agg_tok_s": 84.99 code rc=0 "agg_tok_s": 136.86
+[q74] 20:53:33 dec-f2 4 greedy prose rc=0 "agg_tok_s": 112.51 code rc=0 "agg_tok_s": 166.67
+[q74] 20:53:45 disk tier rc=0 [disktier] 20:53:45 164 GiB free under ~/.cache/huggingface/glm53-zig-learn; the store may take 128 GiB and keeps 40 free DISKTIER-ABORTED 20:53:45 

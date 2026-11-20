@@ -69,7 +69,7 @@ def pp(label):
 
 def secA():
     dirs = [f"{D}/f77-c/dec-{l}" for l in ("P1", "N1", "N2", "P2")]
-    pairs(dirs, (1, 2, 4), "== A. the final recipe (N) against the committed one (P), --parallel 4 --context 1048576")
+    pairs(dirs, (1, 2, 4, 6, 8), "== A. the final recipe (N) against the committed one (P), --parallel 4 --context 1048576 (6 and 8 clients queue on this boot)")
     arms = {l: pp(l) for l in ("P1", "N1", "N2", "P2")}
     if all(arms.values()):
         names = list(arms["P1"])
@@ -86,7 +86,7 @@ def secA():
 def secR():
     print("== R and V: request starts (R1 R2) and MM_WIDE=2 (V1) against N (the mean of N1 and N2), the same cells")
     for kind, label in KINDS:
-        for n in (1, 2, 4):
+        for n in (1, 2, 4, 6, 8):
             nn = [cell(f"{D}/f77-c/dec-{l}", kind, n) for l in ("N1", "N2")]
             rr = [cell(f"{D}/f77-c/dec-{l}", kind, n) for l in ("R1", "R2")]
             vv = cell(f"{D}/f77-c/dec-V1", kind, n)
@@ -117,7 +117,7 @@ def secCold():
         base = [x for x in base if x is not None]
         ref = st.mean(base) if base else None
         line = f"{size // 1000}k:"
-        for a in ("P1", "N1", "N2", "P2", "V1", "X1", "X2", "Y1", "R1", "R2"):
+        for a in ("P1", "N1", "N2", "P2", "V1", "X1", "X2", "Y1", "Y2", "R1", "R2"):
             x = cold_ms(rs, a, size)
             if x is not None:
                 line += f" {a} {x:.0f}" + (f" ({pct(x, ref)})" if ref and a not in ("P1", "P2") else "")
@@ -135,7 +135,7 @@ def chain_of(label):
 
 
 def secChain():
-    tab = {l: chain_of(l) for l in ("P1", "N1", "N2", "P2", "V1", "X1", "X2", "Y1", "R1", "R2")}
+    tab = {l: chain_of(l) for l in ("P1", "N1", "N2", "P2", "V1", "X1", "X2", "Y1", "Y2", "R1", "R2")}
     tab = {l: c for l, c in tab.items() if c}
     if not tab:
         return
@@ -151,7 +151,7 @@ def secChain():
     if all(l in tab for l in ("P1", "P2")):
         first = st.mean(tab[l][0]["ttft_ms"] for l in ("P1", "P2"))
         warm = st.mean(st.mean(x["ttft_ms"] for x in tab[l][1:]) for l in ("P1", "P2"))
-        for grp in (("N1", "N2"), ("V1",), ("X1",), ("X2",), ("Y1",), ("R1", "R2")):
+        for grp in (("N1", "N2"), ("V1",), ("X1",), ("X2",), ("Y1",), ("Y2",), ("R1", "R2")):
             if all(l in tab for l in grp):
                 print(f"{'/'.join(grp)} over the recipe: first turn {st.mean(tab[l][0]['ttft_ms'] for l in grp) / first:.3f}, "
                       f"turns 2+ {st.mean(st.mean(x['ttft_ms'] for x in tab[l][1:]) for l in grp) / warm:.3f}")

@@ -1,0 +1,86 @@
+[q75] 20:57:30 start; IMG=glm53-zig:v129za; deadline 03:57:30; 302G free
+[q75] glm53-zig:v129za ids: sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573 sha256:15941b680fe9846887ca09157c4db53d00b8a35e800dd317c4b3f8ab1ca58573
+[q75] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 20:57:32 production stopped on spark1-3
+[q75] 21:50:05 disk tier rc=0 [disktier] 21:50:05 both GLM watchdogs stay inactive DISKTIER-DONE 21:50:05 
+[q75] 21:53:28 w1 chain: 53344 890 876 850 876 841 844 847
+[q75] 21:53:54 dec-w1 1 greedy prose rc=0 "agg_tok_s": 80.17 code rc=0 "agg_tok_s": 111.93
+[q75] 21:54:43 dec-w1 2 greedy prose rc=0 "agg_tok_s": 84.21 code rc=0 "agg_tok_s": 136.1
+[q75] 21:55:59 dec-w1 4 greedy prose rc=0 "agg_tok_s": 111.61 code rc=0 "agg_tok_s": 165.43
+[q75] 21:59:21 w2 chain: 52435 874 871 842 847 833 828 842
+[q75] 21:59:48 dec-w2 1 greedy prose rc=0 "agg_tok_s": 79.56 code rc=0 "agg_tok_s": 112.09
+[q75] 22:00:36 dec-w2 2 greedy prose rc=0 "agg_tok_s": 84.11 code rc=0 "agg_tok_s": 137.13
+[q75] 22:01:52 dec-w2 4 greedy prose rc=0 "agg_tok_s": 112.0 code rc=0 "agg_tok_s": 166.05
+[q75] 22:05:13 w3 chain: 51100 866 849 831 835 844 824 832
+[q75] 22:05:39 dec-w3 1 greedy prose rc=0 "agg_tok_s": 80.19 code rc=0 "agg_tok_s": 112.64
+[q75] 22:06:28 dec-w3 2 greedy prose rc=0 "agg_tok_s": 83.57 code rc=0 "agg_tok_s": 136.16
+[q75] 22:07:44 dec-w3 4 greedy prose rc=0 "agg_tok_s": 111.53 code rc=0 "agg_tok_s": 166.26
+[q75] 22:11:05 w6 chain: 51510 872 861 844 843 830 830 837
+[q75] 22:11:31 dec-w6 1 greedy prose rc=0 "agg_tok_s": 81.57 code rc=0 "agg_tok_s": 114.79
+[q75] 22:12:19 dec-w6 2 greedy prose rc=0 "agg_tok_s": 85.11 code rc=0 "agg_tok_s": 137.66
+[q75] 22:13:34 dec-w6 4 greedy prose rc=0 "agg_tok_s": 112.69 code rc=0 "agg_tok_s": 167.28
+[q75] 22:16:56 nr chain: 51325 869 855 838 838 832 828 843
+[q75] 22:17:23 dec-nr 1 greedy prose rc=0 "agg_tok_s": 78.79 code rc=0 "agg_tok_s": 109.78
+[q75] 22:18:12 dec-nr 2 greedy prose rc=0 "agg_tok_s": 82.75 code rc=0 "agg_tok_s": 134.66
+[q75] 22:19:28 dec-nr 4 greedy prose rc=0 "agg_tok_s": 111.13 code rc=0 "agg_tok_s": 168.06
+[q75] 22:24:09 mw cold rc=0 3902 14345 53572 3942 14484 53995 
+[q75] 22:25:14 mw chain: 50486 861 842 830 828 815 817 824
+[q75] 22:25:41 dec-mw 1 greedy prose rc=0 "agg_tok_s": 79.8 code rc=0 "agg_tok_s": 112.96
+[q75] 22:26:29 dec-mw 2 greedy prose rc=0 "agg_tok_s": 83.79 code rc=0 "agg_tok_s": 137.39
+[q75] 22:27:45 dec-mw 4 greedy prose rc=0 "agg_tok_s": 111.52 code rc=0 "agg_tok_s": 166.28
+[q75] 22:32:28 sp cold rc=0 3926 14532 54357 3973 14691 54862 
+[q75] 22:33:34 sp chain: 51294 866 853 833 829 817 824 830
+[q75] 22:34:01 dec-sp 1 greedy prose rc=0 "agg_tok_s": 80.0 code rc=0 "agg_tok_s": 112.87
+[q75] 22:34:49 dec-sp 2 greedy prose rc=0 "agg_tok_s": 83.68 code rc=0 "agg_tok_s": 136.27
+[q75] 22:36:05 dec-sp 4 greedy prose rc=0 "agg_tok_s": 112.25 code rc=0 "agg_tok_s": 166.86
+[q75] 22:40:50 p4 cold rc=0 3968 14700 55010 4002 14923 55502 
+[q75] 22:41:57 p4 chain: 52050 876 861 846 845 834 833 841
+[q75] 22:42:23 dec-p4 1 greedy prose rc=0 "agg_tok_s": 81.24 code rc=0 "agg_tok_s": 114.14
+[q75] 22:43:11 dec-p4 2 greedy prose rc=0 "agg_tok_s": 84.82 code rc=0 "agg_tok_s": 137.36
+[q75] 22:44:26 dec-p4 4 greedy prose rc=0 "agg_tok_s": 112.9 code rc=0 "agg_tok_s": 167.13
+[q75] 22:49:17 lr2 cold rc=0 3991 14819 55296 4040 14985 55801 
+[q75] 22:50:24 lr2 chain: 52183 878 863 842 842 834 834 838
+[q75] 22:50:51 dec-lr2 1 greedy prose rc=0 "agg_tok_s": 80.99 code rc=0 "agg_tok_s": 114.05
+[q75] 22:51:39 dec-lr2 2 greedy prose rc=0 "agg_tok_s": 84.87 code rc=0 "agg_tok_s": 137.06
+[q75] 22:52:54 dec-lr2 4 greedy prose rc=0 "agg_tok_s": 111.86 code rc=0 "agg_tok_s": 166.17
+[q75] 22:57:26 all cold rc=0 3793 13969 52034 3823 14100 52574 
+[q75] 22:58:30 all chain: 49079 849 837 822 821 813 809 815
+[q75] 22:58:57 dec-all 1 greedy prose rc=0 "agg_tok_s": 79.74 code rc=0 "agg_tok_s": 112.44
+[q75] 22:59:45 dec-all 2 greedy prose rc=0 "agg_tok_s": 84.06 code rc=0 "agg_tok_s": 136.52
+[q75] 23:01:01 dec-all 4 greedy prose rc=0 "agg_tok_s": 111.76 code rc=0 "agg_tok_s": 166.49
+[q75] 23:05:47 rs3 cold rc=0 4006 14807 55365 4049 14985 55839 
+[q75] 23:06:54 rs3 chain: 52192 880 869 848 844 830 838 845
+[q75] 23:07:21 dec-rs3 1 greedy prose rc=0 "agg_tok_s": 80.2 code rc=0 "agg_tok_s": 112.33
+[q75] 23:08:10 dec-rs3 2 greedy prose rc=0 "agg_tok_s": 83.63 code rc=0 "agg_tok_s": 135.23
+[q75] 23:09:25 dec-rs3 4 greedy prose rc=0 "agg_tok_s": 111.79 code rc=0 "agg_tok_s": 165.88
+[q75] 23:13:59 all2 cold rc=0 3828 14122 52658 3861 14243 53162 
+[q75] 23:15:04 all2 chain: 49649 852 840 830 831 816 815 825
+[q75] 23:15:30 dec-all2 1 greedy prose rc=0 "agg_tok_s": 81.11 code rc=0 "agg_tok_s": 113.98
+[q75] 23:16:18 dec-all2 2 greedy prose rc=0 "agg_tok_s": 84.91 code rc=0 "agg_tok_s": 136.42
+[q75] 23:17:34 dec-all2 4 greedy prose rc=0 "agg_tok_s": 111.92 code rc=0 "agg_tok_s": 166.06
+[q75] 23:22:20 lr22 cold rc=0 4004 14833 55346 4040 14994 55863 
+[q75] 23:23:27 lr22 chain: 52312 877 865 840 843 834 833 842
+[q75] 23:23:54 dec-lr22 1 greedy prose rc=0 "agg_tok_s": 80.32 code rc=0 "agg_tok_s": 114.4
+[q75] 23:24:42 dec-lr22 2 greedy prose rc=0 "agg_tok_s": 84.8 code rc=0 "agg_tok_s": 137.13
+[q75] 23:25:57 dec-lr22 4 greedy prose rc=0 "agg_tok_s": 112.76 code rc=0 "agg_tok_s": 166.87
+[q75] 23:30:42 p42 cold rc=0 3968 14706 54864 4014 14883 55389 
+[q75] 23:31:48 p42 chain: 51821 875 864 846 850 835 834 844
+[q75] 23:32:15 dec-p42 1 greedy prose rc=0 "agg_tok_s": 81.16 code rc=0 "agg_tok_s": 113.98
+[q75] 23:33:02 dec-p42 2 greedy prose rc=0 "agg_tok_s": 85.55 code rc=0 "agg_tok_s": 137.64
+[q75] 23:34:17 dec-p42 4 greedy prose rc=0 "agg_tok_s": 113.25 code rc=0 "agg_tok_s": 167.25
+[q75] 23:39:01 sp2 cold rc=0 3953 14614 54577 3988 14787 55134 
+[q75] 23:40:08 sp2 chain: 51565 871 860 840 835 829 831 834
+[q75] 23:40:34 dec-sp2 1 greedy prose rc=0 "agg_tok_s": 80.83 code rc=0 "agg_tok_s": 113.62
+[q75] 23:41:22 dec-sp2 2 greedy prose rc=0 "agg_tok_s": 84.03 code rc=0 "agg_tok_s": 136.62
+[q75] 23:42:38 dec-sp2 4 greedy prose rc=0 "agg_tok_s": 111.87 code rc=0 "agg_tok_s": 166.24
+[q75] 23:47:21 mw2 cold rc=0 3946 14529 54181 3984 14633 54609 
+[q75] 23:48:27 mw2 chain: 51032 869 855 836 836 826 834 835
+[q75] 23:48:53 dec-mw2 1 greedy prose rc=0 "agg_tok_s": 80.97 code rc=0 "agg_tok_s": 113.44
+[q75] 23:49:42 dec-mw2 2 greedy prose rc=0 "agg_tok_s": 84.44 code rc=0 "agg_tok_s": 136.7
+[q75] 23:50:57 dec-mw2 4 greedy prose rc=0 "agg_tok_s": 112.23 code rc=0 "agg_tok_s": 165.7
+[q75] 23:55:48 rs4 cold rc=0 4006 14822 55344 4056 14974 55890 
+[q75] 23:56:55 rs4 chain: 52125 881 871 851 847 838 835 845
+[q75] 23:57:22 dec-rs4 1 greedy prose rc=0 "agg_tok_s": 81.39 code rc=0 "agg_tok_s": 113.77
+[q75] 23:58:10 dec-rs4 2 greedy prose rc=0 "agg_tok_s": 84.66 code rc=0 "agg_tok_s": 137.08
+[q75] 23:59:25 dec-rs4 4 greedy prose rc=0 "agg_tok_s": 112.71 code rc=0 "agg_tok_s": 166.52
+QUEUE75-DONE 23:59:37
