@@ -3,7 +3,7 @@
 # Rank order matches production's GLM_WORKERS (r0 spark1 local, r1 spark2, r2 spark3).
 # serve.sh carries the model path, the drafter and the production-shaped NCCL env; this driver
 # only names the ranks, the bootstrap address and the box each rank lands on.
-# Env: IMAGE (default glm53-zig:9c9bf54), KNOBS (off|measured|all), DRAFTER (1|0),
+# Env: IMAGE (default glm53-zig:9c9bf54), KNOBS (off|measured|all|prod|dev: serve.sh's environment files), DRAFTER (1|0),
 #      COMM_ID (default 192.168.99.11:29561), PORT (default 8300), XENV, XSERVE extras,
 #      WRAP0 / XRUN0 (rank 0 only: serve.sh's WRAP and XRUN, for profiling the head rank); WRAP1 / XRUN1 and WRAP2 / XRUN2 do the same for a worker rank.
 # Bring-up only: production must be STOPPED first (glm-v110-stop.sh) and the GLM watchdogs paused,
@@ -49,7 +49,10 @@ boot 0
 for rank in 1 2; do
   ssh -n "adam@spark$((rank + 1)).ots-int.net" 'docker rm -f glm53-zig-r1 glm53-zig-r2 >/dev/null 2>&1 || true'
   # the worker runs the head's copy of the recipe files, never one left there by an earlier session
+  # serve.sh reads scripts/env/prod.env and dev.env beside itself, so the two files go with it
+  ssh -n -o BatchMode=yes "adam@spark$((rank + 1)).ots-int.net" 'mkdir -p work/glm53-zig/env' < /dev/null
   scp -q -o BatchMode=yes "$(dirname "${BASH_SOURCE[0]}")/serve.sh" "$(dirname "${BASH_SOURCE[0]}")/config.sh" "adam@spark$((rank + 1)).ots-int.net:work/glm53-zig/" < /dev/null
+  scp -q -o BatchMode=yes "$(dirname "${BASH_SOURCE[0]}")/env/prod.env" "$(dirname "${BASH_SOURCE[0]}")/env/dev.env" "adam@spark$((rank + 1)).ots-int.net:work/glm53-zig/env/" < /dev/null
   boot $rank
 done
 workers() { # the worker ranks' containers, for a failed boot's report

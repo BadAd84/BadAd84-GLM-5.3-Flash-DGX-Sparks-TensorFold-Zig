@@ -26,7 +26,7 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 - `patches/engine/` - EVERY change we own on the engine, numbered, applied in file-name order to a pristine tree at
   `TF_REF` by `scripts/apply.sh`. `RECORD.md` says where each patch's text comes from, `SHA256SUMS` pins the files.
 - `scripts/` - the serve and bench files, AUTHORED here and COPIED to spark1 `~/work/glm53-zig/`; the repo copy is
-  the source. Serve: `serve.sh` (one rank), `zig-tp3.sh` / `zig-tp3-stop.sh` (the whole TP=3 from spark1),
+  the source. Environment: `scripts/env/prod.env` (production: a runtime section, then the adopted recipe) and `scripts/env/dev.env` (production line for line plus a candidates section), read by `serve.sh` (`KNOBS=measured` or `prod` applies prod, `dev` applies dev, `off` only prod's runtime section; `XENV` wins over a line), checked by `scripts/check-env.py` (`python scripts/tests/test_check_env.py`) and `python scripts/tests/test_serve_env.py` (the launcher against the pre-split one). A candidate is promoted by moving its line from `dev.env` to `prod.env`'s recipe section, and to `dev.env`'s recipe section the same line, in the commit that carries its cells. Serve: `serve.sh` (one rank), `zig-tp3.sh` / `zig-tp3-stop.sh` (the whole TP=3 from spark1),
   `build-image.sh`, `dist-image.sh` (copy the image to spark2 and spark3: every rank needs it). Bench: `streams.py`
   (the instrument), `turns.py` (first token of each turn of a growing chat), `bench-arm.sh` (five levels, a fresh boot
   each), `arms-file.sh` (a list of arms), `abba.sh`, `cells.py` and `rounds.py` (tables), `nsys-rank0.sh` (kernel

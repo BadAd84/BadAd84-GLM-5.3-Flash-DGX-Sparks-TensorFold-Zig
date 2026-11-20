@@ -1,11 +1,11 @@
 # The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-19)
 
-`KNOBS=measured` in `scripts/serve.sh` sets the `DEFS` list below on top of an image built from `patches/engine/` (pin v1.2.9, 36 patches) and the packages `patches/pr1411`, `patches/cache-salt`, `patches/learn-starts` and `patches/solo-cuts` (the last two gated, their GPU checks pending). Cells measured on the v1.2.9 stack are in OVERNIGHT sections 41 to 50; the older ones (sections 17 to 36) were measured on the v1.2.7 stack.
+The serve's environment is two files, `scripts/env/prod.env` (production: the runtime section and the adopted recipe) and `scripts/env/dev.env` (production, line for line, plus a candidates section). `KNOBS=measured` (or `prod`) in `scripts/serve.sh` applies `prod.env` and `KNOBS=dev` applies `dev.env`; `KNOBS=off` applies only the runtime section of `prod.env`. `scripts/check-env.py` keeps them consistent. The recipe section is the list below, on top of an image built from `patches/engine/` (pin v1.2.9, 36 patches) and the packages `patches/pr1411`, `patches/cache-salt`, `patches/learn-starts` and `patches/solo-cuts` (the last two gated, their GPU checks pending). Cells measured on the v1.2.9 stack are in OVERNIGHT sections 41 to 50; the older ones (sections 17 to 36) were measured on the v1.2.7 stack.
 Production on the Sparks is the Python stack and takes none of it. A knob is set only when its cells show no regression at 1, 2, 4, 6 and 8
 streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT below). Every name is a row of the `.glm` scope of
-`zig/src/platform/environment.zig`; an unregistered `TF_GLM_*` name is refused at boot, so `DEFS` must follow the patch set it runs on.
+`zig/src/platform/environment.zig`; an unregistered `TF_GLM_*` name is refused at boot, so `scripts/env/prod.env` must follow the patch set it runs on (`scripts/check-env.py --tree GITDIR:TREEISH` checks every name against the tree the series makes).
 
-## Set by `DEFS` (23 knobs) and added by `serve.sh`
+## Set by `scripts/env/prod.env` (the recipe section, 23 knobs) and added by `serve.sh`
 
 `TF_GLM_KDA_PAD`, `TF_GLM_OVN_KEPT_WALK`, `TF_GLM_OVN_DRAFT_ONEPASS`, `TF_GLM_OVN_DRAFT_DOWN4`, `TF_GLM_OVN_DRAFT_MLPSPLIT=4`, `TF_GLM_OVN_MLA_FUSEMERGE`, `TF_GLM_OVN_DRAFT_EDGE=0.6`,
 `TF_GLM_OVN_DRAFT_BETA=2`, `TF_GLM_OVN_DRAFT_CUTS=1:0.3`, `TF_EXL3_DEC_ORDER`, `TF_GLM_OVN_EXL3_ITEMS` (decode windows on our 16-pair item plan: on v1.2.7 the default path, on v1.2.9 a switch because upstream's
@@ -63,7 +63,7 @@ The seven that joined on 2026-11-19 (OVERNIGHT sections 45 to 50; replies equal 
 | `TF_GLM_REQUEST_STARTS=1` | a chat's next turn resumes where its previous turn's history ends, not at the last 2,048-row point | same replies (sections 29 and 48). On a growing conversation (`longctx.py chain`, section 50): -35.5% a turn at ~113k and -35.9% at ~284k, uncached tokens a turn 1,274 against 2,208 (production 1,306); the cost is +7% on a cold prime (+4.1 / +6.5 / +7.2% cold at 8k / 32k / 120k) because a request with a cut ran no solo pass, and +5% / +12% on a warm probe that never sends the next turn. Break-even 8.3 turns after a cold ~113k prime. `patches/solo-cuts` lets a solo step run between the cuts (2026-11-19: gated, GPU check pending) and `patches/learn-starts` lifts upstream's refusal with `--learn-conversations` (gated, GPU check pending); off until both checks have run and the cold cost is measured with the fix |
 | `TF_GLM_COPIES=1` | verified root and context copies | a loss (table above) |
 
-## Not knobs of `DEFS`: the packages and their switches
+## Not knobs of `prod.env`: the packages and their switches
 
 | package | switch | state |
 |---|---|---|
@@ -80,6 +80,6 @@ The seven that joined on 2026-11-19 (OVERNIGHT sections 45 to 50; replies equal 
 ## Absorbed by upstream v1.2.9 (landed 2026-11-15; OVERNIGHT section 37)
 
 Four patches of ours are retired because v1.2.9 has the behaviour: the logit gather (upstream `5cd52c7a8`, `5b927e2bf`), the forward pieces split (`1ba369792`), the 2,048-row expert chunk
-(`8978c4357`) and `EY_DIRECT` (`8978c4357`, `dc4aef0ec`: the prompt chunk writes the slot rows itself, so its knob left `DEFS`). `TF_GLM_INDEX_CUDA` is upstream's default (`8fe15871c`) and also left `DEFS`.
+(`8978c4357`) and `EY_DIRECT` (`8978c4357`, `dc4aef0ec`: the prompt chunk writes the slot rows itself, so its knob left the recipe). `TF_GLM_INDEX_CUDA` is upstream's default (`8fe15871c`) and also left it.
 Upstream's own defaults on v1.2.9 need no setting: `TF_GLM_DSEL`, and `TF_GLM_PROMPT_PAIR=1` (while no stream decodes, a prompt step takes two 2,048-row chunks, each one's exchanges under the other's compute; the kernels still run on 2,048 rows, and pairing is refused while a pass has request starts). Overlaps kept for with/without windows instead of dropped on text: our decode-window index patches against
 `TF_GLM_DSEL`, the item plan against compact decode, `MLPSPLIT` against upstream's drafter split, `SPARSE_ONEPASS` against the new prompt plan, the X3 decode knobs, and the glue gather on the collective path.

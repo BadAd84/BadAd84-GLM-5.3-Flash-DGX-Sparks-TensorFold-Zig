@@ -22,9 +22,10 @@
 #             --learn-conversations, as scripts/queue-disk-tier.sh does.
 #   WRAP      command words run in front of the engine (a profiler: "nsys profile -o /out/r0 --trace=cuda
 #             --sample=none"); XRUN extra docker run arguments (the profiler's output mount)
-#   KNOBS    off (default), measured or all: which of the recipe's knobs to enable
+#   KNOBS    off (default), measured (also prod, all) or dev: which environment file to apply (scripts/env/prod.env, scripts/env/dev.env)
+#   DRYRUN   1 prints the docker command and exits, starting nothing
 #
-# The env block mirrors the production stack's shape (ai-engine serve4.sh measured set: P2P and
+# The runtime section of both environment files mirrors the production stack's shape (ai-engine serve4.sh measured set: P2P and
 # SHM off, 4 channels, cross-NIC routing, LAN socket name) so a Zig boot and a production boot are
 # comparable; the drafter default does the same. The knob set is the one this recipe's patches
 # implement, each proved default-off until its own A/B; per-knob overrides go through XENV.
@@ -44,67 +45,46 @@ PORT=${PORT:-8300}
 MODEL=${MODEL:-/root/.cache/huggingface/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-4bpw-TensorFold/snapshots/078455ffe6472f9a52fbc1139f58b9db2881b25c}
 DFLASH=/root/.cache/huggingface/hub/models--incoai--GLM-5.3-Flash-DFlash2/snapshots/bf582e4eacc1810f76656d1811693ff6c6737d2a
 XENV=${XENV:-}
+XSERVE=${XSERVE:-}
 [[ $WORLD = 1 || -n "${COMM_ID:-}" ]] || { echo "COMM_ID is required for WORLD>1" >&2; exit 1; }
 
 KVFLAG=(--kv-cache fp8)
-ENV=(-e HF_HUB_OFFLINE=1 -e TENSORFOLD_NO_UPDATE_CHECK=1 -e TENSORFOLD_MEMORY_RESERVE_GIB=$RES
- -e TF_GLM_RANK=$RANK -e TF_GLM_WORLD=$WORLD -e TF_GLM_COPY_MAX=15 -e TF_GLM_COPY_REPLY_MATCH=16
- -e TF_GLM_HEAD_BITS=8 -e TF_GLM_DENSE_BITS=4)
+# The values of the serve's environment are two complete files: scripts/env/prod.env (production: a runtime section, then the adopted recipe)
+# and scripts/env/dev.env (production plus the candidates under test). KNOBS picks the file and how much of it: off is the runtime section of
+# prod.env alone (an arm that names its own knobs through XENV), measured (or prod, or all) is prod.env whole, dev is dev.env whole. Only what
+# depends on the boot is set here: the memory reserve, rank, world and NCCL_COMM_ID. A name the caller passes through XENV wins over its line
+# in the file, so an A/B arm can change or turn off any setting without editing a file; a caller's own NCCL_IB_HCA or NCCL_SOCKET_IFNAME in
+# the launching environment wins as well.
+ENV=(-e TENSORFOLD_MEMORY_RESERVE_GIB=$RES -e TF_GLM_RANK=$RANK -e TF_GLM_WORLD=$WORLD)
 [[ -n "${COMM_ID:-}" ]] && ENV+=(-e NCCL_COMM_ID=$COMM_ID)
-# The proven production/ai-engine NCCL shape (same HCA names and GID 3 on spark1-3, from
-# start-tp3.sh's own launcher output): P2P and SHM off, 4 channels, cross-NIC, subnet-aware
-# routing, all four RoCE HCAs, LAN bootstrap.
-ENV+=(-e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 -e NCCL_MIN_NCHANNELS=4 -e NCCL_MAX_NCHANNELS=4
- -e NCCL_CROSS_NIC=1 -e NCCL_IB_SUBNET_AWARE_ROUTING=1 -e NCCL_IB_GID_INDEX=3
- -e NCCL_IB_HCA="${NCCL_IB_HCA:-roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1}"
- -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-enP7s7})
+CALLER_WINS=" NCCL_IB_HCA NCCL_SOCKET_IFNAME "
+# envfile ENV SECTION...: `-e NAME=value` onto ENV for each line of scripts/env/ENV.env's named sections (runtime, recipe, candidates); a section
+# starts at its `# --- NAME` line. A line is NAME=value with no space in the value, or blank, or a # comment.
+envfile() {
+  local f="$here/env/$1.env" sec=runtime want=" ${*:2} " line name val
+  [[ -r $f ]] || { echo "serve.sh: no $f" >&2; exit 2; }
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line#"${line%%[![:space:]]*}"}
+    if [[ $line =~ ^"# --- "(runtime|recipe|candidates)([[:space:]]|$) ]]; then sec=${BASH_REMATCH[1]}; continue; fi
+    [[ -z $line || $line == \#* ]] && continue
+    [[ $want == *" $sec "* ]] || continue
+    line=${line%% #*}; line=${line%"${line##*[![:space:]]}"}
+    [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)=([^[:space:]]*)$ ]] || { echo "serve.sh: bad line in $f: $line" >&2; exit 2; }
+    name=${BASH_REMATCH[1]}; val=${BASH_REMATCH[2]}
+    [[ " ${XENV:-} " == *" -e $name="* ]] && continue
+    if [[ $CALLER_WINS == *" $name "* && -n "${!name:-}" ]]; then val=${!name}; fi
+    ENV+=(-e "$name=$val")
+  done < "$f"
+}
+case "${KNOBS:-off}" in
+  off) envfile prod runtime ;;
+  measured|prod|all) envfile prod runtime recipe ;;
+  dev) envfile dev runtime recipe candidates ;;
+  *) echo "KNOBS must be off, measured (or prod, all) or dev" >&2; exit 2 ;;
+esac
 # NCCL_DEBUG is deliberately NOT set: with it unset the engine captures NCCL's own INFO into a private
 # file and parses it for its transport report. A user value still wins (pass it through XENV).
 [[ -n "${NCCL_DEBUG:-}" ]] && ENV+=(-e NCCL_DEBUG=$NCCL_DEBUG)
-
-# The recipe's knobs: each patch in patches/engine/ adds one, and each is added only when XENV
-# does not already name it, so an A/B arm can turn any of them off without editing this file.
-# The pin's own knobs (L2PF, PREFILL_ROWS, FILL_ROWS) are NOT in this set: setting them explicitly
-# killed the boot (container created, then gone within 60s, twice) and L2PF already reports its own
-# sizing at boot, so each needs its own A/B before it can join. Every name below is a row of the .glm scope of
-# zig/src/platform/environment.zig on the re-seated tree (one-chunk and reply-prefill are not carried, see
-# docs/audit-2026-11-12/reseat-v127.md). On v1.2.9 TF_GLM_INDEX_CUDA's kernels are upstream's default (both, 0 off),
-# so it left this set; TF_GLM_INDEX_CUDA=all with TF_GLM_INDEX_DECODE_FROM=<positions> is the decode-window arm
-# (patch 0007 of the v1.2.9 series). TF_GLM_OVN_EY_DIRECT left the set with patch 0036: v1.2.9 writes a prompt
-# chunk's routed rows into the slot rows itself (upstream 8978c4357), so there is no knob to set. TF_GLM_OVN_EXL3_ITEMS=1 keeps
-# decode windows on our 16-pair item plan (the v1.2.7 default path; v1.2.9's default is its compact 1024-row calls).
-DEFS="TF_GLM_KDA_PAD=1 TF_GLM_OVN_KEPT_WALK=1
- TF_GLM_OVN_DRAFT_ONEPASS=1 TF_GLM_OVN_DRAFT_DOWN4=1 TF_GLM_OVN_DRAFT_MLPSPLIT=4
- TF_GLM_OVN_MLA_FUSEMERGE=1
- TF_GLM_OVN_DRAFT_EDGE=0.6 TF_GLM_OVN_DRAFT_BETA=2 TF_GLM_OVN_DRAFT_CUTS=1:0.3
- TF_EXL3_DEC_ORDER=1 TF_GLM_OVN_EXL3_ITEMS=1 TF_GLM_OVN_X3_NC=1 TF_GLM_OVN_X3_XROW=1 TF_GLM_OVN_X3_FUSEDOWN=1
- TF_GLM_OVN_KEEP_SEQS=1 TF_GLM_OVN_OFF_EFFORT_LINE=1
- TF_GLM_OVN_NO_COPY=1 TF_GLM_OVN_MM_DECTILE=100000 TF_GLM_OVN_SWIGLU_REDUCE=1
- TF_GLM_OVN_ONEPASS_PIPE=1 TF_GLM_CHUNK_SOLO=4096 TF_GLM_OVN_HOST_ONCE=1 TF_GLM_OVN_DRAFT_NOISE=1"
-# The first seven are the arm measured together (docs/OVERNIGHT-2026-11-12.md section 17); EDGE, BETA and CUTS are production's DFlash2
-# chain rule (fnc7:0.3, section 22); TF_EXL3_DEC_ORDER and the three TF_GLM_OVN_X3_* switches are production's routed-expert decode
-# kernel set (section 24); KEEP_SEQS (patch 0031 of the v1.2.9 series, section 30) was measured with EY_DIRECT at
-# 1/2/4/6/8 streams, section 34; EY_DIRECT's win is v1.2.9's own path now, so only KEEP_SEQS is left to set. GLUE_FUSE, INDEX_SCHED, POOLS32,
-# INDEX_REGROUP, MM_WIDE, SPARSE_ONEPASS and ROUTER_WARM were measured one at a time, within the noise, so they stay out.
-# OFF_EFFORT_LINE (patch 0033) sets no speed cell: it is the prompt production sends, a thinking-off request renders
-# without its default `Reasoning Effort: Max` line, so its replies are not token-identical to the knob-off ones by design.
-# The last seven joined together (sections 45 to 49 and the queue71 and queue72 records in docs/KNOBS.md): NO_COPY (patch 0034: a DFlash2
-# drafter's windows without copied continuations), MM_DECTILE (a decode-window tile variant of the matmul launch) and SWIGLU_REDUCE (the
-# reduce and the swiglu in one launch), both checked byte for byte against the default launches by patch 0035's glm-mm-ovn, ONEPASS_PIPE
-# (the DSA block's prompt rows on the one-pass pipeline), CHUNK_SOLO=4096 (upstream: one 4,096-row prompt step while no stream decodes),
-# HOST_ONCE (a request rendered once) and DRAFT_NOISE (a sampled stream's draft pick uses the target's keyed Gumbel draws; greedy streams
-# never read it). Replies equal the recipe's on every cell, and the pairs show no level slower (docs/KNOBS.md has each knob's cells).
-# Off by default: a knob is default-off until it has been A/B'd at 1/2/4/6/8 streams on this series
-# (docs/OVERNIGHT-2026-11-12.md has the cells). KNOBS=measured opts into the set above; KNOBS=all is the same
-# list for an arm that means to test them all.
-case "${KNOBS:-off}" in
-  measured|all)
-    for kv in $DEFS; do
-      [[ " ${XENV:-} " == *" -e ${kv%%=*}="* ]] || XENV="${XENV:-} -e $kv"
-    done ;;
-  off) ;;
-  *) echo "KNOBS must be off, measured or all" >&2; exit 2 ;;
-esac
 # TF_GLM_ROCE_MULTI: v1.2.7's own three-rank RoCE wire for the small all-gathers (ports paired by shared subnet). Measured against the
 # same image without it, order ctl, on, on, ctl: +1.8 / +1.4 / +1.6% at 1 / 2 / 4 streams, +0.1% at 6, -0.5% at 8
 # (docs/OVERNIGHT-2026-11-12.md section 21), so it comes with the measured set only up to 4 streams, which is a boot-time setting.
@@ -139,6 +119,7 @@ read -r -a WR <<< "${WRAP:-}"
 
 echo "[serve] $(date -Is) $IMAGE rank=$RANK world=$WORLD P=$P ctx=$CTX res=$RES"
 echo "[serve] exec docker run ${RUN[*]} ${ENV[*]} $IMAGE ${SERVE[*]}"
+[[ "${DRYRUN:-0}" = 1 ]] && exit 0
 # Detached on purpose: an attached `docker run` ties the engine's stdout to this shell, and when the
 # launching session ends the broken pipe stops every rank (measured: "rank 0: rank N stopped"). With -d the
 # log goes to the docker log driver and the serve outlives every session. Logs: docker logs glm53-zig-r$RANK.
