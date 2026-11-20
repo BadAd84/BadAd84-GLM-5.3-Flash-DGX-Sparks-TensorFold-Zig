@@ -2,6 +2,8 @@
 # queue92.sh - on spark1, detached, after queue91: did anyone else's work speed the serve up. The same boxes, instrument and shape as queue91 (--parallel 4 --context 1048576, 6 and 8
 # clients queue on it), every arm KNOBS=off (the runtime section of env/prod.env, no knob of ours), so a rung is what a user of upstream gets.
 # queue92.env: WORKERS, HOURS, IMGB (the pristine main of queue91, glm53-zig:m130base). Production is down for the campaign and stays down. QUEUE92-DONE.
+# ARMS (env, default the stock ladder): the units to run, in order; only the images those arms need are built. WAIT_FOR (default queue91.sh): the process to wait out first, so the pull
+# request arms can be run later as their own start (ARMS="pd pm pg" WAIT_FOR=queue93.sh) and the pilots' receipts go between.
 #
 #   0  wait for QUEUE91-DONE in ~/bench/queue91.log, then build from stage/src-TAG.tar when the image is absent and copy it to the other two ranks, one image id on all three:
 #        u129 u1210 u130   pristine upstream v1.2.9, v1.2.10 and v1.3.0 (git archive of the tag)
@@ -29,16 +31,20 @@ OUT=$HOME/bench
 agg() { tail -1 "$1" | grep -o '"agg_tok_s": [0-9.]*'; }
 stop() { bash zig-tp3-stop.sh > /dev/null 2>&1; sleep 10; }
 finish() { stop; docker rm -f glm53-zig-r0 > /dev/null 2>&1; echo "QUEUE92-DONE $(date -u +%T)"; }
-echo "[q92] $(date -u +%T) start; waiting for queue91"
-while pgrep -f 'queue91.sh' > /dev/null; do sleep 60; done
+ARMS=${ARMS:-"s9a sm2 smz s13a ud1 ui1 smr s10a s9b s13b sm3"}
+WAIT_FOR=${WAIT_FOR:-queue91.sh}
+want() { case " $ARMS " in *" $1 "*) return 0 ;; esac; return 1; }
+armtag() { case $1 in s9a|s9b) echo u129 ;; s10a) echo u1210 ;; s13a|s13b) echo u130 ;; ud1) echo ud ;; ui1) echo ui ;; pd) echo p3616 ;; pm) echo p3659 ;; pg) echo p2279 ;; esac; }
+NEED=""; for a in $ARMS; do t=$(armtag "$a"); [ -n "$t" ] && case " $NEED " in *" $t "*) ;; *) NEED="$NEED $t" ;; esac; done
+echo "[q92] $(date -u +%T) start; arms: $ARMS; images to build: ${NEED:- none}; waiting for $WAIT_FOR"
+while pgrep -f "$WAIT_FOR" > /dev/null; do sleep 60; done
 trap finish EXIT
-echo "[q92] queue91 log's last line: $(tail -1 "$OUT/queue91.log" | cut -c1-120)"
 DEADLINE=$(( $(date +%s) + ${HOURS:-8} * 3600 ))
 room() { [ "$(date +%s)" -lt "$DEADLINE" ]; }
 echo "[q92] $(date -u +%T) queue91 is done; deadline $(date -u -d @$DEADLINE +%T); $(df -h /home | tail -1 | awk '{print $4}') free"
 ids_of() { { docker images --no-trunc --format '{{.ID}}' "$1" | head -1; for h in "$W1" "$W2"; do ssh -n -o BatchMode=yes -o ConnectTimeout=15 "$h" "docker images --no-trunc --format '{{.ID}}' $1 | head -1"; done; }; }
 HAVE=" "; DPIDS=""
-for tag in u129 u1210 u130 ud ui p3616 p3659 p2279; do
+for tag in $NEED; do
   image="glm53-zig:$tag"
   if ! docker images --format '{{.ID}}' "$image" | grep -q .; then
     if [ ! -f "stage/src-$tag.tar" ]; then echo "[q92] no stage/src-$tag.tar: arm $tag is skipped"; continue; fi
@@ -50,7 +56,7 @@ for tag in u129 u1210 u130 ud ui p3616 p3659 p2279; do
   fi
 done
 wait $DPIDS
-for tag in u129 u1210 u130 ud ui p3616 p3659 p2279; do
+for tag in $NEED; do
   image="glm53-zig:$tag"
   docker images --format '{{.ID}}' "$image" | grep -q . || continue
   [ -f "stage/dist-$tag.out" ] && echo "[q92] distributed $image: $(tail -1 "stage/dist-$tag.out" | cut -c1-200)"
@@ -115,18 +121,18 @@ unit() { # unit LABEL IMAGE KNOBS XENV [EXPECT]: a P=4 boot and everything the q
   prompts "$OUT/f92-c/dec-$label"
   keeplog "$OUT/f92-c/r0-$label.log"
 }
-unit s9a glm53-zig:u129 off ""
-unit sm2 "$IMGB" off ""
-unit smz "$IMGB" off "-e TF_GLM_PDL=0"
-unit s13a glm53-zig:u130 off ""
-unit ud1 glm53-zig:ud off ""
-unit ui1 glm53-zig:ui off ""
-unit smr "$IMGB" off "$RSX"
-unit pd glm53-zig:p3616 off "-e TF_GLM_DRAFT_SPLIT=1" "${EXPECT_PD:-DRAFT_SPLIT}"
-unit pm glm53-zig:p3659 off "-e TF_GLM_MOE_DIRECT=1" "${EXPECT_PM:-MOE_DIRECT}"
-unit pg glm53-zig:p2279 off "-e TF_GLM_GRAPHS=1" "${EXPECT_PG:-GRAPHS}"
-unit s10a glm53-zig:u1210 off ""
-unit s9b glm53-zig:u129 off ""
-unit s13b glm53-zig:u130 off ""
-unit sm3 "$IMGB" off ""
+want s9a && unit s9a glm53-zig:u129 off ""
+want sm2 && unit sm2 "$IMGB" off ""
+want smz && unit smz "$IMGB" off "-e TF_GLM_PDL=0"
+want s13a && unit s13a glm53-zig:u130 off ""
+want ud1 && unit ud1 glm53-zig:ud off ""
+want ui1 && unit ui1 glm53-zig:ui off ""
+want smr && unit smr "$IMGB" off "$RSX"
+want pd && unit pd glm53-zig:p3616 off "-e TF_GLM_DRAFT_SPLIT=1" "${EXPECT_PD:-DRAFT_SPLIT}"
+want pm && unit pm glm53-zig:p3659 off "-e TF_GLM_MOE_DIRECT=1" "${EXPECT_PM:-MOE_DIRECT}"
+want pg && unit pg glm53-zig:p2279 off "-e TF_GLM_GRAPHS=1" "${EXPECT_PG:-GRAPHS}"
+want s10a && unit s10a glm53-zig:u1210 off ""
+want s9b && unit s9b glm53-zig:u129 off ""
+want s13b && unit s13b glm53-zig:u130 off ""
+want sm3 && unit sm3 "$IMGB" off ""
 exit 0
