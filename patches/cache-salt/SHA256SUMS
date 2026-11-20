@@ -1,2 +1,2 @@
-385b720297ff54e9dbe5873db8e9046d810e6c3b3ce3ff8039daf17e18b8890e  0001-server-cache-salt-and-cache-salt-per-key-keep-kept-prompt-states-apart.patch
-d4289dc336a5537011175b8a10dcf27693bb0225a92820981809c5ebbee3008c  0002-tests-the-server-goldens-model-capabilities-carry-cache-salt.patch
+e51ea6eb02309d92a1e7040a054ce07e15449c49fd467957d345ed7336794827  0001-server-cache-salt-and-cache-salt-per-key-keep-kept-prompt-states-apart.patch
+bc84aa0c7868fde07d39be1c7f41aea505e8f0dc17395fe5dd5bdcdc606ad3d8  0002-tests-the-server-goldens-model-capabilities-carry-cache-salt.patch

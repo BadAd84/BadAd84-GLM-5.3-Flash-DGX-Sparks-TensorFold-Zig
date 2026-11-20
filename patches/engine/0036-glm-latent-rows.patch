@@ -37,10 +37,23 @@ switch's, so patches/pr1411's environment.zig and docs/environment.md hunks stil
 
 New here, not a re-seat: written on this series at v1.2.9.
 
+diff --git a/docs/environment.md b/docs/environment.md
+index 55668cdb891b086fa56250b9f2413eab035b5f51..f503763f0d703c53d143ae99562b5d930f7b5133 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -100,6 +100,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
+ | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
+ | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
++| `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
+ | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
+ | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
+ | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
 diff --git a/zig/kernels/cuda/glm_glue_latent.cuh b/zig/kernels/cuda/glm_glue_latent.cuh
+index 241b66add5ac772e9b054dbf89b98abbc3de2180..b091925a247ce6b8c0cf77826c137a364ff64d37 100644
 --- a/zig/kernels/cuda/glm_glue_latent.cuh
 +++ b/zig/kernels/cuda/glm_glue_latent.cuh
-@@ -66,6 +66,143 @@
+@@ -70,6 +70,147 @@ extern "C" __global__ void __launch_bounds__(128)
    }
  }
  
@@ -103,12 +116,14 @@ diff --git a/zig/kernels/cuda/glm_glue_latent.cuh b/zig/kernels/cuda/glm_glue_la
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_absorb_q_x2(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
 +                       int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  absorb_rows<2>(q, wk, qa, rows, heads, rb);
 +}
 +
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_absorb_q_x4(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
 +                       int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  absorb_rows<4>(q, wk, qa, rows, heads, rb);
 +}
 +
@@ -172,122 +187,25 @@ diff --git a/zig/kernels/cuda/glm_glue_latent.cuh b/zig/kernels/cuda/glm_glue_la
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_expand_v_x2(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
 +                       int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  expand_rows<2>(ol, wv, out, rows, heads, rb);
 +}
 +
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_expand_v_x4(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
 +                       int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  expand_rows<4>(ol, wv, out, rows, heads, rb);
 +}
 +
  namespace glm_pages {
  
  // Row r's first element in a cache of `width`-element rows: in order (pt null), or row r % P of page pt[r / P].
-diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
---- a/zig/src/families/glm/cuda_latent.zig
-+++ b/zig/src/families/glm/cuda_latent.zig
-@@ -32,6 +32,26 @@
-     return @intCast((a + b - 1) / b);
- }
- 
-+/// The absorb_q a launch takes: ABSORB_VEC's aligned 16-byte form, else LATENT_ROWS' x2 or x4, else today's.
-+fn absorbFn(set: glue.Set, wk: u64) cuda.Function {
-+    if (set.mla.vec and wk % 16 == 0) return set.glue.absorb_q_vec;
-+    return switch (set.mla.rows) {
-+        2 => set.glue.absorb_q_x2,
-+        4 => set.glue.absorb_q_x4,
-+        else => set.glue.absorb_q,
-+    };
-+}
-+
-+/// The expand_v a launch takes, as absorbFn: the vec form when kv_b and o are both 16-byte aligned.
-+fn expandFn(set: glue.Set, wv: u64, ol: u64) cuda.Function {
-+    if (set.mla.vec and wv % 16 == 0 and ol % 16 == 0) return set.glue.expand_v_vec;
-+    return switch (set.mla.rows) {
-+        2 => set.glue.expand_v_x2,
-+        4 => set.glue.expand_v_x4,
-+        else => set.glue.expand_v,
-+    };
-+}
-+
- /// latent.absorb_q: out [rows][heads][lw] bf16 = q [rows][heads][d] . wk [heads][d][lw], fp32 sums; sk: E4M3 kv_b's.
- pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, sk: u64, out: u64, rows: usize, heads: usize, d: usize, lw: usize) !void {
-     if (d != 256 or lw != 512) return error.LatentShape;
-@@ -39,8 +59,7 @@
-         if (wk % 8 != 0) return error.LatentShape;
-         return rowBlocks(set.glue.absorb_q8, stream, .{ q, wk, sk, out }, rows, heads, lw / 32);
-     }
--    const f = if (set.mla.vec and wk % 16 == 0) set.glue.absorb_q_vec else set.glue.absorb_q; // TF_GLM_OVN_ABSORB_VEC
--    try rowBlocks(f, stream, .{ q, wk, out }, rows, heads, lw / 32);
-+    try rowBlocks(absorbFn(set, wk), stream, .{ q, wk, out }, rows, heads, lw / 32);
- }
- 
- /// The absorb and expand launches (pointers, then rows, heads, rb): rows in one block in decode, prompt_rb in prompts.
-@@ -59,8 +78,7 @@
-         if (wv % 8 != 0) return error.LatentShape;
-         return rowBlocks(set.glue.expand_v8, stream, .{ ol, wv, sv, out }, rows, heads, dv / 16);
-     }
--    const vec = set.mla.vec and wv % 16 == 0 and ol % 16 == 0; // TF_GLM_OVN_ABSORB_VEC: kv_b and o by 16-byte loads
--    try rowBlocks(if (vec) set.glue.expand_v_vec else set.glue.expand_v, stream, .{ ol, wv, out }, rows, heads, dv / 16);
-+    try rowBlocks(expandFn(set, wv, ol), stream, .{ ol, wv, out }, rows, heads, dv / 16);
- }
- 
- /// A latent cache holds BF16 rows, or E4M3 rows followed by one FP32 scale per row.
-@@ -179,3 +197,49 @@
-     try std.testing.expectEqual(@as(usize, 3), chunksFor(1025));
-     try std.testing.expectEqual(@as(usize, 1), chunksFor(512));
- }
-+
-+/// The kernels a recorded launch reaches: each field's index plus one is its handle (cuda_mla_ovn_test's rig).
-+const Rec = struct {
-+    var n: usize = 0;
-+    var ids: [8]usize = undefined;
-+    fn run(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
-+        ids[n] = @intFromPtr(f);
-+        n += 1;
-+        return 0;
-+    }
-+};
-+
-+fn id(comptime name: []const u8) usize {
-+    return std.meta.fieldIndex(glue.Kernels, name).? + 1;
-+}
-+
-+fn kernels(d: *cuda.Driver) glue.Kernels {
-+    var ks: glue.Kernels = undefined;
-+    inline for (@typeInfo(glue.Kernels).@"struct".field_names, 0..) |name, i| @field(ks, name) = .{ .d = d, .handle = @ptrFromInt(i + 1) };
-+    return ks;
-+}
-+
-+test "TF_GLM_OVN_LATENT_ROWS: rows 2 and 4 take the x2 and x4 launches; vec and KVB8 keep today's" {
-+    var d: cuda.Driver = undefined;
-+    d.api.cuLaunchKernel = Rec.run;
-+    const ks = kernels(&d);
-+    const s: cuda.Stream = .{ .d = &d, .handle = null };
-+    const plain: glue.Set = .{ .glue = &ks };
-+    const x2: glue.Set = .{ .glue = &ks, .mla = .{ .rows = 2 } };
-+    const x4: glue.Set = .{ .glue = &ks, .mla = .{ .rows = 4 } };
-+    const vec4: glue.Set = .{ .glue = &ks, .mla = .{ .rows = 4, .vec = true } };
-+    Rec.n = 0;
-+    try absorbQ(plain, s, 256, 4096, 0, 512, 2, 22, 256, 512);
-+    try expandV(plain, s, 256, 4096, 0, 512, 2, 22, 256, 512);
-+    try absorbQ(x2, s, 256, 4096, 0, 512, 2, 22, 256, 512);
-+    try expandV(x2, s, 256, 4096, 0, 512, 2, 22, 256, 512);
-+    try absorbQ(x4, s, 256, 4096, 0, 512, 70, 22, 256, 512);
-+    try expandV(x4, s, 256, 4096, 0, 512, 70, 22, 256, 512);
-+    try absorbQ(vec4, s, 256, 4096, 0, 512, 2, 22, 256, 512);
-+    try expandV(vec4, s, 256, 4096, 0, 512, 2, 22, 256, 512);
-+    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q"), id("expand_v"), id("absorb_q_x2"), id("expand_v_x2"), id("absorb_q_x4"), id("expand_v_x4"), id("absorb_q_vec"), id("expand_v_vec") }, Rec.ids[0..Rec.n]);
-+    Rec.n = 0;
-+    try absorbQ(x4, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
-+    try expandV(x4, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
-+    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
-+}
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index 05e23cd56895b439b17208d0cde2ae58ec730e31..164077eccad608c33dbda405355aa740652c11e8 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -26,21 +26,27 @@
+@@ -27,21 +27,27 @@ pub const Set = struct {
      onepass_pipe: ?cuda.Function = null,
  };
  
@@ -319,7 +237,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
      }
  };
  
-@@ -123,6 +129,11 @@
+@@ -124,6 +130,11 @@ pub const Kernels = struct {
      expand_v_vec: cuda.Function,
      absorb_q8: cuda.Function,
      expand_v8: cuda.Function,
@@ -331,7 +249,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
      router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
  
      pub fn load(m: cuda.Module) !Kernels {
-@@ -402,3 +413,17 @@
+@@ -403,3 +414,17 @@ test "the wrappers' shape rules as glue.py's" {
      try std.testing.expectEqual(@as(i64, 512), pow2(288 + 1)); // _topk's BLOCK for 288 experts
      try std.testing.expectEqual(@as(i64, 16), pow2(8 + 1)); // its SLOTP for top-8 and the shared slot
  }
@@ -349,10 +267,113 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
 +    cuda.ovn.fake("LATENT_ROWS", "6");
 +    try std.testing.expectError(error.BadOvnKnob, Mla.read());
 +}
+diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
+index 0595fcf12c8726ae92adf94bdefdfe0f2c4e3cf7..4620b2d492844bf49e77fe402377f1c0fa9007b2 100644
+--- a/zig/src/families/glm/cuda_latent.zig
++++ b/zig/src/families/glm/cuda_latent.zig
+@@ -33,6 +33,26 @@ fn cdiv(a: usize, b: usize) u32 {
+     return @intCast((a + b - 1) / b);
+ }
+ 
++/// The absorb_q a launch takes: ABSORB_VEC's aligned 16-byte form, else LATENT_ROWS' x2 or x4, else today's.
++fn absorbFn(set: glue.Set, wk: u64) cuda.Function {
++    if (set.mla.vec and wk % 16 == 0) return set.glue.absorb_q_vec;
++    return switch (set.mla.rows) {
++        2 => set.glue.absorb_q_x2,
++        4 => set.glue.absorb_q_x4,
++        else => set.glue.absorb_q,
++    };
++}
++
++/// The expand_v a launch takes, as absorbFn: the vec form when kv_b and o are both 16-byte aligned.
++fn expandFn(set: glue.Set, wv: u64, ol: u64) cuda.Function {
++    if (set.mla.vec and wv % 16 == 0 and ol % 16 == 0) return set.glue.expand_v_vec;
++    return switch (set.mla.rows) {
++        2 => set.glue.expand_v_x2,
++        4 => set.glue.expand_v_x4,
++        else => set.glue.expand_v,
++    };
++}
++
+ /// latent.absorb_q: out [rows][heads][lw] bf16 = q [rows][heads][d] . wk [heads][d][lw], fp32 sums; sk: E4M3 kv_b's.
+ pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, sk: u64, out: u64, rows: usize, heads: usize, d: usize, lw: usize) !void {
+     if (d != 256 or lw != 512) return error.LatentShape;
+@@ -40,8 +60,7 @@ pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, sk: u64, out
+         if (wk % 8 != 0) return error.LatentShape;
+         return rowBlocks(set.glue.absorb_q8, stream, .{ q, wk, sk, out }, rows, heads, lw / 32);
+     }
+-    const f = if (set.mla.vec and wk % 16 == 0) set.glue.absorb_q_vec else set.glue.absorb_q; // TF_GLM_OVN_ABSORB_VEC
+-    try rowBlocks(f, stream, .{ q, wk, out }, rows, heads, lw / 32);
++    try rowBlocks(absorbFn(set, wk), stream, .{ q, wk, out }, rows, heads, lw / 32);
+ }
+ 
+ /// The absorb and expand launches (pointers, then rows, heads, rb): rows in one block in decode, prompt_rb in prompts.
+@@ -60,8 +79,7 @@ pub fn expandV(set: glue.Set, stream: cuda.Stream, ol: u64, wv: u64, sv: u64, ou
+         if (wv % 8 != 0) return error.LatentShape;
+         return rowBlocks(set.glue.expand_v8, stream, .{ ol, wv, sv, out }, rows, heads, dv / 16);
+     }
+-    const vec = set.mla.vec and wv % 16 == 0 and ol % 16 == 0; // TF_GLM_OVN_ABSORB_VEC: kv_b and o by 16-byte loads
+-    try rowBlocks(if (vec) set.glue.expand_v_vec else set.glue.expand_v, stream, .{ ol, wv, out }, rows, heads, dv / 16);
++    try rowBlocks(expandFn(set, wv, ol), stream, .{ ol, wv, out }, rows, heads, dv / 16);
+ }
+ 
+ /// A latent cache holds BF16 rows, or E4M3 rows followed by one FP32 scale per row.
+@@ -180,3 +198,50 @@ test "latent.py's tiling rules" {
+     try std.testing.expectEqual(@as(usize, 3), chunksFor(1025));
+     try std.testing.expectEqual(@as(usize, 1), chunksFor(512));
+ }
++
++/// The kernels a recorded launch reaches: each field's index plus one is its handle (cuda_mla_ovn_test's rig).
++const Rec = struct {
++    var n: usize = 0;
++    var ids: [8]usize = undefined;
++    fn run(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
++        ids[n] = @intFromPtr(f);
++        n += 1;
++        return 0;
++    }
++};
++
++fn id(comptime name: []const u8) usize {
++    return std.meta.fieldIndex(glue.Kernels, name).? + 1;
++}
++
++fn kernels(d: *cuda.Driver) glue.Kernels {
++    var ks: glue.Kernels = undefined;
++    inline for (@typeInfo(glue.Kernels).@"struct".field_names, 0..) |name, i| @field(ks, name) = .{ .d = d, .handle = @ptrFromInt(i + 1) };
++    return ks;
++}
++
++test "TF_GLM_OVN_LATENT_ROWS: rows 2 and 4 take the x2 and x4 launches; vec and KVB8 keep today's" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.run;
++    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Rec.run);
++    const ks = kernels(&d);
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const plain: glue.Set = .{ .glue = &ks };
++    const x2: glue.Set = .{ .glue = &ks, .mla = .{ .rows = 2 } };
++    const x4: glue.Set = .{ .glue = &ks, .mla = .{ .rows = 4 } };
++    const vec4: glue.Set = .{ .glue = &ks, .mla = .{ .rows = 4, .vec = true } };
++    Rec.n = 0;
++    try absorbQ(plain, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try expandV(plain, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try absorbQ(x2, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try expandV(x2, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try absorbQ(x4, s, 256, 4096, 0, 512, 70, 22, 256, 512);
++    try expandV(x4, s, 256, 4096, 0, 512, 70, 22, 256, 512);
++    try absorbQ(vec4, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try expandV(vec4, s, 256, 4096, 0, 512, 2, 22, 256, 512);
++    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q"), id("expand_v"), id("absorb_q_x2"), id("expand_v_x2"), id("absorb_q_x4"), id("expand_v_x4"), id("absorb_q_vec"), id("expand_v_vec") }, Rec.ids[0..Rec.n]);
++    Rec.n = 0;
++    try absorbQ(x4, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
++    try expandV(x4, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
++    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
++}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 4599c2690a0cb66dc534242c8e4bbbfbf0ba46b8..3e5d78e966ae9bffddfcfad356da359acc86aa8d 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -115,6 +115,7 @@
+@@ -159,6 +159,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -360,47 +381,9 @@ diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
      .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
      .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
-diff --git a/docs/environment.md b/docs/environment.md
---- a/docs/environment.md
-+++ b/docs/environment.md
-@@ -73,6 +73,7 @@
- | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
- | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
- | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
-+| `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
- | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
- | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
- | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
-diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
---- a/zig/tests/cuda/glm_ovn_checks.zig
-+++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -6,6 +6,7 @@
- const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
- const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
- const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
-+const glm_latent_rows = @import("glm_latent_rows_tests.zig");
- const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
- const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
- const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
-@@ -17,6 +18,7 @@
-     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
-     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
-     \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
-+    \\  glm-latent-rows           TF_GLM_OVN_LATENT_ROWS: absorb_q and expand_v at 2 and 4 rows a loop step against today's, byte for byte
-     \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
-     \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
-     \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
-@@ -35,6 +37,8 @@
-         try glm_index_regroup_check.run(gpu);
-     } else if (std.mem.eql(u8, cmd, "glm-keep-seqs-check")) {
-         try glm_keep_seqs_check.run(gpu, rest);
-+    } else if (std.mem.eql(u8, cmd, "glm-latent-rows")) {
-+        try glm_latent_rows.run(gpu);
-     } else if (std.mem.eql(u8, cmd, "glm-mla-skip-check")) {
-         try glm_mla_skip_check.run(gpu);
-     } else if (std.mem.eql(u8, cmd, "glm-mm-ovn")) {
 diff --git a/zig/tests/cuda/glm_latent_rows_tests.zig b/zig/tests/cuda/glm_latent_rows_tests.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..9ecfc9a9d2ccd59f1d152c99337e2efc0727fce1
 --- /dev/null
 +++ b/zig/tests/cuda/glm_latent_rows_tests.zig
 @@ -0,0 +1,164 @@
@@ -568,3 +551,32 @@ new file mode 100644
 +    try planted(&r);
 +    check.pass("glm-latent-rows: every case equals today's launches byte for byte", .{});
 +}
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+index ef53d74462dac9186d390f98d45d830d315e2195..e2411eb2f7c14072e09d0e9e3941bbb7d0e8b063 100644
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -5,6 +5,7 @@ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
+ const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
+ const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
+ const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
++const glm_latent_rows = @import("glm_latent_rows_tests.zig");
+ const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
+ const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
+ const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
+@@ -15,6 +16,7 @@ pub const usage =
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
+     \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
++    \\  glm-latent-rows           TF_GLM_OVN_LATENT_ROWS: absorb_q and expand_v at 2 and 4 rows a loop step against today's, byte for byte
+     \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
+     \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
+     \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
+@@ -31,6 +33,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+         try glm_index_regroup_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-keep-seqs-check")) {
+         try glm_keep_seqs_check.run(gpu, rest);
++    } else if (std.mem.eql(u8, cmd, "glm-latent-rows")) {
++        try glm_latent_rows.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-mla-skip-check")) {
+         try glm_mla_skip_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-mm-ovn")) {

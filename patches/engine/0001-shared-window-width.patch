@@ -38,6 +38,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/tests/cuda/glm_lanes_tests.zig b/zig/tests/cuda/glm_lanes_tests.zig
+index d2e5f44f8dbd2cb355b6d34e38ad5b47da19877e..6a7ace8e6bf73185bbd96cb85883a108d1852e26 100644
 --- a/zig/tests/cuda/glm_lanes_tests.zig
 +++ b/zig/tests/cuda/glm_lanes_tests.zig
 @@ -242,6 +242,7 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank:

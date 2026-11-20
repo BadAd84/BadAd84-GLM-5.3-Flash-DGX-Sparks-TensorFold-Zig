@@ -100,17 +100,19 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
+index be940aaf5a2e084b9a700220dddefee67d3fcf13..d2eca9059d0fb08e6bbdcd745cf47dd656183e88 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -31,6 +31,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
- | `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
+@@ -50,6 +50,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
  | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
+ | `TF_QWEN35_CHUNK_SOLO` | Qwen 3.5/3.6/3.8 on CUDA: 4096 or 8192 rows a foreground prompt pass while no other stream decodes (a background warm pass keeps 4096); unset, empty or 4096 is off, with main's scratch. Checked when the model loads, with the family's own message |
 +| `TF_EXL3_DEC_ORDER` | Exactly `0` or `1`; 1 launches the EXL3 grouped decode's blocks k slice by k slice (the same values, a different order); default off |
  | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
  | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
  | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
 diff --git a/zig/kernels/cuda/exl3_experts.cu b/zig/kernels/cuda/exl3_experts.cu
+index 52ddf77dbf94a127cbe1cb29abfeaa8b5f324435..3731013acabd69c21bb988e44f013f8a26cfd955 100644
 --- a/zig/kernels/cuda/exl3_experts.cu
 +++ b/zig/kernels/cuda/exl3_experts.cu
 @@ -17,16 +17,17 @@ constexpr int GROUPED_LOAD = tf_exl3::AHEAD;
@@ -135,6 +137,7 @@ diff --git a/zig/kernels/cuda/exl3_experts.cu b/zig/kernels/cuda/exl3_experts.cu
  
  namespace tf_exl3 {
 diff --git a/zig/kernels/cuda/exl3_grouped.cuh b/zig/kernels/cuda/exl3_grouped.cuh
+index 930700d964cf526217803619983a7a86136550ed..a4059131e1226b7775c104e909df912f954ad364 100644
 --- a/zig/kernels/cuda/exl3_grouped.cuh
 +++ b/zig/kernels/cuda/exl3_grouped.cuh
 @@ -20,7 +20,7 @@ struct GroupedArgs {
@@ -147,6 +150,7 @@ diff --git a/zig/kernels/cuda/exl3_grouped.cuh b/zig/kernels/cuda/exl3_grouped.c
  
  // How a warp reads its k tiles: main's loop, or a tile ahead (sm_120 up); SKIP and STALE are the contract's faults.
 diff --git a/zig/src/cuda/exl3_experts.zig b/zig/src/cuda/exl3_experts.zig
+index b907b3a3044a400ff9447895e0dc5efb796bcff3..95bb251bb5ab9a8b4056c619ac7aeffe93ef351a 100644
 --- a/zig/src/cuda/exl3_experts.zig
 +++ b/zig/src/cuda/exl3_experts.zig
 @@ -57,6 +57,17 @@ pub fn plan(k: usize, n: usize, gateup: bool) !u32 {
@@ -194,29 +198,32 @@ diff --git a/zig/src/cuda/exl3_experts.zig b/zig/src/cuda/exl3_experts.zig
          var cb: launch_.Args = .{};
          cb.add(sc.z);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index a58f582fbd2c2f6ecd1d5b479574213c75ad77c3..aa511ae8d1c362e857fa3e2fdbf7f179b35c77b9 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -53,6 +53,7 @@ pub const rules = [_]Rule{
-     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+@@ -81,6 +81,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
      .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
+     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
 +    .{ .name = "TF_EXL3_DEC_ORDER", .scope = .cuda, .kind = .flag, .trim = " ", .forms = "0 or 1" },
      .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
      .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
      .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
 diff --git a/zig/src/platform/environment_test.zig b/zig/src/platform/environment_test.zig
+index f817bb59bf01aaf687838a4e3bc5c59abe99905f..80309aa699baf78b05be6801449cc2abebe09ba5 100644
 --- a/zig/src/platform/environment_test.zig
 +++ b/zig/src/platform/environment_test.zig
-@@ -70,6 +70,8 @@ const valid = [_]Case{
-     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "0", .n = 0 },
-     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
-     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+@@ -108,6 +108,8 @@ const valid = [_]Case{
+     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+     .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
+     .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
 +    .{ .name = "TF_EXL3_DEC_ORDER", .raw = "0", .n = 0 },
 +    .{ .name = "TF_EXL3_DEC_ORDER", .raw = " 1", .n = 1 },
      .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
      .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
      .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
 diff --git a/zig/tests/cuda/contract_exl3_grouped.zig b/zig/tests/cuda/contract_exl3_grouped.zig
+index d1dd8a49fcd842f6867c04c6d0cb17943cc376f7..0f250e2ebfb2cddb4f2295ac867eefaa5dffeb2e 100644
 --- a/zig/tests/cuda/contract_exl3_grouped.zig
 +++ b/zig/tests/cuda/contract_exl3_grouped.zig
 @@ -75,7 +75,7 @@ pub const Grouped = struct {

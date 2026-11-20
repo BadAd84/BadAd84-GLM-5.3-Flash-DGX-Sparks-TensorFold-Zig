@@ -26,9 +26,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 39add30cd7f5a2c431261262b4e5fcc70aa32fd1..cb13d9f870cff94f5f5dda6c6a6599af65c7b318 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -72,6 +72,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -99,6 +99,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
@@ -39,11 +40,12 @@ diff --git a/docs/environment.md b/docs/environment.md
 +| `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.cuh
+index 8932166b78753936f6245b46d26702e010097b2e..4f8b15da37f590c6f2872c46f135621e7cfb9209 100644
 --- a/zig/kernels/cuda/glm_glue_bmm.cuh
 +++ b/zig/kernels/cuda/glm_glue_bmm.cuh
-@@ -304,6 +304,76 @@ extern "C" __global__ void __launch_bounds__(128)
+@@ -309,6 +309,78 @@ extern "C" __global__ void __launch_bounds__(128)
                                                     static_cast<int>(d), static_cast<int>(ne), ks);
  }
  
@@ -109,11 +111,13 @@ diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.c
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_router16_s3(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
 +                       int64_t d, int64_t ne, int ks) {
++  glm_pdl::enter();
 +  glm_bmm::router16<3>(x, w, part, rows, x_stride, d, ne, ks);
 +}
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_router16_s4(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
 +                       int64_t d, int64_t ne, int ks) {
++  glm_pdl::enter();
 +  glm_bmm::router16<4>(x, w, part, rows, x_stride, d, ne, ks);
 +}
 +
@@ -121,12 +125,14 @@ diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.c
  extern "C" __global__ void __launch_bounds__(128)
      tf_glm_bmm_decode(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m,
 diff --git a/zig/kernels/cuda/glm_glue_moe.cuh b/zig/kernels/cuda/glm_glue_moe.cuh
+index 3926c03f52f8111eda9b7e70c831da43a3b6291c..c8e0751e078dac9156ee87629685ff329c92c789 100644
 --- a/zig/kernels/cuda/glm_glue_moe.cuh
 +++ b/zig/kernels/cuda/glm_glue_moe.cuh
-@@ -1,10 +1,10 @@
- // GLM's MLP and MoE glue by hand: glue._topk and qmm._group_sums (SwiGLU: glm_swiglu.cuh; router dot: glm_glue_router).
+@@ -2,11 +2,10 @@
  #pragma once
  
+ #include "glm_pdl.cuh"
+-
 +#include "glm_swiglu.cuh"
  #include "glm_triton.cuh"
  
@@ -136,9 +142,10 @@ diff --git a/zig/kernels/cuda/glm_glue_moe.cuh b/zig/kernels/cuda/glm_glue_moe.c
  TF_GLM_SWIGLU_512(tf_glm_swiglu_512, false)
  TF_GLM_SWIGLU_64(tf_glm_swiglu_64, false)
 diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
+index e0824852a87eaa7d7dd882b83b8b896e15c2df6f..40c452748d51da17eb53d027893760e1e456a962 100644
 --- a/zig/kernels/cuda/glm_mm.cu
 +++ b/zig/kernels/cuda/glm_mm.cu
-@@ -1,11 +1,12 @@
+@@ -1,12 +1,13 @@
  // GLM dense linears, ours: one tensor-core kernel for any row count, 64-groups then K slices in order; row-stable bits.
  
 +#include <cooperative_groups.h>
@@ -147,12 +154,13 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
  #include <stdint.h>
  
  #include "common/qmm_frag.cuh"
+ #include "glm_pdl.cuh"
 -
 +#include "glm_swiglu.cuh"
  namespace {
  
  using namespace qmm_frag;
-@@ -72,29 +73,44 @@ __device__ __forceinline__ void bpairs(const uint32_t* __restrict__ p, uint32_t
+@@ -73,29 +74,44 @@ __device__ __forceinline__ void bpairs(const uint32_t* __restrict__ p, uint32_t
      }
  }
  
@@ -205,7 +213,7 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
      const int slice = blockIdx.z, g0 = slice * per;
      const int t0 = n0 >> 3;                                   // the block's first column tile
      auto stage = [&](int st) { return buf + st * T::STAGE; };
-@@ -109,7 +125,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
+@@ -110,7 +126,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
      auto loadW = [&](int st, int g) {
          unsigned char* pw = stage(st) + T::X;
          constexpr int PER_TILE = 32 * T::WPC * 4 / 16;        // 16-byte pieces of one column tile's chunks
@@ -214,7 +222,7 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
              const int tt = c / PER_TILE, off = c % PER_TILE;
              if (t0 + tt >= N8) continue;
              const long long src = ((long long)(t0 + tt) * KG + g) * 32 * T::WPC * 4 + off * 16;
-@@ -117,7 +133,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
+@@ -118,7 +134,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
          }
          if constexpr (BITS != 16) {
              unsigned char* ps = pw + T::W;
@@ -223,7 +231,7 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
                  if (t0 + tt >= N8) continue;
                  cp16(ps + tt * 16, s + ((long long)(t0 + tt) * KG + g) * 8);
              }
-@@ -189,6 +205,40 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
+@@ -190,6 +206,40 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
          }
      }
      wait<0>();
@@ -264,7 +272,7 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
  #pragma unroll
      for (int i = 0; i < T::MT; ++i)
  #pragma unroll
-@@ -200,7 +250,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
+@@ -201,7 +251,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
                  const int row = m0 + wm * (BM / WM) + i * 16 + (lane >> 2) + h * 8;
                  if (row >= M) continue;
                  const float v0 = acc[i][j][2 * h], v1 = acc[i][j][2 * h + 1];
@@ -273,14 +281,14 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
                      float* dst = part + ((long long)slice * M + row) * N + col;
                      dst[0] = v0;
                      dst[1] = v1;
-@@ -229,6 +279,22 @@ extern "C" __global__ void glm_mm_reduce(const float* __restrict__ part, void* _
+@@ -230,6 +280,22 @@ extern "C" __global__ void glm_mm_reduce(const float* __restrict__ part, void* _
      else reinterpret_cast<__nv_bfloat16*>(out)[i] = __float2bfloat16_rn(acc);
  }
  
 +// TF_GLM_OVN_SWIGLU_REDUCE: glm_mm_reduce of [gate | up] then glue.swiglu's value, one pass (no 64-sums: no reader)
 +extern "C" __global__ void glm_mm_reduce_swiglu(const float* __restrict__ part, __nv_bfloat16* __restrict__ act,
 +                                                long long rows, long long W, int SK, float limit) {
-+    qmm_frag::grid_launch();
++    glm_pdl::enter();
 +    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
 +    if (i >= rows * W) return;
 +    const long long total = rows * 2 * W;                     // the partials of one slice: [rows][gate | up]
@@ -296,7 +304,7 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
  // one instance a (bits, row bucket): (16, 1 warp row), (32, 1), (64, 2), (128, 2); three stages
  #define GLM_MM_ALL(B)                                                                                                  \
      extern "C" __global__ void __launch_bounds__(128) glm_mm##B##_16(const __nv_bfloat16* __restrict__ x, long long ldx, \
-@@ -246,12 +312,46 @@ extern "C" __global__ void glm_mm_reduce(const float* __restrict__ part, void* _
+@@ -247,12 +313,46 @@ extern "C" __global__ void glm_mm_reduce(const float* __restrict__ part, void* _
  // prompts: 128-row blocks, row blocks fastest (one slice: a prompt's rows fill the GPU)
  extern "C" __global__ void __launch_bounds__(256) glm_mm16_rows(const __nv_bfloat16* __restrict__ x, long long ldx,
      const uint32_t* __restrict__ w, const __half* __restrict__ s, void* __restrict__ out, float* __restrict__ part,
@@ -345,9 +353,10 @@ diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
  template <int BITS>
  __device__ __forceinline__ void tile_packed(const uint32_t* __restrict__ src, const __half* __restrict__ ss,
 diff --git a/zig/src/families/glm/cuda_b16.zig b/zig/src/families/glm/cuda_b16.zig
+index 9662db17283cbf10c5907871b82a844dfafe7f6d..99c1363cd7e0730dfa1ab352017a44aa731e0e68 100644
 --- a/zig/src/families/glm/cuda_b16.zig
 +++ b/zig/src/families/glm/cuda_b16.zig
-@@ -57,7 +57,7 @@ pub fn partBytes(m: usize, n: usize, k: usize) usize {
+@@ -58,7 +58,7 @@ pub fn partBytes(m: usize, n: usize, k: usize) usize {
  pub fn matmul(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, part: u64, m: usize, n: usize, k: usize, wide: bool) !void {
      if (k % bk != 0) return error.KNotMultipleOf64;
      if (set.mm) |mk| { // tiled weights, packed or bf16
@@ -357,9 +366,10 @@ diff --git a/zig/src/families/glm/cuda_b16.zig b/zig/src/families/glm/cuda_b16.z
      }
      const sk = splitK(n, k);
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index 8ae1b42b303e0650a401d9a5e6ac31829d406b54..bbcae3dafb49c4548d3fbc4345deff60b68dc2c3 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -97,10 +97,15 @@ pub const Kernels = struct {
+@@ -98,10 +98,15 @@ pub const Kernels = struct {
      chunks_32_fp8: cuda.Function,
      merge: cuda.Function,
      scores: cuda.Function,
@@ -376,21 +386,22 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
          try k.bmm_tile.allowDynamicShared(bmm_tile_smem);
          try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
          try k.chunks_16.allowDynamicShared(chunksSmem(16));
-@@ -208,6 +213,10 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
+@@ -209,6 +214,10 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
      if (x % 16 != 0 or x_stride % 8 != 0 or w % 16 != 0) return error.RowShape; // the tiles stage rows by cp.async
      var a: cuda.Args = .{};
      inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
 +    if (set.glue.router16) |f| if (m <= 16) { // TF_GLM_OVN_ROUTER16: 16-row tiles, each warp 8 experts
-+        try cuda.launch.launch(f, .{ .grid = .{ .x = 1, .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
++        try cuda_pdl.launch(f, .{ .grid = .{ .x = 1, .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
 +        return sliceSum(set, stream, part, out, m * ne, router_ks, true);
 +    };
-     try cuda.launch.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .shared = router_tile_smem }, stream, &a);
+     try cuda_pdl.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .shared = router_tile_smem }, stream, &a);
      try sliceSum(set, stream, part, out, m * ne, router_ks, true);
  }
 diff --git a/zig/src/families/glm/cuda_mlp.zig b/zig/src/families/glm/cuda_mlp.zig
+index 7b04c02a8476ac864858ad7d35045cee043fdb16..2815a61a751ff1f3d3a67d86f8a7d6d0e2914805 100644
 --- a/zig/src/families/glm/cuda_mlp.zig
 +++ b/zig/src/families/glm/cuda_mlp.zig
-@@ -5,6 +5,7 @@ const cuda = @import("cuda");
+@@ -6,6 +6,7 @@ const cuda_pdl = @import("cuda_pdl.zig");
  const glue = @import("cuda_glue.zig");
  const b16 = @import("cuda_b16.zig");
  const projection = @import("cuda_proj.zig");
@@ -398,7 +409,7 @@ diff --git a/zig/src/families/glm/cuda_mlp.zig b/zig/src/families/glm/cuda_mlp.z
  
  /// A dense layer's weights: NVFP4 as Fp4Linear holds them, an EXL3 checkpoint's bf16, or FP4-Local's MXFP8.
  pub const Weights = union(enum) {
-@@ -53,6 +54,8 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
+@@ -54,6 +55,8 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
      const q = switch (l.w) {
          .nvfp4 => |q| q,
          .bf16 => |b| { // [gate | up] in one matmul, as the shared expert's
@@ -408,9 +419,10 @@ diff --git a/zig/src/families/glm/cuda_mlp.zig b/zig/src/families/glm/cuda_mlp.z
              return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
          },
 diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
+index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24c743ae7e 100644
 --- a/zig/src/families/glm/cuda_mm.zig
 +++ b/zig/src/families/glm/cuda_mm.zig
-@@ -46,6 +46,7 @@ pub const Kernels = struct {
+@@ -47,6 +47,7 @@ pub const Kernels = struct {
      tile_packed: [3]cuda.Function, // glm_mm_tile4/6/8: packed rows and their scales into the tiles
      prompt_fixed_k: bool = false, // opt-in prompt experiment; never selected from the number of batched rows
      pdl: bool, // dependent launches: a matmul's weights stream in while the kernel before it finishes
@@ -418,10 +430,10 @@ diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
  
      pub fn load(m: cuda.Module) !Kernels {
          var k: Kernels = .{ .by_rows = undefined, .packed_rows = undefined, .tile_packed = undefined, .prompt = try m.function("glm_mm16_rows"), .reduce = try m.function("glm_mm_reduce"), .tile = try m.function("glm_mm_tile16"), .pdl = true };
-@@ -62,10 +63,94 @@ pub const Kernels = struct {
+@@ -63,10 +64,94 @@ pub const Kernels = struct {
          }
          try k.prompt.allowDynamicShared(smem(128));
-         k.pdl = try @import("sys").environment.value(bool, "TF_GLM_PDL", @import("profile").lookup("TF_GLM_PDL"), true);
+         k.pdl = cuda_pdl.on();
 +        k.ovn = try Ovn.load(m, k.reduce);
          return k;
      }
@@ -513,7 +525,7 @@ diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
  const split_target = 192; // column tiles times K slices a launch aims at (the GB10's SMs, a few blocks each)
  
  fn bucket(i: usize) usize {
-@@ -78,8 +163,13 @@ fn smem(bm: usize) u32 {
+@@ -79,8 +164,13 @@ fn smem(bm: usize) u32 {
  
  /// A block's shared memory: three stages of `bm` rows of x and a 64-column tile of weights (`bits / 2` words a lane).
  pub fn sharedBytes(bits: u8, bm: usize) u32 {
@@ -528,7 +540,7 @@ diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
  }
  
  /// K slices fixed by the shape: column tiles times slices reach the target, each slice at least 4 groups of 64.
-@@ -97,39 +187,24 @@ pub fn partBytes(m: usize, w: Tiled) usize {
+@@ -98,39 +188,24 @@ pub fn partBytes(m: usize, w: Tiled) usize {
      return if (sk > 1) sk * @min(m, 64) * w.n * 4 else 0;
  }
  
@@ -576,7 +588,7 @@ diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
              const total = rows * w.n;
              var r: cuda.Args = .{};
              r.add(part);
-@@ -143,6 +218,75 @@ pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, o
+@@ -144,6 +219,75 @@ pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, o
      }
  }
  
@@ -643,7 +655,7 @@ diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
 +        r.add(@as(c_longlong, @intCast(width)));
 +        r.add(@as(c_int, @intCast(sk)));
 +        r.add(limit);
-+        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((rows * width + 255) / 256) }, .block = .{ .x = 256 } }, s, &r);
++        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((rows * width + 255) / 256) }, .block = .{ .x = 256 }, .pdl = k.pdl }, s, &r);
 +        done += rows;
 +    }
 +    return true;
@@ -653,9 +665,10 @@ diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
  pub fn tilePacked(k: *const Kernels, s: cuda.Stream, bits: u8, src: u64, ss: u64, dst: u64, ds: u64, n: usize, kk: usize) !void {
      const wi = try widthIndex(bits);
 diff --git a/zig/src/families/glm/cuda_moe.zig b/zig/src/families/glm/cuda_moe.zig
+index b1ec249595200f7ee88fe7b62247a649a6b7fb91..9b3f539b824905ddbcf03aedc36da0fd48310d99 100644
 --- a/zig/src/families/glm/cuda_moe.zig
 +++ b/zig/src/families/glm/cuda_moe.zig
-@@ -7,6 +7,7 @@ const experts = @import("cuda_experts.zig");
+@@ -8,6 +8,7 @@ const experts = @import("cuda_experts.zig");
  const exl3 = @import("cuda_exl3.zig");
  const prof_mod = @import("cuda_prof.zig");
  const projection = @import("cuda_proj.zig");
@@ -663,7 +676,7 @@ diff --git a/zig/src/families/glm/cuda_moe.zig b/zig/src/families/glm/cuda_moe.z
  
  /// One MoE layer on a rank: router (bf16 [count][dims]) and fp32 bias, routed experts, shared [gate | up] and down.
  pub const Layer = struct {
-@@ -78,8 +79,12 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
+@@ -79,8 +80,12 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
      const n = hi - lo;
      const bf16_slots = prompt and l.exl3 == null; // the slot rows: bf16 in an NVFP4 prompt chunk, else fp32
      const eb: usize = if (bf16_slots) 2 else 4;
@@ -679,9 +692,10 @@ diff --git a/zig/src/families/glm/cuda_moe.zig b/zig/src/families/glm/cuda_moe.z
      var a: cuda.Args = .{};
      a.add(s.sy + lo * d * 4);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 2a7de7767bf67b18938164474f6906f701a587c2..63cb95b404a717f7d888d95ba52d9944c16ea39e 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -114,6 +114,11 @@ pub const rules = [_]Rule{
+@@ -158,6 +158,11 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

@@ -18,6 +18,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/glm_ring_host.zig b/zig/glm_ring_host.zig
+index 5cd8da62b5693707f8de9ea3d9af7f0d4d2b050e..a4083573fe06ee5579859f469a8910f6d0ce9160 100644
 --- a/zig/glm_ring_host.zig
 +++ b/zig/glm_ring_host.zig
 @@ -86,3 +86,33 @@ test "glm ring: rejected MTP proposals retain their rollback pool at every ring
@@ -55,6 +56,7 @@ diff --git a/zig/glm_ring_host.zig b/zig/glm_ring_host.zig
 +    try st.readyMtp(stream, keys.len - glm.forward.window_rows);
 +}
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index 5a5c8919a69e6a1c5187090d831cbeaf95302d94..18f6b999be71ebf70fb39eb00354ca6341ec5a45 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -506,12 +506,14 @@ pub const State = struct {

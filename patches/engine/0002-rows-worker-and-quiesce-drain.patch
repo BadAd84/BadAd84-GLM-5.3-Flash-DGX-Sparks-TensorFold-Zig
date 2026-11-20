@@ -46,6 +46,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/src/core/rows_test.zig b/zig/src/core/rows_test.zig
+index e809569c9cb42db46adf67e5599590de3dc72327..d14a8c2b7b19174c435277565e3e50e682a0d1f4 100644
 --- a/zig/src/core/rows_test.zig
 +++ b/zig/src/core/rows_test.zig
 @@ -247,16 +247,18 @@ fn gridRequest(a: Allocator, s: *pc.Store, f: *Fake, p: []const u32, history: u3
@@ -95,6 +96,7 @@ diff --git a/zig/src/core/rows_test.zig b/zig/src/core/rows_test.zig
      var arena: std.heap.ArenaAllocator = .init(gpa);
 diff --git a/zig/src/server/health_quiesce_test.zig b/zig/src/server/health_quiesce_test.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..c071901e9dcbaeb186cda04f644825dc8d92db40
 --- /dev/null
 +++ b/zig/src/server/health_quiesce_test.zig
 @@ -0,0 +1,64 @@
@@ -163,6 +165,7 @@ new file mode 100644
 +    try std.testing.expectEqual(@as(u32, 0), drained);
 +}
 diff --git a/zig/src/server/health_test.zig b/zig/src/server/health_test.zig
+index f2c6620df8df44d4b35111f5f339fa8213135ae3..1a35eac479f93b36370a41e6d60c7ea13f49b18d 100644
 --- a/zig/src/server/health_test.zig
 +++ b/zig/src/server/health_test.zig
 @@ -16,13 +16,13 @@ const Allocator = std.mem.Allocator;
@@ -229,9 +232,10 @@ diff --git a/zig/src/server/health_test.zig b/zig/src/server/health_test.zig
  
  test "with keys configured, /health sends only its status, with and without a valid key, whatever the identity" {
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index d6ae7b479a79b89c506df0e8babbd2432d49c09a..72499119c8328b27e16310449c1a75afe0b4e81e 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
-@@ -104,6 +104,7 @@ test {
+@@ -114,6 +114,7 @@ test {
      if (comptime @import("builtin").os.tag != .windows) _ = @import("pdf_worker.zig"); // spawns /bin/sh workers
      _ = @import("drama_prompt.zig");
      _ = @import("health_test.zig");

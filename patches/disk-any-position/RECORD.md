@@ -1,5 +1,15 @@
 # RECORD.md - patches/disk-any-position
 
+## Current base (re-seated 2026-11-20)
+
+This package applies to upstream TensorFold main `1ece6e6dbbc073582d50738ce8e73e3c3261a73b` (1.3.0) with the packages before it in the order engine, pr1411, cache-salt, learn-starts,
+solo-cuts, disk-any-position, restore-held: it takes the tree `df26af40eca56687f1139d0ad595c271bc7e7530` to `f6a5171dad7e942bdf1c13690921e85f17462840` (1 patch, 46 in all; both ids are
+`git write-tree` on the tree built with `scripts/apply.sh` and the packages' `apply.sh` in that order). What each patch needed is in `docs/audit-2026-11-12/reseat-main-1ece6e6.md`.
+
+Gate: full run `sg-20261120-165217` on the gate host, the pristine main (tree `3a37e287fb1c`) against this series (47 patches in the seven packages, tree `5ae4bbe5e418`, the id the run expected): `check-native-cuda-host`, `compile-cuda-tests` (10 of 10 steps), `test-glm-ring-host`, `test-glm-logprobs-host`, `test-rows-host`, `test-glm-pdl-scan` (3 of 3 tests), `test-kernel-contract` (258 of 258 tests) and `fmt` rc 0 on both, `test-glm-onepass-order-host` rc 0 on the stack (not a step of the base); `test-cuda-host` rc 1 on both with the base's one failing name, `cli_config_test`'s `serve --config` case (7,903 of 7,947 tests passed on the stack, 43 skipped, 1 failed; 7,687 of 7,731 on the base); no new failing name; lean base 6,993 files and 168 problems, head 7,063 files and 168 problems, 0 new. Verdict PASS. An earlier run of the same series (`sg-20261120-145609`) failed with 7 new failing names, every one an abort inside `cuLaunchKernelEx`: upstream's `7948cc42d` launches every GLM kernel through it and asks every fake test driver to forward it (`cuda_pdl.forwardEx`), and the fakes in tests our patches add (`cuda_mla_ovn_test`, the latent-rows test in `cuda_latent`, `cuda_disk_ranks_test`) did not. The lanes' quick checkpoints had not run the host test step, so only the full gate saw it; each of the five fakes now carries the line, inside the patch that owns the test (23, 36 and the `pr1411` package).
+
+The text below was written for the v1.2.9 series (base `6b9de695104b6b8b30c20458da87ac06c9480289`): its file and line references, tree ids and measurements are to that base.
+
 What it is: our own change (not an upstream commit), on this repo's engine stack, that lets a conversation state's disk
 image take any position, not only a multiple of the 4-row pool. With `--learn-conversations` the image's `parts` refused a
 state off a pool's edge (`error.SnapshotShape`) and the store counted the save as skipped, so a state kept at a request start

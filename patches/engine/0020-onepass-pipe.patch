@@ -34,9 +34,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: glue.Set carries v1.2.9's dsel plus our pdl_early, mla, onepass and onepass_pipe; Mla struct kept; the glue.Set literal names only Modules fields this prefix has (mla arrives with 0025, pdl_early with 0026)
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 290f90d4bc392b55986827e50211ed5e2f1f67b9..324d27b21973f720d58b575048d60190d0e0e80d 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -67,6 +67,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -94,6 +94,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
  | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
  | `TF_GLM_OVN_SPARSE_ONEPASS` | Exactly `0` or `1`; default off (a prompt's rows take production's one-pass sparse attention) |
@@ -46,11 +47,12 @@ diff --git a/docs/environment.md b/docs/environment.md
 +| `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
+index 1c4dd693fe5e109aeed782fbfbff7b2ffc59b863..28803f44cfb469dbf260af4029a5ff4198ef9311 100644
 --- a/zig/build/cuda_kernels.zig
 +++ b/zig/build/cuda_kernels.zig
-@@ -144,6 +144,7 @@ pub const kernels = [_]Kernel{
+@@ -146,6 +146,7 @@ pub const kernels = [_]Kernel{
      .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts
      .{ .name = "glm_kda", .flags = &.{ "-O3", "--fmad=false" } }, // GLM: the Python family's glm5_next/cuda/kda.cu
      .{ .name = "glm_onepass", .flags = &.{"-O3"} }, // production's prompt sparse attention (sparse_onepass.cu, OTS 0085 + 0094)
@@ -59,6 +61,7 @@ diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
      .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
      .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
 diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+index e20d136ad4be72899360a426c8a328ba739b9125..4b83fea1fb2d7d1c5d2998fa3f368f1245796d05 100644
 --- a/zig/build/glm_family_host.zig
 +++ b/zig/build/glm_family_host.zig
 @@ -38,6 +38,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
@@ -74,6 +77,7 @@ diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
      const index_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM index:"} }));
 diff --git a/zig/kernels/cuda/glm_onepass_common.cuh b/zig/kernels/cuda/glm_onepass_common.cuh
 new file mode 100644
+index 0000000000000000000000000000000000000000..4bb24f641743b527d09a7fce2c161875ad7fe490
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass_common.cuh
 @@ -0,0 +1,159 @@
@@ -238,11 +242,13 @@ new file mode 100644
 +#endif
 diff --git a/zig/kernels/cuda/glm_onepass_pipe.cu b/zig/kernels/cuda/glm_onepass_pipe.cu
 new file mode 100644
+index 0000000000000000000000000000000000000000..d08ab7facc5dce440c5e8949db42acf46176b95a
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass_pipe.cu
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,24 @@
 +// TF_GLM_OVN_ONEPASS_PIPE measurement variants: exact (all switches on) equals the fused kernel; singles time each.
 +#include "glm_onepass_pipe.cuh"
++#include "glm_pdl.cuh"
 +
 +#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
 +#define PIPE_CALL(DEC, SCA, CHU) glm_onepass_pipe::onepass_pipe<DEC, SCA, CHU>(QA, LC, LS, PR, TOK, W, CNT, OUT, H, scale)
@@ -255,6 +261,7 @@ new file mode 100644
 +        NAME(const __nv_bfloat16* __restrict__ QA, const uint8_t* __restrict__ LC, const float* __restrict__ LS,     \
 +             unsigned PR, const int32_t* __restrict__ TOK, int W, const int32_t* __restrict__ CNT,                   \
 +             __nv_bfloat16* __restrict__ OUT, int H, float scale) {                                                 \
++        glm_pdl::enter();                                                                                           \
 +        PIPE_CALL(DEC, SCA, CHU);                                                                                    \
 +    }
 +
@@ -265,6 +272,7 @@ new file mode 100644
 +PIPE_VARIANT(tf_glm_onepass_pipe_exact, true, true, true)
 diff --git a/zig/kernels/cuda/glm_onepass_pipe.cuh b/zig/kernels/cuda/glm_onepass_pipe.cuh
 new file mode 100644
+index 0000000000000000000000000000000000000000..70e3f637ea4c0f2b00ccaf879b150e856111e62a
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass_pipe.cuh
 @@ -0,0 +1,374 @@
@@ -643,20 +651,22 @@ new file mode 100644
 +} // namespace glm_onepass_pipe
 +#endif
 diff --git a/zig/src/cuda/kernels.zig b/zig/src/cuda/kernels.zig
+index 2df91e3189472679dabf12034ef7340cb18799b7..1c811476d5481db4fa524de1336c5cc38fdb6f7f 100644
 --- a/zig/src/cuda/kernels.zig
 +++ b/zig/src/cuda/kernels.zig
-@@ -99,6 +99,7 @@ pub const glm_index: []const u8 = if (available) &Blob("fatbin_glm_index").bytes
- pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").bytes else &.{};
+@@ -102,6 +102,7 @@ pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").byt
  pub const minimax_m3_attn: []const u8 = if (available) &Blob("fatbin_minimax_m3_attn").bytes else &.{};
+ pub const idol: []const u8 = if (available) &Blob("fatbin_idol").bytes else &.{};
  pub const glm_onepass: []const u8 = if (available) &Blob("fatbin_glm_onepass").bytes else &.{};
 +pub const glm_onepass_pipe: []const u8 = if (available) &Blob("fatbin_glm_onepass_pipe").bytes else &.{};
  pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
  pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
  pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
+index 26707ab229185d8f9f69a9ee726436e85bb687b8..0d51711a7c005a0f0a678cf1b1e90db6b4d83fa0 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -152,6 +152,14 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
+@@ -153,6 +153,14 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
          try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
          const stamp = prof.span(k.prof, stream, .mla);
          defer stamp.end();
@@ -671,7 +681,7 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
          if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
              const slots = try g.gather(k.ops, stream, ix.gate, c.lc, c.pt, t.page_rows, pos, v.tokens, v.counts, rows, sparse.width);
              return latent.sparseAttentionFormat(set, stream, v.qa, slots, 0, .{}, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
-@@ -209,12 +217,10 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -210,12 +218,10 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
          try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
          var stamp = prof.span(k.prof, stream, .mla);
          defer stamp.end();
@@ -688,6 +698,7 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
  }
  
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index ed240d086d26530338d5cf3e4528ce7e4b5c040b..d85bf5cef7218c1c04068b5019c4ad36bbbfff0f 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
 @@ -49,7 +49,8 @@ pub const Modules = struct {
@@ -700,7 +711,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
      packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
      copy_rows: cuda.Function,
      put_slot: cuda.Function,
-@@ -99,17 +100,16 @@ pub const Modules = struct {
+@@ -101,17 +102,16 @@ pub const Modules = struct {
              std.log.warn("TF_GLM_OVN_SPARSE_ONEPASS: the onepass kernel is not used ({t}); prompt rows keep the chunk programs", .{err});
              break :blk null;
          };
@@ -720,7 +731,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
      pub fn ops(m: *const Modules) cuda.Module {
          return m.mods[1];
      }
-@@ -117,6 +117,7 @@ pub const Modules = struct {
+@@ -119,6 +119,7 @@ pub const Modules = struct {
      pub fn deinit(m: *Modules) void {
          if (m.index) |*x| x.unload();
          if (m.onepass) |*x| x.unload();
@@ -728,7 +739,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
          m.exl3.unload();
          for (&m.mods) |*x| x.unload();
          m.lane.unload();
-@@ -175,7 +176,7 @@ pub const Forward = struct {
+@@ -177,7 +178,7 @@ pub const Forward = struct {
      }
  
      pub fn set(f: *const Forward) glue.Set {
@@ -738,9 +749,10 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index 2cffb0f76af30ab8acc86e73076f7d354adb2294..8ae1b42b303e0650a401d9a5e6ac31829d406b54 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -16,8 +16,32 @@ pub const Set = struct {
+@@ -17,8 +17,32 @@ pub const Set = struct {
      copy_rows: ?cuda.Function = null,
      /// A decode window's DSA select on many CTAs (cuda_sparse.decodeSelect; TF_GLM_DSEL, default on).
      dsel: bool = false,
@@ -774,9 +786,10 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
  
  /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.
 diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
+index c89e2c55d41d08a34126b65a08440ffbccb35bd0..3edc57c0c18b3122c42bb7ea16230ae117bf1b88 100644
 --- a/zig/src/families/glm/cuda_onepass.zig
 +++ b/zig/src/families/glm/cuda_onepass.zig
-@@ -7,6 +7,8 @@ const latent = @import("cuda_latent.zig");
+@@ -8,6 +8,8 @@ const latent = @import("cuda_latent.zig");
  /// glm_onepass.cu's block (12 warps) and its Smem: three bf16 32-key tiles, P [24][32] bf16, scales, alphas, sums.
  pub const threads = 384;
  pub const smem: u32 = 3 * 32 * 512 * 2 + 24 * 32 * 2 + 3 * 32 * 4 + 24 * 4 + 24 * 4;
@@ -785,7 +798,7 @@ diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_o
  /// The heads a rank carries for the kernel: production's 16 < H <= 24 (TP=3's 22 / 21).
  pub const min_heads = 17;
  pub const max_heads = 24;
-@@ -36,11 +38,68 @@ pub fn wanted() bool {
+@@ -37,11 +39,68 @@ pub fn wanted() bool {
      return cuda.ovn.on("SPARSE_ONEPASS");
  }
  
@@ -854,8 +867,8 @@ diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_o
  /// latent.sparse_onepass: rows with counts > 0 over their `w`-wide token lists (as `t` maps them) into out bf16.
  pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: latent.Table, tokens: u64, counts: u64, w: usize, out: u64, rows: usize, heads: usize, scale: f32) !void {
      if (rows == 0) return;
-@@ -51,6 +110,16 @@ pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u
-     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads }, .shared = smem }, stream, &a);
+@@ -52,6 +111,16 @@ pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u
+     try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads }, .shared = smem }, stream, &a);
  }
  
 +/// A pipeline variant (tf_glm_onepass_pipe_*): the same arguments and launch as `run`, SmemPipe's shared size.
@@ -865,13 +878,13 @@ diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_o
 +    const page_rows: u32 = if (t.pt != 0) @intCast(t.page_rows) else 0;
 +    var a: cuda.Args = .{};
 +    inline for (.{ qa, cache, scales, page_rows, tokens, @as(c_int, @intCast(w)), counts, out, @as(c_int, @intCast(heads)), scale }) |v| a.add(v);
-+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads }, .shared = pipe_smem }, stream, &a);
++    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads }, .shared = pipe_smem }, stream, &a);
 +}
 +
  test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
      try std.testing.expect(takes(true, 0x1000, 22, 512));
      try std.testing.expect(takes(true, 0x1000, 21, 512));
-@@ -60,3 +129,26 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
+@@ -61,3 +130,26 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
      try std.testing.expect(!takes(true, 0x1000, 16, 512));
      try std.testing.expectEqual(@as(u32, 100416), smem); // glm_onepass.cu's static_assert
  }
@@ -900,6 +913,7 @@ diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_o
 +}
 diff --git a/zig/src/families/glm/cuda_onepass_order_test.zig b/zig/src/families/glm/cuda_onepass_order_test.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..d04a79e1ff7b1ce70effa0bf4fe47fe018282044
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_onepass_order_test.zig
 @@ -0,0 +1,254 @@
@@ -1158,9 +1172,10 @@ new file mode 100644
 +    }
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 42283d3a25e31a12fa6787c3e0bd0fee9f8be32f..ebd49f98f4ba500fa3bcf16e0d946f6f771665c4 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -109,6 +109,10 @@ pub const rules = [_]Rule{
+@@ -153,6 +153,10 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
      .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_SPARSE_ONEPASS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

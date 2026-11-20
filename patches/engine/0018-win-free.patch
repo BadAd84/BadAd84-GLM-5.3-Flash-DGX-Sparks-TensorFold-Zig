@@ -26,20 +26,22 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 1a1db37151bac481656c25071cddbc40baaa9bb4..8487c1998c1db1819f9a4df239f4cfa80a23f8dc 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -65,6 +65,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -92,6 +92,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
  | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
  | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
 +| `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
+index 521d071077231ce466a2704aab288662ef54a41d..7226ca5ab06e04707b89f6b3a6b898e982b313f0 100644
 --- a/zig/src/core/lanes/config.zig
 +++ b/zig/src/core/lanes/config.zig
-@@ -44,6 +44,7 @@ pub const Model = struct {
+@@ -46,6 +46,7 @@ pub const Model = struct {
      batch_rows: u32 = 0, // a shared forward's rows at most (0: 32)
      max_streams: u32 = 0, // a shared forward's streams at most (0: 32)
      shared_costs: []const Cost = &.{}, // shared forwards' ms by total rows (timed at load)
@@ -47,7 +49,7 @@ diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
      draft_probabilities: bool = false, // the head gives each drafted node's chance of landing
      granted_depth: bool = false, // with draft_probabilities: every stream drafts its last grant plus a slack
      draft_slack: u32 = 0, // drafts past a stream's last grant, short or not (0: the Constants' own)
-@@ -113,6 +114,7 @@ pub const Config = struct {
+@@ -116,6 +117,7 @@ pub const Config = struct {
      enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
      copy_rate: f64 = 0.94, // a copied token's chance of landing in allocation
      lone_copies: bool = true, // Model.lone_copies
@@ -55,7 +57,7 @@ diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
      k: Constants = .{},
  
      pub fn init(gpa: Allocator, m: Model, max_rows: u32, max_draft: u32) !Config {
-@@ -131,18 +133,20 @@ pub const Config = struct {
+@@ -134,18 +136,20 @@ pub const Config = struct {
          for (m.window_costs) |c| {
              if (c.width >= 1 and c.width <= width) try family_costs.put(gpa, c.width, c.ms);
          }
@@ -86,7 +88,7 @@ diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
              }
          }
          const depth_prior = try gpa.dupe(f64, prior);
-@@ -197,6 +201,7 @@ pub const Config = struct {
+@@ -202,6 +206,7 @@ pub const Config = struct {
              },
              .draft_step_ms = m.draft_step_ms,
              .shared_drafts = m.shared_drafts,
@@ -96,6 +98,7 @@ diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
  
 diff --git a/zig/src/core/lanes/free_shared_test.zig b/zig/src/core/lanes/free_shared_test.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..0bf992bd2fc6c593784108f7ce56979605fb321b
 --- /dev/null
 +++ b/zig/src/core/lanes/free_shared_test.zig
 @@ -0,0 +1,222 @@
@@ -322,9 +325,10 @@ new file mode 100644
 +    return r;
 +}
 diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+index 5dd92e910b6b5de7d9df0c55d95793bed3d11bc6..dc2126983bfc6d52a3957cf6c4103fa8f492b1f2 100644
 --- a/zig/src/core/lanes/lanes.zig
 +++ b/zig/src/core/lanes/lanes.zig
-@@ -93,6 +93,7 @@ test {
+@@ -95,6 +95,7 @@ test {
      _ = @import("copied_rate_test.zig");
      _ = @import("granted_reservation_test.zig");
      _ = @import("rollback_test.zig");
@@ -333,6 +337,7 @@ diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
  
  pub const learned_disk = @import("learned_disk.zig");
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index 1565e95cd726f3ff2361407282a46a439751fe15..a6634caacf670cd4e54842be2004c8ee30ad19ab 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
 @@ -118,6 +118,7 @@ pub const Lanes = struct {
@@ -344,9 +349,10 @@ diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lan
              .batch_rows = if (sharing) engine.shared_rows else 0,
              .max_streams = if (sharing) engine.max_shared else 1,
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index e1c831265e9dc7f0aee388017fe4af4288506983..a4eacccbada3c004e410a8a40eda89553d207650 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -107,6 +107,7 @@ pub const rules = [_]Rule{
+@@ -151,6 +151,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },
      .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
      .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },

@@ -33,9 +33,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9's boundary resolve carries the TP collective our gather routed to (absorbed), so the loop keeps resolve; fused next-site glue, pdl_early threshold and onepass_pipe's exact kernel kept
 
 diff --git a/docs/environment.md b/docs/environment.md
+index cb13d9f870cff94f5f5dda6c6a6599af65c7b318..be940aaf5a2e084b9a700220dddefee67d3fcf13 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -77,6 +77,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -104,6 +104,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MM_DECTILE` | Whole block count; a decode launch of fewer blocks takes 16-row windows on 32-column tiles; default 0 (off) |
  | `TF_GLM_OVN_ROUTER16` | Whole number; set, router launches of 16 rows or fewer take the 16-row tile (4: four pipeline stages, any other: three); default 0 (off) |
  | `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
@@ -44,11 +45,12 @@ diff --git a/docs/environment.md b/docs/environment.md
 +| `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.cuh
+index 4f8b15da37f590c6f2872c46f135621e7cfb9209..49e2b9981c371caf354b99d7f20a4fde8765613f 100644
 --- a/zig/kernels/cuda/glm_glue_bmm.cuh
 +++ b/zig/kernels/cuda/glm_glue_bmm.cuh
-@@ -98,16 +98,25 @@ __device__ void bmm(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, f
+@@ -100,16 +100,25 @@ __device__ void bmm(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, f
  }
  
  __device__ __forceinline__ void cp16(void* dst, const void* src, bool ok) {
@@ -80,7 +82,7 @@ diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.c
  __device__ __forceinline__ void ldm4(uint32_t* r, const void* p) {
    ldm4s(r, static_cast<unsigned>(__cvta_generic_to_shared(p)));
  }
-@@ -304,8 +313,25 @@ extern "C" __global__ void __launch_bounds__(128)
+@@ -309,8 +318,26 @@ extern "C" __global__ void __launch_bounds__(128)
                                                     static_cast<int>(d), static_cast<int>(ne), ks);
  }
  
@@ -89,6 +91,7 @@ diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.c
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_bmm_decode(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m,
 +                      int64_t x_stride, int64_t n, int64_t k, int sk, int f32) {
++  glm_pdl::enter();
 +  glm_bmm::bmm<16, 64, 64, 1, 4>(x, w, out, part, m, x_stride, n, k, sk, 0, f32);
 +}
 +
@@ -107,7 +110,7 @@ diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.c
  template <int ST>
  __device__ __forceinline__ void router16(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows,
                                           int64_t x_stride, int64_t d, int64_t ne, int ks) {
-@@ -374,22 +400,7 @@ extern "C" __global__ void __launch_bounds__(128)
+@@ -381,23 +408,6 @@ extern "C" __global__ void __launch_bounds__(128)
    glm_bmm::router16<4>(x, w, part, rows, x_stride, d, ne, ks);
  }
  
@@ -115,9 +118,10 @@ diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.c
 -extern "C" __global__ void __launch_bounds__(128)
 -    tf_glm_bmm_decode(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m,
 -                      int64_t x_stride, int64_t n, int64_t k, int sk, int f32) {
+-  glm_pdl::enter();
 -  glm_bmm::bmm<16, 64, 64, 1, 4>(x, w, out, part, m, x_stride, n, k, sk, 0, f32);
 -}
- 
+-
 -// Decode windows on aligned rows as Triton's _bmm stages a row (cuda_b16.decodeTile, 4 warps): 16 x BN, K 64, slice z.
 -namespace glm_bmm {
 -template <int BN, int ST>
@@ -131,18 +135,20 @@ diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.c
    extern "C" __global__ void __launch_bounds__(128)                                                                \
        name(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m, int64_t x_stride,  \
 diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
+index f15fe6849f36b79fde43d0fd835fa37a3648501e..c3a04a82e094323a2c42ed35757f1e4a7034a11d 100644
 --- a/zig/kernels/cuda/glm_glue_hc.cuh
 +++ b/zig/kernels/cuda/glm_glue_hc.cuh
-@@ -1,6 +1,8 @@
- // glue._hc_partial and glue._hc_finish by hand (hyper-connections' pre side, 4 streams of 4096).
+@@ -2,7 +2,8 @@
  #pragma once
  
+ #include "glm_pdl.cuh"
+-
 +#include "glm_glue_rows.cuh"
 +#include "common/qmm_frag.cuh"
  #include "glm_triton.cuh"
  
  using namespace glm_triton;
-@@ -55,14 +57,24 @@ extern "C" __global__ void __launch_bounds__(128)
+@@ -58,15 +59,24 @@ extern "C" __global__ void __launch_bounds__(128)
    }
  }
  
@@ -151,6 +157,7 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
  // The same for decode windows (16 blocks a row): 8 steps of 128 at once, a 128-thread group each; same ops, same order.
 -extern "C" __global__ void __launch_bounds__(1024)
 -    tf_glm_hc_partial8(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
+-  glm_pdl::enter();
 +template <bool PDL>
 +__device__ __forceinline__ void partial8(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide,
 +                                         int nb) {
@@ -169,7 +176,7 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
    if (grp < steps) {
      const int64_t base = b * kb + grp * 128;
      float xv[8];
-@@ -72,7 +84,11 @@ extern "C" __global__ void __launch_bounds__(1024)
+@@ -76,7 +86,11 @@ extern "C" __global__ void __launch_bounds__(1024)
        for (int j = 0; j < 8; ++j) xv[j] = bf(h[j]);
      }
      for (int i = 0; i < 3; ++i) {
@@ -182,7 +189,7 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
        const __nv_bfloat16* w = reinterpret_cast<const __nv_bfloat16*>(&u);
        float d = __fmul_rn(xv[1], bf(w[1]));
        d = __fmaf_rn(xv[0], bf(w[0]), d);
-@@ -101,8 +117,6 @@ extern "C" __global__ void __launch_bounds__(1024)
+@@ -105,8 +119,6 @@ extern "C" __global__ void __launch_bounds__(1024)
    }
  }
  
@@ -191,7 +198,7 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
  // The Sinkhorn sums of 4: lanes (i, j) = (lane / 4 % 4, lane % 4), rows over j (xor 2, 1), columns over i (xor 8, 4).
  __device__ __forceinline__ float row4(float v) {
    v = v + __shfl_xor_sync(0xffffffffu, v, 2);
-@@ -139,30 +153,39 @@ struct Weights<float> {
+@@ -143,30 +155,39 @@ struct Weights<float> {
    }
  };
  
@@ -237,7 +244,7 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
      }
      const float rinv = div_full(1.0f, sqrt_approx(eps + div_full(ss, (float)(S * D))));
      mix = __fmul_rn(mix, rinv);
-@@ -222,13 +245,163 @@ __device__ __forceinline__ void finish(const __nv_bfloat16* x, const float* part
+@@ -226,14 +247,166 @@ __device__ __forceinline__ void finish(const __nv_bfloat16* x, const float* part
    }
  }
  
@@ -384,28 +391,31 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
 +// hcPre's decode windows (16 blocks a row of 1024 threads): glm_hc::partial8.
 +extern "C" __global__ void __launch_bounds__(1024)
 +    tf_glm_hc_partial8(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
++  glm_pdl::enter();
 +  glm_hc::partial8<false>(x, fn, part, wide, nb);
 +}
 +
-+// TF_GLM_OVN_PDL_EARLY: hc_partial8 launched dependent, its weights loading before griddepcontrol.wait.
++// TF_GLM_OVN_PDL_EARLY: hc_partial8 in its dependent-launch form, the wait at entry so the launch may start early.
 +extern "C" __global__ void __launch_bounds__(1024)
 +    tf_glm_hc_partial8_pdl(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
-+  glm_hc::partial8<true>(x, fn, part, wide, nb);
++  glm_pdl::enter();
++  glm_hc::partial8<false>(x, fn, part, wide, nb);
 +}
 +
  extern "C" __global__ void __launch_bounds__(256)
      tf_glm_hc_finish(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
                       const __nv_bfloat16* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
                       float hc_eps, int nb, int iters) {
+   glm_pdl::enter();
 -  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
 +  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters, blockIdx.x);
  }
  
  // FP4-Local's float32 post-attention norm weight: hc_finish's arithmetic, the weight read as float32.
-@@ -236,5 +409,45 @@ extern "C" __global__ void __launch_bounds__(256)
-     tf_glm_hc_finish_f32w(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
+@@ -242,5 +415,47 @@ extern "C" __global__ void __launch_bounds__(256)
                            const float* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
                            float hc_eps, int nb, int iters) {
+   glm_pdl::enter();
 -  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
 +  glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters, blockIdx.x);
  }
@@ -415,7 +425,7 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
 +  extern "C" __global__ void __launch_bounds__(256)                                                                \
 +      name(const __nv_bfloat16* x, const float* part, const float* base, const float* scale, const W* nw,         \
 +           __nv_bfloat16* out, float* xs, float* post, float* comb, float eps, float hc_eps, int nb, int iters) {  \
-+    qmm_frag::grid_launch();                                                                                       \
++    glm_pdl::enter();                                                                                              \
 +    glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters, blockIdx.x);            \
 +  }
 +TF_GLM_HC_FINISH_PDL(tf_glm_hc_finish_pdl, __nv_bfloat16)
@@ -429,6 +439,7 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
 +           const __nv_bfloat16* fn, float* part, unsigned* count, const float* base, const float* scale,          \
 +           const W* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps, float hc_eps,          \
 +           int iters) {                                                                                            \
++    glm_pdl::enter();                                                                                          \
 +    glm_hc::glue<W, LAUNCH>(x, xout, g, rs, world, fn, part, count, base, scale, nw, out, xs, post, comb, eps,    \
 +                            hc_eps, iters);                                                                        \
 +  }
@@ -444,24 +455,27 @@ diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
 +      name(__nv_bfloat16* x, const float* g, int64_t rs, int world, const __nv_bfloat16* fn, const float* base,   \
 +           const float* scale, const W* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,    \
 +           float hc_eps, int iters, int64_t rows) {                                                                \
++    glm_pdl::enter();                                                                                          \
 +    glm_hc::rows4<W>(x, g, rs, world, fn, base, scale, nw, out, xs, post, comb, eps, hc_eps, iters, rows);         \
 +  }
 +TF_GLM_HC_ROW(tf_glm_hc_row, __nv_bfloat16)
 +TF_GLM_HC_ROW(tf_glm_hc_row_f32w, float)
 +#undef TF_GLM_HC_ROW
 diff --git a/zig/kernels/cuda/glm_glue_norm.cuh b/zig/kernels/cuda/glm_glue_norm.cuh
+index 4c2fad9cd2d9f8c320e8c0afa32ff438e1c64bc2..b036fe83c3b3d113ed218f566ec9e85ce8848874 100644
 --- a/zig/kernels/cuda/glm_glue_norm.cuh
 +++ b/zig/kernels/cuda/glm_glue_norm.cuh
-@@ -1,6 +1,7 @@
- // glue._rmsnorm by hand (glm_glue.cu's first group): see glm_triton.cuh for the Triton ops it keeps.
+@@ -2,7 +2,7 @@
  #pragma once
  
+ #include "glm_pdl.cuh"
+-
 +#include "common/qmm_frag.cuh"
  #include "glm_triton.cuh"
  
  namespace glm_glue {
-@@ -152,3 +153,17 @@ extern "C" __global__ void __launch_bounds__(256)
-                              int64_t o_stride, float* xs, float eps, int sums) {
+@@ -155,3 +155,17 @@ extern "C" __global__ void __launch_bounds__(256)
+   glm_pdl::enter();
    glm_glue::rmsnorm<4096, 4096, 8, 8, float>(x, x_stride, w, out, o_stride, xs, eps, sums);
  }
 +
@@ -470,7 +484,7 @@ diff --git a/zig/kernels/cuda/glm_glue_norm.cuh b/zig/kernels/cuda/glm_glue_norm
 +  extern "C" __global__ void __launch_bounds__(NW * 32)                                                            \
 +      name(const __nv_bfloat16* x, int64_t x_stride, const W* w, __nv_bfloat16* out, int64_t o_stride, float* xs, \
 +           float eps, int sums) {                                                                                  \
-+    qmm_frag::grid_launch();                                                                                       \
++    glm_pdl::enter();                                                                                          \
 +    glm_glue::rmsnorm<D, BLOCK, NW, S, W>(x, x_stride, w, out, o_stride, xs, eps, sums);                          \
 +  }
 +RMSNORM_PDL(tf_glm_rmsnorm_4096_pdl, 4096, 4096, 8, 8, __nv_bfloat16)
@@ -479,17 +493,19 @@ diff --git a/zig/kernels/cuda/glm_glue_norm.cuh b/zig/kernels/cuda/glm_glue_norm
 +RMSNORM_PDL(tf_glm_rmsnorm_4096_f32w_pdl, 4096, 4096, 8, 8, float)
 +#undef RMSNORM_PDL
 diff --git a/zig/kernels/cuda/glm_glue_rows.cuh b/zig/kernels/cuda/glm_glue_rows.cuh
+index d141895f54041f81c8a470b080662671ff6b29fa..b9e238d8583631f02eb916e8784a066d6c9ad3a9 100644
 --- a/zig/kernels/cuda/glm_glue_rows.cuh
 +++ b/zig/kernels/cuda/glm_glue_rows.cuh
-@@ -1,6 +1,7 @@
- // GLM's element-wise glue by hand: each output value alone, in the Triton kernel's order of fp32 ops.
+@@ -2,7 +2,7 @@
  #pragma once
  
+ #include "glm_pdl.cuh"
+-
 +#include "common/qmm_frag.cuh"
  #include "glm_triton.cuh"
  
  namespace glm_glue {
-@@ -39,6 +40,34 @@ __device__ __forceinline__ void ranks8(const float* g, int64_t rs, int64_t i, in
+@@ -41,6 +41,34 @@ __device__ __forceinline__ void ranks8(const float* g, int64_t rs, int64_t i, in
    }
  }
  
@@ -524,8 +540,8 @@ diff --git a/zig/kernels/cuda/glm_glue_rows.cuh b/zig/kernels/cuda/glm_glue_rows
  }  // namespace glm_glue
  
  using namespace glm_triton;
-@@ -93,24 +122,16 @@ extern "C" __global__ void tf_glm_hc_post(const __nv_bfloat16* x, __nv_bfloat16*
-                                           const float* post, const float* comb, int64_t rs, int64_t d, int world) {
+@@ -99,24 +127,16 @@ extern "C" __global__ void tf_glm_hc_post(const __nv_bfloat16* x, __nv_bfloat16*
+   glm_pdl::enter();
    const int64_t c = glm_glue::col8();
    if (c >= d) return;
 -  const int64_t r = blockIdx.x;
@@ -549,10 +565,10 @@ diff --git a/zig/kernels/cuda/glm_glue_rows.cuh b/zig/kernels/cuda/glm_glue_rows
 +  glm_glue::hc_post8(x, xout, g, post, comb, rs, d, world, blockIdx.x, c);
 +}
 +
-+// TF_GLM_OVN_PDL_EARLY: hc_post releasing its dependent launch (hc_partial8_pdl's weight loads) at entry.
++// TF_GLM_OVN_PDL_EARLY: hc_post in its dependent-launch form, the wait at entry so the launch may start early.
 +extern "C" __global__ void tf_glm_hc_post_pdl(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g,
 +                                              const float* post, const float* comb, int64_t rs, int64_t d, int world) {
-+  qmm_frag::grid_launch();
++  glm_pdl::enter();
 +  const int64_t c = glm_glue::col8();
 +  if (c >= d) return;
 +  glm_glue::hc_post8(x, xout, g, post, comb, rs, d, world, blockIdx.x, c);
@@ -560,6 +576,7 @@ diff --git a/zig/kernels/cuda/glm_glue_rows.cuh b/zig/kernels/cuda/glm_glue_rows
  
  // glue._combine: fp32 sum over slots in order of y[r][k] wts[r][k] (fma from 0), y fp32 or bf16, 8 columns a thread.
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index b035457091d27aec3c49470620a9b4cf02fa04f1..cbe4829e47de82f12d5817fec04bac028d7b0d8a 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
 @@ -29,6 +29,7 @@ const l2pf_mod = @import("cuda_l2pf.zig");
@@ -577,9 +594,9 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
 +    glue_row: u64, // TF_GLM_OVN_GLUE_ROW=N: a prompt piece's glue of N rows or more in one kernel (0: off)
 +    pdl_early: u64, // TF_GLM_OVN_PDL_EARLY: 1 the decode windows' glue launches dependent-ready, 2 prompt chunks too
  
-     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
-     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
-@@ -109,6 +112,8 @@ pub const Modules = struct {
+     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
+     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
+@@ -111,6 +114,8 @@ pub const Modules = struct {
          m.packs = null; // `m` starts undefined: the field default does not apply
          m.tiled = false;
          m.onepass_pipe = onepass_mod.openPipe(d, k.glm_onepass_pipe, @intCast(try ctx.attribute(.compute_capability_major)));
@@ -588,7 +605,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
          return m;
      }
  
-@@ -177,12 +182,13 @@ pub const Forward = struct {
+@@ -179,12 +184,13 @@ pub const Forward = struct {
      l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
  
      /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
@@ -604,7 +621,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
      }
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
-@@ -203,11 +209,12 @@ pub const Forward = struct {
+@@ -205,11 +211,12 @@ pub const Forward = struct {
          try glue.hcPre(f.set(), f.stream, b.x, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc);
      }
  
@@ -619,7 +636,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
      }
  
      /// forward._mixer: the layer's KDA or DSA block on b.normed; `li`/`di`: its index among loaded KDA / DSA layers.
-@@ -229,7 +236,8 @@ pub const Forward = struct {
+@@ -231,7 +238,8 @@ pub const Forward = struct {
                      s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                  }
                  const conv = st.conv + li * 3 * st.conv_c * 2;
@@ -629,7 +646,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
                  if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
              },
              .mla => |a| {
-@@ -315,36 +323,7 @@ pub const Forward = struct {
+@@ -317,36 +325,7 @@ pub const Forward = struct {
  
      const exchangePieces = @import("cuda_forward_pieces.zig").exchangePieces;
  
@@ -667,7 +684,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
  
      const gluePieces = @import("cuda_forward_pieces.zig").gluePieces;
      const tapPieces = @import("cuda_forward_pieces.zig").tapPieces;
-@@ -405,14 +384,16 @@ pub const Forward = struct {
+@@ -407,14 +386,16 @@ pub const Forward = struct {
      /// The unpieced loop over the layers (and the stream mean): each site's partials whole, then the glue.
      fn whole(f: *const Forward, R: usize) !void {
          const c = &f.ranks[0].w.config;
@@ -686,7 +703,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
                  if (r.segs.len > 0) try shared.mixer(f, r, l, li, di, R, slot(r, R)) else try f.mixer(r, l, li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), slot(r, R));
              }
              if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
-@@ -422,22 +403,29 @@ pub const Forward = struct {
+@@ -424,22 +405,29 @@ pub const Forward = struct {
              prof_mod.context(f.prof, j, null, .ffn);
              for (f.ranks) |r| {
                  const l = r.w.layers[j];
@@ -723,6 +740,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
  
 diff --git a/zig/src/families/glm/cuda_forward_glue.zig b/zig/src/families/glm/cuda_forward_glue.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..4c5d661fd49bf758bd82651b383e00c10cb2966e
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_forward_glue.zig
 @@ -0,0 +1,72 @@
@@ -799,9 +817,10 @@ new file mode 100644
 +    try glue.hcPre(f.set(), f.stream, b.x + lo * S * D * 2, hc.fn_w, hc.base, hc.scale, norm, b.normed + lo * D * 2, b.xs + lo * (D / 64) * 4, b.post + lo * S * 4, b.comb + lo * S * S * 4, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, hi - lo, D, S);
 +}
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index 3afa003d7e485fa62d8c29eda8c4c2ce471f1cda..05e23cd56895b439b17208d0cde2ae58ec730e31 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -38,9 +38,9 @@ pub const Mla = struct {
+@@ -39,9 +39,9 @@ pub const Mla = struct {
          return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC") };
      }
  
@@ -813,7 +832,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
      }
  };
  
-@@ -97,6 +97,21 @@ pub const Kernels = struct {
+@@ -98,6 +98,21 @@ pub const Kernels = struct {
      chunks_32_fp8: cuda.Function,
      merge: cuda.Function,
      scores: cuda.Function,
@@ -835,7 +854,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
      // TF_GLM_OVN_* forms (glm_glue_attn_ovn.cuh, glm_glue_latent_ovn.cuh), launched only with their knob on
      chunks_16_skip: cuda.Function,
      chunks_32_skip: cuda.Function,
-@@ -166,10 +181,12 @@ fn pow2(d: usize) i64 {
+@@ -167,10 +182,12 @@ fn pow2(d: usize) i64 {
  
  /// glue.rmsnorm: bf16(w * bf16(x / sqrt(mean(x^2) + eps))) into `out`, with `xs` each 64 outputs' fp32 sum.
  pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, o_stride: usize, xs: ?u64, eps: f32, rows: usize, d: usize) !void {
@@ -851,26 +870,26 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
          else => return error.NoRmsnormWidth,
      };
      var a: cuda.Args = .{};
-@@ -193,7 +210,8 @@ pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm
+@@ -194,7 +211,8 @@ pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm
      if (d != 4096) return error.NoRmsnormWidth;
      var a: cuda.Args = .{};
      inline for (.{ x, i64of(x_stride), g, out, i64of(o_stride), xs orelse @as(u64, 0), eps, @as(c_int, @intFromBool(xs != null)) }) |v| a.add(v);
--    try cuda.launch.launch(set.glue.rmsnorm_4096_f32w, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
+-    try cuda_pdl.launch(set.glue.rmsnorm_4096_f32w, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
 +    const f = if (set.pdl_early) set.glue.rmsnorm_4096_f32w_pdl else set.glue.rmsnorm_4096_f32w;
-+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
++    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
  }
  
  fn cdiv(a: usize, b: usize) u32 {
-@@ -275,14 +293,16 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
+@@ -276,14 +294,16 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
      inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
      // Decode windows (16 blocks a row) take each block's 8 steps at once; prompt rows 4 rows a 128-thread block.
      if (rows < 64) {
--        try cuda.launch.launch(set.glue.hc_partial8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
+-        try cuda_pdl.launch(set.glue.hc_partial8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
 +        const p8 = if (set.pdl_early) set.glue.hc_partial8_pdl else set.glue.hc_partial8; // _pdl: launched dependent
-+        try cuda.launch.launch(p8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 }, .pdl = set.pdl_early }, stream, &a);
++        try cuda_pdl.launch(p8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
      } else {
          a.add(i64of(rows));
-         try cuda.launch.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
+         try cuda_pdl.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
      }
 +    const e = set.pdl_early;
      const f, const w = switch (norm) {
@@ -881,7 +900,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
      };
      var b: cuda.Args = .{};
      inline for (.{ x, part, base, scale, w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
-@@ -294,7 +314,36 @@ pub fn hcPost(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u6
+@@ -295,7 +315,36 @@ pub fn hcPost(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u6
      if (s != 4) return error.StreamsNotFour;
      var a: cuda.Args = .{};
      inline for (.{ x, xout, g, post, comb, i64of(rows * d), i64of(d), cint(world) }) |v| a.add(v);
@@ -920,6 +939,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
  
  /// glue.rank_sum: out bf16 = partials summed rank 0 first, `me`'s from `own`, others' from `peers` in rank order.
 diff --git a/zig/src/families/glm/cuda_router_warm.zig b/zig/src/families/glm/cuda_router_warm.zig
+index c407544dab44546e6ca6be921238cd058900c6ec..2fac4122e1b0d27340390dcaaee4beb8bbf6915c 100644
 --- a/zig/src/families/glm/cuda_router_warm.zig
 +++ b/zig/src/families/glm/cuda_router_warm.zig
 @@ -113,7 +113,7 @@ fn mixerWarm(e: *Engine, f: *fw.Forward, tst: *fw.State, p: Picked, hidden: usiz
@@ -932,6 +952,7 @@ diff --git a/zig/src/families/glm/cuda_router_warm.zig b/zig/src/families/glm/cu
      }
      return n;
 diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
+index 0af98e9b66e3ade73befb2e6be1b4ea6ba7e3e98..f1c42edb2bac8fd484181aa2155d194b2946e6a7 100644
 --- a/zig/src/families/glm/cuda_shared.zig
 +++ b/zig/src/families/glm/cuda_shared.zig
 @@ -48,7 +48,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di:
@@ -944,6 +965,7 @@ diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_sh
                  const st = g.st;
                  const cur = st.cur[li];
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index be531f6263ae023df4ff054a173d7af0393b2045..5dc84646c4af4b83b889a73de27170f282ad8139 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -196,6 +196,10 @@ pub const Buffers = struct {
@@ -994,9 +1016,10 @@ diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_sta
      }
  };
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 63cb95b404a717f7d888d95ba52d9944c16ea39e..a58f582fbd2c2f6ecd1d5b479574213c75ad77c3 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -119,6 +119,9 @@ pub const rules = [_]Rule{
+@@ -163,6 +163,9 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MM_DECTILE", .scope = .glm, .kind = .u64, .forms = "a whole block count, 0 (off) or the launch size below which decode windows take 16-row tiles" },
      .{ .name = "TF_GLM_OVN_ROUTER16", .scope = .glm, .kind = .u64, .forms = "0 (off), 4 (four stages) or any other value (three stages)" },
      .{ .name = "TF_GLM_OVN_SWIGLU_REDUCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

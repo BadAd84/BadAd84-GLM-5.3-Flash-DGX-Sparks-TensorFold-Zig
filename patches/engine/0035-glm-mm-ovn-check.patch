@@ -14,8 +14,20 @@ untouched; ROUTER16 is left out (a router tile, not a matmul launch variant); th
 added. zig/test_support/glm_mm_cuda.zig gains Config.cluster, the field the cluster launch names,
 without which the host stub cannot compile cuda_mm.zig.
 
+diff --git a/zig/test_support/glm_mm_cuda.zig b/zig/test_support/glm_mm_cuda.zig
+index 87bb331d27632c6727c6693ec981c9f545ca528c..dde03323cb1cccf4072507953b301b8af7010d38 100644
+--- a/zig/test_support/glm_mm_cuda.zig
++++ b/zig/test_support/glm_mm_cuda.zig
+@@ -1,5 +1,5 @@
+ pub const Dim3 = struct { x: u32 = 1, y: u32 = 1, z: u32 = 1 };
+-pub const Config = struct { grid: Dim3 = .{}, block: Dim3 = .{}, shared: u32 = 0, pdl: bool = false };
++pub const Config = struct { grid: Dim3 = .{}, block: Dim3 = .{}, shared: u32 = 0, cluster: ?Dim3 = null, pdl: bool = false };
+ pub const Stream = struct {};
+ pub const Function = struct {
+     id: u32 = 0,
 diff --git a/zig/tests/cuda/glm_mm_ovn_tests.zig b/zig/tests/cuda/glm_mm_ovn_tests.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..e1766cee63d62fffa7bf1e964e20ccd3f56c4b35
 --- /dev/null
 +++ b/zig/tests/cuda/glm_mm_ovn_tests.zig
 @@ -0,0 +1,252 @@
@@ -272,9 +284,10 @@ new file mode 100644
 +    check.pass("glm-mm-ovn: every variant's kernels equal today's byte for byte", .{});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+index dde339b08e87015bb0c2c4a876b27e6d39399512..ef53d74462dac9186d390f98d45d830d315e2195 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -7,6 +7,7 @@
+@@ -6,6 +6,7 @@ const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
  const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
  const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
  const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
@@ -282,7 +295,7 @@ diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.z
  const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
  
  /// The lines these commands add to `main.zig`'s usage, after its own.
-@@ -17,6 +18,7 @@
+@@ -15,6 +16,7 @@ pub const usage =
      \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
      \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
@@ -290,7 +303,7 @@ diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.z
      \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
      \\
  ;
-@@ -35,6 +37,8 @@
+@@ -31,6 +33,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
          try glm_keep_seqs_check.run(gpu, rest);
      } else if (std.mem.eql(u8, cmd, "glm-mla-skip-check")) {
          try glm_mla_skip_check.run(gpu);
@@ -299,13 +312,3 @@ diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.z
      } else if (std.mem.eql(u8, cmd, "glm-onepass-exact-check")) {
          try glm_onepass_exact_check.run(gpu);
      } else return false;
-diff --git a/zig/test_support/glm_mm_cuda.zig b/zig/test_support/glm_mm_cuda.zig
---- a/zig/test_support/glm_mm_cuda.zig
-+++ b/zig/test_support/glm_mm_cuda.zig
-@@ -1,5 +1,5 @@
- pub const Dim3 = struct { x: u32 = 1, y: u32 = 1, z: u32 = 1 };
--pub const Config = struct { grid: Dim3 = .{}, block: Dim3 = .{}, shared: u32 = 0, pdl: bool = false };
-+pub const Config = struct { grid: Dim3 = .{}, block: Dim3 = .{}, shared: u32 = 0, cluster: ?Dim3 = null, pdl: bool = false };
- pub const Stream = struct {};
- pub const Function = struct {
-     id: u32 = 0,

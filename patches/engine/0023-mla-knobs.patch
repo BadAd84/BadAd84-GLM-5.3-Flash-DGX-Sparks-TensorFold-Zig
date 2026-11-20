@@ -43,6 +43,7 @@ bounded and fused launches against today's chunk programs and merge, byte for by
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: one include each in glm_glue.cu, and the glue.Set literal keeps dsel, pdl_early and mla beside our onepass pair; the glue.Set literal gains .mla here, where Modules.mla arrives
 
 diff --git a/zig/kernels/cuda/glm_glue.cu b/zig/kernels/cuda/glm_glue.cu
+index 27ec32eb936ede717bca0e86c2d2b5a857167191..a9ad6e65c4a867c8ee91f4064fe820f9fc588852 100644
 --- a/zig/kernels/cuda/glm_glue.cu
 +++ b/zig/kernels/cuda/glm_glue.cu
 @@ -9,3 +9,5 @@
@@ -53,9 +54,10 @@ diff --git a/zig/kernels/cuda/glm_glue.cu b/zig/kernels/cuda/glm_glue.cu
 +#include "glm_glue_latent_ovn.cuh"
 diff --git a/zig/kernels/cuda/glm_glue_attn_ovn.cuh b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
 new file mode 100644
+index 0000000000000000000000000000000000000000..29d4b8e0e1cbe4d6af7645d07ccd7c2dba001b82
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,350 @@
 +// TF_GLM_OVN_MLA_FUSEMERGE: the chunk pass stops at a chunk's last live key tile; merge walks the row's chunks.
 +#pragma once
 +
@@ -351,6 +353,7 @@ new file mode 100644
 +    tf_glm_chunks_16_skip(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
 +                          const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
 +                          float scale, int sparse, const int* pt, int64_t pstep) {
++  glm_pdl::enter();
 +  glm_attn_ovn::chunks<16, false, false>(qa, lc, nullptr, pos, tok, cnt, po, pm, pl, nullptr, 1, rows, heads, w, scale,
 +                                         sparse, pt, pstep);
 +}
@@ -358,6 +361,7 @@ new file mode 100644
 +    tf_glm_chunks_32_skip(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
 +                          const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
 +                          float scale, int sparse, const int* pt, int64_t pstep) {
++  glm_pdl::enter();
 +  glm_attn_ovn::chunks<32, false, false>(qa, lc, nullptr, pos, tok, cnt, po, pm, pl, nullptr, 1, rows, heads, w, scale,
 +                                         sparse, pt, pstep);
 +}
@@ -365,6 +369,7 @@ new file mode 100644
 +    tf_glm_chunks_16_fp8_skip(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
 +                              const int* tok, const int* cnt, float* po, float* pm, float* pl, int64_t rows,
 +                              int64_t heads, int64_t w, float scale, int sparse) {
++  glm_pdl::enter();
 +  glm_attn_ovn::chunks<16, true, false>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, po, pm,
 +                                        pl, nullptr, 1, rows, heads, w, scale, sparse, nullptr, 0);
 +}
@@ -372,6 +377,7 @@ new file mode 100644
 +    tf_glm_chunks_32_fp8_skip(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
 +                              const int* tok, const int* cnt, float* po, float* pm, float* pl, int64_t rows,
 +                              int64_t heads, int64_t w, float scale, int sparse) {
++  glm_pdl::enter();
 +  glm_attn_ovn::chunks<32, true, false>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, po, pm,
 +                                        pl, nullptr, 1, rows, heads, w, scale, sparse, nullptr, 0);
 +}
@@ -390,6 +396,7 @@ new file mode 100644
 +    tf_glm_chunks_32_fused(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
 +                           const int* cnt, __nv_bfloat16* out, int64_t rows, int64_t heads, int64_t w, float scale,
 +                           int sparse, const int* pt, int64_t pstep, int nch) {
++  glm_pdl::enter();
 +  glm_attn_ovn::chunks<32, false, true>(qa, lc, nullptr, pos, tok, cnt, nullptr, nullptr, nullptr, out, nch, rows, heads,
 +                                        w, scale, sparse, pt, pstep);
 +}
@@ -397,14 +404,16 @@ new file mode 100644
 +    tf_glm_chunks_32_fp8_fused(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
 +                               const int* tok, const int* cnt, __nv_bfloat16* out, int64_t rows, int64_t heads,
 +                               int64_t w, float scale, int sparse, int nch) {
++  glm_pdl::enter();
 +  glm_attn_ovn::chunks<32, true, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), scales, pos, tok, cnt, nullptr,
 +                                       nullptr, nullptr, out, nch, rows, heads, w, scale, sparse, nullptr, 0);
 +}
 diff --git a/zig/kernels/cuda/glm_glue_latent_ovn.cuh b/zig/kernels/cuda/glm_glue_latent_ovn.cuh
 new file mode 100644
+index 0000000000000000000000000000000000000000..078adcad6b58cd2ae923c6bd67c129d76b779fbb
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_glue_latent_ovn.cuh
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,146 @@
 +// TF_GLM_OVN_ABSORB_VEC and TF_GLM_OVN_KVB8: absorb and expand reading a three-way kv_b a row by one load.
 +#pragma once
 +
@@ -528,11 +537,13 @@ new file mode 100644
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_absorb_q_vec(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
 +                        int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  glm_latent_ovn::absorb<false>(q, wk, nullptr, qa, rows, heads, rb);
 +}
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_expand_v_vec(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
 +                        int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  glm_latent_ovn::expand<false>(ol, wv, nullptr, out, rows, heads, rb);
 +}
 +
@@ -540,17 +551,20 @@ new file mode 100644
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_absorb_q8(const __nv_bfloat16* q, const unsigned char* wk, const float* sk, __nv_bfloat16* qa, int64_t rows,
 +                     int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  glm_latent_ovn::absorb<true>(q, wk, sk, qa, rows, heads, rb);
 +}
 +extern "C" __global__ void __launch_bounds__(128)
 +    tf_glm_expand_v8(const __nv_bfloat16* ol, const unsigned char* wv, const float* sv, __nv_bfloat16* out,
 +                     int64_t rows, int64_t heads, int64_t rb) {
++  glm_pdl::enter();
 +  glm_latent_ovn::expand<true>(ol, wv, sv, out, rows, heads, rb);
 +}
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index 17b1681e194f1fa98604de9bfe47e3f116ed3365..a25a3c0aa1e092e57b671f9b588dd8da4268db27 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
-@@ -51,6 +51,8 @@ test {
+@@ -52,6 +52,8 @@ test {
      _ = @import("cuda_formats_csf0_test.zig");
      _ = @import("cuda_tile.zig");
      _ = @import("cuda_kv8_test.zig");
@@ -560,9 +574,10 @@ diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
      _ = @import("cuda_prof.zig");
      _ = @import("cuda_load_owner.zig");
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
+index 0d51711a7c005a0f0a678cf1b1e90db6b4d83fa0..e395dbdfb976317d0c003feaf2d20ef0a0337022 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -24,6 +24,8 @@ pub const Layer = struct {
+@@ -25,6 +25,8 @@ pub const Layer = struct {
      q_b: projection.Proj,
      wk: u64,
      wv: u64,
@@ -571,7 +586,7 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
      o: projection.Proj,
      index: Index,
      heads: usize,
-@@ -94,7 +96,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x:
+@@ -95,7 +97,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x:
      try attend(k, stream, l, c, s, 0, rows, pos, host_pos, nch, part_rows);
      const stamp = prof.span(k.prof, stream, .projections);
      defer stamp.end();
@@ -580,7 +595,7 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
  }
  
  /// Whether a sequence at `host_pos` has rows past the dense limit among its next `rows` (the sparse pass).
-@@ -120,7 +122,7 @@ pub fn prepareProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch,
+@@ -121,7 +123,7 @@ pub fn prepareProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch,
      const ix = l.index;
      try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
      try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
@@ -589,7 +604,7 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
      if (qi) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
  }
  
-@@ -185,7 +187,7 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
+@@ -186,7 +188,7 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
      const pstamp = prof.span(k.prof, stream, .projections);
      defer pstamp.end();
      const off = (rows - 1) * l.heads * l.lw * 2;
@@ -599,6 +614,7 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
  }
  
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index 15ac183633814926c929d560442265dce8326061..b035457091d27aec3c49470620a9b4cf02fa04f1 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
 @@ -58,6 +58,7 @@ pub const Modules = struct {
@@ -607,9 +623,9 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
      q4: q4.Kernels,
 +    mla: glue.Mla, // TF_GLM_OVN_MLA_FUSEMERGE, TF_GLM_OVN_ABSORB_VEC: the MLA launch choices, read at load
  
-     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
-     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
-@@ -88,6 +89,7 @@ pub const Modules = struct {
+     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
+     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
+@@ -90,6 +91,7 @@ pub const Modules = struct {
          m.chunked = if (kda_chunk.enabled()) try kda_chunk.Kernel.load(d) else null;
          errdefer if (m.chunked) |*x| x.unload();
          m.index = null;
@@ -617,7 +633,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
          errdefer if (m.index) |*x| x.unload();
          const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
          _ = index_mod.splitRows() catch return error.BadIndexSetting; // TF_GLM_OVN_DECODE_INDEX: a typo is refused
-@@ -180,7 +182,7 @@ pub const Forward = struct {
+@@ -182,7 +184,7 @@ pub const Forward = struct {
      }
  
      pub fn set(f: *const Forward) glue.Set {
@@ -627,9 +643,10 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index bbcae3dafb49c4548d3fbc4345deff60b68dc2c3..3afa003d7e485fa62d8c29eda8c4c2ce471f1cda 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -38,9 +38,9 @@ pub const Mla = struct {
+@@ -39,9 +39,9 @@ pub const Mla = struct {
          return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC") };
      }
  
@@ -641,7 +658,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
      }
  };
  
-@@ -97,12 +97,29 @@ pub const Kernels = struct {
+@@ -98,12 +98,29 @@ pub const Kernels = struct {
      chunks_32_fp8: cuda.Function,
      merge: cuda.Function,
      scores: cuda.Function,
@@ -673,7 +690,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
          }
          const router16 = try cuda.ovn.int("ROUTER16", 0);
          k.router16 = if (router16 == 0) null else try m.function(if (router16 == 4) "tf_glm_router16_s4" else "tf_glm_router16_s3");
-@@ -112,6 +129,13 @@ pub const Kernels = struct {
+@@ -113,6 +130,13 @@ pub const Kernels = struct {
          try k.chunks_32.allowDynamicShared(chunksSmem(32));
          try k.chunks_16_fp8.allowDynamicShared(chunksSmem(16));
          try k.chunks_32_fp8.allowDynamicShared(chunksSmem(32));
@@ -689,6 +706,7 @@ diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue
  };
 diff --git a/zig/src/families/glm/cuda_kvb.zig b/zig/src/families/glm/cuda_kvb.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..b701b20e949f96671cd6ac0c37baf36c5e1282c4
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_kvb.zig
 @@ -0,0 +1,70 @@
@@ -763,9 +781,10 @@ new file mode 100644
 +    try std.testing.expectError(error.NonFiniteKvb, quantize(&bits, &codes, &scales));
 +}
 diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
+index 82e4028388100b803665554f2391494b5a736f50..bda3d5f00f144fd2c41b9614c227cabf2df56cfe 100644
 --- a/zig/src/families/glm/cuda_latent.zig
 +++ b/zig/src/families/glm/cuda_latent.zig
-@@ -26,24 +26,35 @@ fn cdiv(a: usize, b: usize) u32 {
+@@ -27,24 +27,35 @@ fn cdiv(a: usize, b: usize) u32 {
      return @intCast((a + b - 1) / b);
  }
  
@@ -792,7 +811,7 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
 -    inline for (.{ in, w, out, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(rb)) }) |v| a.add(v);
 +    inline for (ptrs) |v| a.add(@as(u64, v));
 +    inline for (.{ @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(rb)) }) |v| a.add(v);
-     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(heads), .y = @intCast(cols), .z = cdiv(rows, rb) }, .block = .{ .x = 128 } }, stream, &a);
+     try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(heads), .y = @intCast(cols), .z = cdiv(rows, rb) }, .block = .{ .x = 128 } }, stream, &a);
  }
  
 -/// latent.expand_v (BF16 kv_b): out [rows][heads][dv] bf16 = o_lat [rows][heads][lw] . wv [heads][dv][lw].
@@ -810,7 +829,7 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
  }
  
  /// A latent cache holds BF16 rows, or E4M3 rows followed by one FP32 scale per row.
-@@ -82,6 +93,7 @@ pub fn attention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, t: Tab
+@@ -83,6 +94,7 @@ pub fn attention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, t: Tab
  }
  
  pub fn attentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, pos: u64, p: Partials, out: u64, dummy: u64, rows: usize, heads: usize, lw: usize, nch: usize, scale: f32, hb: usize) !void {
@@ -818,7 +837,7 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
      try chunks(set, stream, qa, cache, scales, t, pos, 0, 0, p, rows, heads, lw, nch, 0, scale, hb, false);
      try merge(set, stream, p, out, dummy, rows, heads, lw, nch, false);
  }
-@@ -90,9 +102,11 @@ pub fn attentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
+@@ -91,9 +103,11 @@ pub fn attentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
  fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, pos: u64, tokens: u64, counts: u64, p: Partials, rows: usize, heads: usize, lw: usize, nch: usize, w: usize, scale: f32, hb: usize, sparse: bool) !void {
      if (lw != 512) return error.LatentShape;
      if (scales != 0 and t.pt != 0) return error.Fp8OnPages;
@@ -832,8 +851,8 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
          else => return error.HeadBlock,
      };
      var a: cuda.Args = .{};
-@@ -108,6 +122,29 @@ fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64,
-     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, hb), .z = @intCast(nch) }, .block = .{ .x = 256 }, .shared = shared }, stream, &a);
+@@ -109,6 +123,29 @@ fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64,
+     try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, hb), .z = @intCast(nch) }, .block = .{ .x = 256 }, .shared = shared }, stream, &a);
  }
  
 +/// TF_GLM_OVN_MLA_FUSEMERGE: whether a launch of `rows` rows on `hb`-head blocks runs chunks and merge as one kernel.
@@ -856,13 +875,13 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
 +        a.add(@as(i64, @intCast(t.ps)));
 +    }
 +    a.add(@as(c_int, @intCast(nch)));
-+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, heads_tile_wide) }, .block = .{ .x = 256 }, .shared = glue.chunksSmem(heads_tile_wide) }, stream, &a);
++    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, heads_tile_wide) }, .block = .{ .x = 256 }, .shared = glue.chunksSmem(heads_tile_wide) }, stream, &a);
 +}
 +
  /// latent.sparse_attention: rows with counts > 0 over their selected tokens (i32 [rows][w]); others left alone.
  pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
      return sparseAttentionFormat(set, stream, qa, cache, 0, t, tokens, counts, w, p, out, rows, heads, lw, scale);
-@@ -115,7 +152,9 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
+@@ -116,7 +153,9 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
  
  pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
      const nch = chunksFor(w);
@@ -875,9 +894,10 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
  
 diff --git a/zig/src/families/glm/cuda_mla_ovn_test.zig b/zig/src/families/glm/cuda_mla_ovn_test.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..44183d4cd248ebb4454dccbacfc8e7125e8ba1b4
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_mla_ovn_test.zig
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,90 @@
 +//! TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC and _KVB8 launch choices under a recording driver; off is today's kernels.
 +const std = @import("std");
 +const cuda = @import("cuda");
@@ -921,6 +941,7 @@ new file mode 100644
 +test "TF_GLM_OVN MLA knobs off: today's chunk, merge, absorb and expand kernels" {
 +    var d: cuda.Driver = undefined;
 +    d.api.cuLaunchKernel = Rec.run;
++    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Rec.run);
 +    const ks = kernels(&d);
 +    const s: cuda.Stream = .{ .d = &d, .handle = null };
 +    const off: glue.Set = .{ .glue = &ks };
@@ -935,6 +956,7 @@ new file mode 100644
 +test "TF_GLM_OVN_MLA_FUSEMERGE: 32-head launches from fuse_rows rows fused, the rest bounded" {
 +    var d: cuda.Driver = undefined;
 +    d.api.cuLaunchKernel = Rec.run;
++    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Rec.run);
 +    const ks = kernels(&d);
 +    const s: cuda.Stream = .{ .d = &d, .handle = null };
 +    const on: glue.Set = .{ .glue = &ks, .mla = .{ .fuse_rows = 64, .skip = true } };
@@ -951,6 +973,7 @@ new file mode 100644
 +test "TF_GLM_OVN_ABSORB_VEC and _KVB8: 16-byte forms when aligned, E4M3 forms whenever kv_b has scales" {
 +    var d: cuda.Driver = undefined;
 +    d.api.cuLaunchKernel = Rec.run;
++    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Rec.run);
 +    const ks = kernels(&d);
 +    const s: cuda.Stream = .{ .d = &d, .handle = null };
 +    const vec: glue.Set = .{ .glue = &ks, .mla = .{ .vec = true } };
@@ -966,6 +989,7 @@ new file mode 100644
 +    try t.expectError(error.LatentShape, latent.absorbQ(vec, s, 256, 4100, 8192, 512, 2, 22, 256, 512));
 +}
 diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
+index da3673d1b87a6a1808981d479c1660d230e9df94..0af98e9b66e3ade73befb2e6be1b4ea6ba7e3e98 100644
 --- a/zig/src/families/glm/cuda_shared.zig
 +++ b/zig/src/families/glm/cuda_shared.zig
 @@ -84,7 +84,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di:
@@ -978,6 +1002,7 @@ diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_sh
          },
      }
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index 3f03b5c9d298ae9f8f8e8917f8053542ccc1e8fe..be531f6263ae023df4ff054a173d7af0393b2045 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -241,7 +241,10 @@ pub const Buffers = struct {
@@ -993,6 +1018,7 @@ diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_sta
          const sel = selectLs(rows, prefill, seg, np_max);
          var mm: usize = 4;
 diff --git a/zig/src/families/glm/cuda_weights.zig b/zig/src/families/glm/cuda_weights.zig
+index ac9f7aea111396814975c01b503a4cfe7f8e6164..645f01d948659e6a0f1141e774258ff34cfe400c 100644
 --- a/zig/src/families/glm/cuda_weights.zig
 +++ b/zig/src/families/glm/cuda_weights.zig
 @@ -17,6 +17,7 @@ const mm_mod = @import("cuda_mm.zig");
@@ -1040,6 +1066,7 @@ diff --git a/zig/src/families/glm/cuda_weights.zig b/zig/src/families/glm/cuda_w
          const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ fmt, .{i});
 diff --git a/zig/tests/cuda/glm_mla_skip_check.zig b/zig/tests/cuda/glm_mla_skip_check.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..344155fa52e4c1ff6289494537b4f7f6c7b4323b
 --- /dev/null
 +++ b/zig/tests/cuda/glm_mla_skip_check.zig
 @@ -0,0 +1,109 @@
@@ -1154,6 +1181,7 @@ new file mode 100644
 +}
 diff --git a/zig/tests/cuda/glm_onepass_exact_check.zig b/zig/tests/cuda/glm_onepass_exact_check.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..6958cd1093fe8caea617a17733071dc7f0d64222
 --- /dev/null
 +++ b/zig/tests/cuda/glm_onepass_exact_check.zig
 @@ -0,0 +1,101 @@
@@ -1259,9 +1287,10 @@ new file mode 100644
 +    check.pass("glm-onepass-exact-check: pipe exact == chunk programs + merge byte for byte on {d} shapes; pipe off == the one-pass; the one-pass differs", .{5});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+index 5ac2f5d55e0bd98ac6bc16ef34314ff8b5897c93..3c3137290df252d726f8f076b6c1c5feb927458a 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -5,6 +5,8 @@ const glm_exl3_items_tests = @import("glm_exl3_items_tests.zig");
+@@ -4,12 +4,16 @@ const check = @import("check.zig");
  const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
  const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
  const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
@@ -1270,7 +1299,6 @@ diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.z
  
  /// The lines these commands add to `main.zig`'s usage, after its own.
  pub const usage =
-@@ -12,6 +14,8 @@ pub const usage =
      \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
      \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
      \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
@@ -1279,7 +1307,7 @@ diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.z
      \\
  ;
  
-@@ -26,6 +30,10 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+@@ -22,6 +26,10 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
          try glm_index_ovn_check.run(gpu);
      } else if (std.mem.eql(u8, cmd, "glm-index-regroup-check")) {
          try glm_index_regroup_check.run(gpu);

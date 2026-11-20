@@ -21,9 +21,10 @@ cuda_glm_disk.zig matched the commit's pre-image byte for byte on this series, a
 offset of one line over this package's 0011/0012 head flag in the test rig, which changes no context.
 
 diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
+index 9e27aebdde0c7f1f77e80ae3de0f8956979abf9e..ce6bfc18760daaa7ea6db9066c8b9e1bb0fe9faf 100644
 --- a/zig/src/families/glm/cuda_disk_image.zig
 +++ b/zig/src/families/glm/cuda_disk_image.zig
-@@ -274,6 +274,31 @@
+@@ -274,6 +274,31 @@ pub const Copy = struct {
          }
      }
  
@@ -56,6 +57,7 @@ diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cud
      fn leased(c: Copy, at: u64, host: []u8, out: bool) !void {
          const arena = c.pool.arena orelse return error.NoSnapshotRoom;
 diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cuda_disk_ranks.zig
+index 43698e35fc9a8eef498fd7b9c7225be9025d7a9f..5d63d7d1f0f877b261b5170fe6802a8074b95bef 100644
 --- a/zig/src/families/glm/cuda_disk_ranks.zig
 +++ b/zig/src/families/glm/cuda_disk_ranks.zig
 @@ -1,5 +1,6 @@
@@ -65,7 +67,7 @@ diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cud
  const follow = @import("cuda_follow.zig");
  const image = @import("cuda_disk_image.zig");
  const snapshots = @import("cuda_snapshots.zig");
-@@ -9,7 +10,7 @@
+@@ -9,7 +10,7 @@ const Engine = @import("cuda_engine.zig").Engine;
  pub var link: ?*follow.Link = null;
  
  /// A disk step's op (Header.flags); its id is `a`, its image offset `seed`, its bytes `depth`, its rank `top_k`.
@@ -74,7 +76,7 @@ diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cud
  const kind = @backingInt(follow.Kind.disk); // each op crosses the follow link as a disk step, its bytes as the ids
  
  /// This rank's image shape (every sequence of the engine has the same).
-@@ -28,16 +29,41 @@
+@@ -28,16 +29,41 @@ pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
  
  /// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
  pub fn copy(e: *Engine, id: u64, off: u64, host: []u8, out: bool) !void {
@@ -118,7 +120,7 @@ diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cud
  }
  
  /// Rank 0's link at TP, else null (one rank: every op is local).
-@@ -66,19 +92,66 @@
+@@ -66,19 +92,66 @@ pub fn blank(e: *Engine, at: u32) !u64 {
      return id;
  }
  
@@ -196,7 +198,7 @@ diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cud
  }
  
  /// Rank 0: rank `rank`'s image bytes of `id` from `off` into `out`.
-@@ -152,9 +225,10 @@
+@@ -152,9 +225,10 @@ pub fn step(e: *Engine, l: *follow.Link, h: follow.Header, ids: []const u32) !vo
              const w = try decode(e, x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
              try snapshots.seal(e, h.a, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
          },
@@ -211,9 +213,10 @@ diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cud
          .take => {
              if (h.depth > l.ids.len * 4) return error.BadStep;
 diff --git a/zig/src/families/glm/cuda_disk_ranks_test.zig b/zig/src/families/glm/cuda_disk_ranks_test.zig
+index 80919aec3e8f331884c76d3a8a4fcbb50a544247..97b399f09de63780ce3c21f7d0b93d312b6b223f 100644
 --- a/zig/src/families/glm/cuda_disk_ranks_test.zig
 +++ b/zig/src/families/glm/cuda_disk_ranks_test.zig
-@@ -195,9 +195,12 @@
+@@ -196,9 +196,12 @@ test "GLM disk ranks: a follower refuses a disk step rank 0 does not send, befor
          .{ .h = .{ .kind = disk, .flags = 0 }, .n = 0 }, // no op
          .{ .h = .{ .kind = disk, .flags = op(.prefixes) + 1 }, .n = 0 }, // past the last op
          .{ .h = .{ .kind = disk, .flags = op(.seal), .a = 1 }, .n = 1 }, // words of another length
@@ -227,7 +230,7 @@ diff --git a/zig/src/families/glm/cuda_disk_ranks_test.zig b/zig/src/families/gl
      for (bad) |b| try t.expectError(error.BadStep, ranks.step(x.e, &x.link, b.h, x.ids[0..b.n]));
      x.e.share.world = 65; // more ranks than a gather holds
      try t.expectError(error.BadStep, ranks.step(x.e, &x.link, .{ .kind = disk, .flags = op(.prefixes) }, &.{}));
-@@ -231,3 +234,61 @@
+@@ -232,3 +235,61 @@ test "GLM disk ranks: each other rank's shared bytes come from past its own pref
      Wire.odd = 2;
      try t.expectError(error.RanksDiffer, ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs));
  }
@@ -290,9 +293,10 @@ diff --git a/zig/src/families/glm/cuda_disk_ranks_test.zig b/zig/src/families/gl
 +    try t.expectEqual(@as(usize, 1), Wire.casts);
 +}
 diff --git a/zig/src/native/cuda_glm_disk.zig b/zig/src/native/cuda_glm_disk.zig
+index 65c2e0f51cc5ceca7c82ef4b53a22c263aa18cfa..bb9674fa4bd4abdffde80777648592cf14b5a4aa 100644
 --- a/zig/src/native/cuda_glm_disk.zig
 +++ b/zig/src/native/cuda_glm_disk.zig
-@@ -90,6 +90,8 @@
+@@ -90,6 +90,8 @@ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.
      }
      var pieces: std.ArrayList(img.Piece) = .empty;
      defer pieces.deinit(e.gpa);
@@ -301,7 +305,7 @@ diff --git a/zig/src/native/cuda_glm_disk.zig b/zig/src/native/cuda_glm_disk.zig
      const sh = try ranks.shape(e);
      var o: usize = 0;
      for (ranges) |g| {
-@@ -100,10 +102,12 @@
+@@ -100,10 +102,12 @@ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.
              const bytes = in[o..][0..n];
              o += n;
              if (p.rank == 0 and p.off < img.Words.bytes) continue; // the words went with the seal

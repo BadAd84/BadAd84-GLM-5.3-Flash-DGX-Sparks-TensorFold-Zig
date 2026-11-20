@@ -55,17 +55,19 @@ Receipts (lane RequestStartCost, 2026-11-14; base = v1.2.7 + 0001..0034, tree f5
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 9122611dd1042be72b2d4d90807ff41c5224c24f..a2ab32bc9204cde51e1d7886565b0b3c0a83dc32 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -85,6 +85,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -112,6 +112,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_X3_NC` | Whole level `0`, `1` or `2`: a decode window's routed-expert GEMMs load each warp's trellis in 16-byte reads that many k steps ahead (4-bit mcg layers with whole steps), the same bits; default 0 (off) |
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
 +| `TF_GLM_OVN_KEEP_SEQS` | Exactly `0` or `1`; default off (a released stream's sequence stays allocated for the next request on its slot, as slot 0's always does, so a request starts with no allocation, fill or free) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+index dcc1284e80d51eec9024de4593266322e9cce578..965973b5564cfd4b146fd9f83b7ae6f007a15892 100644
 --- a/zig/build/glm_family_host.zig
 +++ b/zig/build/glm_family_host.zig
 @@ -105,6 +105,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
@@ -77,9 +79,10 @@ diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
  
  pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index a25a3c0aa1e092e57b671f9b588dd8da4268db27..46c44320bba14aabd55ba10fb4575855b585eb25 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
-@@ -59,6 +59,7 @@ test {
+@@ -60,6 +60,7 @@ test {
      _ = @import("cuda_thin_bytes.zig");
      _ = @import("cuda_images_interleave_test.zig");
      _ = @import("cuda_pages_test.zig");
@@ -88,6 +91,7 @@ diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
      _ = @import("cuda_ranks_test.zig");
      _ = @import("cuda_ranks_roce_test.zig");
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+index 2f44e68cc0e72aa31c2445d0371b42a0f7160751..4b6930a700aed9545eb84e7c5d0ebadf2a2472df 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
 @@ -313,15 +313,20 @@ pub const Engine = struct {
@@ -115,6 +119,7 @@ diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_en
          cuda.completion.drain(e.d, e.stream, "GLM sequence release did not drain");
 diff --git a/zig/src/families/glm/cuda_keep_seqs_test.zig b/zig/src/families/glm/cuda_keep_seqs_test.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..6d847e67ba756a1808ab4e850b334b140169c953
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_keep_seqs_test.zig
 @@ -0,0 +1,198 @@
@@ -317,9 +322,10 @@ new file mode 100644
 +    try expect(f.e.seqs.items[1].?.st.capacity == 0 and p.pool.idle() and p.pool.census().free == 8);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index e851a1bcda89dbfab5814b112699391d2c127198..7055d0c8e1970fd9edfea4607ac2741449a5abc7 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -127,6 +127,7 @@ pub const rules = [_]Rule{
+@@ -171,6 +171,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_X3_NC", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 or 2 (the routed experts' decode trellis loads, 16 bytes, that many k steps ahead)" },
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -329,6 +335,7 @@ diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
      .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
 diff --git a/zig/tests/cuda/glm_keep_seqs_check.zig b/zig/tests/cuda/glm_keep_seqs_check.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..eb25f32f4ec5514747a25dbcc427e9c6ed76bf87
 --- /dev/null
 +++ b/zig/tests/cuda/glm_keep_seqs_check.zig
 @@ -0,0 +1,146 @@
@@ -479,9 +486,10 @@ new file mode 100644
 +    check.pass("kept sequences, as left and with every byte poisoned, equal fresh ones: {d} greedy steps' tokens, bf16 logits rows and MTP drafts after prompts of {any} tokens, fp8 and bf16 caches", .{ steps, prompts });
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+index 3c3137290df252d726f8f076b6c1c5feb927458a..dde339b08e87015bb0c2c4a876b27e6d39399512 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -5,6 +5,7 @@ const glm_exl3_items_tests = @import("glm_exl3_items_tests.zig");
+@@ -4,6 +4,7 @@ const check = @import("check.zig");
  const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
  const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
  const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
@@ -489,7 +497,7 @@ diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.z
  const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
  const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
  
-@@ -14,6 +15,7 @@ pub const usage =
+@@ -12,6 +13,7 @@ pub const usage =
      \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
      \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
      \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
@@ -497,15 +505,14 @@ diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.z
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
      \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
      \\
-@@ -21,7 +23,6 @@ pub const usage =
+@@ -19,13 +21,14 @@ pub const usage =
  
  /// True when `cmd` is one of these commands, having run it; false when main.zig's own table should go on.
  pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
 -    _ = rest;
-     if (std.mem.eql(u8, cmd, "glm-exl3-items")) {
-         try glm_exl3_items_tests.run_(gpu);
-     } else if (std.mem.eql(u8, cmd, "glm-draft-onepass")) {
-@@ -30,6 +31,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+     if (std.mem.eql(u8, cmd, "glm-draft-onepass")) {
+         try glm_draft_onepass.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-index-ovn-check")) {
          try glm_index_ovn_check.run(gpu);
      } else if (std.mem.eql(u8, cmd, "glm-index-regroup-check")) {
          try glm_index_regroup_check.run(gpu);

@@ -23,20 +23,22 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 173e1785848788940ee2bce25d28047df372c06c..1a1db37151bac481656c25071cddbc40baaa9bb4 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -64,6 +64,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -91,6 +91,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
  | `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
  | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
 +| `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index caaa814f51acad0d227af6d09c47ae336b34c69a..399d5c7b05f9e02e3fdcc9a8740be67e2d25e12d 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
-@@ -63,6 +63,7 @@ test {
+@@ -65,6 +65,7 @@ test {
      _ = @import("cuda_resolve_test.zig");
      _ = @import("cuda_boundary.zig");
      _ = @import("cuda_roce_multi.zig");
@@ -45,6 +47,7 @@ diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
      _ = @import("cuda_prompt_cuts.zig");
      _ = @import("cuda_request_starts_test.zig");
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+index 135f9a892daa51a896561403f127420b1729abb7..c006e1dd886493d95dbde828b678378551a1e02d 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
 @@ -229,6 +229,8 @@ pub const Engine = struct {
@@ -57,9 +60,10 @@ diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_en
      }
  
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index fe9337a1a8d428abd57c1057219d256a98df3417..9a69473faed5f28a5ae2622a984bb2570874d145 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -187,7 +187,7 @@ pub const Forward = struct {
+@@ -189,7 +189,7 @@ pub const Forward = struct {
          try glue.hcPre(f.set(), f.stream, b.x, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc);
      }
  
@@ -68,7 +72,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
          const stamp = prof_mod.span(f.prof, f.stream, .glue);
          defer stamp.end();
          const c = &r.w.config;
-@@ -255,7 +255,7 @@ pub const Forward = struct {
+@@ -257,7 +257,7 @@ pub const Forward = struct {
          return .{ .set = f.set(), .linear = .{ .lane = &f.m.lane, .nvfp4_prompt = &f.m.prompt }, .copy_rows = f.m.copy_rows };
      }
  
@@ -79,6 +83,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
  
 diff --git a/zig/src/families/glm/cuda_router_warm.zig b/zig/src/families/glm/cuda_router_warm.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..c407544dab44546e6ca6be921238cd058900c6ec
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_router_warm.zig
 @@ -0,0 +1,156 @@
@@ -239,9 +244,10 @@ new file mode 100644
 +    return n;
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index eb3642cfcc36fe6a7f60d412f14492a8ec8209d9..e1c831265e9dc7f0aee388017fe4af4288506983 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -106,6 +106,7 @@ pub const rules = [_]Rule{
+@@ -150,6 +150,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },
      .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },

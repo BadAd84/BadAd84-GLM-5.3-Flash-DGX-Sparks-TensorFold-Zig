@@ -1,21 +1,20 @@
-# The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-19)
+# The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-20)
 
-The serve's environment is two files, `scripts/env/prod.env` (production: the runtime section and the adopted recipe) and `scripts/env/dev.env` (production, line for line, plus a candidates section). `KNOBS=measured` (or `prod`) in `scripts/serve.sh` applies `prod.env` and `KNOBS=dev` applies `dev.env`; `KNOBS=off` applies only the runtime section of `prod.env`. `scripts/check-env.py` keeps them consistent. The recipe section is the list below, on top of an image built from `patches/engine/` (pin v1.2.9, 36 patches) and the packages `patches/pr1411`, `patches/cache-salt`, `patches/learn-starts` and `patches/solo-cuts` (the last two gated, their GPU checks pending). Cells measured on the v1.2.9 stack are in OVERNIGHT sections 41 to 50; the older ones (sections 17 to 36) were measured on the v1.2.7 stack.
+The serve's environment is two files, `scripts/env/prod.env` (production: the runtime section and the adopted recipe) and `scripts/env/dev.env` (production, line for line, plus a candidates section). `KNOBS=measured` (or `prod`) in `scripts/serve.sh` applies `prod.env` and `KNOBS=dev` applies `dev.env`; `KNOBS=off` applies only the runtime section of `prod.env`. `scripts/check-env.py` keeps them consistent. The recipe section is the list below, on top of an image built from `patches/engine/` (upstream main `1ece6e6db`, 1.3.0: 38 patches, 0011 retired because upstream has it) and the packages `patches/pr1411`, `patches/cache-salt`, `patches/learn-starts`, `patches/solo-cuts`, `patches/disk-any-position` and `patches/restore-held`; the series was re-seated onto main on 2026-11-20 with every default path unchanged (OVERNIGHT section 70, `docs/audit-2026-11-12/reseat-main-1ece6e6.md`). Every cell below was measured on the v1.2.9 stack (OVERNIGHT sections 41 to 69; the older ones, sections 17 to 36, on the v1.2.7 stack) and has not been measured on main yet: queue91 (`scripts/queues/queue91.sh`, scored by `scripts/queue-scores/score91.py`) is the first queue on the new base.
 Production on the Sparks is the Python stack and takes none of it. A knob is set only when its cells show no regression at 1, 2, 4, 6 and 8
 streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT below). Every name is a row of the `.glm` scope of
 `zig/src/platform/environment.zig`; an unregistered `TF_GLM_*` name is refused at boot, so `scripts/env/prod.env` must follow the patch set it runs on (`scripts/check-env.py --tree GITDIR:TREEISH` checks every name against the tree the series makes).
 
-## Set by `scripts/env/prod.env` (the recipe section, 23 knobs) and added by `serve.sh`
+## Set by `scripts/env/prod.env` (the recipe section, 22 knobs) and added by `serve.sh`
 
 `TF_GLM_KDA_PAD`, `TF_GLM_OVN_KEPT_WALK`, `TF_GLM_OVN_DRAFT_ONEPASS`, `TF_GLM_OVN_DRAFT_DOWN4`, `TF_GLM_OVN_DRAFT_MLPSPLIT=4`, `TF_GLM_OVN_MLA_FUSEMERGE`, `TF_GLM_OVN_DRAFT_EDGE=0.6`,
-`TF_GLM_OVN_DRAFT_BETA=2`, `TF_GLM_OVN_DRAFT_CUTS=1:0.3`, `TF_EXL3_DEC_ORDER`, `TF_GLM_OVN_EXL3_ITEMS` (decode windows on our 16-pair item plan: on v1.2.7 the default path, on v1.2.9 a switch because upstream's
-default is its compact 1024-row calls), `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN`, `TF_GLM_OVN_KEEP_SEQS` (OVERNIGHT sections 30 and 34), `TF_GLM_OVN_OFF_EFFORT_LINE`,
+`TF_GLM_OVN_DRAFT_BETA=2`, `TF_GLM_OVN_DRAFT_CUTS=1:0.3`, `TF_EXL3_DEC_ORDER`, `TF_GLM_OVN_X3_NC`, `TF_GLM_OVN_X3_XROW`, `TF_GLM_OVN_X3_FUSEDOWN`, `TF_GLM_OVN_KEEP_SEQS` (OVERNIGHT sections 30 and 34), `TF_GLM_OVN_OFF_EFFORT_LINE`,
 and, since 2026-11-19, the seven below.
 The three-rank RoCE wire (`TF_GLM_ROCE_MULTI`, `TF_TP_MASTER`, `TF_TP_KERNEL_IMAGE`) is added when `--parallel` is at most 4, the world is above 1 and the fatbin exists.
 
 `TF_GLM_OVN_OFF_EFFORT_LINE` sets no speed cell: it is a prompt change, not a kernel one. Thinking off, GLM-5.3's chat template leaves out its default `Reasoning Effort: Max` system line, exactly as production's Python engine renders it (prompts.py `thinking_off`), so the served prompt for the bench prose prompt is the same 33 tokens production sends instead of 40; a request that names `low` or `high` keeps its line and thinking on renders as before. Replies are therefore NOT token-identical to the knob-off serve, by design.
 
-On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, arms against the mean of two controls): `TF_GLM_OVN_EXL3_ITEMS=1` is worth +3.8% at one stream, +3.9% at four and +5.3% at eight over upstream's compact decode path; `TF_GLM_OVN_KEEP_SEQS=1` +0.5% at one stream (inside the controls' 1.3% spread), +2.3% at four and +4.5% at eight. Both stay set; the X3 switches only act on the item plan. With them the stack decodes at parity with the v1.2.7 stack (section 41).
+On v1.2.9 with every rank on the recipe `serve.sh` sets (OVERNIGHT section 41, arms against the mean of two controls): `TF_GLM_OVN_EXL3_ITEMS=1` is worth +3.8% at one stream, +3.9% at four and +5.3% at eight over upstream's compact decode path; `TF_GLM_OVN_KEEP_SEQS=1` +0.5% at one stream (inside the controls' 1.3% spread), +2.3% at four and +4.5% at eight. On main `EXL3_ITEMS` has no line: the item plan is upstream's unconditional decode path (`4e6cdeed9`, `51a6fe02a`, our PR #2044), so its +3.8 / +3.9 / +5.3% is part of the base; `KEEP_SEQS` stays set; the X3 switches only act on the item plan. With them the stack decodes at parity with the v1.2.7 stack (section 41).
 
 The seven that joined on 2026-11-19 (OVERNIGHT sections 45 to 50; replies equal to the recipe's on every cell):
 
@@ -76,6 +75,24 @@ The seven that joined on 2026-11-19 (OVERNIGHT sections 45 to 50; replies equal 
 | `patches/engine/0036` | `TF_GLM_OVN_LATENT_ROWS=2` or `4`, default 0 | gated 2026-11-19, no GPU run yet: `glm-latent-rows` (byte equality of the absorb and expand kernels at 2 and 4 rows a step against today's launch) and the cold first token arms are in `scripts/queues/queue73.sh` |
 | `patches/engine/0038` | `TF_GLM_OVN_PIECE_FRONT=1`, `TF_GLM_OVN_PIECE_MLA=1`, `TF_GLM_OVN_PIECE_FFN=1`, default 0; `TF_GLM_OVN_FRONT_ROWS=N` (a front range joins pieces until it has N rows), default 0 | gated 2026-11-20 (full gate run `sg-20261120-042953`, nine mutants); the three schedule switches on a GPU in queue83 (OVERNIGHT section 58, two boots each, every reply equal, decode level): the three together read -3.6 / -3.8 / -3.5% cold at 8k / 32k / 120k, -3.5% on a ~113k conversation's first turn and -1.2% on its turns 2 to 8; the KDA front alone -3.0 / -3.0 / -2.6%, the router front adds 0.1 points. Joins the final recipe N' (queue77 measures it at every level); `FRONT_ROWS` gained nothing in queue84 (512 and 768 level, 2048 slower; OVERNIGHT section 61), so it stays 0 |
 | `patches/engine/0039` | `TF_GLM_OVN_PIECE_KDA=1`, default 0 | a KDA mixer site's chain run in the ranges the pieces cut, each ahead of its pieces' o_proj and exchange, so the first exchange no longer waits for the whole chain. Gated 2026-11-20 (full gate `sg-20261120-081755`, 14 mutants); `tf-cuda-test glm-kda-pieces` (byte equality against the whole chain, seven cases, two planted controls) PASSes on a GPU (queue87, 2 PASS lines, rc 0). Measured slower, so it stays off (OVERNIGHT section 67, queue87, A B B A, every reply equal): the cold first token +0.73 / +0.88 / +0.97% at 8k / 32k / 120k (0.86% on the mean; the controls' spread 0.64 to 1.48%), the ~113k conversation's turns 2 to 8 level (0.19% faster), against an expected 1% to 1.5% faster from the idle it hides |
+
+## Absorbed by upstream main (the re-seat of 2026-11-20; OVERNIGHT section 70)
+
+Patch 0011 (`TF_GLM_OVN_EXL3_ITEMS`, decode windows on the 16-pair item plan) is retired: upstream's `4e6cdeed9` and `51a6fe02a` are our PR #2044 and make the plan unconditional, so the switch has no reader. Every other patch is kept, ten of them (engine 0012, 0013, 0019 to 0024 and 0036, and the `pr1411` package's test) repaired for upstream's `7948cc42d` (each GLM kernel opens with `glm_pdl::enter()`, each launch goes through `cuda_pdl.launch`, each fake test driver forwards `cuLaunchKernelEx`).
+
+## Settings upstream added or changed since v1.2.9, read from its code (`docs/audit-2026-11-12/knob-inventory-main-1ece6e6.md`; none measured on this serve yet)
+
+| setting | what the code says | arm in queue91 |
+|---|---|---|
+| `TF_GLM_PDL` (default on, exactly `0` launches plain) | every GLM kernel and the decode linears are dependent launches; upstream's commit quotes 2 to 3 us idle between ~1,320 kernels a step and 1.3% for the linears | `mz`: prod with `TF_GLM_PDL=0` |
+| `TF_CACHE_EVICT=decayed_resume` (default `main`) | prompt-cache victim choice with recency credit for resumed snapshots, read by the store GLM's snapshots live in; upstream quotes 28 to 34% fewer prompt rows rebuilt at 16 GiB | needs a many-conversation cohort that exceeds the ~7.85 GiB cache budget; not in queue91 |
+| `NCCL_IB_SUBNET_PREFIX_LEN=24` with NCCL 2.30.7 or later | switchless RoCE links on separate subnets (recipe doc) | not set yet |
+| lanes: draft depth held against a noisy round, shared and lone prices from warm trials | changes round counts and draft choices with no switch; our `DRAFT_EDGE`, `DRAFT_BETA` and `DRAFT_CUTS` tune the same rule | every arm of queue91 carries it; the draft knobs need their own screen on main |
+| `TF_GLM_INDEX_CUDA` | now a registry row with words 1, 0, scores; our patch 0007 adds `all` | unchanged |
+| `TF_GLM_EXPERT_FORM` and its per-width race | NVFP4 experts only; this serve's EXL3 returns before it | none |
+| `TF_GLM_L2PF` site f | acts only when L2PF is on, and it is unset on a GB10 at two ranks or more | none |
+| `--tp 3 --rank N` | refused for GLM (its options have no rank field); `TF_GLM_RANK` and `TF_GLM_WORLD` stay the way in and are refused from 1.4.0 | none; laudney's open #2919 is the upstream work |
+| `--learn-conversations` | still refused for GLM without `patches/pr1411`; the maintainers rebased #1411 and put it in the landing queue | none |
 
 ## Absorbed by upstream v1.2.9 (landed 2026-11-15; OVERNIGHT section 37)
 

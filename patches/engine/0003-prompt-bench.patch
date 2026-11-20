@@ -54,9 +54,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/build.zig b/build.zig
+index 8eedd401e6d4111a2c3646c28fc3b963bf644c14..750d32c54a4e060d75dda5b9356c113fc088ad75 100644
 --- a/build.zig
 +++ b/build.zig
-@@ -256,6 +256,7 @@ pub fn build(b: *std.Build) void {
+@@ -264,6 +264,7 @@ pub fn build(b: *std.Build) void {
      @import("zig/build/startup_states_timing.zig").step(b);
      // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
      @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
@@ -65,9 +66,10 @@ diff --git a/build.zig b/build.zig
      @import("zig/build/cache_index_timing.zig").step(b);
      // the chat template's nesting, step, stack and memory limits (zig/src/core/template/limits_test.zig), on every host
 diff --git a/zig/build/server.zig b/zig/build/server.zig
+index a157e0143b74177c83fa3f8ee41c9cd396bfbe83..565acac98271cd10be121645c25952c2df9d4bb5 100644
 --- a/zig/build/server.zig
 +++ b/zig/build/server.zig
-@@ -202,3 +202,19 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
+@@ -220,3 +220,19 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
      step.dependOn(&server_install.step);
      step.dependOn(&cli_install.step);
  }
@@ -88,6 +90,7 @@ diff --git a/zig/build/server.zig b/zig/build/server.zig
 +    b.step("prompt-bench", "The server's request preparation on the parity probe's r2, ms per site (no GPU)").dependOn(&b.addInstallArtifact(exe, .{}).step);
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 72499119c8328b27e16310449c1a75afe0b4e81e..093606cc5226b2d4cc67149ce6fbf20583d850e9 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
 @@ -15,6 +15,10 @@ pub const hub = @import("hub.zig");
@@ -100,9 +103,10 @@ diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
 +pub const openai = @import("openai.zig");
  
  test {
-     _ = @import("startup_receipt.zig");
+     _ = @import("drafter_test.zig");
 diff --git a/zig/tests/server/prompt_bench.zig b/zig/tests/server/prompt_bench.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..26db37dc96062a5040ca384a7a6c354f11bdaf24
 --- /dev/null
 +++ b/zig/tests/server/prompt_bench.zig
 @@ -0,0 +1,256 @@

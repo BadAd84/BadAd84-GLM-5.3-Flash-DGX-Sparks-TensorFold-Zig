@@ -37,10 +37,48 @@ with starts takes a solo pass where no message start is inside it.
 
 ---
 
+diff --git a/docs/recipes/glm-5.3-flash-cuda.md b/docs/recipes/glm-5.3-flash-cuda.md
+index 5336c8fba1ef95765ecb31dbacd5f1794e52e4c7..8368ddafd49233ed887c426f13188e5aa6dd2b00 100644
+--- a/docs/recipes/glm-5.3-flash-cuda.md
++++ b/docs/recipes/glm-5.3-flash-cuda.md
+@@ -99,9 +99,10 @@ drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,5
+   Unset or `2048`, every pass takes 2,048 rows and nothing extra is held. See [Prompt chunk size](#prompt-chunk-size).
+ - `TF_GLM_REQUEST_STARTS=1` on rank 0 (opt-in, off by default) cuts each prompt pass at the request's message starts
+   too, and every 2,048 rows from the last cut, so a chat's next turn resumes where its previous turn's history ends
+-  instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes no solo
+-  or batched pass. GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the
+-  cuts digest in each state's disk image, so a warm turn resumes where its previous turn ended even after a restart
++  instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes a solo
++  pass where no message start is inside it (the cut between its two grid chunks does not count), and no batched pass.
++  GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the cuts digest in each
++  state's disk image, so a warm turn resumes where its previous turn ended even after a restart
+   (#2404, part of #2396).
+ - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
+   faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in
+diff --git a/zig/src/families/glm/cuda_kv8_test.zig b/zig/src/families/glm/cuda_kv8_test.zig
+index 12f9f4df47b3dac435605c9b2ba9bcd2ecb79fcc..94caa7606863071ab61d2ccc82aaaac4c7dcaa28 100644
+--- a/zig/src/families/glm/cuda_kv8_test.zig
++++ b/zig/src/families/glm/cuda_kv8_test.zig
+@@ -299,10 +299,10 @@ test "GLM FP8 KV: canonical per-rank state bytes at configured long windows are
+     try t.expectEqual(@as(usize, 11), mla);
+     const contexts = [_]usize{ 8192, 65536, 199307, 245760 };
+     const bytes = [_][3]usize{
+-        .{ 8256, 350153216, 299824640 },
+-        .{ 65600, 1098836480, 698938880 },
+-        .{ 199360, 2845207040, 1629908480 },
+-        .{ 245824, 3451841024, 1953297920 },
++        .{ 8256, 350177792, 299849216 },
++        .{ 65600, 1098861056, 698963456 },
++        .{ 199360, 2845231616, 1629933056 },
++        .{ 245824, 3451865600, 1953322496 },
+     };
+     for (contexts, bytes) |context, want| {
+         const capacity = @import("cuda_native.zig").capacity(context);
 diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cuda_prompt_cuts.zig
+index d477325c34c0deefa62fe65e90b783a498b575c1..ee49f9612b1f173f3a65e4496bd67fa0c188d8b4 100644
 --- a/zig/src/families/glm/cuda_prompt_cuts.zig
 +++ b/zig/src/families/glm/cuda_prompt_cuts.zig
-@@ -49,12 +49,19 @@
+@@ -49,12 +49,19 @@ pub fn set(gpa: std.mem.Allocator, list: *std.ArrayList(u32), cuts: []const u32)
      try list.appendSlice(gpa, cuts);
  }
  
@@ -63,7 +101,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  }
  
  test "glm request starts: with no cuts a pass cuts every prefill_rows rows from 0, as before" {
-@@ -93,15 +100,37 @@
+@@ -93,15 +100,37 @@ test "glm request starts: a short chunk ends at a start inside the first grid st
      try std.testing.expect(!coldCut(3000, &cuts, 0 + prefill_rows));
  }
  
@@ -104,7 +142,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  }
  
  test "glm request starts: starts 1 and 2 rows apart each end a chunk, and a step from each runs to the next" {
-@@ -177,9 +206,9 @@
+@@ -177,9 +206,9 @@ test "glm request starts: rank 0's step rows (Leader.chunk) are the rows each ot
              const n = leaderRows(c.len, c.cuts, start, false);
              try std.testing.expectEqual(@min(left, n), try stepRows(c.len, c.cuts, start, @min(left, n + 1)));
              const w = leaderRows(c.len, c.cuts, start, true); // a solo or paired step: two grid steps left
@@ -116,7 +154,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
                      try std.testing.expectError(error.BadChunk, wide);
                  } else try std.testing.expectEqual(@min(left, w), try wide);
              }
-@@ -189,6 +218,96 @@
+@@ -189,6 +218,96 @@ test "glm request starts: rank 0's step rows (Leader.chunk) are the rows each ot
      }
  }
  
@@ -214,9 +252,10 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
      var list: std.ArrayList(u32) = .empty;
      defer list.deinit(std.testing.allocator);
 diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cuda_prompt_solo.zig
+index 0c3395ea754d6bfa5915d010a5fa6db5c9318b62..09ba3c32a7d8ed4807e8bd0ccdee52fd3204be1e 100644
 --- a/zig/src/families/glm/cuda_prompt_solo.zig
 +++ b/zig/src/families/glm/cuda_prompt_solo.zig
-@@ -3,6 +3,8 @@
+@@ -3,6 +3,8 @@ const std = @import("std");
  const fw = @import("cuda_forward.zig");
  const engine = @import("cuda_engine.zig");
  const Engine = engine.Engine;
@@ -225,7 +264,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cu
  
  /// Whether a stream besides `s` is past its prompt pass (a lane with no fill): a solo pass would hold up its rounds.
  pub fn othersDecode(lanes: anytype, s: anytype) bool {
-@@ -30,11 +32,12 @@
+@@ -30,11 +32,12 @@ fn rowsAt(start: usize, len: usize) usize {
      return @min(len - start, fw.solo_rows);
  }
  
@@ -240,7 +279,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cu
      // a resumed step restores its kept state, and the rings' base, after this choice
      const base = if (from) |r| (e.snaps.get(r.id) orelse return false).bases[0] else e.cur.st.base;
      return ringsAgree(base, e.cur.st.ring_rows, start, rowsAt(start, len));
-@@ -42,7 +45,8 @@
+@@ -42,7 +45,8 @@ pub fn at(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, mark
  
  /// Whether a pass of `rows` past a chunk may run: `at`'s rule on every rank, its kept state restored.
  pub fn allowed(e: *const Engine, start: usize, rows: usize) bool {
@@ -250,7 +289,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cu
      return ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rows);
  }
  
-@@ -80,8 +84,59 @@
+@@ -80,8 +84,59 @@ test "a solo pass rebases the rings where chunks one at a time do" {
      try std.testing.expect(ringsAgree(C, 2 * C, C, 2 * C));
  }
  
@@ -313,9 +352,10 @@ diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cu
 +    }
 +}
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+index 272870e67f799ced066ae0bf18520288f9c2cfed..d88ea117ba7af322d2c267b58d583e08bfd4dd32 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
-@@ -23,10 +23,10 @@
+@@ -23,10 +23,10 @@ pub const window_rows = 32;
  pub const prompt_heads = 16;
  /// The context the buffers' dense attention partials reach (Buffers' min(capacity, 2560)).
  pub const dense_reach = 2560;
@@ -330,38 +370,3 @@ diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_sta
  
  /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
  const Arena = struct {
-diff --git a/zig/src/families/glm/cuda_kv8_test.zig b/zig/src/families/glm/cuda_kv8_test.zig
---- a/zig/src/families/glm/cuda_kv8_test.zig
-+++ b/zig/src/families/glm/cuda_kv8_test.zig
-@@ -291,10 +291,10 @@
-     try t.expectEqual(@as(usize, 11), mla);
-     const contexts = [_]usize{ 8192, 65536, 199307, 245760 };
-     const bytes = [_][3]usize{
--        .{ 8256, 350153216, 299824640 },
--        .{ 65600, 1098836480, 698938880 },
--        .{ 199360, 2845207040, 1629908480 },
--        .{ 245824, 3451841024, 1953297920 },
-+        .{ 8256, 350177792, 299849216 },
-+        .{ 65600, 1098861056, 698963456 },
-+        .{ 199360, 2845231616, 1629933056 },
-+        .{ 245824, 3451865600, 1953322496 },
-     };
-     for (contexts, bytes) |context, want| {
-         const capacity = @import("cuda_native.zig").capacity(context);
-diff --git a/docs/recipes/glm-5.3-flash-cuda.md b/docs/recipes/glm-5.3-flash-cuda.md
---- a/docs/recipes/glm-5.3-flash-cuda.md
-+++ b/docs/recipes/glm-5.3-flash-cuda.md
-@@ -85,9 +85,10 @@
-   Unset or `2048`, every pass takes 2,048 rows and nothing extra is held. See [Prompt chunk size](#prompt-chunk-size).
- - `TF_GLM_REQUEST_STARTS=1` on rank 0 (opt-in, off by default) cuts each prompt pass at the request's message starts
-   too, and every 2,048 rows from the last cut, so a chat's next turn resumes where its previous turn's history ends
--  instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes no solo
--  or batched pass. GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the
--  cuts digest in each state's disk image, so a warm turn resumes where its previous turn ended even after a restart
-+  instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes a solo
-+  pass where no message start is inside it (the cut between its two grid chunks does not count), and no batched pass.
-+  GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the cuts digest in each
-+  state's disk image, so a warm turn resumes where its previous turn ended even after a restart
-   (#2404, part of #2396).
- - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
-   faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in

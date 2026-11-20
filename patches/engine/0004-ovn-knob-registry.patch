@@ -22,6 +22,7 @@ Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9 (ovn.zig registr
 
 diff --git a/zig/src/cuda/ovn.zig b/zig/src/cuda/ovn.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..562d69f3a75e858fb0e973ab556658d95b2cc25e
 --- /dev/null
 +++ b/zig/src/cuda/ovn.zig
 @@ -0,0 +1,77 @@
@@ -103,6 +104,7 @@ new file mode 100644
 +    set("TF_GLM_PROF", null);
 +}
 diff --git a/zig/src/cuda/root.zig b/zig/src/cuda/root.zig
+index b6476817f2b73ad60dd0a6c9e1b5f986c248dff7..10f4bd933970ab26f0f1e070b2d70afc83eadb29 100644
 --- a/zig/src/cuda/root.zig
 +++ b/zig/src/cuda/root.zig
 @@ -44,6 +44,7 @@ pub const nvfp4 = @import("nvfp4.zig");
@@ -114,16 +116,20 @@ diff --git a/zig/src/cuda/root.zig b/zig/src/cuda/root.zig
  pub const norms = @import("norms.zig");
  pub const embed_rows = @import("embed_rows.zig");
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
+index cb407cb222b6a1fa346ff049cd33639faf7d0d03..a4db878d8050e0e052eec504fbcccdfe3344fb5a 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
-@@ -61,11 +61,20 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
+@@ -68,7 +68,7 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
      var n: usize = 0;
      for (e.rules) |r| if (r.scope == .glm) {
          try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
 -        n += 1;
 +        if (!std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) n += 1; // the speed-hunt knobs: the next test
      };
-     try t.expectEqual(switches.len + counts.len + reals.len + windows.len, n);
+     try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len, n);
+ }
+@@ -83,6 +83,15 @@ test "GLM strict env: the expert form takes classic or factored, leaves blank to
+     for ([_][]const u8{ "Classic", "FACTORED", "0", "1", "race", "auto", " classic", "factored " }) |raw| try check(words[0], raw, false);
  }
  
 +test "GLM strict env: every speed-hunt knob (cuda/ovn.zig) is a glm switch, count, real or text row" {

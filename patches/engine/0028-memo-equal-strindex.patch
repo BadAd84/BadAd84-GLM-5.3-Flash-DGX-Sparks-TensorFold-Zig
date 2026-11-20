@@ -49,20 +49,22 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
+index 96a9a4a69a19b9198145d9957460c3035c8dba63..6988fc9e4675f91e4009b55c1fce31fbe93cf149 100644
 --- a/zig/build/cuda.zig
 +++ b/zig/build/cuda.zig
-@@ -351,8 +351,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
+@@ -368,8 +368,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
      b.step("test-save-reopen-host", "Unresolved save through actual checkpoint admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"Save recovery:"} })).step);
      b.step("test-trainer-close-host", "Actual native close and real Flash Next trainer ownership sentinels").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"Save recovery:"} })).step);
      const template, const server_tests = @import("cuda_server_host.zig").steps(b, host, cuda, mods, native_modules, build_options, windows_port, step, server_steps);
 -    // the tokenizer's own tests (memo, steps, regex, unicode) run here: no other test binary reaches them
--    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
-+    // the tokenizer's and the chat template's own tests (memo, regex, provenance): no other test binary reaches them
-+    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, template, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
-     const selected = b.option([]const u8, "modelopt-host-filter", "One portable ModelOpt regression") orelse "modelopt host:";
-     const run = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{selected} }));
-     run.has_side_effects = true;
+-    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.nemo_audio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| {
++    // the tokenizer's and chat template's own tests run here: no other test binary reaches them
++    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.nemo_audio, mods.heat, mods.tokenizer, template, native_modules.api, native, stagger(b, host, .debug) }) |m| {
+         // The native root compiles every family's open, including Muse's POSIX TP session.
+         if (host.result.os.tag == .windows and m == native) continue;
+         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
 diff --git a/zig/src/core/template/access.zig b/zig/src/core/template/access.zig
+index 0ad8edcdfa86b5cc9e2f35c06fbb53e8f7d609ca..aefe177dc78340899a5257d02e002897c574e58f 100644
 --- a/zig/src/core/template/access.zig
 +++ b/zig/src/core/template/access.zig
 @@ -103,6 +103,31 @@ fn index(i: i64, n: usize) ?usize {
@@ -107,15 +109,17 @@ diff --git a/zig/src/core/template/access.zig b/zig/src/core/template/access.zig
                  var end = at;
                  _ = uni.next(s.s, &end);
 diff --git a/zig/src/core/template/template.zig b/zig/src/core/template/template.zig
+index e87cefae5d700314b59d1db82de5b60a74eed69a..f7d492dce882ed6fa8b3fc1a79bd565b4e907b98 100644
 --- a/zig/src/core/template/template.zig
 +++ b/zig/src/core/template/template.zig
-@@ -243,4 +243,5 @@ test {
+@@ -263,4 +263,5 @@ test {
      _ = @import("unicode.zig");
      _ = @import("value.zig");
      _ = @import("provenance_test.zig");
 +    _ = @import("access.zig");
  }
 diff --git a/zig/src/core/tokenizer/memo.zig b/zig/src/core/tokenizer/memo.zig
+index 7d499f98bcd9bb21957fba7311c792484ef4e1ae..d51a76863ffebe32787b331e69ab6145b2e48e38 100644
 --- a/zig/src/core/tokenizer/memo.zig
 +++ b/zig/src/core/tokenizer/memo.zig
 @@ -5,6 +5,11 @@ const Allocator = std.mem.Allocator;

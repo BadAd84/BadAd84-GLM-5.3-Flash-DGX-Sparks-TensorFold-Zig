@@ -48,10 +48,70 @@ New here, not a re-seat: written on this stack at v1.2.9, on top of this package
 
 ---
 
+diff --git a/docs/environment.md b/docs/environment.md
+index cd2f8457181c5c140e213cd85264fd1e6ed04c5f..5416590c2f2743fd72c6a8299ef544c93d630d99 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -107,6 +107,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
+ | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
+ | `TF_GLM_OVN_PIECE_KDA` | Exactly `0` or `1`; default off (a prompt chunk's KDA mixer site runs its chain piece by piece, each range of rows ahead of its pieces' o_proj and exchange, instead of the whole chain before the first piece; the bits are the same) |
++| `TF_GLM_OVN_SOLO_TO_START` | Exactly `0` or `1`; default off (with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_REQUEST_STARTS=1`, a solo prompt step whose second chunk holds a request start ends at that start instead of being refused, so the stretch before a message start runs as one pass and not two; the tokens are the same) |
+ | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
+ | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
+ | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
+diff --git a/docs/recipes/glm-5.3-flash-cuda.md b/docs/recipes/glm-5.3-flash-cuda.md
+index 8368ddafd49233ed887c426f13188e5aa6dd2b00..e4a284fe080464cc190a2b3588761291778c7381 100644
+--- a/docs/recipes/glm-5.3-flash-cuda.md
++++ b/docs/recipes/glm-5.3-flash-cuda.md
+@@ -101,6 +101,8 @@ drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,5
+   too, and every 2,048 rows from the last cut, so a chat's next turn resumes where its previous turn's history ends
+   instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes a solo
+   pass where no message start is inside it (the cut between its two grid chunks does not count), and no batched pass.
++  With `TF_GLM_OVN_SOLO_TO_START=1` a solo pass whose second chunk holds a message start ends at that start, so the
++  stretch before a message start runs as one pass where it ran as two (same tokens; off by default).
+   GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the cuts digest in each
+   state's disk image, so a warm turn resumes where its previous turn ended even after a restart
+   (#2404, part of #2396).
+diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
+index f21ff030852eecad5de59ebb60527c6584a5327b..dce25b15911aa0e1bb3d74aecaabbe2a1949a9a4 100644
+--- a/zig/src/families/glm/cuda_engine.zig
++++ b/zig/src/families/glm/cuda_engine.zig
+@@ -206,6 +206,7 @@ pub const Engine = struct {
+         if (world > 1 and rank == 0 and side_high and !pair) std.log.info("glm: the exchanges' side stream runs at the highest priority", .{});
+         if (world > 1 and rank == 0 and (fw.pieceFront() or fw.pieceMla() or fw.pieceFfn())) std.log.info("glm: pieced sites hand the next block's front its glued rows piece by piece (kda {}, mla {}, ffn {}, front rows {d})", .{ fw.pieceFront(), fw.pieceMla(), fw.pieceFfn(), fw.pieceFrontRows() catch 0 });
+         if (world > 1 and rank == 0 and fw.pieceKda()) std.log.info("glm: a KDA mixer site's chain runs piece by piece, each ahead of its piece's o_proj and exchange", .{});
++        if (rank == 0 and prompt_solo.toStart()) std.log.info("glm: a solo prompt step may end at a request start", .{});
+         if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+         errdefer if (e.pair) |*p| p.deinit();
+         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
+@@ -390,7 +391,7 @@ pub const Engine = struct {
+         const split = e.index_split; // this step's alone
+         e.index_split = false;
+         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
+-        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len);
++        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len, prompt_solo.toStart());
+         if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
+         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
+         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
+diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
+index 3561a154bb5e1b905e8fe8983bdf6acf2d69f1f9..18e1fd29d7b03b66300c9cdaeba633e857bc330f 100644
+--- a/zig/src/families/glm/cuda_follow.zig
++++ b/zig/src/families/glm/cuda_follow.zig
+@@ -267,7 +267,7 @@ pub const Leader = struct {
+         if (start >= ids.len) return error.BadChunk;
+         try x.flush();
+         const wide = alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
+-        const n = prompt_cuts.leaderRows(ids.len, x.e.cur.cuts.items, start, wide);
++        const n = try prompt_cuts.leaderRows(ids.len, x.e.cur.cuts.items, start, wide, prompt_solo.toStart());
+         const part = ids[start..@min(ids.len, start + n + 1)];
+         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world); // a paired step's chunks share it
+         try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
 diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cuda_prompt_cuts.zig
+index ee49f9612b1f173f3a65e4496bd67fa0c188d8b4..d405f0163c3ecbcda4388880dbbc3504f89688b6 100644
 --- a/zig/src/families/glm/cuda_prompt_cuts.zig
 +++ b/zig/src/families/glm/cuda_prompt_cuts.zig
-@@ -37,9 +37,19 @@
+@@ -37,9 +37,19 @@ pub fn resumes(len: usize, cuts: []const u32, at: u32, kept_below: u64) bool {
      return coldCut(len, cuts, at) and kept_below == below(cuts, at);
  }
  
@@ -73,7 +133,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  }
  
  /// A sequence's request chunk starts (TF_GLM_REQUEST_STARTS) into `list`: ascending and after 0, else error.BadCuts.
-@@ -55,13 +65,11 @@
+@@ -55,13 +65,11 @@ pub fn cutInside(cuts: []const u32, start: usize, rows: usize) bool {
      return false;
  }
  
@@ -90,7 +150,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  }
  
  test "glm request starts: with no cuts a pass cuts every prefill_rows rows from 0, as before" {
-@@ -103,21 +111,46 @@
+@@ -103,21 +111,46 @@ test "glm request starts: a short chunk ends at a start inside the first grid st
  test "glm request starts: a step runs to the next cut, or solo where no start is inside it, from a cold cut only" {
      const m = prefill_rows;
      const s: usize = state.solo_rows;
@@ -152,7 +212,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  }
  
  test "glm request starts: a start is inside a step when it falls past the step's first row and before its end" {
-@@ -142,11 +175,11 @@
+@@ -142,11 +175,11 @@ test "glm request starts: starts 1 and 2 rows apart each end a chunk, and a step
      for (ends) |end| {
          try std.testing.expectEqual(end, nextCut(len, &cuts, at));
          try std.testing.expect(coldCut(len, &cuts, at));
@@ -166,7 +226,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  }
  
  /// The prompts and starts the tests here cut: the grid alone, starts off and on it, past the prompt, and close starts.
-@@ -197,50 +230,65 @@
+@@ -197,50 +230,65 @@ test "glm request starts: a kept state's digest below `at` matches another pass'
      try std.testing.expect(compared > 50);
  }
  
@@ -267,7 +327,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  }
  
  /// The starts the server sends (chunk_plan Plan.starts and withCut): a grid step from each start or message, and `cut`.
-@@ -279,33 +327,45 @@
+@@ -279,33 +327,45 @@ test "glm request starts: the server's list has a start every grid step, and a w
          .{ .len = 9 * prefill_rows + 3, .messages = &.{}, .cut = 1000 },
      };
      var buf: [64]u32 = undefined;
@@ -337,6 +397,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_cuts.zig b/zig/src/families/glm/cu
  
  test "glm request starts: starts must ascend after 0, and a refused list leaves the last one in place" {
 diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cuda_prompt_solo.zig
+index 09ba3c32a7d8ed4807e8bd0ccdee52fd3204be1e..9c2ed1ab4c8733affe59d6c903fe1d3424381c84 100644
 --- a/zig/src/families/glm/cuda_prompt_solo.zig
 +++ b/zig/src/families/glm/cuda_prompt_solo.zig
 @@ -1,5 +1,6 @@
@@ -346,7 +407,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cu
  const fw = @import("cuda_forward.zig");
  const engine = @import("cuda_engine.zig");
  const Engine = engine.Engine;
-@@ -27,20 +28,20 @@
+@@ -27,20 +28,20 @@ pub fn ringsAgree(base: usize, ring: usize, start: usize, rows: usize) bool {
      return start + fw.prefill_rows > base + ring or start + rows <= base + ring;
  }
  
@@ -373,7 +434,7 @@ diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cu
  }
  
  /// Whether a pass of `rows` past a chunk may run: `at`'s rule on every rank, its kept state restored.
-@@ -140,3 +141,55 @@
+@@ -140,3 +141,55 @@ test "a solo pass: taken between request starts, refused where one is inside it,
          }
      }
  }
@@ -429,42 +490,11 @@ diff --git a/zig/src/families/glm/cuda_prompt_solo.zig b/zig/src/families/glm/cu
 +    try std.testing.expect(allowed(&e, 301, C + 1001));
 +    try std.testing.expect(!ringsAgree(0, seq.st.ring_rows, 301, fw.solo_rows));
 +}
-diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
---- a/zig/src/families/glm/cuda_follow.zig
-+++ b/zig/src/families/glm/cuda_follow.zig
-@@ -259,7 +259,7 @@
-         if (start >= ids.len) return error.BadChunk;
-         try x.flush();
-         const wide = alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
--        const n = prompt_cuts.leaderRows(ids.len, x.e.cur.cuts.items, start, wide);
-+        const n = try prompt_cuts.leaderRows(ids.len, x.e.cur.cuts.items, start, wide, prompt_solo.toStart());
-         const part = ids[start..@min(ids.len, start + n + 1)];
-         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world); // a paired step's chunks share it
-         try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
-diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
---- a/zig/src/families/glm/cuda_engine.zig
-+++ b/zig/src/families/glm/cuda_engine.zig
-@@ -206,6 +206,7 @@
-         if (world > 1 and rank == 0 and side_high and !pair) std.log.info("glm: the exchanges' side stream runs at the highest priority", .{});
-         if (world > 1 and rank == 0 and (fw.pieceFront() or fw.pieceMla() or fw.pieceFfn())) std.log.info("glm: pieced sites hand the next block's front its glued rows piece by piece (kda {}, mla {}, ffn {}, front rows {d})", .{ fw.pieceFront(), fw.pieceMla(), fw.pieceFfn(), fw.pieceFrontRows() catch 0 });
-         if (world > 1 and rank == 0 and fw.pieceKda()) std.log.info("glm: a KDA mixer site's chain runs piece by piece, each ahead of its piece's o_proj and exchange", .{});
-+        if (rank == 0 and prompt_solo.toStart()) std.log.info("glm: a solo prompt step may end at a request start", .{});
-         if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
-         errdefer if (e.pair) |*p| p.deinit();
-         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
-@@ -390,7 +391,7 @@
-         const split = e.index_split; // this step's alone
-         e.index_split = false;
-         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
--        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len);
-+        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len, prompt_solo.toStart());
-         if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
-         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
-         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 3dbf9e9b48bcbf3c6edf28152f12e3d521b05299..20be7098cee96066fd38ceb3da2c67c71faee369 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -122,6 +122,7 @@
+@@ -166,6 +166,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },
      .{ .name = "TF_GLM_OVN_PIECE_KDA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -473,9 +503,10 @@ diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
      .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
      .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
 diff --git a/zig/tests/cuda/glm_solo_tests.zig b/zig/tests/cuda/glm_solo_tests.zig
+index 300cd96b9ae13e8c1946a7ac8838099ad067c216..9558765d7c04389d0724317a8245012cdfb16d26 100644
 --- a/zig/tests/cuda/glm_solo_tests.zig
 +++ b/zig/tests/cuda/glm_solo_tests.zig
-@@ -46,7 +46,7 @@
+@@ -46,7 +46,7 @@ pub fn soloCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
      const x: glm.follow.Leader = .{ .e = e, .link = &link };
      defer x.end() catch {};
      const V = e.share.vocab.len();
@@ -484,7 +515,7 @@ diff --git a/zig/tests/cuda/glm_solo_tests.zig b/zig/tests/cuda/glm_solo_tests.z
      const cases = [_]Case{
          .{ .len = 2 * C + 300 }, // a solo pass and a tail
          .{ .len = C + 2 }, // the shortest solo pass
-@@ -56,6 +56,9 @@
+@@ -56,6 +56,9 @@ pub fn soloCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
          .{ .len = C }, // one chunk
          .{ .len = 5 * C + 7 }, // solo passes past a rebase
          .{ .len = 4 * C, .marks = &.{C} }, // a mark at chunk 1: 0 and 1 alone, then a solo pass
@@ -494,7 +525,7 @@ diff --git a/zig/tests/cuda/glm_solo_tests.zig b/zig/tests/cuda/glm_solo_tests.z
      };
      const Kept = struct {
          fn call(_: *anyopaque, _: u32) void {} // the check keeps no state: its marks only shape the steps
-@@ -74,6 +77,7 @@
+@@ -74,6 +77,7 @@ pub fn soloCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
          for (0..2) |twin| { // twin 0 a chunk a step, twin 1 solo where it can, both with the same marks
              try x.bind(@intCast(2 * i + twin));
              try x.begin(null);
@@ -502,7 +533,7 @@ diff --git a/zig/tests/cuda/glm_solo_tests.zig b/zig/tests/cuda/glm_solo_tests.z
              var at: usize = 0;
              const t = while (true) {
                  const r = x.chunk(ids, at, twin == 1, null, null, marks) catch |err| {
-@@ -92,9 +96,9 @@
+@@ -92,9 +96,9 @@ pub fn soloCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
          }
          const st = &e.seqs.items[2 * i].?.st;
          const tw = &e.seqs.items[2 * i + 1].?.st;
@@ -514,7 +545,7 @@ diff --git a/zig/tests/cuda/glm_solo_tests.zig b/zig/tests/cuda/glm_solo_tests.z
          while (at < len) {
              const reach = @min(len - at, 2 * C);
              const two = glm.prompt_solo.takesTwo(at, len, case.marks) and glm.prompt_solo.ringsAgree(base, st.ring_rows, at, reach);
-@@ -126,5 +130,6 @@
+@@ -126,5 +130,6 @@ pub fn soloCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
          }
      }
      if (failed) return error.TestFailed;
@@ -522,26 +553,3 @@ diff --git a/zig/tests/cuda/glm_solo_tests.zig b/zig/tests/cuda/glm_solo_tests.z
 +    const to_start: []const u8 = if (glm.prompt_solo.toStart()) "on" else "off";
 +    check.pass("solo prompt passes at TP={d}: {d} prompts, one with a mark at chunk 1 and two with request starts (a solo step to a start: {s}), equal their twins a chunk a step in the first token, the next window's logits and tokens, the rings' bases and every state byte", .{ world, cases.len, to_start });
  }
-diff --git a/docs/environment.md b/docs/environment.md
---- a/docs/environment.md
-+++ b/docs/environment.md
-@@ -80,6 +80,7 @@
- | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
- | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
- | `TF_GLM_OVN_PIECE_KDA` | Exactly `0` or `1`; default off (a prompt chunk's KDA mixer site runs its chain piece by piece, each range of rows ahead of its pieces' o_proj and exchange, instead of the whole chain before the first piece; the bits are the same) |
-+| `TF_GLM_OVN_SOLO_TO_START` | Exactly `0` or `1`; default off (with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_REQUEST_STARTS=1`, a solo prompt step whose second chunk holds a request start ends at that start instead of being refused, so the stretch before a message start runs as one pass and not two; the tokens are the same) |
- | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
- | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
- | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
-diff --git a/docs/recipes/glm-5.3-flash-cuda.md b/docs/recipes/glm-5.3-flash-cuda.md
---- a/docs/recipes/glm-5.3-flash-cuda.md
-+++ b/docs/recipes/glm-5.3-flash-cuda.md
-@@ -87,6 +87,8 @@
-   too, and every 2,048 rows from the last cut, so a chat's next turn resumes where its previous turn's history ends
-   instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes a solo
-   pass where no message start is inside it (the cut between its two grid chunks does not count), and no batched pass.
-+  With `TF_GLM_OVN_SOLO_TO_START=1` a solo pass whose second chunk holds a message start ends at that start, so the
-+  stretch before a message start runs as one pass where it ran as two (same tokens; off by default).
-   GLM refuses the switch at startup with `TF_KV_SHARE` above 0; `--learn-conversations` keeps the cuts digest in each
-   state's disk image, so a warm turn resumes where its previous turn ended even after a restart
-   (#2404, part of #2396).

@@ -25,9 +25,10 @@ base's own cli_config_test, lean 0 new; series and series+pr1411+cache-salt PASS
 pristine base in the three-tree run.
 
 diff --git a/docs/environment.md b/docs/environment.md
+index cc46a13445ded42318521be4f4345531da3cc46a..55668cdb891b086fa56250b9f2413eab035b5f51 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -67,6 +67,7 @@
+@@ -94,6 +94,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
  | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
  | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
@@ -36,9 +37,10 @@ diff --git a/docs/environment.md b/docs/environment.md
  | `TF_GLM_OVN_ONEPASS_PIPE` | Exactly `0` or `1`; default off (the DSA block's prompt rows take the one-pass pipeline) |
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
 diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+index dc2126983bfc6d52a3957cf6c4103fa8f492b1f2..4192be87b979095fa091620f23818eb2e7072774 100644
 --- a/zig/src/core/lanes/lanes.zig
 +++ b/zig/src/core/lanes/lanes.zig
-@@ -94,6 +94,7 @@
+@@ -96,6 +96,7 @@ test {
      _ = @import("granted_reservation_test.zig");
      _ = @import("rollback_test.zig");
      _ = @import("free_shared_test.zig");
@@ -48,6 +50,7 @@ diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
  pub const learned_disk = @import("learned_disk.zig");
 diff --git a/zig/src/core/lanes/no_copy_test.zig b/zig/src/core/lanes/no_copy_test.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..709d89489bfb1e40e62899c3ec0c83757ab13a80
 --- /dev/null
 +++ b/zig/src/core/lanes/no_copy_test.zig
 @@ -0,0 +1,94 @@
@@ -146,9 +149,10 @@ new file mode 100644
 +    try std.testing.expectEqual(@as(usize, 0), got.n); // nothing copied: the backend holds every row
 +}
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index a6634caacf670cd4e54842be2004c8ee30ad19ab..815682bf631ad5bb5e38dd96e5ed3811c5378572 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
-@@ -119,6 +119,7 @@
+@@ -119,6 +119,7 @@ pub const Lanes = struct {
              .floor_rates = !block, // a chain's step costs a forward: --mtp-confidence cuts the rates' depth, not max_drafts
              .plain_margin = @as(f64, @floatFromInt(cuda.ovn.int("PLAIN_MARGIN", 0) catch 0)) / 100.0, // TF_GLM_OVN_PLAIN_MARGIN, in hundredths
              .free_shared = block and cuda.ovn.on("WIN_FREE"), // TF_GLM_OVN_WIN_FREE: shared windows fill by chance alone
@@ -157,9 +161,10 @@ diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lan
              .batch_rows = if (sharing) engine.shared_rows else 0,
              .max_streams = if (sharing) engine.max_shared else 1,
 diff --git a/zig/src/families/glm/cuda_lanes_test.zig b/zig/src/families/glm/cuda_lanes_test.zig
+index 328f16113239eee4ee4923dc9f9a9ec2e7dc0202..9af867eb4fb21b58632b192c04d60e2e1220be29 100644
 --- a/zig/src/families/glm/cuda_lanes_test.zig
 +++ b/zig/src/families/glm/cuda_lanes_test.zig
-@@ -6,6 +6,8 @@
+@@ -6,6 +6,8 @@ const Lanes = @import("cuda_lanes.zig").Lanes;
  const fw = @import("cuda_forward.zig");
  const solo = @import("cuda_prompt_solo.zig");
  const prompt_cuts = @import("cuda_prompt_cuts.zig");
@@ -168,7 +173,7 @@ diff --git a/zig/src/families/glm/cuda_lanes_test.zig b/zig/src/families/glm/cud
  
  test "a lane's slot is chosen before its map entry exists" {
      var storage: [8192]u8 = @splat(0);
-@@ -98,3 +100,25 @@
+@@ -98,3 +100,25 @@ test "glm request starts: a kept state off the new request's cold cuts, or over
          try std.testing.expectEqual(if (c.why == null) c.at else 0, s.cached); // refused: the pass starts at 0
      }
  }
@@ -195,9 +200,10 @@ diff --git a/zig/src/families/glm/cuda_lanes_test.zig b/zig/src/families/glm/cud
 +    try std.testing.expect(self.facts().copy_drafts);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 18f07df8c684bb8ca4ba458760156e16cb271b75..4599c2690a0cb66dc534242c8e4bbbfbf0ba46b8 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -109,6 +109,7 @@
+@@ -153,6 +153,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
      .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
      .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

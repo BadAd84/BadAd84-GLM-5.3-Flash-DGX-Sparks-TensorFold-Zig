@@ -31,9 +31,10 @@ and solo-cuts).
 ---
 
 diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
+index f448c0b745766695cb7ced4de12b1ee0d5a3ec96..7896807835e4eba2345fa8f6325eed3f275d7071 100644
 --- a/zig/src/families/glm/cuda_disk_image.zig
 +++ b/zig/src/families/glm/cuda_disk_image.zig
-@@ -107,14 +107,14 @@
+@@ -107,14 +107,14 @@ fn cache(sh: Shape, n: u64) [5]u64 {
      };
  }
  
@@ -53,9 +54,10 @@ diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cud
      const pooled: u64 = at / sparse.pool;
      for (0..sh.layers) |_| {
 diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
+index d68fc56312d95e89780e1c9fe25a14bb5b0fdb80..dd62060d1fcfb0395d7a386bb720563266e5a494 100644
 --- a/zig/src/families/glm/cuda_disk_image_test.zig
 +++ b/zig/src/families/glm/cuda_disk_image_test.zig
-@@ -102,7 +102,7 @@
+@@ -102,7 +102,7 @@ test "GLM disk image: the lease bytes the image counts are the snapshot plan's,
          defer st.deinit();
          for ([_]bool{ false, true }) |head| {
              const sh = try image.Shape.of(&st, &m.w.config, capacity, head);
@@ -64,7 +66,7 @@ diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/gl
                  for ([_]u64{ at - 1, at, sh.headRows(at) }) |mtp| {
                      const plan = try Plan.init(&st, &m.w.config, at, if (head) mtp else null, 0);
                      try expectEqual(@as(u64, plan.len), image.leaseBytes(sh, at, if (head) mtp else 0));
-@@ -112,7 +112,7 @@
+@@ -112,7 +112,7 @@ test "GLM disk image: the lease bytes the image counts are the snapshot plan's,
      }
  }
  
@@ -73,7 +75,7 @@ diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/gl
      var m: Model = undefined;
      try m.init();
      var d = H.driver();
-@@ -123,12 +123,12 @@
+@@ -123,12 +123,12 @@ test "GLM disk image: the longest state is a position the store's parts take, so
          defer st.deinit();
          const sh = try image.Shape.of(&st, &m.w.config, cap, true);
          const at = image.longest(sh);
@@ -88,7 +90,7 @@ diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/gl
      }
  }
  
-@@ -144,26 +144,37 @@
+@@ -144,26 +144,37 @@ test "GLM disk image: the store's rows are by position from 0 in whole blocks; r
      defer list.deinit(a);
      var segs: std.ArrayList(image.Seg) = .empty;
      defer segs.deinit(a);
@@ -142,7 +144,7 @@ diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/gl
      var m: Model = undefined;
      try m.init();
      var d = H.driver();
-@@ -175,7 +186,6 @@
+@@ -175,7 +186,6 @@ test "GLM disk image: a kept state's image read out of its lease restores every
      var pool = try pages.Pool.init(a, &d, 64 << 20, false);
      defer pool.deinit();
      const stream: cuda.Stream = .{ .d = &d, .handle = null };
@@ -150,7 +152,7 @@ diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/gl
      const mtp: u64 = at - 1; // a head one row behind: its last image row is not in the lease
      const sh = try image.Shape.of(&st, c, capacity, true);
      const plan = try Plan.init(&st, c, at, mtp, 0);
-@@ -385,6 +395,14 @@
+@@ -385,6 +395,14 @@ fn storeImage(a: std.mem.Allocator, d: *const cuda.Driver, pool: *pages.Pool, st
  }
  
  test "GLM disk image: the probe's hash leaves out what a prompt pass does not write, whatever the slot ran before" {
@@ -165,7 +167,7 @@ diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/gl
      var m: Model = undefined;
      try m.init();
      var d = H.driver();
-@@ -395,7 +413,6 @@
+@@ -395,7 +413,6 @@ test "GLM disk image: the probe's hash leaves out what a prompt pass does not wr
      for (H.bytes(st.arena.buf.ptr, st.arena.buf.len), 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
      var pool = try pages.Pool.init(a, &d, 64 << 20, false);
      defer pool.deinit();

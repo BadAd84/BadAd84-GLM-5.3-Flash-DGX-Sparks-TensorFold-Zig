@@ -23,17 +23,19 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 96440c0d236c47d8bb34d5a18e92f4852d26547e..a2a6d312d71881d8b1807a1ecbef90c670c1c259 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -61,6 +61,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -88,6 +88,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_DECODE_INDEX` | Whole row count; a decode window of fewer rows scores with shared key tiles and selects with the split select; default 0 (off) |
  | `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
  | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
 +| `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/kernels/cuda/glm_index.cu b/zig/kernels/cuda/glm_index.cu
+index f4e65c5e2cec6d9487f62f16328187761f8bc608..3c530ed51b1e93c376599d2e11f42ce87de1794c 100644
 --- a/zig/kernels/cuda/glm_index.cu
 +++ b/zig/kernels/cuda/glm_index.cu
 @@ -3,3 +3,4 @@
@@ -43,9 +45,10 @@ diff --git a/zig/kernels/cuda/glm_index.cu b/zig/kernels/cuda/glm_index.cu
 +#include "glm_index_regroup.cuh"
 diff --git a/zig/kernels/cuda/glm_index_regroup.cuh b/zig/kernels/cuda/glm_index_regroup.cuh
 new file mode 100644
+index 0000000000000000000000000000000000000000..88f9ae0d162e77a9536e3441bba1e5b380c37eb4
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_index_regroup.cuh
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,113 @@
 +// GLM DSA indexer scores as prod ots0109 prompt_scores.cu (Apache-2.0) over our sched kernel: TF_GLM_OVN_INDEX_REGROUP.
 +#pragma once
 +
@@ -57,6 +60,7 @@ new file mode 100644
 +                                const __nv_bfloat16* pk, float* out, const int* pos, int64_t rows, int64_t np,
 +                                int64_t nb, float scale, float wscale, int64_t heads, int loop, const int* pt,
 +                                int64_t ps) {
++  glm_pdl::enter();
 +  using namespace glm_index;
 +  __shared__ __align__(16) __nv_bfloat16 tile[2][BP * D];  // two key tiles
 +  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
@@ -159,9 +163,10 @@ new file mode 100644
 +  }
 +}
 diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_index.zig
+index 0a34e3082496707014957a42f34d55c4424f34ce..ac1205edc7ab4b1e4c7dcf14536f947a1859240c 100644
 --- a/zig/src/families/glm/cuda_index.zig
 +++ b/zig/src/families/glm/cuda_index.zig
-@@ -101,6 +101,8 @@ pub const Kernels = struct {
+@@ -103,6 +103,8 @@ pub const Kernels = struct {
      split_fn: ?cuda.Function = null,
      /// TF_GLM_OVN_INDEX_SCHED (read at load): prompt-sized launches score with tf_glm_index_scores_sched.
      sched_fn: ?cuda.Function = null,
@@ -170,7 +175,7 @@ diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_ind
  
      /// `image`: cuda.kernels.glm_index.
      pub fn load(d: *const cuda.Driver, image: []const u8, mode: Mode) !Kernels {
-@@ -118,6 +120,7 @@ pub const Kernels = struct {
+@@ -120,6 +122,7 @@ pub const Kernels = struct {
              .split_rows = sr,
              .split_fn = if (sr > 0) try m.function("tf_glm_index_split") else null,
              .sched_fn = if (cuda.ovn.on("INDEX_SCHED")) try m.function("tf_glm_index_scores_sched") else null,
@@ -178,7 +183,7 @@ diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_ind
          };
      }
  
-@@ -140,12 +143,24 @@ pub const Kernels = struct {
+@@ -142,12 +145,24 @@ pub const Kernels = struct {
          return k.split_fn != null and rows < k.split_rows and rows < rows_from and np >= split_from;
      }
  
@@ -201,10 +206,10 @@ diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_ind
 +            .sched => k.sched_fn.?,
 +            .plain => k.scores_fn,
 +        };
-         try cuda.launch.launch(f, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
+         try cuda_pdl.launch(f, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
      }
  
-@@ -173,6 +188,23 @@ pub const Kernels = struct {
+@@ -175,6 +190,23 @@ pub const Kernels = struct {
      }
  };
  
@@ -229,9 +234,10 @@ diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_ind
  pub fn decodeFrom(raw: ?[]const u8) !usize {
      return try @import("sys").environment.value(usize, "TF_GLM_INDEX_DECODE_FROM", raw, 0) / sparse.pool;
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 2d490c28b68c011e65b7e893bce00e9e44d53e43..3b71b2e43d65d014b020a76c9635f2a327f1503b 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -103,6 +103,7 @@ pub const rules = [_]Rule{
+@@ -147,6 +147,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_DECODE_INDEX", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows below which a decode window scores with shared key tiles and the split select" },
      .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -240,6 +246,7 @@ diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
      .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
      .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
 diff --git a/zig/tests/cuda/glm_index_ovn_check.zig b/zig/tests/cuda/glm_index_ovn_check.zig
+index 2b17d3e9b430177fb2ade70a4ae4bb40596f3d35..fbec5cf357c9753af4c9bab2668246d02fcd9520 100644
 --- a/zig/tests/cuda/glm_index_ovn_check.zig
 +++ b/zig/tests/cuda/glm_index_ovn_check.zig
 @@ -27,9 +27,9 @@ const prompt = [_]Case{
@@ -256,6 +263,7 @@ diff --git a/zig/tests/cuda/glm_index_ovn_check.zig b/zig/tests/cuda/glm_index_o
      defer gpa.free(qi);
 diff --git a/zig/tests/cuda/glm_index_regroup_check.zig b/zig/tests/cuda/glm_index_regroup_check.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..c96e5b7f22ed87c39a5f526ecec9a877f56dd38e
 --- /dev/null
 +++ b/zig/tests/cuda/glm_index_regroup_check.zig
 @@ -0,0 +1,88 @@
@@ -348,24 +356,24 @@ new file mode 100644
 +    return fails;
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+index a9a303b21f7bf56fe652457da5f79e84a385c28f..5ac2f5d55e0bd98ac6bc16ef34314ff8b5897c93 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -4,12 +4,14 @@ const check = @import("check.zig");
- const glm_exl3_items_tests = @import("glm_exl3_items_tests.zig");
+@@ -3,11 +3,13 @@ const std = @import("std");
+ const check = @import("check.zig");
  const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
  const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
 +const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
  
  /// The lines these commands add to `main.zig`'s usage, after its own.
  pub const usage =
-     \\  glm-exl3-items            the decode item plan against the plain decode, byte for byte (synthetic)
      \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
      \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
 +    \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
      \\
  ;
  
-@@ -22,6 +24,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+@@ -18,6 +20,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
          try glm_draft_onepass.run(gpu);
      } else if (std.mem.eql(u8, cmd, "glm-index-ovn-check")) {
          try glm_index_ovn_check.run(gpu);

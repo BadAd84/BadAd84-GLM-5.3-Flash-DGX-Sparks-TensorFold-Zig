@@ -21,28 +21,30 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9's floor_rates and our plain_margin are one struct literal's fields; both kept
 
 diff --git a/docs/environment.md b/docs/environment.md
+index a2a6d312d71881d8b1807a1ecbef90c670c1c259..380a0c1e5ab4f32a2a28d459ecbe733d0fd9b901 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -62,6 +62,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -89,6 +89,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
  | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
  | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
 +| `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
+index 09df22cb2bd86c90db11e2637ad02c3c7d81cd69..521d071077231ce466a2704aab288662ef54a41d 100644
 --- a/zig/src/core/lanes/config.zig
 +++ b/zig/src/core/lanes/config.zig
-@@ -27,6 +27,7 @@ pub const Model = struct {
+@@ -28,6 +28,7 @@ pub const Model = struct {
      speculate_early: bool = true, // draft every row's first draft behind the verify
      draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
      depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
 +    plain_margin: f64 = 0, // how much a drafted depth must beat plain rounds' tokens a ms by (0: the core's 1.05)
      plain_guard: bool = false, // plain rounds compete with drafted depths
+     copy_guard: bool = false, // a lone stream's copies compete with its own plain rounds (a family opts in)
      draft_confidence: ?f64 = null,
-     floor_rates: bool = false, // Constants.floor_rates: a head whose steps cost more than the floor's cut saves
-@@ -192,6 +193,7 @@ pub const Config = struct {
+@@ -197,6 +198,7 @@ pub const Config = struct {
                  .copy_first = m.copy_first and !m.context_copies,
                  .floor_rates = m.floor_rates,
                  .hold_costs = m.hold_costs,
@@ -50,7 +52,7 @@ diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
              },
              .draft_step_ms = m.draft_step_ms,
              .shared_drafts = m.shared_drafts,
-@@ -215,6 +217,7 @@ test "setup derives widths like Python" {
+@@ -220,6 +222,7 @@ test "setup derives widths like Python" {
      try std.testing.expectEqual(@as(u32, 4), c.most_drafts);
      try std.testing.expect(c.family_mtp and c.family_streams);
      try std.testing.expectEqual(@as(f64, 0.15), c.k.depth_rate);
@@ -59,6 +61,7 @@ diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
      defer steady.deinit(gpa);
      try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index 46340b0351cfc1b60ec0cdac063cc90532b31ba9..1565e95cd726f3ff2361407282a46a439751fe15 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
 @@ -117,6 +117,7 @@ pub const Lanes = struct {
@@ -70,9 +73,10 @@ diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lan
              .batch_rows = if (sharing) engine.shared_rows else 0,
              .max_streams = if (sharing) engine.max_shared else 1,
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 3b71b2e43d65d014b020a76c9635f2a327f1503b..cf07950b48e6319ac046720ad770a699e12effe9 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -104,6 +104,7 @@ pub const rules = [_]Rule{
+@@ -148,6 +148,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

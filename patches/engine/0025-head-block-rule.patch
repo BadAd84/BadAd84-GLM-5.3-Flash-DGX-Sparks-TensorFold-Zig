@@ -30,9 +30,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
+index e395dbdfb976317d0c003feaf2d20ef0a0337022..7c6bee7ce0605e51cbd39b8fc470b9bd618ca48d 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -211,7 +211,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -212,7 +212,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
      const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
      if (host_pos < l.dense_limit) { // the same keys today's whole-chunk call read for this row
          var stamp = prof.span(k.prof, stream, .mla);
@@ -41,7 +42,7 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
          stamp.end();
      }
      if (sparseRows(l, host_pos, rows)) {
-@@ -228,7 +228,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -229,7 +229,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
  
  /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
  fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
@@ -51,9 +52,10 @@ diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda
      while (r0 < rows) : (r0 += part_rows) {
          const n = @min(part_rows, rows - r0);
 diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
+index bda3d5f00f144fd2c41b9614c227cabf2df56cfe..0595fcf12c8726ae92adf94bdefdfe0f2c4e3cf7 100644
 --- a/zig/src/families/glm/cuda_latent.zig
 +++ b/zig/src/families/glm/cuda_latent.zig
-@@ -17,6 +17,12 @@ pub fn headBlock(rows: usize) usize {
+@@ -18,6 +18,12 @@ pub fn headBlock(rows: usize) usize {
      return if (rows >= 64) heads_tile_wide else heads_tile;
  }
  
@@ -66,7 +68,7 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
  /// latent.chunks_for: 512-key chunks to cover `length` keys.
  pub fn chunksFor(length: usize) usize {
      return (length + chunk - 1) / chunk;
-@@ -152,7 +158,7 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
+@@ -153,7 +159,7 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64,
  
  pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
      const nch = chunksFor(w);
@@ -75,7 +77,7 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
      if (fuses(set.mla, rows, hb)) return fused(set, stream, qa, cache, scales, t, 0, tokens, counts, out, rows, heads, lw, nch, w, scale, true);
      try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, hb, true);
      try merge(set, stream, p, out, counts, rows, heads, lw, nch, true);
-@@ -167,6 +173,8 @@ fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64,
+@@ -168,6 +174,8 @@ fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64,
  
  test "latent.py's tiling rules" {
      try std.testing.expectEqual(@as(usize, 16), headBlock(8));
@@ -85,9 +87,10 @@ diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_la
      try std.testing.expectEqual(@as(usize, 3), chunksFor(1025));
      try std.testing.expectEqual(@as(usize, 1), chunksFor(512));
 diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
+index 3edc57c0c18b3122c42bb7ea16230ae117bf1b88..83eee84cecad5bee3d0cdad0659132df814e50a0 100644
 --- a/zig/src/families/glm/cuda_onepass.zig
 +++ b/zig/src/families/glm/cuda_onepass.zig
-@@ -97,7 +97,7 @@ pub fn takes(prompt: bool, scales: u64, heads: usize, lw: usize) bool {
+@@ -98,7 +98,7 @@ pub fn takes(prompt: bool, scales: u64, heads: usize, lw: usize) bool {
  
  /// `takes`'s shapes, only where the default uses 32-head blocks (headBlock == heads_tile_wide), else chunk programs.
  pub fn takesExact(prompt: bool, scales: u64, heads: usize, lw: usize, rows: usize) bool {
@@ -96,7 +99,7 @@ diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_o
  }
  
  /// latent.sparse_onepass: rows with counts > 0 over their `w`-wide token lists (as `t` maps them) into out bf16.
-@@ -131,9 +131,9 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
+@@ -132,9 +132,9 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
  }
  
  test "onepass pipe: its exact variant takes the onepass shapes where the default uses 32-head blocks" {

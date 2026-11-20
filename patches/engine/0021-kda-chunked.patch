@@ -34,20 +34,22 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 324d27b21973f720d58b575048d60190d0e0e80d..39add30cd7f5a2c431261262b4e5fcc70aa32fd1 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -71,6 +71,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -98,6 +98,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
 +| `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
+index 28803f44cfb469dbf260af4029a5ff4198ef9311..5b7eca3c0287cfee3161a4f1f85b8c1c2deb41a2 100644
 --- a/zig/build/cuda_kernels.zig
 +++ b/zig/build/cuda_kernels.zig
-@@ -143,6 +143,8 @@ pub const kernels = [_]Kernel{
+@@ -145,6 +145,8 @@ pub const kernels = [_]Kernel{
      .{ .name = "dense_rows", .flags = &.{"-O3"} }, // ours: bf16 rows times weight rows into fp32 (cuda/dense_rows.zig)
      .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts
      .{ .name = "glm_kda", .flags = &.{ "-O3", "--fmad=false" } }, // GLM: the Python family's glm5_next/cuda/kda.cu
@@ -58,12 +60,14 @@ diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
      .{ .name = "glm_glue", .flags = &.{"-O3"} }, // ours: the Python family's Triton glue by hand, its PTX op for op
 diff --git a/zig/kernels/cuda/glm_kda_chunk.cu b/zig/kernels/cuda/glm_kda_chunk.cu
 new file mode 100644
+index 0000000000000000000000000000000000000000..de10a479d7f8d823075f7242f17d4554d2371d0e
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_kda_chunk.cu
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,491 @@
 +// TF_GLM_OVN_KDA_CHUNKED: a prompt chunk's KDA chain in chunked (WY) form, from glm5_next (Apache-2.0).
 +
 +#include "glm_kda_chunk.cuh"
++#include "glm_pdl.cuh"
 +
 +namespace {
 +
@@ -546,12 +550,14 @@ new file mode 100644
 +        const float* __restrict__ cw, const float* __restrict__ state_in, const float* __restrict__ a_log,
 +        const float* __restrict__ dt_bias, const __nv_bfloat16* __restrict__ norm_w, float eps, float lower, int rows,
 +        int off, __nv_bfloat16* __restrict__ out, float* __restrict__ state_out) {
++    glm_pdl::enter();
 +    chunk_kernel_body(
 +        H, P, p_stride, b_off, A, a_stride, G, g_stride, cs, cw, state_in, a_log, dt_bias, norm_w, eps, lower, rows,
 +        off, out, state_out);
 +}
 diff --git a/zig/kernels/cuda/glm_kda_chunk.cuh b/zig/kernels/cuda/glm_kda_chunk.cuh
 new file mode 100644
+index 0000000000000000000000000000000000000000..2f39db5ea351970fd523af62bd1cbec15e431db1
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_kda_chunk.cuh
 @@ -0,0 +1,173 @@
@@ -730,15 +736,18 @@ new file mode 100644
 +}  // namespace
 diff --git a/zig/kernels/cuda/glm_l2pf.cu b/zig/kernels/cuda/glm_l2pf.cu
 new file mode 100644
+index 0000000000000000000000000000000000000000..b34bf5f39a063852e79c553ee5ba96b4ce0fe8af
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_l2pf.cu
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,41 @@
 +// L2 prefetch of weight ranges for GLM decode windows on a side stream: loads and prefetches only, no result changes.
 +
 +#include <stdint.h>
++#include "glm_pdl.cuh"
 +
 +extern "C" __global__ void __launch_bounds__(512) tf_glm_l2pf(  // table [n, 2] i64: (address, bytes), 16-byte aligned
 +    const long long* __restrict__ table, int n, int mode, unsigned* __restrict__ sink) {  // pieces of at most 32 KiB
++    glm_pdl::enter();
 +    const int lane = threadIdx.x & 31;
 +    const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
 +    const int warps = (gridDim.x * blockDim.x) >> 5;
@@ -773,9 +782,10 @@ new file mode 100644
 +    if (mode == 2 && acc == 0x9e3779b9u && sink != nullptr) sink[0] = acc;  // keeps the loads; never true in practice
 +}
 diff --git a/zig/src/cuda/kernels.zig b/zig/src/cuda/kernels.zig
+index 1c811476d5481db4fa524de1336c5cc38fdb6f7f..8524a295ab9d429e98978cabceb842f9f47ebf8a 100644
 --- a/zig/src/cuda/kernels.zig
 +++ b/zig/src/cuda/kernels.zig
-@@ -105,6 +105,8 @@ pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").byt
+@@ -108,6 +108,8 @@ pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").byt
  pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
  pub const glm_dflash: []const u8 = if (available) &Blob("fatbin_glm_dflash").bytes else &.{};
  pub const glm_kda: []const u8 = if (available) &Blob("fatbin_glm_kda").bytes else &.{};
@@ -785,6 +795,7 @@ diff --git a/zig/src/cuda/kernels.zig b/zig/src/cuda/kernels.zig
  pub const exl3_experts: []const u8 = if (available) &Blob("fatbin_exl3_experts").bytes else &.{};
  pub const exl3_candidate: []const u8 = if (available) &Blob("fatbin_exl3_candidate").bytes else &.{};
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index d4c2fba53f8184cdaf1809b1ba79c3ad2b865b22..17b1681e194f1fa98604de9bfe47e3f116ed3365 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
 @@ -10,6 +10,7 @@ pub const image_core = @import("image_core.zig");
@@ -795,7 +806,7 @@ diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
  pub const b16 = @import("cuda_b16.zig");
  pub const latent = @import("cuda_latent.zig");
  pub const sparse = @import("cuda_sparse.zig");
-@@ -80,6 +81,7 @@ test {
+@@ -82,6 +83,7 @@ test {
      _ = image_core;
      _ = glue;
      _ = kda;
@@ -804,6 +815,7 @@ diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
      _ = latent;
      _ = sparse;
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+index d85bf5cef7218c1c04068b5019c4ad36bbbfff0f..15ac183633814926c929d560442265dce8326061 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
 @@ -28,7 +28,7 @@ const index_mod = @import("cuda_index.zig");
@@ -827,7 +839,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
      packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
      copy_rows: cuda.Function,
      put_slot: cuda.Function,
-@@ -84,6 +85,8 @@ pub const Modules = struct {
+@@ -86,6 +87,8 @@ pub const Modules = struct {
          m.exl3 = try exl3.Kernels.load(d);
          errdefer m.exl3.unload();
          m.mm = try mm_mod.Kernels.load(m.mods[7]);
@@ -836,7 +848,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
          m.index = null;
          errdefer if (m.index) |*x| x.unload();
          const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
-@@ -115,6 +118,7 @@ pub const Modules = struct {
+@@ -117,6 +120,7 @@ pub const Modules = struct {
      }
  
      pub fn deinit(m: *Modules) void {
@@ -844,7 +856,7 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
          if (m.index) |*x| x.unload();
          if (m.onepass) |*x| x.unload();
          if (m.onepass_pipe) |*x| x.unload();
-@@ -223,8 +227,7 @@ pub const Forward = struct {
+@@ -225,8 +229,7 @@ pub const Forward = struct {
                      s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                  }
                  const conv = st.conv + li * 3 * st.conv_c * 2;
@@ -855,17 +867,18 @@ diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_f
              },
              .mla => |a| {
 diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
+index a8a2e09efa533d08e1c95187804db377e9e74d44..0ae81ea0698218eb4cf9be5732dc42c40e5dfbfc 100644
 --- a/zig/src/families/glm/cuda_kda_block.zig
 +++ b/zig/src/families/glm/cuda_kda_block.zig
-@@ -4,6 +4,7 @@ const std = @import("std");
- const cuda = @import("cuda");
+@@ -5,6 +5,7 @@ const cuda = @import("cuda");
+ const cuda_pdl = @import("cuda_pdl.zig");
  const glue = @import("cuda_glue.zig");
  const kda = cuda.kda;
 +const kda_chunk = @import("cuda_kda_chunk.zig");
  const b16 = @import("cuda_b16.zig");
  const prof = @import("cuda_prof.zig");
  const l2pf = @import("cuda_l2pf.zig");
-@@ -81,17 +82,18 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
+@@ -82,17 +83,18 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
  
  /// The block up to its out_proj: the projections, the chain, and a prompt chunk's conv window commit.
  pub fn body(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool) !void {
@@ -887,8 +900,8 @@ diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda
      if (prompt) try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.matWidth(), l.matWidth(), 1, 3 * l.heads * kda.dk);
  }
  
-@@ -148,11 +150,12 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64,
-     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
+@@ -149,11 +151,12 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64,
+     try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
  }
  
 -/// The chain over `rows` projected rows (s.p, s.ka, s.kg) on one sequence's conv window and recurrent state.
@@ -904,13 +917,15 @@ diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda
  
 diff --git a/zig/src/families/glm/cuda_kda_chunk.zig b/zig/src/families/glm/cuda_kda_chunk.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..4bcee109b0f6a9b1bfee85cd9779cc319710abba
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_kda_chunk.zig
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,72 @@
 +//! TF_GLM_OVN_KDA_CHUNKED: a prompt chunk's KDA chain in chunked (WY) form, on 32-row sub-chunks at absolute positions.
 +
 +const std = @import("std");
 +const cuda = @import("cuda");
++const cuda_pdl = @import("cuda_pdl.zig");
 +const kda = cuda.kda;
 +
 +/// Rows of a sub-chunk (kda_chunk.cu's BT): sub-chunks sit at absolute positions, multiples of it.
@@ -971,7 +986,7 @@ new file mode 100644
 +    a.add(out);
 +    a.add(state_out);
 +    const cfg: cuda.launch.Config = .{ .grid = .{ .x = @intCast(c.heads) }, .block = .{ .x = threads }, .shared = smem_bytes };
-+    try cuda.launch.launch(p.kernel.f, cfg, stream, &a);
++    try cuda_pdl.launch(p.kernel.f, cfg, stream, &a);
 +}
 +
 +test "the chunked chain's shared memory fits a GB10 block's opt-in 99 KiB, its sub-chunks a 32-row grid" {
@@ -979,6 +994,7 @@ new file mode 100644
 +    try std.testing.expectEqual(@as(u32, 32), sub_rows);
 +}
 diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
+index 1c669938d782cb317b20a20a1efc3bde6344e0a9..da3673d1b87a6a1808981d479c1660d230e9df94 100644
 --- a/zig/src/families/glm/cuda_shared.zig
 +++ b/zig/src/families/glm/cuda_shared.zig
 @@ -10,6 +10,7 @@ const kda_block = @import("cuda_kda_block.zig");
@@ -1008,9 +1024,10 @@ diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_sh
              if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
          },
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index ebd49f98f4ba500fa3bcf16e0d946f6f771665c4..2a7de7767bf67b18938164474f6906f701a587c2 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -113,6 +113,7 @@ pub const rules = [_]Rule{
+@@ -157,6 +157,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

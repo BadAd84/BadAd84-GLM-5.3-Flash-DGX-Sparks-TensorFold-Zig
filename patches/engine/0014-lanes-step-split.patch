@@ -12,6 +12,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index b3f3cf8cd2bd80c421048692ef1bbf91290212f1..46340b0351cfc1b60ec0cdac063cc90532b31ba9 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
 @@ -86,7 +86,7 @@ pub const Lanes = struct {
@@ -94,7 +95,7 @@ diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lan
          const ids = s.prompt();
          if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
          const gpa = self.x.e.gpa;
-@@ -357,15 +327,15 @@ pub const Lanes = struct {
+@@ -357,14 +327,14 @@ pub const Lanes = struct {
      }
  
      /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
@@ -102,8 +103,7 @@ diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lan
 +    pub fn images(self: *Lanes, s: *lanes.Stream, from: ?engine.Resume) !void {
          if (s.images.len == 0) return;
          const v = self.x.e.images orelse return error.NoVision;
-         try v.begin(self.x.e.slot, s.images, if (from) |r| r.at else 0); // a refusal here leaves every rank as it was
-         try self.x.images(v);
+         try self.x.encode(v, s.images, if (from) |r| r.at else 0);
      }
 -    const Sink = @import("cuda_prompt_sink.zig").Sink;
 +    pub const Sink = @import("cuda_prompt_sink.zig").Sink;
@@ -115,6 +115,7 @@ diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lan
              return share_mod.marks(self.x.e, l.slot, s, l.marks, keeps);
 diff --git a/zig/src/families/glm/cuda_lanes_step.zig b/zig/src/families/glm/cuda_lanes_step.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..6754a8f3facc0f81993e485ace6838cf1a841df7
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_lanes_step.zig
 @@ -0,0 +1,36 @@

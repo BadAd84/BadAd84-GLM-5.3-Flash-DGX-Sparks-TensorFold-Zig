@@ -33,23 +33,25 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9 added TF_GLM_CONTEXT_CEILING at the same table line; both rows kept
 
 diff --git a/docs/environment.md b/docs/environment.md
+index 0f302bb129b280a8875989f461fb27a71f9364de..ab4470acea8816a199fd711f0dc0488a29907959 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -45,6 +45,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
- | `TF_GLM_DFLASH2_LOG` | Whole unsigned 64-bit count of DFlash2 rounds whose drafts are logged; default 0 |
- | `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 |
- | `TF_GLM_CONTEXT_CEILING` | GLM-5.3-Flash on CUDA: whole token count 1 through 2147483616, the window `--context` may ask for and `--context 0` serves, in place of config.json's 1048576; read at GLM's open. Past that length the model's quality is the operator's to check. Unset keeps config.json's window |
+@@ -67,6 +67,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_EXPERT_FORM` | `classic` or `factored`: the expert form GLM's CUDA decode windows use at every width (the same bits either way), also at a load that times nothing; unset or blank races the two at each timed width when a build first loads with drafts and scratch context and keeps each width's winner, else classic; read on rank 0, which chooses every rank's forms |
+ | `TF_GLM_INDEX_CUDA` | GLM on CUDA: exactly `1` (both DSA indexer kernels), `0` (neither) or `scores` (scores only); unset or blank is `both` |
+ | `TF_GLM_KV_HOST_GIB` | GLM on CUDA: a finite GiB amount of at least 0 for the DSA layers' pinned host pages; unset or blank uses one full window and 16 rows a page |
 +| `TF_GLM_KDA_DUMP` | A file path without control characters; the first KDA input projection after load writes its `rows` x width bf16 stack there once, for the pad's own float64 check. Unset or blank writes none |
- | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
- | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
+ | `TF_GLM_RANK` | GLM-5.3-Flash on CUDA: a whole rank index from 0 through 4294967295, set with `TF_GLM_WORLD`; unset with it gives one rank |
+ | `TF_GLM_WORLD` | GLM-5.3-Flash on CUDA: a whole rank count from 1 through 4294967295, set with `TF_GLM_RANK`; unset with it gives one rank |
+ | `TF_NEMOTRON_RANK` | Nemotron 3.5 Super on CUDA: a whole rank index from 0 through 4294967295, set with `TF_NEMOTRON_WORLD`; unset with it gives one rank |
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
+index a4db878d8050e0e052eec504fbcccdfe3344fb5a..4333dd2ae21525ffaae103963da1655548134faa 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
-@@ -21,6 +21,10 @@ const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
- const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
- /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
+@@ -25,6 +25,10 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
  const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
+ const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
+ const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
 +/// The other GLM settings the speed-hunt levers read, each with its row's kind.
 +const levers = [_]struct { name: [:0]const u8, kind: e.Kind }{
 +    .{ .name = "TF_GLM_KDA_DUMP", .kind = .path },
@@ -57,10 +59,10 @@ diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_
  
  /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
  fn row(name: []const u8) !e.Rule {
-@@ -58,12 +62,22 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
-     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
-     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
-     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
+@@ -65,12 +69,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
+     for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
+     for (added) |name| try t.expect((try row(name)).kind != .flag);
+     for (ranks) |name| try t.expectEqual(e.Kind.u32, (try row(name)).kind);
 +    for (levers) |l| try t.expectEqual(l.kind, (try row(l.name)).kind);
      var n: usize = 0;
      for (e.rules) |r| if (r.scope == .glm) {
@@ -68,10 +70,15 @@ diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_
 -        if (!std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) n += 1; // the speed-hunt knobs: the next test
 +        if (!std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) n += 1; // the speed-hunt knobs have their own test below
      };
--    try t.expectEqual(switches.len + counts.len + reals.len + windows.len, n);
-+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + levers.len, n);
-+}
-+
+-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len, n);
++    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len + levers.len, n);
+ }
+ 
+ test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {
+@@ -83,6 +88,15 @@ test "GLM strict env: the expert form takes classic or factored, leaves blank to
+     for ([_][]const u8{ "Classic", "FACTORED", "0", "1", "race", "auto", " classic", "factored " }) |raw| try check(words[0], raw, false);
+ }
+ 
 +test "GLM strict env: the levers' own rows take blank as unset, and a path row refuses control characters by name" {
 +    for (levers) |l| {
 +        for ([_][]const u8{ "", " ", "\t" }) |blank| try check(l.name, blank, true);
@@ -79,13 +86,16 @@ diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_
 +        try check(l.name, "/tmp/kda dump.bin", true);
 +        try check(l.name, "/tmp/kda\ndump.bin", false);
 +    }
- }
- 
++}
++
  test "GLM strict env: every speed-hunt knob (cuda/ovn.zig) is a glm switch, count, real or text row" {
+     for (e.rules) |r| if (std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) {
+         try t.expectEqual(e.Scope.glm, r.scope);
 diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
+index 8408249ff7ba0fe362b1f78a8b00ae7b1f5cf482..a8a2e09efa533d08e1c95187804db377e9e74d44 100644
 --- a/zig/src/families/glm/cuda_kda_block.zig
 +++ b/zig/src/families/glm/cuda_kda_block.zig
-@@ -48,6 +48,10 @@ pub const Layer = struct {
+@@ -49,6 +49,10 @@ pub const Layer = struct {
  /// TF_GLM_KDA_PAD's one eight-aligned row width for every rank, set once at load (Engine.open); 0: no pad.
  pub var pad_to: usize = 0;
  
@@ -96,7 +106,7 @@ diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda
  /// The pad width for `kda_heads` split over `world` ranks: the widest rank's row, rounded up to eight columns.
  pub fn padWidth(kda_heads: usize, world: usize) usize {
      const heads = (kda_heads + world - 1) / world;
-@@ -112,6 +116,23 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
+@@ -113,6 +117,23 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
      }
      try b16.matmul(selected, stream, s.p + fa * 2, w, l.fb, s.ka, s.mm_part, rows, n, kda.dk, false);
      try b16.matmul(selected, stream, s.p + (fa + kda.dk) * 2, w, l.gb, s.kg, s.mm_part, rows, n, kda.dk, false);
@@ -121,6 +131,7 @@ diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda
  
  /// `rows` rows of `cols` bf16 packed at `src` into `dst`, rows `stride` apart (tf_glm_copy_rows).
 diff --git a/zig/src/families/glm/cuda_tile.zig b/zig/src/families/glm/cuda_tile.zig
+index 592a24dd2cbc57c1a4a3239137386a0dd335205a..5b25327969b82d29bf9e3a7b78ec67d37a73dad0 100644
 --- a/zig/src/families/glm/cuda_tile.zig
 +++ b/zig/src/families/glm/cuda_tile.zig
 @@ -63,6 +63,12 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
@@ -137,12 +148,13 @@ diff --git a/zig/src/families/glm/cuda_tile.zig b/zig/src/families/glm/cuda_tile
          .kda => |*x| try padOneKdaInput(w, d, s, x),
          else => {},
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 40c747683f103a0a5f4e713c5d308cd8223072f4..e07101bb4a36c8de292dbda28a6ca00046a07ca4 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -87,6 +87,7 @@ pub const rules = [_]Rule{
-     .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7)" },
+@@ -132,6 +132,7 @@ pub const rules = [_]Rule{
      // 2^31 - 32: GLM's slots, the window and its 32 verify rows (glm/cuda_native.zig's capacity), keep i32 positions
      .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
+     .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },
 +    .{ .name = "TF_GLM_KDA_DUMP", .scope = .glm, .kind = .path, .forms = "a file path without control characters, where one projected KDA input stack is written" },
      .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
      .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },

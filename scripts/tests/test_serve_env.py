@@ -19,8 +19,9 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 OLD_REV = "4c02515"
-# Dropped on purpose by the split: two names nothing in zig/src reads at the pin or at main (the inventory of the move to main checked both).
-REMOVED = {"TF_GLM_COPY_MAX", "TF_GLM_COPY_REPLY_MATCH"}
+# Dropped on purpose: two names nothing in zig/src reads at the v1.2.9 pin or at main (the inventory of the move to main checked both), and the switch main's
+# unconditional item plan retired (upstream 4e6cdeed9 and 51a6fe02a).
+REMOVED = {"TF_GLM_COPY_MAX", "TF_GLM_COPY_REPLY_MATCH", "TF_GLM_OVN_EXL3_ITEMS"}
 
 
 def wsl(path):

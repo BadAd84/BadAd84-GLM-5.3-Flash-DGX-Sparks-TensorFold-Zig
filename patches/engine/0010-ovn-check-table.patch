@@ -14,6 +14,7 @@ Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9; main.zig at v1.
 
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
 new file mode 100644
+index 0000000000000000000000000000000000000000..cae4c71d24044283f2eee14f13656fdd065abf43
 --- /dev/null
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
 @@ -0,0 +1,26 @@
@@ -44,42 +45,35 @@ new file mode 100644
 +    return error.UnknownCommand;
 +}
 diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+index e2334df2de5e85230b0469285644f83446d3dc9e..ebad02ab4f6c91f6bd773820a9311537c030475a 100644
 --- a/zig/tests/cuda/main.zig
 +++ b/zig/tests/cuda/main.zig
-@@ -37,7 +37,6 @@ const glm_exl3_tests = @import("glm_exl3_tests.zig");
+@@ -32,7 +32,6 @@ const w4a8_tests = @import("w4a8_tests.zig");
+ const glm_exl3_tests = @import("glm_exl3_tests.zig");
  const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
  const glm_vision_tests = @import("glm_vision_tests.zig");
- const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
 -const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
- const glm_mm_bench = @import("glm_mm_bench.zig");
  const glm_index_check = @import("glm_index_check.zig");
  const carveout_tests = @import("carveout_tests.zig");
-@@ -278,7 +277,6 @@ const usage =
-     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
-     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
-     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
--    \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
-     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
-     \\  glm-index-check           GLM's indexer with glm_index against tf_glm_scores and tf_glm_select_rows, byte for byte (one GPU)
-     \\  glm-kv-host-slots         TF_GLM_KV_HOST's gather past its slots is refused as error.GlmKvHostSlots, then one within (one GPU)
-@@ -314,7 +312,7 @@ const usage =
-     \\  glm-fp8g-shares          block-FP8 TP shares packed as GLM's loader packs them, on the lane, against FP64 of the cut
-     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
-     \\
--;
-+++ @import("glm_ovn_checks.zig").usage;
+ const nvfp4_tests = @import("nvfp4_tests.zig");
+@@ -113,7 +112,7 @@ const kolibri_layer_tests = @import("kolibri_layer_tests.zig");
+ const aot_fallback_tests = @import("aot_fallback_tests.zig");
+ const qwen_draft_frames = @import("qwen_draft_frames.zig");
+ 
+-const usage = @import("main_usage.zig").usage;
++const usage = @import("main_usage.zig").usage ++ @import("glm_ovn_checks.zig").usage;
  
  pub fn main(init: std.process.Init) !u8 {
      const args = try init.minimal.args.toSlice(init.arena.allocator());
-@@ -446,7 +444,6 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
-     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
+@@ -246,7 +245,6 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+     if (std.mem.eql(u8, cmd, "glm-exl3") or std.mem.eql(u8, cmd, "glm-exl3-items")) return glm_exl3_tests.runCmd(gpu, cmd);
      if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
-     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return @import("glm_mm_fixed_tests.zig").run(gpu);
 -    if (std.mem.eql(u8, cmd, "glm-draft-onepass")) return glm_draft_onepass.run(gpu);
-     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return @import("glm_mm_bench.zig").run(gpu);
+     if (std.mem.eql(u8, cmd, "glm-pdl-order")) return @import("glm_pdl_order.zig").run(gpu, if (rest.len > 0) rest[0] else null);
      if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
-     if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
-@@ -581,8 +578,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+@@ -389,8 +387,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
      if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);
      if (std.mem.eql(u8, cmd, "aot-fallback")) return aot_fallback_tests.run(gpu, try arg(rest, 0));
      if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
@@ -89,3 +83,15 @@ diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
  }
  
  fn info(gpu: check.Gpu) !void {
+diff --git a/zig/tests/cuda/main_usage.zig b/zig/tests/cuda/main_usage.zig
+index ad3c48dbae727231c9b0b392a98a7be875204336..e588db109cb646e06ff15bd7be229f7688ebe0bc 100644
+--- a/zig/tests/cuda/main_usage.zig
++++ b/zig/tests/cuda/main_usage.zig
+@@ -158,7 +158,6 @@ pub const usage =
+     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
+     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
+     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
+-    \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
+     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
+     \\  glm-index-check           GLM's indexer with glm_index against tf_glm_scores and tf_glm_select_rows, byte for byte (one GPU)
+     \\  glm-kv-host-slots         TF_GLM_KV_HOST's gather past its slots is refused as error.GlmKvHostSlots, then one within (one GPU)

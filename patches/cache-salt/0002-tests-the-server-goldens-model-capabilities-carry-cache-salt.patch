@@ -8,7 +8,7 @@ patches/pr1411); it adds and removes exactly the lines of lane V129B's pristine-
 ---
 
 diff --git a/zig/tests/server/golden/framing/chunked-bytes.json b/zig/tests/server/golden/framing/chunked-bytes.json
-index 5943f1ffe8ae4ab2187c6cc87ecab2eb2f5074e0..72989bfb9e69b7249f650a1f8a52e57d1d42e9c9 100644
+index b1a329f3a5cbea5bf9ea624faca3607de8099469..cee6b66e1be1a9a2c3a9e65adaa38ee68774797d 100644
 --- a/zig/tests/server/golden/framing/chunked-bytes.json
 +++ b/zig/tests/server/golden/framing/chunked-bytes.json
 @@ -25,10 +25,10 @@
@@ -46,7 +46,7 @@ index 69732154d1970124f36438e1d32eb3ce99fd7b17..eea0318fb3907645750df1cfebb58c69
    }
   ]
 diff --git a/zig/tests/server/golden/framing/extensions-trailers.json b/zig/tests/server/golden/framing/extensions-trailers.json
-index 5943f1ffe8ae4ab2187c6cc87ecab2eb2f5074e0..72989bfb9e69b7249f650a1f8a52e57d1d42e9c9 100644
+index b1a329f3a5cbea5bf9ea624faca3607de8099469..cee6b66e1be1a9a2c3a9e65adaa38ee68774797d 100644
 --- a/zig/tests/server/golden/framing/extensions-trailers.json
 +++ b/zig/tests/server/golden/framing/extensions-trailers.json
 @@ -25,10 +25,10 @@
@@ -63,7 +63,7 @@ index 5943f1ffe8ae4ab2187c6cc87ecab2eb2f5074e0..72989bfb9e69b7249f650a1f8a52e57d
    }
   ]
 diff --git a/zig/tests/server/golden/framing/keepalive-three.json b/zig/tests/server/golden/framing/keepalive-three.json
-index 884751a9420cb71f8e5c597b8eaa8daf6b4de5ec..21b38717ca31333e9565124c53fb86ab7fbc60a9 100644
+index ba1a8e8aeac08df4630dd0bf05b9e1b5f8edbda4..22aa64f1006b313c066fb401957b3ee6bb567d5d 100644
 --- a/zig/tests/server/golden/framing/keepalive-three.json
 +++ b/zig/tests/server/golden/framing/keepalive-three.json
 @@ -40,10 +40,10 @@
