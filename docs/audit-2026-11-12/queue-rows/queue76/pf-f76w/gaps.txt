@@ -1,0 +1,16 @@
+6 warmed 4096-row passes of request 2; main-stream gaps over 2 us: 169.4 ms a pass
+ ms a pass    gaps  mean us  kernel before -> kernel after
+     67.46   266.8    252.8  tf_glm_hc_finish -> tf_glm_hc_post
+     52.43    47.0   1115.6  tf_glm_hc_finish -> glm_mm4_w2x4
+     46.19    42.0   1099.9  tf_glm_hc_finish -> tf_glm_router_tile
+      1.13     1.0   1134.3  tf_glm_stream_mean -> tf_glm_rmsnorm_4096
+      0.89     3.0    296.7  tf_glm_stream_mean -> tf_glm_hc_post
+      0.67    48.0     13.9  glm_mm4_w2x4 -> tf_glm_hc_post
+      0.16    42.0      3.7  tf_glm_combine -> tf_glm_hc_post
+      0.12    27.0      4.3  tf_glm_hc_post -> tf_glm_hc_partial
+      0.11    16.8      6.3  tf_glm_hc_partial -> tf_glm_hc_finish
+      0.06    11.0      5.4  tf_glm_index_pools -> ncclDevKernel_AllGather_RING_LL
+      0.05     5.8      8.5  tf_glm_put_slot -> tf_glm_combine
+      0.04     5.3      6.9  glm_mm4_128 -> tf_glm_swiglu_64
+      0.02     1.0     23.5  ncclDevKernel_AllReduce_Sum_f64_TR -> ncclDevKernel_AllReduce_Sum_f64_TR
+      0.02     1.0     18.2  ncclDevKernel_Broadcast_RING_LL -> ncclDevKernel_Broadcast_RING_LL
