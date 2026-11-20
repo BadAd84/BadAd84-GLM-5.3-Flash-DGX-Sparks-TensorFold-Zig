@@ -106,6 +106,7 @@ ultradaoto runs the same kind of rig (three GB10 on a switchless triangle, GLM-5
 
 | lever | branch | state on 2026-11-20 |
 |---|---|---|
-| `KEEP_SEQS` | `up/keep-seqs`, head `151839e5c`, cut from `9ba855b3b` | one signed commit, `git diff --check` clean, `pr_check` 0 errors, lean 168 against 168 with 0 new; gate host: check, fmt, ctest, lean, pdl, contract pass; the host `test` step and six mutant runs are in progress; drafts in `work/up/drafts/keep-seqs/`; no GPU run yet |
-| `NO_COPY` | `up/no-copy` | the lane is gating it; drafts written |
-| open-PR test trees (#2279, #3616, #3659) | `test/pr-N`, `work/pr-trees/` | the lane is building and gating them for queue92 |
+| `KEEP_SEQS` | `up/keep-seqs`, head `151839e5c`, tree `37d550a25f2a`, cut from `9ba855b3b` | one commit, `git diff --check` clean, `pr_check` 0 errors, lean 168 against 168 with 0 new; gate host: all seven steps pass (check, fmt, ctest, lean, pdl, contract, and `test` at 438/438 steps, 7755/7798 tests, 43 skipped); six of six mutants killed by named host tests (two first forms did not compile and were rewritten); drafts in `work/up/drafts/keep-seqs/`; GPU receipts are queue93 |
+| `NO_COPY` | `up/no-copy`, head `f9bf65048`, tree `45ee2c34fe7e`, cut from `9ba855b3b` | main has no switch for it, so it is not a duplicate; one commit, lean 168 against 168 with 0 new; gate host: all six steps pass on the final tree (`test` 438/438 steps); nine of nine mutants killed by named host tests, the wiring of the setting to the lanes included (a first version left that line untested; it moved into a function a host test reaches); drafts in `work/up/drafts/no-copy/`; GPU receipts are queue93 |
+| open-PR test trees (#2279, #3616, #3659) | `test/pr-N`, `work/pr-trees/` | a lane is building and gating them; they run after the receipts |
+| umbrella proposal issue | `work/up/drafts/umbrella-issue.md` | a draft for the `proposal` template, not through the voice pipeline yet, not posted |
