@@ -1,0 +1,24 @@
+main stream, ms a pass (before 6 passes, after 6): total 1604.1 -> 1645.6
+  change   before    after          launches  kernel
+  +41.23   307.97   349.20   262.0 ->  460.0  glm_mm4_w2x4
+  +24.90    86.97   111.87   415.0 ->  646.0  glm_mm4_128
+  +12.17   297.69   309.86    42.0 ->   42.0  tf_exl3_prompt_gu
+   +8.39    58.89    67.28    11.0 ->   44.0  tf_glm_absorb_q_x2
+   +7.66   210.86   218.52    42.0 ->   42.0  tf_exl3_prompt_down
+   +3.78    92.42    96.20    11.0 ->   11.0  tf_glm_onepass_pipe_exact
+   +1.44   128.22   129.66   168.0 ->  168.0  tf_glm_combine
+   +1.06     0.83     1.89    42.0 ->  168.0  tf_glm_topk
+   +0.59    73.96    74.55    11.0 ->   11.0  tf_glm_expand_v_x2
+   +0.31     2.37     2.68    11.0 ->   11.0  tf_glm_dsa_tokens
+  -28.10    58.85    30.75   360.0 ->  184.0  tf_glm_hc_post
+  -13.66    30.18    16.52   357.0 ->  181.0  tf_glm_hc_partial
+   -5.28     7.61     2.33    53.0 ->  212.0  tf_glm_slice_sum
+   -5.27    11.86     6.59   357.0 ->  181.0  tf_glm_hc_finish
+   -3.94    17.47    13.53    42.0 ->   42.0  tf_exl3_prompt_rotate
+   -1.87     4.98     3.11    11.0 ->   11.0  ncclDevKernel_AllGather_RING_LL
+side stream, ms a pass (before 6 passes, after 6): total 484.0 -> 530.2
+  change   before    after          launches  kernel
+  +30.23     0.00    30.23     0.0 ->  176.0  tf_glm_hc_post
+  +20.64     0.00    20.64     0.0 ->  176.0  tf_glm_hc_partial
+  +10.38     0.00    10.38     0.0 ->  176.0  tf_glm_hc_finish
+  -15.05   484.04   468.99   720.0 ->  720.0  ncclDevKernel_SendRecv
