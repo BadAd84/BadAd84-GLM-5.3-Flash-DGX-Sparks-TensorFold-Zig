@@ -1,0 +1,863 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm: TF_GLM_OVN_RESTORE_HELD, a restore leaves the rows its sequence already holds
+
+A warm turn restores its kept prompt state into a sequence and, a pass later, keeps the state again. Each is a copy
+of the whole state between the sequence and the snapshot pages: on three GB10s at TP=3 an nsys capture of a ~113k
+conversation shows 850 MiB in 10.8 ms for the restore and 858 MiB in 10.3 ms for the keep on rank 0, on every turn,
+and the state is 7.5 MiB a 1,000 rows, so the cost grows with the conversation. Most of the restore's bytes are
+already where it puts them: a sequence only appends rows, State.reset clears the KDA records and the conv rows and
+nothing else, and a released slot keeps its sequence (slot 0 always, every slot under TF_GLM_OVN_KEEP_SEQS), so the
+sequence that served the last turn still holds every latent row, scale and whole pool below the kept state's
+position.
+
+With TF_GLM_OVN_RESTORE_HELD=1 a restore into such a sequence copies only what a sequence rewrites: the arena head
+(KDA records, conv rows, a window's saved rows), the index rings, each layer's pool in progress and spare row, the
+head's caches and the tail. The rows left alone are the ones cuda_disk_image already stores by position
+(Plan.byPosition names them from the live sequence; a host test compares the two counts).
+
+How a sequence is known to hold a state. State.held is set to the state's id and position when the sequence keeps a
+state (keepAs: the snapshot is a copy of the live rows) and when a restore into it completes. State.ready, which
+every forward calls on each sequence before it writes rows at the sequence's position (a prompt chunk, a solo or
+paired step, a batched pass, a verify window, a shared one), clears it when that position is below the mark's, and
+a restore clears it before it copies, so a restore that fails midway leaves no mark. A restore of the state
+the mark names (its id says which state, and so which position) skips the by-position ranges; any other restore is whole, as is every restore into a paged
+sequence (Plan.byPosition names no range for one: its rows are on its pages, and a state that left pages to the
+shared store is only kept by such a sequence). Each rank keeps its own mark and takes the same decision, since
+every rank runs the same keeps, restores and forwards.
+
+Which slot a request takes. Lanes.claim gave a stream the lowest free slot; with the switch a stream that resumes a
+kept state takes the free slot whose sequence still holds it (Lanes.heldSlot), so two conversations that alternate
+keep finding their own rows. A paged engine keeps the lowest free slot.
+
+Default off: with the switch unset every restore copies every byte and claim picks the lowest free slot. Replies are
+unchanged by construction (the bytes after the restore are the kept state's either way); the checks below decide it.
+
+Host tests (cuda_restore_held_test.zig, on a driver whose device memory is host memory): eachBut's pieces; the
+by-position ranges against cuda_disk_image.parts' rows by position, fp8 and bf16, at seven positions; a keep, every
+other byte of the arena changed, then a restore: the bytes copied are the plan's less the by-position ranges and every
+planned byte is the kept one; a planted control (a held byte changed is not repaired, and is once a forward below the
+position clears the mark); the mark after a restore, after a keep of another state (one position on, and the same
+position with other rows), and with the switch off; a restore
+that fails midway leaves no mark and the next one is whole; a paged sequence names no range.
+cuda_lanes_test.zig: the slot choice. GPU check: tf-cuda-test glm-restore-held-check on glm-synth's checkpoint (one
+GPU): the sequence that kept a state resumes it, another sequence resumes it whole, a third runs the request cold;
+every planned byte of the first two is equal and twelve greedy steps (tokens, logits rows, MTP drafts) are equal
+across the three, at three keep positions (on the grid, inside a pool, where the index rings are nearly full), fp8
+and bf16 caches, with a planted control each (a held byte changed before the resume stays changed with the switch and
+is repaired without it). Not run on a GPU yet.
+
+New here, not a re-seat: written on this stack at v1.2.9.
+
+---
+
+diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
+--- a/zig/src/families/glm/cuda_state.zig
++++ b/zig/src/families/glm/cuda_state.zig
+@@ -393,6 +393,9 @@
+     }
+ };
+ 
++/// A kept state's id and position: a sequence that kept it there, or restored it, and has only added rows since.
++pub const Held = struct { id: u64, at: usize };
++
+ /// A sequence's committed caches on a rank (the Python family's State): KDA conv and states, saved rows, DSA caches.
+ pub const State = struct {
+     arena: Arena,
+@@ -425,6 +428,7 @@
+     rings: []u64, // each DSA layer's ik ring then ig ring, the MTP layer's last: [layers + 1][2]
+     base: usize = 0, // the first position the main rings hold (their pointers are ring - base rows)
+     mtp_base: usize = 0,
++    held: ?Held = null, // the kept state whose by-position rows the sequence still holds (cuda_snapshots.restore)
+     prompt_hidden: u64, // first-draft row owned and charged by this sequence arena
+     table: u64 = 0, // on pages: its page table (i32, `pages` entries), else 0
+     pages: []const u32 = &.{}, // on pages: the page ids its table holds, in row order (none while no stream holds it)
+@@ -534,6 +538,9 @@
+ 
+     /// Before a pass of `rows` rows at pos: within capacity, and the index rings holding them (rebased if not).
+     pub fn ready(st: *State, stream: cuda.Stream, rows: usize) !void {
++        if (st.held) |h| if (st.pos < h.at) {
++            st.held = null; // rows below the kept state's position are about to be written
++        };
+         if (st.pos + rows > st.capacity) return error.PastCapacity;
+         if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
+         if (st.pos + rows > st.base + st.ring_rows) return error.PastRing; // rows past the ring overwrite its neighbour
+diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
+--- a/zig/src/families/glm/cuda_snapshots.zig
++++ b/zig/src/families/glm/cuda_snapshots.zig
+@@ -9,6 +9,11 @@
+ 
+ pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
+ 
++/// TF_GLM_OVN_RESTORE_HELD: a restore into the sequence that still holds a state's by-position rows copies the rest.
++pub fn restoreHeld() bool {
++    return cuda.ovn.on("RESTORE_HELD");
++}
++
+ pub fn prepare(e: anytype, budget: u64) !void {
+     if (e.snap_pages != null or e.snaps.count() != 0) return error.SnapshotCacheMade;
+     const count = std.math.cast(u32, budget / pages.page) orelse return error.SnapshotBudget;
+@@ -119,6 +124,7 @@
+     try pool.move(e.stream, &lease, &plan, true);
+     try e.stream.synchronize();
+     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .below = prompt_cuts.below(e.cur.cuts.items, @intCast(e.cur.st.pos)), .shared = plan.shared, .win_from = if (win) |w| w.from else null });
++    e.cur.st.held = .{ .id = id, .at = e.cur.st.pos };
+ }
+ 
+ /// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
+@@ -163,10 +169,16 @@
+     const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
+     if (plan.len != s.len) return error.SnapshotSize;
+     errdefer cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot restore did not drain");
+-    try pool.move(e.stream, &s.lease, &plan, false);
++    // a sequence that kept this state here, or restored it, and only added rows since holds its by-position rows
++    var ranges: [layout.max_by_position][2]u64 = undefined;
++    const same = if (e.cur.st.held) |h| h.id == id else false;
++    const but: []const [2]u64 = if (same and restoreHeld()) layout.Plan.byPosition(&e.cur.st, &e.c, s.pos, &ranges) else &.{};
++    e.cur.st.held = null; // a restore that fails midway leaves rows of both
++    try pool.moveBut(e.stream, &s.lease, &plan, false, but);
+     try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur, s.bases);
+     e.cur.in_head = 0;
+     try e.stream.synchronize();
++    e.cur.st.held = .{ .id = id, .at = s.pos };
+ }
+ 
+ /// The pages below `at` the shared prompt store holds (TF_KV_SHARE): a kept state's copy leaves them out.
+diff --git a/zig/src/families/glm/cuda_snapshot_pages.zig b/zig/src/families/glm/cuda_snapshot_pages.zig
+--- a/zig/src/families/glm/cuda_snapshot_pages.zig
++++ b/zig/src/families/glm/cuda_snapshot_pages.zig
+@@ -81,20 +81,47 @@
+ 
+     /// The plan's parts to (`into`) or from the lease's pages, queued on `stream`: the core walk, a copy a piece.
+     pub fn move(p: *const Pool, stream: cuda.Stream, lease: *const Lease, plan: *const Plan, into: bool) !void {
++        return p.moveBut(stream, lease, plan, into, &.{});
++    }
++
++    /// `move` less the live ranges of `but` (ascending, apart): bytes already where the copy would put them.
++    pub fn moveBut(p: *const Pool, stream: cuda.Stream, lease: *const Lease, plan: *const Plan, into: bool, but: []const [2]u64) !void {
+         if (plan.len > lease.ids.items.len * page) return error.SnapshotSize;
+         const arena = p.arena orelse return error.NoSnapshotRoom;
+         const kept: walk.Kept = .{ .ids = lease.ids.items, .base = arena.ptr() };
+-        const c: Copy = .{ .d = arena.driver(), .s = stream, .into = into };
++        const c: Copy = .{ .d = arena.driver(), .s = stream, .into = into, .but = but };
+         try walk.Device.each(plan.parts[0..plan.count], plan.ids, kept, c, Copy.run);
+     }
+ };
+ 
++/// [live, live + n) less the ranges of `but` (ascending, apart): f(ctx, start, bytes) for each piece left, in order.
++pub fn eachBut(live: u64, n: usize, but: []const [2]u64, ctx: anytype, comptime f: fn (@TypeOf(ctx), u64, usize) anyerror!void) !void {
++    var at = live;
++    const end = live + n;
++    for (but) |r| {
++        if (r[1] <= at) continue;
++        if (r[0] >= end) break;
++        if (r[0] > at) try f(ctx, at, @intCast(r[0] - at));
++        at = r[1];
++    }
++    if (at < end) try f(ctx, at, @intCast(end - at));
++}
++
+ const Copy = struct {
+     d: *const cuda.Driver,
+     s: cuda.Stream,
+     into: bool,
++    but: []const [2]u64 = &.{}, // live ranges left alone
+     fn run(c: Copy, live: u64, kept: u64, n: usize) anyerror!void {
+-        const dst, const src = if (c.into) .{ kept, live } else .{ live, kept };
+-        try c.d.check(c.d.api.cuMemcpyDtoDAsync_v2(dst, src, n, c.s.handle), "cuMemcpyDtoDAsync");
++        const Piece = struct {
++            c: Copy,
++            delta: u64, // kept less live, as wrapping words
++            fn copy(p: @This(), at: u64, len: usize) anyerror!void {
++                const there = at +% p.delta;
++                const dst, const src = if (p.c.into) .{ there, at } else .{ at, there };
++                try p.c.d.check(p.c.d.api.cuMemcpyDtoDAsync_v2(dst, src, len, p.c.s.handle), "cuMemcpyDtoDAsync");
++            }
++        };
++        try eachBut(live, n, c.but, Piece{ .c = c, .delta = kept -% live }, Piece.copy);
+     }
+ };
+diff --git a/zig/src/families/glm/cuda_snapshot_layout.zig b/zig/src/families/glm/cuda_snapshot_layout.zig
+--- a/zig/src/families/glm/cuda_snapshot_layout.zig
++++ b/zig/src/families/glm/cuda_snapshot_layout.zig
+@@ -21,6 +21,9 @@
+     return h;
+ }
+ 
++/// The most ranges `Plan.byPosition` names: a DSA layer's latent rows, their scales and its whole pools.
++pub const max_by_position = 3 * @import("config.zig").max_layers;
++
+ /// `len` bytes from `live`, or on a paged sequence's pages `span` bytes a page `page` bytes apart, from byte `from`.
+ pub const Part = walk.Part;
+ pub const Plan = struct {
+@@ -105,6 +108,25 @@
+         p.count += 1;
+     }
+ 
++    /// Live [from, to) ranges below `at` a sequence writes once: each DSA layer's latent rows, scales and whole pools.
++    pub fn byPosition(st: *const State, c: *const Config, at: usize, out: *[max_by_position][2]u64) [][2]u64 {
++        var n: usize = 0;
++        std.debug.assert(st.caches.len <= out.len / 3); // Plan.make refuses more layers
++        for (st.caches) |x| {
++            if (x.pt != 0) return out[0..0]; // a paged sequence's rows sit on its pages
++            const each = [_][2]u64{
++                .{ x.lc, at * @as(u64, c.kv_lora) * @as(u64, if (x.ls == 0) 2 else 1) },
++                .{ x.ls, if (x.ls == 0) 0 else at * @sizeOf(f32) },
++                .{ x.pk, @min(at / sparse.pool, x.pk_rows) * @as(u64, c.i_dim) * 2 }, // the pool in progress is the state's own
++            };
++            for (each) |r| if (r[1] > 0) {
++                out[n] = .{ r[0], r[0] + r[1] };
++                n += 1;
++            };
++        }
++        return out[0..n];
++    }
++
+     /// Where a part's bytes from `done` on sit, as many as lie in a row there.
+     pub fn piece(p: *const Plan, part: Part, done: usize) Part {
+         return walk.piece(p.ids, part, done);
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -7,6 +7,7 @@
+ const dflash = @import("dflash.zig");
+ const prompt_lp = @import("cuda_prompt_logprobs.zig");
+ const share_mod = @import("cuda_share.zig");
++const snapshots = @import("cuda_snapshots.zig");
+ const cuda = @import("cuda");
+ const be = lanes.backend;
+ /// First tokens a handle names.
+@@ -162,13 +163,33 @@
+         }
+     }
+ 
++    /// TF_GLM_OVN_RESTORE_HELD: the free slot whose sequence still holds the kept state the stream resumes, if any.
++    pub fn heldSlot(self: *const Lanes, s: *const lanes.Stream) ?u32 {
++        if (!snapshots.restoreHeld() or self.x.e.pages != null) return null;
++        const k: *const engine.Kept = @ptrCast(@alignCast(s.reuse.saved orelse return null));
++        for (self.x.e.seqs.items, 0..) |q, slot| {
++            const h = (q orelse continue).st.held orelse continue;
++            if (h.id != k.id) continue;
++            var it = self.lanes.valueIterator();
++            while (it.next()) |l| {
++                if (l.slot == slot) break;
++            } else return @as(u32, @intCast(slot));
++        }
++        return null;
++    }
++
+     pub fn claim(self: *Lanes, s: *const lanes.Stream) !*Lane {
++        if (self.lanes.getPtr(s)) |existing| return existing;
++        if (self.heldSlot(s)) |slot| return self.claimAt(s, slot);
+         return self.claimUsing(s, freeSlot);
+     }
+ 
+     pub fn claimUsing(self: *Lanes, s: *const lanes.Stream, comptime choose: anytype) !*Lane {
+         if (self.lanes.getPtr(s)) |existing| return existing;
+-        const slot = choose(self);
++        return self.claimAt(s, choose(self));
++    }
++
++    fn claimAt(self: *Lanes, s: *const lanes.Stream, slot: u32) !*Lane {
+         const gop = try self.lanes.getOrPut(self.x.e.gpa, s);
+         gop.value_ptr.* = .{ .slot = slot };
+         return gop.value_ptr;
+diff --git a/zig/src/families/glm/cuda_lanes_test.zig b/zig/src/families/glm/cuda_lanes_test.zig
+--- a/zig/src/families/glm/cuda_lanes_test.zig
++++ b/zig/src/families/glm/cuda_lanes_test.zig
+@@ -122,3 +122,44 @@
+     cuda.ovn.fake("NO_COPY", "0");
+     try std.testing.expect(self.facts().copy_drafts);
+ }
++
++test "TF_GLM_OVN_RESTORE_HELD: a stream that resumes a kept state takes the free slot whose sequence still holds it" {
++    const Seq = @import("cuda_engine_types.zig").Seq;
++    var e: engine.Engine = undefined;
++    e.gpa = std.testing.allocator;
++    e.pages = null;
++    e.seqs = .empty;
++    defer e.seqs.deinit(e.gpa);
++    var seqs: [3]Seq = undefined; // the choice reads each sequence's mark and nothing else
++    seqs[0].st.held = .{ .id = 5, .at = 100 };
++    seqs[1].st.held = .{ .id = 9, .at = 200 };
++    seqs[2].st.held = null;
++    try e.seqs.appendSlice(e.gpa, &[_]?*Seq{ &seqs[0], &seqs[1], &seqs[2] });
++    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
++    defer self.lanes.deinit(e.gpa);
++    var streams: [4]lanes.Stream = undefined;
++    for (&streams) |*s| s.reuse = .{};
++    var kept: engine.Kept = .{ .id = 9, .at = 200 };
++    streams[0].reuse.saved = &kept;
++    streams[2].reuse.saved = &kept;
++    defer cuda.ovn.fake("RESTORE_HELD", null);
++    cuda.ovn.fake("RESTORE_HELD", null);
++    try std.testing.expectEqual(@as(?u32, null), self.heldSlot(&streams[0])); // off: the lowest free slot, as before
++    cuda.ovn.fake("RESTORE_HELD", "1");
++    try std.testing.expectEqual(@as(?u32, 1), self.heldSlot(&streams[0]));
++    try std.testing.expectEqual(@as(?u32, null), self.heldSlot(&streams[1])); // it resumes nothing
++    kept = .{ .id = 8, .at = 200 };
++    try std.testing.expectEqual(@as(?u32, null), self.heldSlot(&streams[0]));
++    kept = .{ .id = 9, .at = 200 };
++    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[0])).slot);
++    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[0])).slot); // its lane, once claimed
++    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&streams[1])).slot); // the others: the lowest free slot
++    try std.testing.expectEqual(@as(?u32, null), self.heldSlot(&streams[2])); // the holder is taken
++    try std.testing.expectEqual(@as(u32, 2), (try self.claim(&streams[2])).slot);
++    _ = self.lanes.remove(&streams[0]);
++    streams[3].reuse.saved = &kept;
++    try std.testing.expectEqual(@as(?u32, 1), self.heldSlot(&streams[3])); // free again
++    var paged: @import("cuda_pages.zig").Pages = undefined;
++    e.pages = &paged; // a paged engine's sequences hold their rows on pages: no slot is preferred
++    try std.testing.expectEqual(@as(?u32, null), self.heldSlot(&streams[3]));
++}
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -66,6 +66,7 @@
+     _ = @import("cuda_piece_front_test.zig");
+     _ = @import("cuda_piece_kda_test.zig");
+     _ = @import("cuda_snapshot_layout_test.zig");
++    _ = @import("cuda_restore_held_test.zig");
+     _ = @import("cuda_ranks_test.zig");
+     _ = @import("cuda_ranks_roce_test.zig");
+     _ = @import("cuda_env.zig");
+diff --git a/zig/src/families/glm/cuda_restore_held_test.zig b/zig/src/families/glm/cuda_restore_held_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_restore_held_test.zig
+@@ -0,0 +1,281 @@
++//! TF_GLM_OVN_RESTORE_HELD on a driver whose device memory is host memory: what a restore copies and what it leaves.
++const std = @import("std");
++const cuda = @import("cuda");
++const fixture = @import("cuda_disk_image_test.zig");
++const image = @import("cuda_disk_image.zig");
++const snaps = @import("cuda_snapshots.zig");
++const pages = @import("cuda_snapshot_pages.zig");
++const types = @import("cuda_engine_types.zig");
++const Plan = @import("cuda_snapshot_layout.zig").Plan;
++const max_by_position = @import("cuda_snapshot_layout.zig").max_by_position;
++const State = @import("cuda_state.zig").State;
++const Held = @import("cuda_state.zig").Held;
++const H = fixture.H;
++const expect = std.testing.expect;
++const expectEqual = std.testing.expectEqual;
++
++/// Device addresses are host addresses on the fixture's driver.
++fn hostBytes(p: u64, n: usize) []u8 {
++    return @as([*]u8, @ptrFromInt(p))[0..n];
++}
++
++/// The fixture's driver with device-to-device copies counted by bytes, and the 32-bit fill a state's position takes.
++const D = struct {
++    var copied: usize = 0;
++    var inner: cuda.Driver = undefined;
++    fn dtod(dst: u64, src: u64, n: usize, s: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
++        copied += n;
++        return inner.api.cuMemcpyDtoDAsync_v2(dst, src, n, s);
++    }
++    fn set32(p: u64, v: c_uint, n: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
++        for (0..n) |i| std.mem.writeInt(u32, hostBytes(p + 4 * i, 4)[0..4], v, .little);
++        return 0;
++    }
++    fn driver() cuda.Driver {
++        inner = H.driver();
++        var d = inner;
++        d.api.cuMemcpyDtoDAsync_v2 = dtod;
++        d.api.cuMemsetD32Async = set32;
++        return d;
++    }
++};
++
++/// What keepAs and restore read of an engine: a bound sequence (its state carries the mark) and the snapshot pages.
++const Fake = struct {
++    gpa: std.mem.Allocator,
++    d: *const cuda.Driver,
++    stream: cuda.Stream,
++    c: @import("config.zig").Config,
++    cur: struct { st: State, in_head: usize = 0, cuts: std.ArrayList(u32) = .empty },
++    capacity: usize = fixture.capacity,
++    mtp: bool = false, // DFlash2 drafting: a kept state holds no head rows
++    head: bool = false,
++    snaps: std.AutoHashMapUnmanaged(u64, types.Snap) = .empty,
++    snap_pages: ?pages.Pool = null,
++    share_pages: bool = false,
++};
++
++/// A plan's bytes in order, read from the live sequence.
++fn gather(plan: *const Plan, out: []u8) void {
++    var at: usize = 0;
++    for (plan.parts[0..plan.count]) |p| {
++        @memcpy(out[at..][0..p.len], hostBytes(p.live, p.len));
++        at += p.len;
++    }
++}
++
++/// Other bytes over a live range, by offset from the arena's first byte.
++const Scribble = struct {
++    base: u64,
++    fn run(s: @This(), at: u64, n: usize) anyerror!void {
++        for (hostBytes(at, n), 0..) |*b, i| b.* = @truncate((at - s.base + i) *% 17 +% 3);
++    }
++};
++
++test "restore held: a copy leaves out the ranges it is told, piece by piece" {
++    const a = std.testing.allocator;
++    const Got = struct {
++        list: *std.ArrayList([2]u64),
++        fn add(g: @This(), at: u64, n: usize) anyerror!void {
++            try g.list.append(std.testing.allocator, .{ at, n });
++        }
++    };
++    var got: std.ArrayList([2]u64) = .empty;
++    defer got.deinit(a);
++    const but = [_][2]u64{ .{ 100, 200 }, .{ 300, 310 }, .{ 500, 900 } };
++    const cases = [_]struct { live: u64, n: usize, want: []const [2]u64 }{
++        .{ .live = 0, .n = 50, .want = &.{.{ 0, 50 }} }, // before every range
++        .{ .live = 0, .n = 150, .want = &.{.{ 0, 100 }} }, // into one
++        .{ .live = 100, .n = 100, .want = &.{} }, // one range exactly
++        .{ .live = 150, .n = 200, .want = &.{ .{ 200, 100 }, .{ 310, 40 } } }, // out of one, across the next
++        .{ .live = 50, .n = 1000, .want = &.{ .{ 50, 50 }, .{ 200, 100 }, .{ 310, 190 }, .{ 900, 150 } } },
++        .{ .live = 250, .n = 20, .want = &.{.{ 250, 20 }} }, // between two
++        .{ .live = 600, .n = 100, .want = &.{} }, // inside one
++        .{ .live = 890, .n = 20, .want = &.{.{ 900, 10 }} },
++        .{ .live = 900, .n = 5, .want = &.{.{ 900, 5 }} }, // from a range's end
++    };
++    for (cases) |c| {
++        got.clearRetainingCapacity();
++        try pages.eachBut(c.live, c.n, &but, Got{ .list = &got }, Got.add);
++        try std.testing.expectEqualSlices([2]u64, c.want, got.items);
++    }
++    got.clearRetainingCapacity();
++    try pages.eachBut(7, 9, &.{}, Got{ .list = &got }, Got.add); // no range: the whole copy
++    try std.testing.expectEqualSlices([2]u64, &.{.{ 7, 9 }}, got.items);
++}
++
++test "restore held: the by-position ranges are each DSA layer's latent rows, scales and whole pools, as the disk image counts them" {
++    var m: fixture.Model = undefined;
++    try m.init();
++    var d = H.driver();
++    const a = std.testing.allocator;
++    var list: std.ArrayList(image.Part) = .empty;
++    defer list.deinit(a);
++    for ([_]bool{ false, true }) |kv8| {
++        var st = try State.initFormat(a, &d, &m.w, fixture.capacity, kv8);
++        defer st.deinit();
++        const sh = try image.Shape.of(&st, &m.w.config, fixture.capacity, false);
++        for ([_]u32{ 1, 3, 4, 2048, 2051, 6141, 6144 }) |at| {
++            var buf: [max_by_position][2]u64 = undefined;
++            const ranges = Plan.byPosition(&st, &m.w.config, at, &buf);
++            list.clearRetainingCapacity();
++            try image.parts(sh, at, &list, a);
++            var want_bytes: u64 = 0;
++            var want_count: usize = 0;
++            for (list.items) |p| if (p.row != 0 and p.bytes > 0) {
++                want_bytes += p.bytes;
++                want_count += 1;
++            };
++            var bytes: u64 = 0;
++            const plan = try Plan.init(&st, &m.w.config, at, null, 0);
++            for (ranges, 0..) |r, i| {
++                try expect(r[1] > r[0]);
++                if (i > 0) try expect(r[0] >= ranges[i - 1][1]); // ascending and apart
++                bytes += r[1] - r[0];
++                var parts: usize = 0; // each lies in one part of the plan, from that part's first byte
++                for (plan.parts[0..plan.count]) |p| parts += @intFromBool(r[0] == p.live and r[1] <= p.live + p.len);
++                try expectEqual(@as(usize, 1), parts);
++            }
++            try expectEqual(want_count, ranges.len);
++            try expectEqual(want_bytes, bytes);
++            try expect(bytes < plan.len); // the head, the rings and the pools in progress are never among them
++        }
++    }
++}
++
++test "restore held: a restore into the sequence that kept the state copies its own parts alone, and every planned byte is the kept one" {
++    var m: fixture.Model = undefined;
++    try m.init();
++    var d = D.driver();
++    const a = std.testing.allocator;
++    defer cuda.ovn.fake("RESTORE_HELD", null);
++    for ([_]bool{ false, true }) |kv8| for ([_]u32{ 2048, 2051, 4099 }) |at| {
++        var e: Fake = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .c = m.w.config, .cur = .{ .st = try State.initFormat(a, &d, &m.w, fixture.capacity, kv8) } };
++        defer e.cur.st.deinit();
++        e.snap_pages = try pages.Pool.init(a, &d, 256 << 20, false);
++        defer e.snap_pages.?.deinit();
++        try e.snaps.ensureTotalCapacity(a, 8);
++        defer e.snaps.deinit(a);
++        defer for ([_]u64{ 7, 8, 9 }) |id| if (e.snaps.getPtr(id)) |s| snaps.free(&e, s);
++        const live = hostBytes(e.cur.st.arena.buf.ptr, e.cur.st.arena.buf.len);
++        for (live, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
++        const cur = try a.dupe(u1, e.cur.st.cur);
++        defer a.free(cur);
++        try e.cur.st.restoreHost(e.stream, at, 0, cur, .{ 0, 0 }); // the sequence stands at `at`
++        cuda.ovn.fake("RESTORE_HELD", "1");
++        try snaps.keepAs(&e, 7);
++        try expectEqual(@as(?Held, .{ .id = 7, .at = at }), e.cur.st.held);
++        const plan = try Plan.init(&e.cur.st, &e.c, at, null, 0);
++        const kept = try a.alloc(u8, plan.len);
++        defer a.free(kept);
++        const now = try a.alloc(u8, plan.len);
++        defer a.free(now);
++        gather(&plan, kept);
++        var buf: [max_by_position][2]u64 = undefined;
++        const held = Plan.byPosition(&e.cur.st, &e.c, at, &buf);
++        var held_bytes: usize = 0;
++        for (held) |r| held_bytes += @intCast(r[1] - r[0]);
++        try expect(held_bytes > 0 and held_bytes < plan.len);
++        // the sequence goes on: every byte a later pass may write gets another value, its rows below `at` stay
++        const base = e.cur.st.arena.buf.ptr;
++        try pages.eachBut(base, live.len, held, Scribble{ .base = base }, Scribble.run);
++        try e.cur.st.restoreHost(e.stream, at + 40, 0, cur, .{ 4, 0 });
++        D.copied = 0;
++        try snaps.restore(&e, 7);
++        try expectEqual(plan.len - held_bytes, D.copied);
++        gather(&plan, now);
++        try std.testing.expectEqualSlices(u8, kept, now);
++        try expectEqual(@as(usize, at), e.cur.st.pos);
++        try expectEqual(@as(usize, 0), e.cur.st.base);
++        try expectEqual(@as(?Held, .{ .id = 7, .at = at }), e.cur.st.held);
++        // the control: a held byte changed behind the mark's back is not repaired, so that restore did not copy it
++        hostBytes(held[0][0], 1)[0] ^= 0xFF;
++        try snaps.restore(&e, 7);
++        gather(&plan, now);
++        try expect(!std.mem.eql(u8, kept, now));
++        // a forward at `at` or past it keeps the mark; one below clears it, and the next restore is whole
++        for ([_]usize{ at, at + 5, at - 1 }) |pos| {
++            try e.cur.st.restoreHost(e.stream, pos, 0, cur, .{ at - 3, 0 });
++            try e.cur.st.ready(e.stream, 1);
++            try expectEqual(pos >= at, e.cur.st.held != null);
++        }
++        D.copied = 0;
++        try snaps.restore(&e, 7);
++        try expectEqual(plan.len, D.copied);
++        gather(&plan, now);
++        try std.testing.expectEqualSlices(u8, kept, now);
++        // a restore sets the mark as a keep does: the same state again copies its own parts alone
++        D.copied = 0;
++        try snaps.restore(&e, 7);
++        try expectEqual(plan.len - held_bytes, D.copied);
++        // off, every restore is whole, mark or not
++        cuda.ovn.fake("RESTORE_HELD", null);
++        D.copied = 0;
++        try snaps.restore(&e, 7);
++        try expectEqual(plan.len, D.copied);
++        // another kept state's mark is no match: after a keep four rows on, the first state comes back whole
++        cuda.ovn.fake("RESTORE_HELD", "1");
++        try e.cur.st.restoreHost(e.stream, at + 4, 0, cur, .{ 0, 0 });
++        try snaps.keepAs(&e, 8);
++        try expectEqual(@as(?Held, .{ .id = 8, .at = at + 4 }), e.cur.st.held);
++        D.copied = 0;
++        try snaps.restore(&e, 7);
++        try expectEqual(plan.len, D.copied);
++        try expectEqual(@as(?Held, .{ .id = 7, .at = at }), e.cur.st.held);
++        gather(&plan, now);
++        try std.testing.expectEqualSlices(u8, kept, now);
++        // the same position under another id is another state, other rows and all: the first comes back whole
++        try e.cur.st.restoreHost(e.stream, at, 0, cur, .{ 0, 0 });
++        for (live, 0..) |*b, i| b.* = @truncate(i *% 13 +% 5);
++        try snaps.keepAs(&e, 9);
++        try expectEqual(@as(?Held, .{ .id = 9, .at = at }), e.cur.st.held);
++        D.copied = 0;
++        try snaps.restore(&e, 7);
++        try expectEqual(plan.len, D.copied);
++        gather(&plan, now);
++        try std.testing.expectEqualSlices(u8, kept, now);
++    };
++}
++
++test "restore held: a paged sequence names no by-position range, its rows being on pages" {
++    var m: fixture.Model = undefined;
++    try m.init();
++    var d = D.driver();
++    const a = std.testing.allocator;
++    const paged: @import("cuda_state.zig").Paged = .{ .kv = 1 << 30, .pages = @import("cuda_pages.zig").tableLen(fixture.capacity), .page_bytes = @import("cuda_state.zig").pageBytes(&m.w) };
++    var st = try State.initPaged(a, &d, &m.w, fixture.capacity, paged);
++    defer st.deinit();
++    var buf: [max_by_position][2]u64 = undefined;
++    try expectEqual(@as(usize, 0), Plan.byPosition(&st, &m.w.config, 2048, &buf).len);
++}
++
++test "restore held: a restore that fails midway leaves no mark, and the next one is whole" {
++    var m: fixture.Model = undefined;
++    try m.init();
++    var d = D.driver();
++    const a = std.testing.allocator;
++    defer cuda.ovn.fake("RESTORE_HELD", null);
++    var e: Fake = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .c = m.w.config, .cur = .{ .st = try State.initFormat(a, &d, &m.w, fixture.capacity, false) } };
++    defer e.cur.st.deinit();
++    e.snap_pages = try pages.Pool.init(a, &d, 256 << 20, false);
++    defer e.snap_pages.?.deinit();
++    try e.snaps.ensureTotalCapacity(a, 8);
++    defer e.snaps.deinit(a);
++    defer if (e.snaps.getPtr(7)) |s| snaps.free(&e, s);
++    const cur = try a.dupe(u1, e.cur.st.cur);
++    defer a.free(cur);
++    try e.cur.st.restoreHost(e.stream, 2048, 0, cur, .{ 0, 0 });
++    cuda.ovn.fake("RESTORE_HELD", "1");
++    try snaps.keepAs(&e, 7);
++    try expectEqual(@as(?Held, .{ .id = 7, .at = 2048 }), e.cur.st.held);
++    const lease = &e.snaps.getPtr(7).?.lease;
++    lease.ids.items.len -= 1; // one page short: the copy refuses before it moves a byte
++    if (snaps.restore(&e, 7)) |_| return error.TestExpectedError else |err| try expectEqual(error.SnapshotSize, err);
++    try expectEqual(@as(?Held, null), e.cur.st.held); // part of the sequence may be the state's and part not
++    lease.ids.items.len += 1;
++    D.copied = 0;
++    const plan = try Plan.init(&e.cur.st, &e.c, 2048, null, 0);
++    try snaps.restore(&e, 7);
++    try expectEqual(plan.len, D.copied);
++    try expectEqual(@as(?Held, .{ .id = 7, .at = 2048 }), e.cur.st.held);
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -122,6 +122,7 @@
+     .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },
+     .{ .name = "TF_GLM_OVN_PIECE_KDA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_RESTORE_HELD", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_SOLO_TO_START", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -11,6 +11,7 @@
+ const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
+ const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
+ const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
++const glm_restore_held_check = @import("glm_restore_held_check.zig");
+ 
+ /// The lines these commands add to `main.zig`'s usage, after its own.
+ pub const usage =
+@@ -24,6 +25,7 @@
+     \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
+     \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
+     \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
++    \\  glm-restore-held-check    TF_GLM_OVN_RESTORE_HELD: a state resumed by the sequence that kept it against a whole restore, byte for byte
+     \\
+ ;
+ 
+@@ -49,6 +51,8 @@
+         try glm_mm_ovn.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-onepass-exact-check")) {
+         try glm_onepass_exact_check.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-restore-held-check")) {
++        try glm_restore_held_check.run(gpu, rest);
+     } else return false;
+     return true;
+ }
+diff --git a/zig/tests/cuda/glm_restore_held_check.zig b/zig/tests/cuda/glm_restore_held_check.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/tests/cuda/glm_restore_held_check.zig
+@@ -0,0 +1,200 @@
++//! `glm-restore-held-check CKPT ID_PATH`: TF_GLM_OVN_RESTORE_HELD's restore against a whole one, byte for byte.
++const std = @import("std");
++const cuda = @import("cuda");
++const check = @import("check.zig");
++const openComm = @import("glm_lanes_tests.zig").openComm;
++const glm = @import("glm_cuda");
++
++/// Greedy steps a run records after its prompt, and the MTP head's drafts at each.
++const steps = 12;
++const depth = 2;
++
++/// A first request of `first` rows keeps its state at `at` (in `cuts`, or on the grid); the next one has `next` rows.
++const Case = struct { name: []const u8, first: usize, at: u32, cuts: []const u32 = &.{}, next: usize };
++const cases = [_]Case{
++    .{ .name = "kept on the grid", .first = 3000, .at = 2048, .next = 3548 },
++    .{ .name = "kept inside a pool", .first = 2600, .at = 2051, .cuts = &.{2051}, .next = 2951 },
++    .{ .name = "kept where the index rings are nearly full", .first = 4500, .at = 4099, .cuts = &.{4099}, .next = 5299 },
++};
++
++/// One run's record: each step's drawn token, its logits row (bf16) and the MTP head's drafts after it.
++const Trace = struct {
++    tokens: [steps]u32 = undefined,
++    drafts: [steps * depth]u32 = undefined,
++    logits: []u16,
++
++    fn init(a: std.mem.Allocator, v: usize) !Trace {
++        return .{ .logits = try a.alloc(u16, steps * v) };
++    }
++
++    fn equals(t: *const Trace, o: *const Trace) bool {
++        return std.mem.eql(u32, &t.tokens, &o.tokens) and std.mem.eql(u32, &t.drafts, &o.drafts) and std.mem.eql(u16, t.logits, o.logits);
++    }
++};
++
++/// The mark's hook: the state kept where the pass stands at `at`.
++const Keep = struct {
++    e: *glm.engine.Engine,
++    at: [1]u32,
++    id: u64 = 0,
++
++    fn call(ctx: *anyopaque, at: u32) void {
++        const k: *Keep = @ptrCast(@alignCast(ctx));
++        if (at == k.at[0]) k.id = k.e.keepState() catch 0;
++    }
++};
++
++const Run = struct {
++    gpu: check.Gpu,
++    e: *glm.engine.Engine,
++    x: glm.follow.Leader,
++    v: usize,
++
++    /// A request's prompt pass on `slot`, a chunk a step, from row 0 or a kept state; `keep` keeps a state at its row.
++    fn prompt(r: Run, slot: u32, p: []const u32, starts: []const u32, from: ?glm.engine.Resume, keep: ?*Keep) !u32 {
++        try r.x.bind(slot);
++        try r.x.begin(null);
++        if (starts.len > 0) try r.x.cuts(starts);
++        const marks: ?glm.engine.Marks = if (keep) |k| .{ .at = &k.at, .ctx = k, .call = Keep.call } else null;
++        var at: usize = if (from) |f| f.at else 0;
++        var again = from;
++        while (true) {
++            const c = try r.x.chunk(p, at, false, again, null, marks);
++            again = null;
++            if (c.first) |t| return t;
++            at += c.rows;
++        }
++    }
++
++    /// Lone greedy steps from `first` on the bound sequence, recorded.
++    fn decode(r: Run, token: u32, out: *Trace) !void {
++        var t = token;
++        var held: [glm.engine.max_drafts]u32 = undefined;
++        try r.x.draft(true, &.{t}, depth, &held, null);
++        for (0..steps) |s| {
++            var o: [1]u32 = undefined;
++            try r.x.verify(&.{t}, &o, 0);
++            try cuda.memory.download(r.gpu.d, r.e.bd.logits, std.mem.sliceAsBytes(out.logits[s * r.v ..][0..r.v]));
++            try r.x.keep(1);
++            try r.x.draft(false, &o, depth, &held, null);
++            out.tokens[s] = o[0];
++            @memcpy(out.drafts[s * depth ..][0..depth], held[0..depth]);
++            t = o[0];
++        }
++    }
++
++    /// The bound sequence's state as a keep here would copy it: the snapshot plan's parts, in order.
++    fn planned(r: Run, a: std.mem.Allocator) ![]u8 {
++        const st = &r.e.cur.st;
++        try r.e.stream.synchronize();
++        const plan = try glm.snapshots.layout.Plan.init(st, &r.e.c, st.pos, if (r.e.mtp) st.mtp_len else null, 0);
++        const out = try a.alloc(u8, plan.len);
++        var at: usize = 0;
++        for (plan.parts[0..plan.count]) |p| {
++            try cuda.memory.download(r.gpu.d, p.live, out[at..][0..p.len]);
++            at += p.len;
++        }
++        return out;
++    }
++
++    /// A first request on `slot` that keeps its state at the case's row and then decodes; the kept state's id.
++    fn first(r: Run, slot: u32, c: Case, p: []const u32, a: std.mem.Allocator) !u64 {
++        var keep: Keep = .{ .e = r.e, .at = .{c.at} };
++        var scratch = try Trace.init(a, r.v);
++        try r.decode(try r.prompt(slot, p[0..c.first], c.cuts, null, &keep), &scratch);
++        try check.expect(keep.id != 0 and r.e.holds(keep.id), "{s}: no state was kept at row {d}", .{ c.name, c.at });
++        return keep.id;
++    }
++};
++
++/// `n` prompt ids from `seed`, inside the vocabulary.
++fn ids(a: std.mem.Allocator, n: usize, seed: u64, vocab: usize) ![]u32 {
++    const out = try a.alloc(u32, n);
++    var r = std.Random.DefaultPrng.init(seed);
++    for (out) |*u| u.* = r.random().uintLessThan(u32, @intCast(vocab));
++    return out;
++}
++
++pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
++    if (rest.len < 2) return check.expect(false, "usage: glm-restore-held-check CKPT ID_PATH (TF_GLM_LAYERS=2 on glm-synth's checkpoint)", .{});
++    const on = glm.snapshots.restoreHeld();
++    var arena = std.heap.ArenaAllocator.init(gpu.gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var lib = try cuda.nccl.Library.open();
++    defer lib.close();
++    const comm = try openComm(gpu, &lib, 0, 1, rest[1]);
++    defer _ = lib.api.ncclCommDestroy(comm);
++    var problem: []const u8 = "";
++    var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
++        std.debug.print("REFUSE {s}\n", .{problem});
++        return err;
++    };
++    var failed = false;
++    var planted: usize = 0;
++    for ([_]bool{ false, true }) |kv8| {
++        set.kv8 = kv8;
++        const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, rest[0], &lib, comm, 0, 1, .{ .capacity = 8192, .mtp = true, .settings = set });
++        defer e.deinit();
++        var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, 8192);
++        defer link.deinit();
++        const r: Run = .{ .gpu = gpu, .e = e, .x = .{ .e = e, .link = &link }, .v = e.share.vocab.len() };
++        try r.x.snapshots(1 << 30);
++        for (cases, 0..) |c, ci| {
++            const base: u32 = @intCast(10 * ci + 1);
++            // the next request shares the first's rows to `at` and goes its own way after
++            const p = try ids(a, c.first, 11 + ci, e.c.vocab);
++            const q = try ids(a, c.next, 31 + ci, e.c.vocab);
++            @memcpy(q[0..c.at], p[0..c.at]);
++            // the sequence that kept the state resumes it: under the switch its by-position rows stay where they are
++            const id = try r.first(base, c, p, a);
++            var got = try Trace.init(a, r.v);
++            const t1 = try r.prompt(base, q, c.cuts, .{ .id = id, .at = c.at }, null);
++            const held = try r.planned(a);
++            try r.decode(t1, &got);
++            // another sequence resumes the same state: a whole restore
++            var whole = try Trace.init(a, r.v);
++            const t2 = try r.prompt(base + 1, q, c.cuts, .{ .id = id, .at = c.at }, null);
++            const copied = try r.planned(a);
++            try r.decode(t2, &whole);
++            // a third runs the request cold
++            var cold = try Trace.init(a, r.v);
++            try r.decode(try r.prompt(base + 2, q, c.cuts, null, null), &cold);
++            if (!std.mem.eql(u8, held, copied)) {
++                std.debug.print("FAIL kv8={}, {s}: the resumed sequence's state differs from a whole restore's (first byte {?d} of {d})\n", .{ kv8, c.name, std.mem.indexOfDiff(u8, held, copied), held.len });
++                failed = true;
++            }
++            if (!got.equals(&whole) or !got.equals(&cold)) {
++                std.debug.print("FAIL kv8={}, {s}: {d} steps differ (against a whole restore {}, against a cold run {})\n", .{ kv8, c.name, steps, got.equals(&whole), got.equals(&cold) });
++                failed = true;
++            }
++            // the planted control: one byte of a row the sequence holds, changed before it resumes its own state
++            const id2 = try r.first(base + 3, c, p, a);
++            var ranges: [glm.snapshots.layout.max_by_position][2]u64 = undefined;
++            const rows = glm.snapshots.layout.Plan.byPosition(&r.e.cur.st, &r.e.c, c.at, &ranges);
++            try check.expect(rows.len > 0, "{s}: no by-position rows", .{c.name});
++            const at = rows[0][0] + (rows[0][1] - rows[0][0]) / 2;
++            var one: [1]u8 = undefined;
++            try r.e.stream.synchronize();
++            try cuda.memory.download(gpu.d, at, &one);
++            const byte: cuda.DeviceBuffer = .{ .d = gpu.d, .ptr = at, .len = 1, .borrowed = true };
++            try byte.fill8(one[0] ^ 0xFF, e.stream.handle);
++            _ = try r.prompt(base + 3, q, c.cuts, .{ .id = id2, .at = c.at }, null);
++            const poisoned = try r.planned(a);
++            const same = std.mem.eql(u8, poisoned, copied);
++            if (on and same) {
++                std.debug.print("FAIL kv8={}, {s}: a changed byte of a held row was repaired, so the restore copied it and the check cannot fail\n", .{ kv8, c.name });
++                failed = true;
++            } else if (!on and !same) {
++                std.debug.print("FAIL kv8={}, {s}: off, a whole restore left a changed byte (first {?d})\n", .{ kv8, c.name, std.mem.indexOfDiff(u8, poisoned, copied) });
++                failed = true;
++            } else planted += 1;
++            for ([_]u64{ id, id2 }) |k| e.dropState(k);
++        }
++        try r.x.end();
++    }
++    if (failed) return error.TestFailed;
++    if (on) {
++        check.pass("TF_GLM_OVN_RESTORE_HELD=1: a state resumed by the sequence that kept it equals a whole restore's in every planned byte and {d} greedy steps equal a cold run's, {d} cases, fp8 and bf16 caches; {d} planted controls (a held byte changed) stayed changed", .{ steps, cases.len, planted });
++    } else check.pass("TF_GLM_OVN_RESTORE_HELD off: every restore is whole, {d} cases, fp8 and bf16 caches; {d} planted controls (a held byte changed) were repaired", .{ cases.len, planted });
++}
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -80,6 +80,7 @@
+ | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
+ | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
+ | `TF_GLM_OVN_PIECE_KDA` | Exactly `0` or `1`; default off (a prompt chunk's KDA mixer site runs its chain piece by piece, each range of rows ahead of its pieces' o_proj and exchange, instead of the whole chain before the first piece; the bits are the same) |
++| `TF_GLM_OVN_RESTORE_HELD` | Exactly `0` or `1`; default off (a kept prompt state restored into the sequence that kept it, or last restored it, and has only added rows since copies what a sequence rewrites alone: the arena head, the index rings and each layer's pool in progress, not the latent rows, their scales and the whole pools already there; a stream that resumes a kept state takes the free slot that still holds it; the tokens are the same) |
+ | `TF_GLM_OVN_SOLO_TO_START` | Exactly `0` or `1`; default off (with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_REQUEST_STARTS=1`, a solo prompt step whose second chunk holds a request start ends at that start instead of being refused, so the stretch before a message start runs as one pass and not two; the tokens are the same) |
+ | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
+ | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |

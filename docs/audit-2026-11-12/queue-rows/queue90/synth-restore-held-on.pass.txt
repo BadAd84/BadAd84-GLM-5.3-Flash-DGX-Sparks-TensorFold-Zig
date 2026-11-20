@@ -1,0 +1,1 @@
+PASS TF_GLM_OVN_RESTORE_HELD=1: a state resumed by the sequence that kept it equals a whole restore's in every planned byte and 12 greedy steps equal a cold run's, 3 cases, fp8 and bf16 caches; 6 planted controls (a held byte changed) stayed changed

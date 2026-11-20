@@ -1,0 +1,44 @@
+[q90] 11:53:13 start; IMG=glm53-zig:v129zg; NEWX='-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e NCCL_NCHANNELS_PER_NET_PEER=4 -e TF_GLM_OVN_SOLO_TO_START=1'; deadline 15:53:13; 278G free
+[q90] 12:00:42 built glm53-zig:v129zg: 52a1f0ce250a
+[q90] 12:09:29 distributed: 52a1f0ce250a 52a1f0ce250a 52a1f0ce250a DIST-DONE v129zg
+[q90] glm53-zig:v129zg ids: sha256:52a1f0ce250a9cbfa866681f7ef97a6e127ae39990d3ad828678d1c3a23c7e82 sha256:52a1f0ce250a9cbfa866681f7ef97a6e127ae39990d3ad828678d1c3a23c7e82 sha256:52a1f0ce250a9cbfa866681f7ef97a6e127ae39990d3ad828678d1c3a23c7e82
+[q90] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 12:09:31 production stopped on spark1-3
+[q90] 12:09:47 glm-synth rc=0: PASS glm-synth: 330 tensors, 2095 MiB, config 2 layers 16 experts vocabulary 8192, dc.json in /s/ckpt
+[q90] 12:10:09 glm-restore-held-check, off: rc=0, 1 PASS, 0 FAIL lines; PASS TF_GLM_OVN_RESTORE_HELD off: every restore is whole, 3 cases, fp8 and bf16 caches; 6 planted controls (a held byte changed) were repair
+[q90] 12:10:24 glm-restore-held-check, on: rc=0, 1 PASS, 0 FAIL lines; PASS TF_GLM_OVN_RESTORE_HELD=1: a state resumed by the sequence that kept it equals a whole restore's in every planned byte and 12 greedy st
+[q90] 12:10:25 glm-restore-held-check passed with the switch off and on
+[q90] 12:15:00 h0a cold rc=0 3494 13250 50219 3526 13435 50927 
+[q90] 12:16:03 h0a chain: 47639 837 857 810 809 804 799 799
+[q90] 12:18:16 h0a chain: 122227 871 885 869 874 863
+[q90] 12:18:44 dec-h0a 1 greedy prose rc=0 "agg_tok_s": 78.98 code rc=0 "agg_tok_s": 109.79
+[q90] 12:23:21 h1a cold rc=0 3517 13387 50676 3560 13585 51251 
+[q90] 12:24:24 h1a chain: 47860 832 813 803 794 791 789 787
+[q90] 12:26:38 h1a chain: 122999 857 865 853 857 828
+[q90] 12:27:05 dec-h1a 1 greedy prose rc=0 "agg_tok_s": 79.17 code rc=0 "agg_tok_s": 112.45
+[q90] 12:31:48 h1b cold rc=0 3520 13345 50618 3560 13505 51196 
+[q90] 12:32:51 h1b chain: 47825 831 813 806 803 794 793 795
+[q90] 12:35:05 h1b chain: 123149 856 867 859 860 840
+[q90] 12:35:32 dec-h1b 1 greedy prose rc=0 "agg_tok_s": 79.13 code rc=0 "agg_tok_s": 110.99
+[q90] 12:40:20 h0b cold rc=0 3523 13434 50805 3587 13626 51425 
+[q90] 12:41:23 h0b chain: 48089 842 813 802 811 807 803 801
+[q90] 12:43:37 h0b chain: 123105 870 891 880 880 871
+[q90] 12:44:05 dec-h0b 1 greedy prose rc=0 "agg_tok_s": 78.66 code rc=0 "agg_tok_s": 110.52
+[q90] 12:48:38 h0c cold rc=0 3536 13408 50872 3580 13581 51312 
+[q90] 12:49:41 h0c chain: 48054 834 822 812 810 803 791 803
+[q90] 12:51:55 h0c chain: 123351 878 891 877 872 867
+[q90] 12:52:22 dec-h0c 1 greedy prose rc=0 "agg_tok_s": 79.56 code rc=0 "agg_tok_s": 112.46
+[q90] 12:56:55 h1c cold rc=0 3525 13386 50717 3546 13574 51344 
+[q90] 12:57:58 h1c chain: 48164 821 825 805 797 786 788 795
+[q90] 13:00:12 h1c chain: 123139 847 862 855 855 855
+[q90] 13:00:39 dec-h1c 1 greedy prose rc=0 "agg_tok_s": 78.77 code rc=0 "agg_tok_s": 110.65
+[q90] 13:05:13 h1d cold rc=0 3532 13456 50850 3581 13583 51453 
+[q90] 13:06:16 h1d chain: 48141 833 842 811 810 799 788 798
+[q90] 13:08:30 h1d chain: 123348 854 865 851 847 846
+[q90] 13:08:57 dec-h1d 1 greedy prose rc=0 "agg_tok_s": 79.18 code rc=0 "agg_tok_s": 111.84
+[q90] 13:13:31 h0d cold rc=0 3531 13427 50916 3580 13626 51381 
+[q90] 13:14:34 h0d chain: 48071 839 823 818 812 789 802 807
+[q90] 13:16:48 h0d chain: 123487 882 880 880 876 867
+[q90] 13:17:16 dec-h0d 1 greedy prose rc=0 "agg_tok_s": 78.3 code rc=0 "agg_tok_s": 109.61
+[q90] 13:21:15 nsys prefill with the switch on (cold 8k, 32k, three warm turns):   pass at 15539.6 ms, 4096 rows:  PREFILL-DONE 13:21:15 [prefill] 13:21:15 serve stopped; production stays down 
+QUEUE90-DONE 13:21:26
