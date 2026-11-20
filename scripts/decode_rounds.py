@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""decode_rounds.py SQLITE [--top N] [--min-kernels K] [--json OUT] - rank 0's decode rounds, round by round, from an Nsight Systems export of the
+"""decode_rounds.py SQLITE [--top N] [--min-kernels K] [--min-wall MS] [--range LO-HI] [--json OUT] - rank 0's decode rounds, round by round, from an Nsight Systems export of the
 GLM Zig serve (read-only on the export; stdlib only; the categories and the loader are prefill_stages.py's).
 
 The main stream is the one carrying tf_glm_put_words, which starts every lane step. A decode round is one lane step (from a put_words to the next one
@@ -43,10 +43,12 @@ def main():
     ap.add_argument("sqlite")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--min-kernels", type=int, default=200)
+    ap.add_argument("--min-wall", type=float, default=0.0, help="drop rounds shorter than this many ms (20 keeps the verify windows and drops the drafter passes)")
     ap.add_argument("--json")
+    ap.add_argument("--range", help="LO-HI: one detail block over every round whose rows lie in LO..HI (instead of the four commonest row counts)")
     a = ap.parse_args()
     ks, copies, _ = ps.load(a.sqlite)
-    rs = [r for r in rounds(ks, copies) if len(r[2]) >= a.min_kernels]
+    rs = [r for r in rounds(ks, copies) if len(r[2]) >= a.min_kernels and (r[1] - r[0]) / 1e6 >= a.min_wall]
     if not rs:
         print("no decode rounds")
         return 1
@@ -63,7 +65,12 @@ def main():
         b = st.mean(ps.union_len([(k[0], k[1]) for k in r[2]]) / 1e6 for r in group)
         print(f"{n:4d} | {len(group):6d} | {w:7.2f} | {b:7.2f} | {w - b:7.2f} | {w / max(n, 1):7.2f}")
     out = {}
-    for n, group in sorted(shapes.items(), key=lambda kv: -len(kv[1]))[:4]:
+    pick = sorted(shapes.items(), key=lambda kv: -len(kv[1]))[:4]
+    if a.range:
+        lo_r, hi_r = (int(x) for x in a.range.split("-"))
+        every = [r for n, g in shapes.items() if lo_r <= n <= hi_r for r in g]
+        pick = [(f"{lo_r} to {hi_r}", every)] if every else []
+    for n, group in pick:
         if len(group) < 3:
             continue
         wall, busy, side = [], [], []

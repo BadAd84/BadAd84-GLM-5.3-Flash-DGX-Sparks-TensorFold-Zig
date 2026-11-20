@@ -1,0 +1,155 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm cuda: TF_GLM_OVN_PIECES_SIDE_GLUE, a solo pass's pieces glued and shared on the side stream as a pair's are
+
+A prompt chunk's pieced sites (cuda_forward.zig pieced) run exchangePieces, which fills each piece on the main stream and
+posts its partials exchange on the side stream, and then gluePieces, which glues every piece on the MAIN stream after the
+last piece was filled and posts each piece's share on the side stream behind the exchanges still queued there. A solo pass
+(the recipe's TF_GLM_CHUNK_SOLO=4096, nothing to overlap with) therefore piles every piece's glue and share after its last
+fill: on a 4,096-row pass the main stream waits 18.3 us a row for the partials exchange and 24.5 for the glued rows' share,
+9.3% of the pass (queue76 capture f76w, request 1, `scripts/prefill_stages.py`), where production's accounting has 5 to 12.
+
+A paired step already schedules a site differently (cuda_forward_pair.zig exchangeGlue): each piece is filled on the main
+stream, and on the side stream its exchange, its glue and its share follow in order, so piece q's glue and share run while
+the main stream fills piece q + 1 and the main stream waits once, for the last piece's chain, before the next site
+(awaitShared). TF_GLM_OVN_PIECES_SIDE_GLUE=1 gives a solo pass that schedule. pieced() calls pieceSite for each site:
+without the switch it is exchangePieces then gluePieces, the same calls in the same order as before; with it, exchangeGlue
+then awaitShared. Scheduling only: the same kernels with the same rows and arguments, the glue kernels on the side stream
+and the side stream's order of collectives unchanged, so the bits are the same. The glue touches only its own piece's rows
+(x, post, comb, xs and normed by row, and hcpart, which only the glue uses), and no fill reads them, so the overlap is a
+row-disjoint one. Default off; with the profiler on (its spans sit on the main stream's glue) the switch is ignored.
+
+The two method aliases exchangePieces and gluePieces on Forward are replaced by pieceSite (nothing else used them).
+
+Host test: the switch's reading, on only with the switch and never under the profiler (cuda_pieces_side_glue_test.zig,
+listed in cuda.zig's test block); the schedule is checked by the reply digests, which must equal the recipe's on every cell.
+The registry row follows TF_GLM_OVN_SIDE_PRIO's and the docs line follows that switch's, so patches/pr1411's hunks still
+apply on top. Not run on a GPU yet.
+
+New here, not a re-seat: written on this series at v1.2.9.
+
+---
+
+diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm/cuda_forward_pieces.zig
+--- a/zig/src/families/glm/cuda_forward_pieces.zig
++++ b/zig/src/families/glm/cuda_forward_pieces.zig
+@@ -26,6 +26,11 @@
+     return n;
+ }
+ 
++/// TF_GLM_OVN_PIECES_SIDE_GLUE: a solo pass's sites glue on the side stream, as a pair's do; not when profiled.
++pub fn sideGlue(profiled: bool) bool {
++    return !profiled and cuda.ovn.on("PIECES_SIDE_GLUE");
++}
++
+ /// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
+ pub const Pieces = struct {
+     count: usize = 4,
+diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
+--- a/zig/src/families/glm/cuda_forward.zig
++++ b/zig/src/families/glm/cuda_forward.zig
+@@ -321,29 +321,28 @@
+         try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, stream.handle), "cuMemcpyDtoDAsync");
+     }
+ 
+-    const exchangePieces = @import("cuda_forward_pieces.zig").exchangePieces;
++    const pieceSite = @import("cuda_forward_pair.zig").pieceSite;
+ 
+     pub const glueRows = hc_glue.glueRows;
+ 
+-    const gluePieces = @import("cuda_forward_pieces.zig").gluePieces;
++    const sideGlue = pieces_mod.sideGlue;
+     const tapPieces = @import("cuda_forward_pieces.zig").tapPieces;
+     const shareTaps = @import("cuda_forward_pieces.zig").shareTaps;
+ 
+     /// forward.pieced_layers: a prompt chunk's layers with exchanges in row pieces; same kernels and bits as unpieced.
+     fn pieced(f: *const Forward, p: *const Pieces, R: usize, cut: []const [2]usize) !void {
+         const layers = f.ranks[0].w.layers;
++        const side = sideGlue(f.prof != null);
+         for (f.ranks) |r| try f.pre(r, r.w.layers[0].attn_hc, r.w.layers[0].in_norm, R);
+         var li: usize = 0;
+         var di: usize = 0;
+         for (layers, 0..) |_, j| {
+             prof_mod.context(f.prof, j, null, .mixer);
+             for (f.ranks) |r| if (r.segs.len > 0) try shared.mixer(f, r, r.w.layers[j], li, di, R, null) else try f.mixer(r, r.w.layers[j], li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), null);
+-            try f.exchangePieces(p, j, .mixer, cut);
+-            try f.gluePieces(p, j, .mixer, cut);
++            try f.pieceSite(p, j, .mixer, cut, side);
+             prof_mod.context(f.prof, j, null, .ffn);
+             for (f.ranks) |r| try f.ffn(r, r.w.layers[j], R, null);
+-            try f.exchangePieces(p, j, .ffn, cut);
+-            try f.gluePieces(p, j, .ffn, cut);
++            try f.pieceSite(p, j, .ffn, cut, side);
+             if (f.taps) |t| try f.tapPieces(t, j, cut);
+             switch (layers[j].mixer) {
+                 .kda => li += 1,
+diff --git a/zig/src/families/glm/cuda_forward_pair.zig b/zig/src/families/glm/cuda_forward_pair.zig
+--- a/zig/src/families/glm/cuda_forward_pair.zig
++++ b/zig/src/families/glm/cuda_forward_pair.zig
+@@ -83,3 +83,13 @@
+ fn awaitShared(f: *const Forward, p: *const Pieces, count: usize) !void {
+     for (p.shared[0..count]) |e| try f.stream.wait(e);
+ }
++
++/// A solo pass's pieced site: glued on the main stream, or with `side` on the side stream as a pair's are.
++pub fn pieceSite(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: []const [2]usize, side: bool) !void {
++    if (!side) {
++        try pieces.exchangePieces(f, p, j, site, cut);
++        return pieces.gluePieces(f, p, j, site, cut);
++    }
++    try exchangeGlue(f, p, j, site, cut);
++    try awaitShared(f, p, cut.len);
++}
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -63,6 +63,7 @@
+     _ = @import("cuda_pages_test.zig");
+     _ = @import("cuda_keep_seqs_test.zig");
+     _ = @import("cuda_side_prio_test.zig");
++    _ = @import("cuda_pieces_side_glue_test.zig");
+     _ = @import("cuda_snapshot_layout_test.zig");
+     _ = @import("cuda_ranks_test.zig");
+     _ = @import("cuda_ranks_roce_test.zig");
+diff --git a/zig/src/families/glm/cuda_pieces_side_glue_test.zig b/zig/src/families/glm/cuda_pieces_side_glue_test.zig
+new file mode 100644
+--- /dev/null
++++ b/zig/src/families/glm/cuda_pieces_side_glue_test.zig
+@@ -0,0 +1,16 @@
++//! TF_GLM_OVN_PIECES_SIDE_GLUE: whether a solo pass's pieced sites glue and share on the side stream.
++const std = @import("std");
++const cuda = @import("cuda");
++const sideGlue = @import("cuda_forward_pieces.zig").sideGlue;
++
++test "TF_GLM_OVN_PIECES_SIDE_GLUE: on only with the switch, and never under the profiler" {
++    defer cuda.ovn.fake("PIECES_SIDE_GLUE", null);
++    cuda.ovn.fake("PIECES_SIDE_GLUE", null);
++    try std.testing.expect(!sideGlue(false));
++    try std.testing.expect(!sideGlue(true));
++    cuda.ovn.fake("PIECES_SIDE_GLUE", "1");
++    try std.testing.expect(sideGlue(false));
++    try std.testing.expect(!sideGlue(true));
++    cuda.ovn.fake("PIECES_SIDE_GLUE", "0");
++    try std.testing.expect(!sideGlue(false));
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -117,6 +117,7 @@
+     .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
+     .{ .name = "TF_GLM_OVN_SIDE_PRIO", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_PIECES_SIDE_GLUE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
+     .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
+diff --git a/docs/environment.md b/docs/environment.md
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -75,6 +75,7 @@
+ | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
+ | `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
+ | `TF_GLM_OVN_SIDE_PRIO` | Exactly `0` or `1`; default off (the prompt chunk's exchanges run on a side stream at the highest priority, ahead of the main stream's grids, as they do with `TF_GLM_PROMPT_PAIR`; the bits are the same) |
++| `TF_GLM_OVN_PIECES_SIDE_GLUE` | Exactly `0` or `1`; default off (a solo prompt pass's pieced sites glue and share on the side stream, as a `TF_GLM_PROMPT_PAIR` pair's do, so a piece's glue runs while the main stream fills the next piece; the bits are the same; not under the profiler) |
+ | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
+ | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
+ | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
