@@ -13,6 +13,8 @@
 #   boots at --context 262144 for keep-seqs: ks262-A1 ks262-B1a ks262-B1b ks262-A2
 #   every boot: tools/bench_concurrent.py at 1, 2 and 4 streams (1 and 4 at 262144), both temperatures, --alone --serial; tools/bench_openai.py; tools/bench_cache.py --require-cold at
 #   2,048 / 8,192 / 32,768 / 65,536 prompt ids (scripts/gen_ids.py, distinct seeds); at 1048576 the 24 prompts one at a time; the memory of the three boxes after the boot and after the cells.
+#   before the boots, the device checks of the receipts plans on glm-synth's checkpoint on one GPU: glm-keep-seqs-check on pks with the switch on, glm-lanes-concurrent and glm-lanes-cover
+#   on pm9, on pks with and without TF_GLM_KEEP_SEQS=1 and on pnc with and without TF_GLM_NO_COPY=1; a branch whose check fails is dropped from the window and the queue says so.
 #   scripts/queue-scores/score93.py reads the reports; its rules were written before they existed.
 set -u
 G=$HOME/work/glm53-zig; cd "$G" || exit 1
@@ -62,6 +64,32 @@ for spec in "2048 11" "8192 12" "32768 13" "65536 14"; do set -- $spec; [ -s "id
 bash prod-stop.sh || { echo "[q93] PRODUCTION DID NOT STOP"; exit 1; }
 stop
 IMAGE="$IMGA" WORLD=3 COMM_ID=rank0:29583 KNOBS=off DRYRUN=1 bash serve.sh 0 4 1048576 > "$OUT/serve-dryrun.txt" 2>&1 || true  # the serve line and environment of every arm, for the receipts
+TEST=/opt/tensorfold/bin/tf-cuda-test
+CK="$OUT/checks"; SYN="$CK/synth"; mkdir -p "$SYN"
+docker run --rm --gpus all -v "$SYN:/s" --entrypoint $TEST "$IMGA" glm-synth /s/ckpt > "$SYN/synth.log" 2>&1; echo "[q93] $(date -u +%T) glm-synth rc=$?: $(grep -a '^PASS' "$SYN/synth.log" | head -1 | cut -c1-120)"
+chk() { # chk IMAGE LABEL NAME XENV ARGS...: one single-GPU check on the synthetic checkpoint; 0 when it exits 0 with a PASS line and no FAIL line
+  local image=$1 tag=$2 name=$3 xenv=$4; shift 4
+  local log="$CK/$tag-$name.log"
+  timeout 1800 docker run --rm --gpus all --ipc=host -v "$SYN:/s" -e TF_GLM_LAYERS=2 $xenv --entrypoint $TEST "$image" "$name" "$@" > "$log" 2>&1; local rc=$?
+  local p f; p=$(grep -c '^PASS' "$log"); f=$(grep -c 'FAIL' "$log")
+  echo "[q93] $(date -u +%T) $tag $name ${xenv:+($xenv) }rc=$rc: $p PASS, $f FAIL lines; $(grep -a '^PASS' "$log" | head -1 | cut -c1-110)"
+  [ "$rc" = 0 ] && [ "$p" -ge 1 ] && [ "$f" = 0 ]
+}
+drop() { HAVE=${HAVE/ $1 / }; echo "[q93] A DEVICE CHECK FAILED ON $1: its arms are dropped from the window"; }
+LC="/s/ckpt /s/ckpt/dc.json 0 1"
+chk "$IMGA" pm9 glm-lanes-concurrent "" $LC /s/id-m1; chk "$IMGA" pm9 glm-lanes-cover "" $LC /s/id-m2
+case "$HAVE" in *" pks "*)
+  chk glm53-zig:pks pks glm-keep-seqs-check "-e TF_GLM_KEEP_SEQS=1" /s/ckpt /s/id-k1 || drop pks
+  chk glm53-zig:pks pks glm-lanes-concurrent "-e TF_GLM_KEEP_SEQS=1" $LC /s/id-k2 || drop pks
+  chk glm53-zig:pks pks glm-lanes-concurrent "" $LC /s/id-k3 || drop pks
+  chk glm53-zig:pks pks glm-lanes-cover "-e TF_GLM_KEEP_SEQS=1" $LC /s/id-k4 || drop pks ;; esac
+case "$HAVE" in *" pnc "*)
+  chk glm53-zig:pnc pnc glm-lanes-concurrent "-e TF_GLM_NO_COPY=1" $LC /s/id-n1 || drop pnc
+  chk glm53-zig:pnc pnc glm-lanes-concurrent "" $LC /s/id-n2 || drop pnc
+  chk glm53-zig:pnc pnc glm-lanes-cover "-e TF_GLM_NO_COPY=1" $LC /s/id-n3 || drop pnc
+  chk glm53-zig:pnc pnc glm-lanes-cover "" $LC /s/id-n4 || drop pnc ;; esac
+docker run --rm -v "$SYN:/s" --entrypoint rm "$IMGA" -rf /s/ckpt > /dev/null 2>&1
+echo "[q93] images in the window after the device checks:$HAVE"
 boot() { # boot LABEL IMAGE XENV CTX: the Zig serve up on :8300 at --parallel 4, 0 when it is
   local label=$1 image=$2 xenv=$3 ctx=$4; mkdir -p "$OUT/boots"; stop
   IMAGE=$image KNOBS=off XENV="$xenv" bash zig-tp3.sh 4 "$ctx" > "$OUT/boots/$label.log" 2>&1 && return 0
