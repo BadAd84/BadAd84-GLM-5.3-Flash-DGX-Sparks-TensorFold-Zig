@@ -1,0 +1,159 @@
+scripts/prefill_passes.py over the nsys boot's rank 0 capture (pf-f85w.sqlite): requests of 8,183 and 32,756 rows (cold), then three warm turns of the ~113k conversation
+
+== passes
+  #   start s    wall ms  kernels
+  0    -0.012     1832.3     5014
+  1     1.820      933.3     4704
+  2     2.754      970.2     4794
+  3     3.724       45.5     1419
+  4     3.773       27.8     1647
+  5     3.804       26.1     1650
+  6     8.933     1916.1     5014   5.1 s after the forward before it
+  7    10.850     1697.3     4695
+  8    12.547     1696.2     4695
+  9    14.243     1679.7     4695
+ 10    15.923     1701.6     4695
+ 11    17.624     1703.2     4695
+ 12    19.328     1713.8     4695
+ 13    21.041      929.6     4704
+ 14    21.971      971.0     4794
+ 15    22.942       47.1     1419
+ 16    22.993       29.1     1658
+ 17    23.026       27.5     1661
+ 18    28.155      767.3     4731   5.1 s after the forward before it
+ 19    28.923       48.7     1419
+ 20    28.975       29.7     1658
+ 21    29.008       28.8     1657
+ 22    29.040       26.2     1658
+ 23    29.070       26.3     1657
+ 24    29.099       30.6     1657
+ 25    29.133       34.3     1658
+ 26    29.172       31.7     1657
+ 27    29.207       28.9     1657
+ 28    29.239       26.2     1657
+ 29    29.269       32.7     1659
+ 30    29.305       54.5     1663
+(the decode windows of the warm turns continue)
+
+== copies
+  start s  copies      MiB  wall ms  GiB/s
+    3.688       1     79.5      0.7  118.4
+    3.718     165    214.4      2.6   80.3
+   21.033     227    339.1      3.9   84.2
+   22.904       1     79.4      0.7  119.0
+   22.934     239    363.9      4.1   85.8
+   28.143     482    850.0     10.8   77.1
+   28.883       1     51.8      0.4  121.3
+   28.902     487    858.0     10.3   81.1
+   35.140     509    858.0     11.5   72.8
+   35.866       1     50.4      0.4  122.9
+   35.884     490    865.9      9.6   88.4
+   42.049     490    865.9     11.8   71.5
+   42.772       1     49.7      0.4  122.9
+   42.792     494    873.6     10.3   82.7
+
+== diff 18:1326 2:2036 8:4096 (a warm turn's pass at ~113k, the 2,036-row pass of the 8k request, a warmed 4,096-row pass of the 32k request)
+pass 18 (1326 rows): wall 767.3 ms, main stream busy 736.9 ms, idle between its kernels 53.8 ms
+pass 2 (2036 rows): wall 970.2 ms, main stream busy 932.6 ms, idle between its kernels 64.4 ms
+pass 8 (4096 rows): wall 1696.2 ms, main stream busy 1641.3 ms, idle between its kernels 80.5 ms
+kernel                                    launches  18   ms  ms/1k rows  launches   2   ms  ms/1k rows  launches   8   ms  ms/1k rows
+tf_exl3_prompt_gu                                   42   177.3       133.7            42   198.9        97.7            42   307.0        75.0
+ncclDevKernel_SendRecv                             724   158.0       119.2           724   249.5       122.5           720   472.5       115.4
+tf_exl3_prompt_down                                 42   118.0        89.0            42   138.5        68.0            42   218.1        53.2
+glm_mm4_w2x4                                       346   113.1        85.3           416   171.1        84.0           460   350.5        85.6
+glm_mm4_128                                        760    69.2        52.2           690    71.4        35.1           646   111.3        27.2
+tf_glm_combine                                     168    45.6        34.4           168    67.0        32.9           168   129.5        31.6
+tf_glm_onepass_pipe_exact                           11    30.7        23.1            11    47.3        23.2            11    94.8        23.1
+tf_glm_kda_step                                     34    27.0        20.3            34    41.1        20.2            34    85.7        20.9
+tf_glm_expand_v_x2                                  11    24.2        18.3            11    36.9        18.1            11    74.3        18.1
+tf_glm_absorb_q_x2                                  44    22.1        16.7            44    33.0        16.2            44    68.0        16.6
+tf_glm_hc_partial                                  268    19.2        14.5           357    20.2         9.9           357    37.5         9.1
+group_kernel                                        66    18.8        14.2            96    28.6        14.0             0     0.0         0.0
+tf_glm_hc_post                                     360    16.3        12.3           360    24.5        12.0           360    61.1        14.9
+tf_glm_kda_prep                                     34    14.8        11.1            34    23.6        11.6            34    50.2        12.3
+tf_glm_index_scores                                 11    13.1         9.9            22     2.1         1.0            33     4.7         1.1
+ncclDevKernel_AllReduce_Sum_f64_TREE_LL              2     9.7         7.3             2     2.6         1.3             2     0.6         0.1
+tf_glm_hc_finish                                   357     9.2         6.9           357     7.9         3.9           357    17.0         4.2
+tf_glm_router_tile                                 212     8.2         6.2           212    11.3         5.6           212    26.1         6.4
+tf_glm_put_slot                                    168     7.6         5.7           168     8.2         4.0           168    21.2         5.2
+tf_glm_hc_partial8                                  89     4.9         3.7             0     0.0         0.0             0     0.0         0.0
+tf_glm_index_pools                                  11     3.3         2.5            22     0.9         0.5            33     2.0         0.5
+tf_exl3_prompt_rotate                               42     3.0         2.3            42     5.9         2.9            42    13.5         3.3
+tf_glm_kda_out                                      34     2.9         2.2            34     5.1         2.5            34    11.8         2.9
+ncclDevKernel_AllGather_RING_LL                     11     2.3         1.7            11     2.2         1.1            11     2.7         0.6
+glm_mm8_w2x4                                         1     1.0         0.8             1     1.0         0.5             1     1.1         0.3
+tf_glm_topk                                        168     1.0         0.7           168     1.2         0.6           168     1.9         0.5
+tf_glm_slice_sum                                   212     0.9         0.7           212     1.2         0.6           212     2.3         0.6
+tf_glm_swiglu_64                                   168     0.9         0.7           168     1.4         0.7           168     2.2         0.5
+df_gsum                                              6     0.7         0.5             6     1.2         0.6             0     0.0         0.0
+tf_glm_swiglu_512                                    3     0.5         0.4             3     0.7         0.3             3     1.4         0.4
+
+== diff 6:4096 7:4096 (the 32k request's first pass, from row 0, and its second)
+pass 6 (4096 rows): wall 1916.1 ms, main stream busy 1774.8 ms, idle between its kernels 168.0 ms
+pass 7 (4096 rows): wall 1697.3 ms, main stream busy 1643.9 ms, idle between its kernels 79.8 ms
+kernel                                    launches   6   ms  ms/1k rows  launches   7   ms  ms/1k rows
+ncclDevKernel_SendRecv                             720   558.5       136.3           720   475.6       116.1
+glm_mm4_w2x4                                       460   349.2        85.2           460   353.1        86.2
+tf_exl3_prompt_gu                                   42   315.1        76.9            42   308.3        75.3
+tf_exl3_prompt_down                                 42   222.2        54.3            42   221.4        54.1
+tf_glm_chunks_32_fp8_fused                          88   174.5        42.6             0     0.0         0.0
+tf_glm_combine                                     168   128.7        31.4           168   129.6        31.7
+glm_mm4_128                                        646   111.2        27.1           646   112.6        27.5
+tf_glm_kda_step                                     34    83.8        20.5            34    84.7        20.7
+tf_glm_expand_v_x2                                  11    75.1        18.3            11    74.5        18.2
+tf_glm_absorb_q_x2                                  44    67.5        16.5            44    66.9        16.3
+tf_glm_hc_post                                     360    60.1        14.7           360    61.0        14.9
+tf_glm_kda_prep                                     34    49.0        12.0            34    49.2        12.0
+tf_glm_onepass_pipe_exact                           11    46.7        11.4            11    92.9        22.7
+tf_glm_hc_partial                                  357    37.0         9.0           357    37.1         9.1
+tf_glm_router_tile                                 212    26.6         6.5           212    26.4         6.4
+tf_glm_put_slot                                    168    21.7         5.3           168    21.7         5.3
+tf_glm_hc_finish                                   357    16.5         4.0           357    16.9         4.1
+tf_exl3_prompt_rotate                               42    13.6         3.3            42    13.6         3.3
+tf_glm_kda_out                                      34    11.7         2.9            34    11.6         2.8
+tf_glm_index_scores                                 88     6.8         1.7            33     3.3         0.8
+tf_glm_dsa_tokens                                   11     2.4         0.6            11     2.5         0.6
+tf_glm_slice_sum                                   212     2.4         0.6           212     2.4         0.6
+tf_glm_index_pools                                  88     2.3         0.6            33     1.8         0.4
+tf_glm_swiglu_64                                   168     2.2         0.5           168     2.3         0.6
+tf_glm_topk                                        168     2.0         0.5           168     1.9         0.5
+tf_glm_swiglu_512                                    3     1.4         0.4             3     1.4         0.4
+glm_mm8_w2x4                                         1     1.0         0.3             1     1.0         0.3
+tf_glm_embed_b16                                     1     0.7         0.2             1     0.7         0.2
+tf_glm_rmsnorm_1536                                 44     0.6         0.1            44     0.6         0.1
+ncclDevKernel_AllReduce_Sum_f64_TREE_LL              2     0.5         0.1             2     0.3         0.1
+
+== diff 3:3 4 (the reply header's 3-row pass of the 8k request, and the decode window after it)
+pass 3 (3 rows): wall 45.5 ms, main stream busy 40.4 ms, idle between its kernels 7.4 ms
+pass 4: wall 27.8 ms, main stream busy 27.1 ms, idle between its kernels 1.0 ms
+kernel                                    launches   3   ms  ms/1k rows  launches   4   ms
+glm_mm4_128                                        281    19.4      6452.7             0     0.0
+tf_exl3_prompt_gu                                   42    10.0      3326.3             0     0.0
+tf_exl3_prompt_down                                 42     4.6      1536.9             0     0.0
+ncclDevKernel_SendRecv                             181     4.2      1391.9             0     0.0
+glm_mm8_w2x4                                         1     1.0       327.1             0     0.0
+tf_glm_kda_chain                                    34     0.8       277.5             0     0.0
+tf_glm_router_tile                                  53     0.8       272.9            53     0.4
+tf_glm_hc_finish                                    90     0.6       189.1            90     0.6
+tf_glm_hc_partial8                                  90     0.5       181.3            90     0.7
+tf_glm_chunks_16_fp8_skip                           11     0.5       167.3            11     0.5
+group_kernel                                         6     0.4       126.9             6     0.4
+tf_glm_absorb_q_x2                                  11     0.3       111.6            11     0.4
+tf_glm_expand_v_x2                                  11     0.3       111.3            11     0.3
+ncclDevKernel_AllGather_RING_LL                     11     0.3        95.6             0     0.0
+tf_glm_topk                                         42     0.2        69.3            42     0.2
+tf_glm_hc_post                                      90     0.2        53.9            90     0.2
+tf_exl3_prompt_rotate                               42     0.1        45.7            42     0.1
+tf_glm_combine                                      42     0.1        40.3            42     0.1
+plan_kernel                                         42     0.1        39.0            42     0.1
+tf_glm_select_rows                                  11     0.1        36.2            11     0.1
+tp_roce_multi                                        1     0.1        32.8            91     1.6
+tf_glm_slice_sum                                    53     0.1        31.3            53     0.1
+tf_glm_swiglu_64                                    42     0.1        23.8             0     0.0
+tf_glm_put_slot                                     42     0.1        22.5            42     0.0
+tf_glm_scores                                       11     0.0        15.6            11     0.1
+tf_glm_conv_shift                                   34     0.0        14.3             1     0.0
+tf_glm_dsa_tokens                                   11     0.0        11.6            11     0.0
+tf_glm_merge                                        11     0.0        11.3            11     0.1
+df_gsum                                              6     0.0         8.7             6     0.0
+tf_glm_rmsnorm_1536                                 11     0.0         8.6            11     0.0

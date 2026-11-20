@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """test_decide84.py - scripts/queue-scores/decide84.py: a FRONT_ROWS value joins on a warm gain of 1.0% with the cold mean not worse than 0.3%, a piece count (and PIECE_KDA, queue87's
-block, which then names the image with patch 0039) on a cold gain of 0.5% with the warm mean not worse than 0.3%; a changed reply, a boot over the slower control by more than 1.0%, a decode slower by more than 1.0%, missing boots and fewer than two controls
+block, which then names the image with patch 0039) on a cold gain of 0.5% with the warm mean not worse than 0.3%; SOLO_TO_START (queue89's block) on its ~3k-row turns 1.0% under the controls' with the cold and c74 means not worse than 0.3%, undecided unless every such turn adds rows the switch changes; RESTORE_HELD (queue90's block, four boots each) on the c74 turns 0.8% under with the cold mean not worse than 0.3%; a changed reply, a boot over the slower control by more than 1.0%, a decode slower by more than 1.0%, missing boots and fewer than two controls
 keep a setting out; the larger sum of cold and warm gains wins a block; the numerics boots join nothing; --apply edits NEWX once and names the image.
 Plain asserts: python scripts/tests/test_decide84.py"""
 import json
@@ -16,11 +16,13 @@ FRONT_CTL, FRONT = ("r4a", "r4b"), {"512": ("r5a", "r5b"), "768": ("r7a", "r7b")
 PIECE_CTL, PIECES = ("k4a", "k4b"), {"2": ("k2a", "k2b"), "3": ("k3a", "k3b"), "6": ("k6a", "k6b"), "8": ("k8a", "k8b")}
 KDA_CTL, KDA = ("n9a", "n9b"), ("d9a", "d9b")
 W_CTL, W3 = ("w4a", "w4b", "w4c", "w4d"), ("w3a", "w3b", "w3c", "w3d")
-ALL = list(FRONT_CTL) + [b for v in FRONT.values() for b in v] + list(PIECE_CTL) + [b for v in PIECES.values() for b in v] + list(KDA_CTL) + list(KDA) + list(W_CTL) + list(W3) + ["kca", "kva"]
+SOLO_CTL, SOLO = ("s0a", "s0b"), ("s1a", "s1b")
+HELD_CTL, HELD = ("h0a", "h0b", "h0c", "h0d"), ("h1a", "h1b", "h1c", "h1d")
+ALL = list(FRONT_CTL) + [b for v in FRONT.values() for b in v] + list(PIECE_CTL) + [b for v in PIECES.values() for b in v] + list(KDA_CTL) + list(KDA) + list(W_CTL) + list(W3) + list(SOLO_CTL) + list(SOLO) + list(HELD_CTL) + list(HELD) + ["kca", "kva"]
 
 
 def write(root, plan=None, drop=(), sha=lambda b, k: "a"):
-    """plan: boot -> dict(cold=factor, warm=factor, first=factor, speed=tok/s, late=factor of the ~250k conversation's turns 2 on: written only when given)."""
+    """plan: boot -> dict(cold=factor, warm=factor, first=factor, speed=tok/s, late=factor of the ~250k conversation's turns 2 on, long=factor of the c3k conversation's: each written only when given)."""
     plan = plan or {}
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, "rows.jsonl"), "w", encoding="utf-8") as f:
@@ -41,6 +43,12 @@ def write(root, plan=None, drop=(), sha=lambda b, k: "a"):
             if p.get("late") is not None or any(plan.get(o, {}).get("late") is not None for o in ALL):
                 for k in range(6):
                     f.write(json.dumps({"tag": "c250", "ttft_ms": 120000.0 if k == 0 else 1000.0 * p.get("late", 1.0), "token_sha": sha(b, ("turn250", k))}) + "\n")
+            if p.get("long") is not None or any(plan.get(o, {}).get("long") is not None for o in ALL):
+                for k in range(10):  # the c3k conversation: rows (one number, or one a turn in turn) is the uncached rows of turns 2 on
+                    rows = p.get("rows", 3020)
+                    rows = rows[k % len(rows)] if isinstance(rows, list) else rows
+                    at = 113000 + 3020 * k
+                    f.write(json.dumps({"tag": "c3k", "ttft_ms": 50000.0 if k == 0 else 1500.0 * p.get("long", 1.0), "token_sha": sha(b, ("turn3k", k)), "prompt_tokens": at, "cached_tokens": 0 if k == 0 else at - rows}) + "\n")
         d = os.path.join(root, f"dec-{b}")
         os.makedirs(d, exist_ok=True)
         for kind in ("P", "C"):
@@ -272,5 +280,132 @@ with tempfile.TemporaryDirectory() as t:  # warm3 with fewer than two controls o
     assert "warm3 3: NOT DECIDED (boots missing)" in run(t)
     write(t, warm3_plan(0.98), drop=("w4a", "w4b", "w4c"))
     assert "warm3: NOT DECIDED (fewer than two controls" in run(t)
+
+def solo_plan(long, **rest):
+    """The two controls level and the two switch boots with the c3k conversation's turns 2 on at `long` (and `rest` on those boots)."""
+    plan = {b: {"long": 1.0} for b in SOLO_CTL}
+    plan.update({b: dict(rest, long=long) for b in SOLO})
+    return plan
+
+
+with tempfile.TemporaryDirectory() as t:  # solo (queue89): the ~3k-row turns 2% under the controls' with the cold prompt and the c74 turns level: joins
+    write(t, solo_plan(0.98))
+    out = run(t)
+    assert verdict(out, "solo", "1") == "passes" and "solo: 1 JOINS" in out and "~3k-row turns +2.00% (3020 uncached rows a turn)" in line(out, "solo 1 ("), out
+    write(t, solo_plan(0.995))  # 0.5% is under the 1.0% it needs
+    assert verdict(run(t), "solo", "1") == "no"
+    write(t, solo_plan(1.0, cold={8000: 0.944, 32000: 0.985}))  # a cold gain alone does not pass it, and is printed by size
+    out = run(t)
+    assert verdict(out, "solo", "1") == "no" and "cold by size +5.60% / +1.50% / +0.00%" in line(out, "solo 1 ("), out
+    for cold, want in ((1.002, "passes"), (1.004, "no")):  # the cold mean may be 0.2% over, not 0.4%
+        write(t, solo_plan(0.98, cold=cold))
+        assert verdict(run(t), "solo", "1") == want, cold
+    for warm, want in ((1.002, "passes"), (1.005, "no")):  # and the c74 turns 2 to 8 the same
+        write(t, solo_plan(0.98, warm=warm))
+        assert verdict(run(t), "solo", "1") == want, warm
+    write(t, solo_plan(0.98), sha=lambda b, k: "b" if (b == "s1a" and k == ("turn3k", 4)) else "a")  # a changed reply in the c3k conversation: out
+    out = run(t)
+    assert verdict(out, "solo", "1") == "no" and "replies equal False" in line(out, "solo 1 ("), out
+
+with tempfile.TemporaryDirectory() as t:  # solo is undecided without the c3k rows, with a boot missing, or when a c3k turn adds rows the switch does not change
+    write(t, both(SOLO, cold=0.98))
+    assert "solo 1: NOT DECIDED (boots missing, or a c3k turn the switch does not change)" in run(t)
+    write(t, solo_plan(0.98), drop=("s1b",))
+    assert "solo 1: NOT DECIDED" in run(t)
+    cases = ((2300, False), (2306, False), (2307, True), (4096, True), (4099, False), (4100, False), (1290, False), (4096 + 2307, True), ([3020, 1290], False))
+    for rows, decided in cases:  # (rows - 3) mod 4,096 of 2,304 or more on every turn
+        plan = solo_plan(0.98)
+        plan["s1b"]["rows"] = rows
+        write(t, plan)
+        assert ("solo 1: NOT DECIDED" in run(t)) != decided, rows
+    plan = solo_plan(0.98)
+    plan["s0a"]["rows"] = 1290  # a control's turns count too
+    write(t, plan)
+    assert "solo 1: NOT DECIDED" in run(t)
+
+with tempfile.TemporaryDirectory() as t:  # --apply: SOLO_TO_START is added once with the image that carries it, also when PIECE_KDA joined (one image holds both); kda alone keeps ze
+    write(t, solo_plan(0.98))
+    env = os.path.join(t, "queue77.env")
+    open(env, "w", encoding="utf-8").write('IMG=glm53-zig:v129zd\nNEWX="-e TF_GLM_OVN_MM_WIDE=1"\nHOURS=6\n')
+    run(t, "--apply", env)
+    run(t, "--apply", env)
+    want = 'IMG=glm53-zig:v129zf\nNEWX="-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SOLO_TO_START=1"\nHOURS=6\n'
+    assert open(env, encoding="utf-8").read() == want, open(env, encoding="utf-8").read()
+    plan = solo_plan(0.98)
+    plan.update(both(KDA, cold=0.99))
+    write(t, plan)
+    open(env, "w", encoding="utf-8").write('IMG=glm53-zig:v129zd\nNEWX="-e TF_GLM_OVN_MM_WIDE=1"\nHOURS=6\n')
+    run(t, "--apply", env)
+    run(t, "--apply", env)
+    want = 'IMG=glm53-zig:v129zf\nNEWX="-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_PIECE_KDA=1 -e TF_GLM_OVN_SOLO_TO_START=1"\nHOURS=6\n'
+    assert open(env, encoding="utf-8").read() == want, open(env, encoding="utf-8").read()
+
+def held_plan(warm, **rest):
+    """The four controls level and the four RESTORE_HELD boots with the c74 turns 2 to 8 at `warm` (a factor, or one per boot), `rest` on those boots."""
+    plan = {b: {} for b in HELD_CTL}
+    for i, b in enumerate(HELD):
+        plan[b] = dict(rest, warm=warm[i] if isinstance(warm, (list, tuple)) else warm)
+    return plan
+
+
+with tempfile.TemporaryDirectory() as t:  # held (queue90) reads like a FRONT_ROWS value with 0.8%: 1.2% faster warm turns join, 0.5% does not, 0.9% does
+    write(t, held_plan(0.988))
+    out = run(t)
+    assert verdict(out, "held", "1") == "passes" and "held: 1 JOINS" in out, out
+    for warm, want in ((0.995, "no"), (0.991, "passes"), (0.993, "no")):
+        write(t, held_plan(warm))
+        assert verdict(run(t), "held", "1") == want, (warm, run(t))
+    # the minimum is the block's own: a FRONT_ROWS-shaped 1.0% rule would refuse 0.9% and the warm3 one too
+    write(t, held_plan(0.991))
+    assert verdict(run(t), "held", "1") == "passes"
+
+with tempfile.TemporaryDirectory() as t:  # held: the cold mean may be 0.2% over but not 0.4% over; a changed reply, a boot 1.5% over the slower control, decode 2% down, a missing boot all keep it out
+    for cold, want in ((1.002, "passes"), (1.004, "no")):
+        write(t, held_plan(0.985, cold=cold))
+        assert verdict(run(t), "held", "1") == want, (cold, run(t))
+    write(t, held_plan(0.985), sha=lambda b, k: "b" if (b == "h1c" and k == ("turn", 4)) else "a")
+    out = run(t)
+    assert verdict(out, "held", "1") == "no" and "replies equal False" in line(out, "held 1 ("), out
+    plan = held_plan(0.985)
+    plan["h1b"]["cold"] = 1.015
+    write(t, plan)
+    assert verdict(run(t), "held", "1") == "no"
+    write(t, held_plan(0.985, speed=98.0))
+    assert verdict(run(t), "held", "1") == "no"
+    write(t, held_plan(0.985), drop=("h1d",))
+    assert "held 1: NOT DECIDED (boots missing)" in run(t)
+    write(t, held_plan(0.985), drop=("h0a", "h0b", "h0c"))
+    assert "held: NOT DECIDED (fewer than two controls" in run(t)
+
+with tempfile.TemporaryDirectory() as t:  # held prints the ~250k conversation against the controls and decides nothing on it
+    plan = held_plan(0.985, late=0.97)
+    for b in HELD_CTL:
+        plan[b]["late"] = 1.0
+    write(t, plan)
+    out = run(t)
+    assert "~250k conversation, turns 2+ +3.00% (report only)" in out[out.index("held 1 ("):] and verdict(out, "held", "1") == "passes", out
+    plan = held_plan(0.995, late=0.9)
+    for b in HELD_CTL:
+        plan[b]["late"] = 1.0
+    write(t, plan)
+    assert verdict(run(t), "held", "1") == "no"
+
+with tempfile.TemporaryDirectory() as t:  # --apply: RESTORE_HELD is added once with the image that carries patches/restore-held, over solo's and kda's images, and keeps the other switches
+    plan = held_plan(0.985)
+    plan.update(solo_plan(0.98))
+    plan.update(both(KDA, cold=0.99))
+    write(t, plan)
+    env = os.path.join(t, "queue77.env")
+    open(env, "w", encoding="utf-8").write('IMG=glm53-zig:v129zd\nNEWX="-e TF_GLM_OVN_MM_WIDE=1"\nHOURS=6\n')
+    run(t, "--apply", env)
+    run(t, "--apply", env)
+    text = open(env, encoding="utf-8").read()
+    assert text.startswith("IMG=glm53-zig:v129zg\n") and text.count("TF_GLM_OVN_RESTORE_HELD=1") == 1 and text.count("TF_GLM_OVN_SOLO_TO_START=1") == 1 and "TF_GLM_OVN_PIECE_KDA=1" in text, text
+    write(t, held_plan(0.985))
+    open(env, "w", encoding="utf-8").write('IMG=glm53-zig:v129zd\nNEWX="-e TF_GLM_OVN_MM_WIDE=1"\nHOURS=6\n')
+    run(t, "--apply", env)
+    run(t, "--apply", env)
+    want = 'IMG=glm53-zig:v129zg\nNEWX="-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_RESTORE_HELD=1"\nHOURS=6\n'
+    assert open(env, encoding="utf-8").read() == want, open(env, encoding="utf-8").read()
 
 print("ok")

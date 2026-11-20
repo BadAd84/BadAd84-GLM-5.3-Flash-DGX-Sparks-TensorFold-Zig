@@ -1,0 +1,17 @@
+front 512 (r5a r5b): no | cold mean -0.56%, turns 2+ -0.99%, decode at 1 client +0.19%, replies equal True, no boot over the slower control by more than 1.0% True
+front 768 (r7a r7b): no | cold mean -0.51%, turns 2+ -0.61%, decode at 1 client +0.18%, replies equal True, no boot over the slower control by more than 1.0% True
+front 2048 (r2a r2b): no | cold mean -1.87%, turns 2+ -3.51%, decode at 1 client +0.04%, replies equal True, no boot over the slower control by more than 1.0% False
+front: nothing joins
+pieces 2 (k2a k2b): no | cold mean -1.49%, turns 2+ +1.81%, decode at 1 client +0.17%, replies equal True, no boot over the slower control by more than 1.0% False
+pieces 3 (k3a k3b): no | cold mean -0.00%, turns 2+ +1.88%, decode at 1 client +0.06%, replies equal True, no boot over the slower control by more than 1.0% True
+pieces 6 (k6a k6b): no | cold mean -0.31%, turns 2+ -0.28%, decode at 1 client -0.48%, replies equal True, no boot over the slower control by more than 1.0% True
+pieces 8 (k8a k8b): no | cold mean -0.99%, turns 2+ -0.33%, decode at 1 client +0.01%, replies equal True, no boot over the slower control by more than 1.0% False
+pieces: nothing joins
+kda 1 (d9a d9b): no | cold mean -0.86%, turns 2+ +0.19%, decode at 1 client -0.35%, replies equal True, no boot over the slower control by more than 1.0% True
+kda: nothing joins
+warm3 3 (w3a w3b w3c w3d): no | cold mean -0.24%, turns 2+ +1.33%, decode at 1 client -0.09%, replies equal True, no boot over the slower control by more than 1.0% True, every boot's turns 2+ under every control's False
+  ~250k conversation, turns 2+ +1.29% (report only)
+warm3: nothing joins
+solo: NOT DECIDED (fewer than two controls with rows)
+kca (TF_GLM_OVN_KDA_CHUNKED=1): reported, joins nothing | cold mean +1.24%, turns 2+ +0.67%, decode at 1 client -0.38%, 12 of 16 reply digests differ from the controls'
+kva (TF_GLM_OVN_KVB8=1): reported, joins nothing | cold mean +0.52%, turns 2+ +0.79%, decode at 1 client +5.56%, 14 of 16 reply digests differ from the controls'

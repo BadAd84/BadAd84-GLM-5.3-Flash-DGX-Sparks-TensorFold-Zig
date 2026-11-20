@@ -1,0 +1,24 @@
+[q87] 10:13:54 start; IMG=glm53-zig:v129ze; NEWX='-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e NCCL_NCHANNELS_PER_NET_PEER=4'; deadline 13:13:54; 283G free
+[q87] 10:21:24 built glm53-zig:v129ze: 1b9ffa1ded6c
+[q87] 10:30:00 distributed: 1b9ffa1ded6c 1b9ffa1ded6c 1b9ffa1ded6c DIST-DONE v129ze
+[q87] glm53-zig:v129ze ids: sha256:1b9ffa1ded6cd6f4b0bf64bb3467cd56ef1eb400f5477827cc677841c4ff288b sha256:1b9ffa1ded6cd6f4b0bf64bb3467cd56ef1eb400f5477827cc677841c4ff288b sha256:1b9ffa1ded6cd6f4b0bf64bb3467cd56ef1eb400f5477827cc677841c4ff288b
+[q87] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 10:30:02 production stopped on spark1-3
+[q87] 10:30:03 glm-kda-pieces rc=0: 2 PASS, 0 FAIL lines (two PASS lines expected: the planted controls and the cases)
+[q87] n9a piece-kda boot line: 
+[q87] 10:34:34 n9a cold rc=0 3637 13383 50056 3692 13582 50816 
+[q87] 10:35:36 n9a chain: 47527 833 820 808 825 796 796 801
+[q87] 10:36:03 dec-n9a 1 greedy prose rc=0 "agg_tok_s": 79.27 code rc=0 "agg_tok_s": 111.32
+[q87] d9a piece-kda boot line: info: glm: a KDA mixer site's chain runs piece by piece, each ahead of its piece's o_proj and exchange
+[q87] 10:40:37 d9a cold rc=0 3678 13534 50810 3716 13743 51416 
+[q87] 10:41:40 d9a chain: 48025 827 848 806 808 787 796 804
+[q87] 10:42:07 dec-d9a 1 greedy prose rc=0 "agg_tok_s": 78.68 code rc=0 "agg_tok_s": 112.71
+[q87] d9b piece-kda boot line: info: glm: a KDA mixer site's chain runs piece by piece, each ahead of its piece's o_proj and exchange
+[q87] 10:46:42 d9b cold rc=0 3692 13680 51265 3726 13829 51721 
+[q87] 10:47:45 d9b chain: 48385 833 818 810 806 792 795 805
+[q87] 10:48:12 dec-d9b 1 greedy prose rc=0 "agg_tok_s": 78.83 code rc=0 "agg_tok_s": 112.29
+[q87] n9b piece-kda boot line: 
+[q87] 10:52:46 n9b cold rc=0 3670 13585 50864 3706 13760 51501 
+[q87] 10:53:49 n9b chain: 48132 829 822 821 803 801 797 805
+[q87] 10:54:16 dec-n9b 1 greedy prose rc=0 "agg_tok_s": 79.78 code rc=0 "agg_tok_s": 110.96
+QUEUE87-DONE 10:54:28

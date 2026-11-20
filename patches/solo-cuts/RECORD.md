@@ -64,12 +64,11 @@ What it edits (all on the tree it applies to):
 | `docs/recipes/glm-5.3-flash-cuda.md` | the request starts row: a solo pass where no message start is inside it |
 
 Base it applies to: the stack at the pin `6b9de695104b6b8b30c20458da87ac06c9480289` (v1.2.9) plus
-`patches/engine` (37 patches, series tree `d674e199cf6d97f7ac84a374c83153baabc911ed`), `patches/pr1411` (2),
-`patches/cache-salt` (2) and `patches/learn-starts` (1), tree `098a8968dc83c191e71c67bc3a9a13da9545a52c` (42 patches).
-This package makes tree `b0ae14df04d750dfbc217d13efc9a998d0ac6ac8` (43 patches). Both ids are `git write-tree` on the
-tree built from the pin by `scripts/apply.sh` and the packages' `apply.sh` in that order, with this package's
-`apply.sh --check` giving the second. The docs hunk sits on `learn-starts`' text of the request starts row, so this
-package applies after it.
+`patches/engine` (39 patches), `patches/pr1411` (2), `patches/cache-salt` (2) and `patches/learn-starts` (1), tree
+`24e9c520faf9b16dfe82cf53d88c8db36a520338` (44 patches). This package (two patches) makes tree
+`181fa1a3dd7a6b876e56f373c43b3c7dfa984e12` (46 patches). Both ids are `git write-tree` on the tree built from the pin by
+`scripts/apply.sh` and the packages' `apply.sh` in that order, with this package's `apply.sh --check` giving the second.
+The docs hunk sits on `learn-starts`' text of the request starts row, so this package applies after it.
 
 ## Gate
 
@@ -114,3 +113,87 @@ package applies after it.
   salt, 8 turns): the first turn 1.000 of the recipe's, turns 2 to 8 0.653 (851 against 1,304 ms on average), all 8 turns with one
   reply digest and one prompt length over the four boots; turn 2 resumed at 112,640 rows, the start its first turn kept, and turns 3
   to 8 at 113,963, 115,252, 116,524, 117,793, 119,038 and 120,286 rows, each the previous prompt's end less its three header tokens.
+
+## 0002: `TF_GLM_OVN_SOLO_TO_START`, a solo step may end at a request start (2026-11-20)
+
+What it is: our own change, default off. The first patch refuses a solo step whenever a request start lies inside it, the middle
+grid point excepted. A chat prompt ends in a message start 3 rows before its last row (the reply's header), so a last stretch of
+more than one grid step before that start ran as a 2,048-row pass and a remainder: queue85's capture shows an 8,183-row prompt as
+passes of 4,096, 2,048, 2,036 and 3 rows (OVERNIGHT-2026-11-12.md, sections 59 and 64). A warm turn that adds 2,307 to 4,096 rows
+is cut the same way. With the switch the solo step ends at the start: 4,096, 4,084 and 3 rows for that prompt.
+
+What it does:
+
+- `cuda_prompt_cuts.soloRows(len, cuts, start, to_start)` is the one statement of what a solo step is: the cold plan's next two
+  chunks, the first of them a grid step (`nextCut(start) == start + prefill_rows`, so no start inside it), ending where the plan's
+  chunk after it ends (`nextCut` of the middle point: the next start, a grid step on, or the prompt's end). Without `to_start` it
+  returns null unless that end is the whole step's (`min(len, start + solo_rows)`), which is the rule of 0001 (`cutInside` over a
+  whole step; a host test compares the two on every cold cut of the test prompts). With it the step ends at the start.
+- `stepRows` (every rank's size of a step from the part it was sent) and `leaderRows` (rank 0's) return `soloRows`' answer for a
+  long part or a wide step and `error.BadChunk` where it names none, so a rank that sizes a part differently refuses it; `leaderRows`
+  returned 4,096 rows for any wide step before. `prompt_solo.at` (rank 0's choice) takes its rows from `soloRows`, asks `takesTwo`
+  about the step's own end (a second chunk of one row is still not taken, a keep mark at the middle grid point still refuses) and
+  `ringsAgree` about the step's own rows. `prompt_solo.allowed`, every rank's check, is unchanged: a step that ends at a start has
+  none inside it.
+- `prompt_solo.toStart()` reads the switch (`cuda.ovn.on("SOLO_TO_START")`); `Leader.chunk` (`cuda_follow.zig`) and
+  `Engine.prefillChunk` (`cuda_engine.zig`) pass it to `leaderRows` and `stepRows`. The registry row is in
+  `zig/src/platform/environment.zig`, the docs rows in `docs/environment.md` and `docs/recipes/glm-5.3-flash-cuda.md`, and rank 0
+  logs the switch at boot.
+- The pass itself is not touched: `prefillChunk` runs a step's rows as one pass whatever their count, as it does for a solo step
+  that ends at the prompt's end, and a state is kept when the next step starts at a marked row, which the start still is.
+
+Reply contract: 0001's, the tokens two 2,048-row chunks give. With the switch unset no step is sized differently.
+
+What it edits: `cuda_prompt_cuts.zig`, `cuda_prompt_solo.zig`, `cuda_follow.zig`, `cuda_engine.zig` (the two call sites and the boot
+log line), `zig/src/platform/environment.zig`, `docs/environment.md`, `docs/recipes/glm-5.3-flash-cuda.md`, and the GPU check
+`zig/tests/cuda/glm_solo_tests.zig` (two prompts with request starts, below).
+
+### Gate of 0002
+
+Full run `sg-20261120-093958` on the gate host, the pristine pin (tree `4be51cc6beef`) against the 47-patch stack (tree
+`9297755c6943c6f85d9c78ffdfd2bcc0f3a40e1d`: this package's two patches, `patches/disk-any-position` and patch 0039 included):
+`check-native-cuda-host`, `compile-cuda-tests`, `test-glm-ring-host`, `test-glm-logprobs-host`, `test-rows-host` and `fmt` rc 0 on
+both, `test-glm-onepass-order-host` rc 0 on the stack (not a step of the base); `test-cuda-host` rc 1 on both with the same one
+failing name, `cli_config_test`'s `serve --config` case, which fails on the pristine v1.2.9 itself (6,925 of 6,959 passed on the
+stack, 33 skipped, 1 failed; 6,716 of 6,750 on the base); lean base 6,454 files and 341 problems, head 6,523 files and 341
+problems, 0 new. Verdict PASS.
+
+### Mutants of 0002
+
+Each is the patch with one added line changed, run through the fast loop's `test-cuda-host` on the 47-patch stack (6,959 tests);
+each fails only the tests named, beyond the pristine `cli_config_test`. The names are short forms of the test titles (stepRows,
+soloRows: a solo step is the plan's next two chunks, old rule: without to_start a solo step is sized and refused exactly as
+cutInside over a whole step says, walk, server-list walk, 8k prompt: a prompt whose last message starts 3 rows before its end,
+engine predicates: a solo pass taken between request starts, to_start predicates: a solo step ends at a start in its second chunk).
+
+| mutant | what it changes | tests that fail |
+|---|---|---|
+| s1 | the first chunk need not be a grid step | stepRows; soloRows; old rule; walk; server-list walk; engine predicates; to_start predicates |
+| s2 | without the switch a step may end at a start too | stepRows; soloRows; old rule; server-list walk; 8k prompt; engine predicates; to_start predicates |
+| s3 | the switch is ignored: never to a start | stepRows; soloRows; server-list walk; 8k prompt; to_start predicates |
+| s4 | two chunks judged by the prompt's end | to_start predicates |
+| s5 | the rings asked about a whole step | to_start predicates |
+| s6a | the switch is always on | engine predicates; to_start predicates |
+| s6b | another switch is read | to_start predicates |
+| s7 | rank 0 sizes a wide step without the switch | soloRows; walk; server-list walk; 8k prompt; to_start predicates |
+| s8 | every rank sizes a long part without the switch | stepRows; soloRows; walk; server-list walk; 8k prompt |
+| s9 | a long part is never refused | stepRows; old rule |
+| s10 | rank 0's wide step is a whole one where the plan names none | soloRows; old rule |
+| s11 | the step ends where its first chunk does | stepRows; soloRows; old rule; walk; server-list walk; 8k prompt; engine predicates; to_start predicates |
+| s12 | rank 0's choice does not ask the plan | engine predicates; to_start predicates |
+| s13 | no registry row | the build refuses: `TF_GLM_OVN_SOLO_TO_START has no row in platform/environment.zig` (the registry's own comptime check; no test runs) |
+
+Thirteen are killed by tests. s13 is not a test result: the registry refuses a switch with no row at compile time, so the mutant
+does not build.
+
+### GPU checks of 0002
+
+`tf-cuda-test glm-solo-check` now runs ten prompts, the eight it had and two with request starts (the 8,183-row chat shape above,
+and one of 8,692 rows with starts off the 4-row index pool's edge, where a solo step runs from row 301 to the start at 3,350),
+and fails unless the solo passes taken equal the case's own count for the setting (1 and 1 without the switch, 1 and 2 with it).
+On the 8-prompt version, image `glm53-zig:v129zd`, three ranks, real checkpoint, through `scripts/gpu-check-tp3.sh`: rc 0 0 0, one
+PASS line, 156 s (10:13 UTC). On the image with this patch, `glm53-zig:v129zf` (id `112d31581f2f` on all three ranks, built from
+tree `9297755c6943` by `scripts/queues/queue89.sh`): one GPU on glm-synth's 2-layer checkpoint, switch off and on, PASS and PASS;
+three ranks on the real checkpoint, four runs (the check's plain environment, then the recipe's `DEFS` and `NEWX`, each with the
+switch off and on): rc 0 0 0 and one PASS line each, 172 to 181 s each; every one names the setting it ran. The speed result is
+queue89's (OVERNIGHT section 64).

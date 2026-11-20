@@ -19,7 +19,7 @@ run there goes under `nice -n 15` (--nice) and, where a systemd user scope exist
           the gate logs after a passing verdict.
   wait    [--run RUN]  Polls the run (default: the newest) every 60 s until the marker, then prints the log tail and
           the verdict table. Exit 0 only when every non-base tree passes, 1 on any failure, 2 when it could not tell.
-  iter    --pin REF --dir DIR[,DIR] [check] [fmt] [test] [lean]  The fast loop: rebuilds one tree on the host and runs
+  iter    --pin REF --dir DIR[,DIR] [check] [fmt] [test] [lean] [ctest]  The fast loop: rebuilds one tree on the host and runs
           the named steps there in the foreground (default: check fmt). Exit 0 when every step had rc 0.
   verdict RUN_LOG  The verdict table of a run.log; the runner calls it on the host at the end of every run.
 """
@@ -57,7 +57,7 @@ REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
 PATCH_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.patch$")
 TEST_STEP = "test-cuda-host"
 REQUIRED_STEPS = ("check-native-cuda-host", TEST_STEP, "fmt")  # gates.sh runs these on every tree of this engine
-ITER_STEPS = ("check", "fmt", "test", "lean")
+ITER_STEPS = ("check", "fmt", "test", "lean", "ctest")
 
 
 def die(msg, rc=2):
@@ -483,6 +483,10 @@ for s in @STEPS@; do
       echo "== test-cuda-host"
       HOME=$IT/home timeout -k 30 2400 "$Z" build test-cuda-host -j@JOBS@ --cache-dir "$C" --summary all > "$IT/test.log" 2>&1 < /dev/null; rc=$?
       grep -E "^error: |: error: |^Build Summary" "$IT/test.log" | awk '!seen[$0]++' | head -80 ;;
+    ctest)
+      echo "== compile-cuda-tests"
+      HOME=$IT/home timeout -k 30 2400 "$Z" build compile-cuda-tests -j@JOBS@ --cache-dir "$C" --summary all > "$IT/ctest.log" 2>&1 < /dev/null; rc=$?
+      grep -E "^error: |: error: |^Build Summary" "$IT/ctest.log" | awk '!seen[$0]++' | head -60 ;;
     lean)
       echo "== lean, against the pristine pin"
       B=$HOME/spark-gates/pins/@COMMIT@

@@ -1,0 +1,45 @@
+[q88] 09:04:26 start; IMG=glm53-zig:v129zd; NEWX='-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_LATENT_ROWS=2 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e NCCL_NCHANNELS_PER_NET_PEER=4'; deadline 12:04:26; 283G free
+[q88] glm53-zig:v129zd ids: sha256:3a9ec4925eaf0b8e7bedbbe4d0c8d087f725d280cbc837aa2a92a69400a021c6 sha256:3a9ec4925eaf0b8e7bedbbe4d0c8d087f725d280cbc837aa2a92a69400a021c6 sha256:3a9ec4925eaf0b8e7bedbbe4d0c8d087f725d280cbc837aa2a92a69400a021c6
+[q88] serve.sh sha256 (first 12): a0b05f16fb88 a0b05f16fb88 a0b05f16fb88
+[prod-stop] 09:04:28 production stopped on spark1-3
+[q88] w4a pieces boot line: info: glm: a prompt chunk's exchanges in 4 row pieces
+[q88] 09:09:04 w4a cold rc=0 3641 13420 50348 3684 13580 50845 
+[q88] 09:10:06 w4a chain: 47561 825 811 798 803 790 787 801
+[q88] 09:12:20 w4a chain: 122334 870 876 860 862 853
+[q88] 09:12:46 dec-w4a 1 greedy prose rc=0 "agg_tok_s": 81.02 code rc=0 "agg_tok_s": 114.48
+[q88] w3a pieces boot line: info: glm: a prompt chunk's exchanges in 3 row pieces
+[q88] 09:17:19 w3a cold rc=0 3654 13496 50549 3697 13656 51090 
+[q88] 09:18:22 w3a chain: 47760 821 810 794 792 781 778 788
+[q88] 09:20:35 w3a chain: 122335 854 863 853 857 850
+[q88] 09:21:01 dec-w3a 1 greedy prose rc=0 "agg_tok_s": 80.76 code rc=0 "agg_tok_s": 113.79
+[q88] w3b pieces boot line: info: glm: a prompt chunk's exchanges in 3 row pieces
+[q88] 09:25:36 w3b cold rc=0 3685 13604 50996 3721 13754 51527 
+[q88] 09:26:39 w3b chain: 48196 826 805 790 792 784 793 797
+[q88] 09:28:54 w3b chain: 123741 858 875 862 865 848
+[q88] 09:29:21 dec-w3b 1 greedy prose rc=0 "agg_tok_s": 78.83 code rc=0 "agg_tok_s": 111.37
+[q88] w4b pieces boot line: info: glm: a prompt chunk's exchanges in 4 row pieces
+[q88] 09:33:55 w4b cold rc=0 3694 13611 50988 3722 13800 51493 
+[q88] 09:34:58 w4b chain: 48208 833 822 817 811 796 793 810
+[q88] 09:37:12 w4b chain: 123273 871 890 874 874 868
+[q88] 09:37:39 dec-w4b 1 greedy prose rc=0 "agg_tok_s": 78.61 code rc=0 "agg_tok_s": 110.85
+[q88] w4c pieces boot line: info: glm: a prompt chunk's exchanges in 4 row pieces
+[q88] 09:42:14 w4c cold rc=0 3702 13658 51122 3741 13819 51649 
+[q88] 09:43:17 w4c chain: 48260 839 821 810 820 809 807 810
+[q88] 09:45:32 w4c chain: 123794 879 882 876 882 874
+[q88] 09:45:59 dec-w4c 1 greedy prose rc=0 "agg_tok_s": 78.83 code rc=0 "agg_tok_s": 111.79
+[q88] w3c pieces boot line: info: glm: a prompt chunk's exchanges in 3 row pieces
+[q88] 09:50:34 w3c cold rc=0 3719 13626 51190 3731 13818 51724 
+[q88] 09:51:37 w3c chain: 48319 830 814 818 805 791 792 789
+[q88] 09:53:52 w3c chain: 123983 867 881 866 866 848
+[q88] 09:54:19 dec-w3c 1 greedy prose rc=0 "agg_tok_s": 79.58 code rc=0 "agg_tok_s": 111.12
+[q88] w3d pieces boot line: info: glm: a prompt chunk's exchanges in 3 row pieces
+[q88] 09:58:54 w3d cold rc=0 3705 13691 51321 3748 13879 51832 
+[q88] 09:59:57 w3d chain: 48556 833 811 795 803 798 790 798
+[q88] 10:02:13 w3d chain: 124761 870 884 870 877 853
+[q88] 10:02:40 dec-w3d 1 greedy prose rc=0 "agg_tok_s": 78.58 code rc=0 "agg_tok_s": 111.32
+[q88] w4d pieces boot line: info: glm: a prompt chunk's exchanges in 4 row pieces
+[q88] 10:07:14 w4d cold rc=0 3694 13666 50891 3729 13770 51446 
+[q88] 10:08:17 w4d chain: 48121 842 825 820 816 804 800 801
+[q88] 10:10:32 w4d chain: 123609 878 888 880 884 871
+[q88] 10:10:59 dec-w4d 1 greedy prose rc=0 "agg_tok_s": 78.51 code rc=0 "agg_tok_s": 112.06
+QUEUE88-DONE 10:11:11
