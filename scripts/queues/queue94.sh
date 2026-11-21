@@ -84,7 +84,8 @@ XS="-e TF_GLM_CHUNK_SOLO=4096 -e TF_GLM_REQUEST_STARTS=1"
 HS="-e TF_GLM_HEAD_SKIP=1"
 STS="-e TF_GLM_SOLO_TO_START=1"
 dry() { # dry LABEL TAG XENV: serve.sh's line and effective environment for one arm, starting nothing
-  local label=$1 tag=$2 xenv=$3 f="$OUT/serve-dryrun-$label.txt"
+  local label=$1 tag=$2 xenv=$3
+  local f="$OUT/serve-dryrun-$label.txt"  # separate: the shell expands every word before `local` runs, so $label here would be read unset under set -u
   IMAGE="glm53-zig:$tag" WORLD=3 COMM_ID=rank0:29583 KNOBS=off XENV="$xenv" DRYRUN=1 bash serve.sh 0 4 1048576 > "$f" 2>&1 || true
   echo "[q94] DRYRUN $label $tag: $(grep -o -- ' -e ' "$f" | wc -l) -e settings on the line; CHUNK_SOLO $(grep -o 'TF_GLM_CHUNK_SOLO=4096' "$f" | wc -l), REQUEST_STARTS $(grep -o 'TF_GLM_REQUEST_STARTS=1' "$f" | wc -l), HEAD_SKIP $(grep -o 'TF_GLM_HEAD_SKIP=1' "$f" | wc -l), SOLO_TO_START $(grep -o 'TF_GLM_SOLO_TO_START=1' "$f" | wc -l), PROF $(grep -o 'TF_GLM_PROF=1' "$f" | wc -l)"
 }
