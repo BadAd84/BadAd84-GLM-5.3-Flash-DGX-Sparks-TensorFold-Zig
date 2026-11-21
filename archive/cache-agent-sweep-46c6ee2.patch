@@ -1,0 +1,209 @@
+diff --git a/zig/build/cache_replay.zig b/zig/build/cache_replay.zig
+index 4b06f71..af489b8 100644
+--- a/zig/build/cache_replay.zig
++++ b/zig/build/cache_replay.zig
+@@ -23,6 +23,12 @@ pub fn steps(b: *std.Build) void {
+     b.step("cache-agent-replay", "Fixed long shared-system agents, phased chats and one-off prompt traces").dependOn(&agent_run.step);
+     const agent_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_agent_test.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }), .filters = &.{"agent cache replay:"} });
+     b.step("test-cache-agent-host", "Native shared-prefix replay, adapter equivalence and exact rows without devices").dependOn(&b.addRunArtifact(agent_tests).step);
++    // A sweep over the same frozen traces: the replay's own state sizes at converted capacities, and another
++    // family's measured kept-state sizes at its own budget. Arguments would not survive `zig build STEP`.
++    const sweep = b.addExecutable(.{ .name = "tf-cache-agent-sweep", .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_agent_sweep.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }) });
++    const sweep_run = b.addRunArtifact(sweep);
++    sweep_run.has_side_effects = true;
++    b.step("cache-agent-sweep", "The frozen agent traces at converted capacities and at a served family's measured state sizes").dependOn(&sweep_run.step);
+     const decay_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_decay_test.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }), .filters = &.{"cache decay:"} });
+     b.step("test-cache-decay-host", "Bounded resume priority, cohort replacement and native eviction protections").dependOn(&b.addRunArtifact(decay_tests).step);
+     const confirm = b.addExecutable(.{ .name = "tf-cache-confirm-replay", .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_confirm_replay.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }) });
+diff --git a/zig/cache_agent_sweep.zig b/zig/cache_agent_sweep.zig
+new file mode 100644
+index 0000000..96ac308
+--- /dev/null
++++ b/zig/cache_agent_sweep.zig
+@@ -0,0 +1,93 @@
++//! A sweep over the frozen agent traces: the replay's own state sizes at capacities converted from another
++//! serve's budget, and that serve's measured kept-state sizes at its own budget. Host only, no device, no serve.
++const std = @import("std");
++const traces = @import("cache_agent_trace.zig");
++const common = @import("cache_replay_trace.zig");
++const run = @import("cache_replay_run.zig");
++const model = @import("cache_replay_model.zig");
++
++const MIB: u64 = 1 << 20;
++
++/// GLM-5.3-Flash at TP=3 as served: a kept state is `page2M(fixed + per_row * at)`, from queue91's probe rows
++/// (202, 352 and 888 MiB at 7,999, 32,014 and 120,388 rows; the 168 MiB minimum at 2,048). `ours-measured`
++/// keeps 11 caches' rows, 6,378 a row, which is 11 x (512 + 4 + 64) bytes; `ours-layout` prices the source's
++/// own page math for 12 caches, 6,960 a row, and `ours-mid` sits between the two fits.
++const ours_measured: model.Model = .{ .padded = true, .recurrent = 162_843_852, .per_token = 6_378, .eighths = 0, .align_bytes = 2 * MIB };
++const ours_mid: model.Model = .{ .padded = true, .recurrent = 163_420_569, .per_token = 6_662, .eighths = 0, .align_bytes = 2 * MIB };
++const ours_layout: model.Model = .{ .padded = true, .recurrent = 163_997_286, .per_token = 6_947, .eighths = 0, .align_bytes = 2 * MIB };
++const budget_ours: u64 = 8_426_464_256;
++
++const Set = struct { name: []const u8, params: traces.Params };
++const sets = [_]Set{
++    .{ .name = "default", .params = .{} },
++    .{ .name = "conversations-3", .params = .{ .conversations = 3 } },
++    .{ .name = "conversations-12", .params = .{ .conversations = 12 } },
++    .{ .name = "prefix-32768", .params = .{ .prefix = 32768, .base = 65_536, .stride = 4096, .growth = 2048, .one_sizes = .{ 4096, 16_384, 32_768, 48_000 } } },
++    .{ .name = "rounds-24", .params = .{ .rounds = 24 } },
++    .{ .name = "prefix-32768-rounds-24", .params = .{ .rounds = 24, .prefix = 32768, .base = 65_536, .stride = 4096, .growth = 2048, .one_sizes = .{ 4096, 16_384, 32_768, 48_000 } } },
++};
++
++const Cell = struct { label: []const u8, m: model.Model, budget: u64, ref_rows: u32 = 0 };
++
++fn runCell(a: std.mem.Allocator, out: anytype, set: []const u8, shape: traces.Shape, seed: u64, trace: *const common.Trace, cell: Cell) !void {
++    for ([_]run.policy.Policy{ .main, .decayed_resume }) |selected| {
++        var replay: run.Replay = undefined;
++        replay.init(a, selected, cell.budget, cell.m);
++        defer replay.deinit();
++        var stats: run.Stats = .{};
++        defer stats.deinit(a);
++        for (trace.requests) |request| try stats.add(a, request, try replay.request(request));
++        try out.print("{{\"set\":\"{s}\",\"trace\":\"{s}\",\"seed\":{d},\"cell\":\"{s}\",\"policy\":\"{s}\",\"budget_bytes\":{d},\"budget_mib\":{d},\"ref_rows\":{d},\"state_2048\":{d},\"state_8192\":{d},\"state_32768\":{d},\"state_120000\":{d},\"digest\":\"{x}\",\"requests\":{d},\"hits\":{d},\"prompt_rows\":{d},\"rebuilt_rows\":{d},\"evictions\":{d},\"peak_bytes\":{d}}}\n", .{
++            set, @tagName(shape), seed, cell.label, @tagName(selected), cell.budget, cell.budget / MIB, cell.ref_rows,
++            cell.m.bytes(2048), cell.m.bytes(8192), cell.m.bytes(32768), cell.m.bytes(120_000),
++            trace.digest, stats.requests, stats.hits, stats.prompt_tokens, stats.recompute_tokens, stats.evicted, replay.peak_bytes,
++        });
++    }
++}
++
++pub fn main(init: std.process.Init) !void {
++    var buffer: [8192]u8 = undefined;
++    var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
++    const out = &stdout.interface;
++    const sim_model: model.Model = .{};
++    // Our capacity in the replay's own unit: the states of a reference length this serve's budget holds under
++    // the measured model, times the replay's bytes for one such state.
++    const refs = [5]u32{ 8192, 16_384, 32_768, 42_512, 120_000 };
++    const ref_labels = [5][]const u8{ "converted-8192", "converted-16384", "converted-32768", "converted-42512", "converted-120000" };
++    const ours = [3]model.Model{ ours_measured, ours_mid, ours_layout };
++    const ours_labels = [3][]const u8{ "ours-measured", "ours-mid", "ours-layout" };
++    const seeds = [3]u64{ 7, 11, 23 };
++    const shapes = [2]traces.Shape{ .agent_loops, .agent_cohorts };
++    for (sets, 0..) |set, si| {
++        const default_set = si == 0;
++        for (shapes) |shape| {
++            for (seeds) |seed| {
++                var trace = try traces.makeParams(init.gpa, shape, seed, set.params);
++                defer trace.deinit();
++                if (default_set) try runCell(init.gpa, out, set.name, shape, seed, &trace, .{ .label = "replay-16gib", .m = sim_model, .budget = 16 << 30 });
++                if (seed == 7) {
++                    if (default_set) {
++                        try runCell(init.gpa, out, set.name, shape, seed, &trace, .{ .label = "replay-4gib", .m = sim_model, .budget = 4 << 30 });
++                        try runCell(init.gpa, out, set.name, shape, seed, &trace, .{ .label = "replay-8gib", .m = sim_model, .budget = 8 << 30 });
++                    }
++                    for (refs, ref_labels) |at, label| {
++                        const held = budget_ours / ours_measured.bytes(at);
++                        try runCell(init.gpa, out, set.name, shape, seed, &trace, .{ .label = label, .m = sim_model, .budget = held * sim_model.bytes(at), .ref_rows = at });
++                    }
++                }
++                for (ours, ours_labels) |m, label| {
++                    try runCell(init.gpa, out, set.name, shape, seed, &trace, .{ .label = label, .m = m, .budget = budget_ours });
++                }
++                // The same measured sizes at the smaller budgets a cheap served A/B could run: pressure at 8k prefixes.
++                if (seed == 7) {
++                    const small_budgets = [3]u64{ 2 << 30, 4 << 30, 6 << 30 };
++                    const small_labels = [3][]const u8{ "ours-measured-2gib", "ours-measured-4gib", "ours-measured-6gib" };
++                    for (small_budgets, small_labels) |budget, label| {
++                        try runCell(init.gpa, out, set.name, shape, seed, &trace, .{ .label = label, .m = ours_measured, .budget = budget });
++                    }
++                }
++            }
++        }
++    }
++    try out.flush();
++}
+diff --git a/zig/cache_agent_trace.zig b/zig/cache_agent_trace.zig
+index 0074c92..f412b63 100644
+--- a/zig/cache_agent_trace.zig
++++ b/zig/cache_agent_trace.zig
+@@ -5,11 +5,28 @@ pub const Shape = enum { agent_loops, interleaved_chats, one_off, agent_cohorts
+ pub const rounds = 48;
+ pub const budgets = [_]u64{ 4 << 30, 8 << 30, 16 << 30 };
+ 
++/// One trace's shape in the served client's terms: conversations, rounds, the shared system prefix, and the
++/// per-session history (base, an offset by session, and a growth a round) that follows it.
++pub const Params = struct {
++    conversations: usize = 6,
++    rounds: usize = rounds,
++    prefix: u32 = 8192,
++    base: u32 = 16384,
++    stride: u32 = 1024,
++    growth: u32 = 512,
++    one_offs: usize = 2,
++    one_sizes: [4]u32 = .{ 1024, 4096, 8192, 12000 },
++};
++
+ pub fn make(gpa: std.mem.Allocator, shape: Shape) !common.Trace {
+     return makeSeeded(gpa, shape, 7);
+ }
+ 
+ pub fn makeSeeded(gpa: std.mem.Allocator, shape: Shape, seed: u64) !common.Trace {
++    return makeParams(gpa, shape, seed, .{});
++}
++
++pub fn makeParams(gpa: std.mem.Allocator, shape: Shape, seed: u64, p: Params) !common.Trace {
+     var arena: std.heap.ArenaAllocator = .init(gpa);
+     errdefer arena.deinit();
+     const a = arena.allocator();
+@@ -17,23 +34,22 @@ pub fn makeSeeded(gpa: std.mem.Allocator, shape: Shape, seed: u64) !common.Trace
+     var rng = std.Random.DefaultPrng.init(seed);
+     var unique: u32 = 1000;
+     var turns: [12]u32 = @splat(0);
+-    for (0..rounds) |r| switch (shape) {
++    for (0..p.rounds) |r| switch (shape) {
+         .agent_loops, .agent_cohorts => {
+-            for (0..6) |session| {
+-                const phase: usize = if (shape == .agent_cohorts and r >= rounds / 2) 6 else 0;
+-                const turn = if (shape == .agent_cohorts) r % (rounds / 2) else r;
+-                const history: u32 = 16384 + @as(u32, @intCast(session % 3)) * 1024 + @as(u32, @intCast(turn)) * 512;
+-                try add(a, &requests, .agent, @intCast(phase + session + 1), history, 8192, @intCast(phase + 1), @intCast(r));
+-                for (0..2) |_| {
+-                    const sizes = [_]u32{ 1024, 4096, 8192, 12000 };
+-                    try add(a, &requests, .one_off, unique, sizes[rng.random().uintLessThan(usize, sizes.len)], 0, unique, @intCast(r));
++            for (0..p.conversations) |session| {
++                const phase: usize = if (shape == .agent_cohorts and r >= p.rounds / 2) p.conversations else 0;
++                const turn = if (shape == .agent_cohorts) r % (p.rounds / 2) else r;
++                const history: u32 = p.base + @as(u32, @intCast(session % 3)) * p.stride + @as(u32, @intCast(turn)) * p.growth;
++                try add(a, &requests, .agent, @intCast(phase + session + 1), history, p.prefix, @intCast(phase + 1), @intCast(r));
++                for (0..p.one_offs) |_| {
++                    try add(a, &requests, .one_off, unique, p.one_sizes[rng.random().uintLessThan(usize, p.one_sizes.len)], 0, unique, @intCast(r));
+                     unique += 1;
+                 }
+             }
+         },
+         .interleaved_chats => {
+             for (0..4) |j| {
+-                const phase: usize = if (r < rounds / 2) 0 else 6;
++                const phase: usize = if (r < p.rounds / 2) 0 else 6;
+                 const session = phase + (r + j * 2) % 6;
+                 const history: u32 = 4096 + @as(u32, @intCast(session % 4)) * 512 + turns[session] * 256;
+                 try add(a, &requests, .agent, @intCast(session + 1), history, 2048, @intCast(phase + 2), @intCast(r));
+diff --git a/zig/cache_replay_model.zig b/zig/cache_replay_model.zig
+index f311671..411ddc1 100644
+--- a/zig/cache_replay_model.zig
++++ b/zig/cache_replay_model.zig
+@@ -3,11 +3,19 @@ const std = @import("std");
+ const pc = @import("cache");
+ pub const Model = struct {
+     padded: bool = true,
++    /// A state's fixed bytes and its bytes a prompt row, so a sweep can price another family's kept states.
++    recurrent: u64 = recurrent_bytes,
++    per_token: u64 = kv_bytes_per_token,
++    /// `padded` adds `eighths` eighths of the raw size, then rounds up to `align_bytes` bytes.
++    eighths: u64 = 1,
++    align_bytes: u64 = 32 << 20,
+     pub const recurrent_bytes: u64 = 48 * (48 * 128 * 128 * 4 + (2 * 16 * 128 + 48 * 128) * 3 * 2);
+     pub const kv_bytes_per_token: u64 = 16 * 2 * 4 * 256 * 2;
+     pub fn bytes(m: Model, at: u32) u64 {
+-        const raw = recurrent_bytes + kv_bytes_per_token * at;
+-        return if (m.padded) std.mem.alignForward(u64, raw + raw / 8, 32 << 20) else raw;
++        const raw = m.recurrent + m.per_token * at;
++        if (!m.padded) return raw;
++        const grown = raw + raw * m.eighths / 8;
++        return if (m.align_bytes == 0) grown else std.mem.alignForward(u64, grown, m.align_bytes);
+     }
+ };
+ pub const State = struct {
+
