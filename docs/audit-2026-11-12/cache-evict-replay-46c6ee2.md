@@ -560,6 +560,17 @@ mapping of `--prefix-tokens 32768` is what the `prefix-32768` set in the sweep u
 - **Two images, two minima.** The facts rows show both 176,160,768 (168 MiB, m130a) and 178,257,920 (170 MiB,
   the stock-main boot) as the minimum state, which is what the two fits were anchored to at 2,048 rows. That
   cross-check is what ties the probe-row deltas to the reported minimum.
+- **The replay counts a hit at the exact prefix length; this engine resumes at a chunk boundary (added by the reviewer, not the lane).**
+  queue91's chain rows for a growing chat of 112,695 to 121,557 tokens show every resumed turn reusing a multiple of 2,048 rows
+  (112,640, 114,688, 116,736 and 118,784), the gap to the previous prompt being 55 to 1,839 rows with a mean of 944 and nothing evicted.
+  Both arms of a served run lose that tail on every resumed turn, about a thousand rows against the tens of thousands a lost state
+  costs, so the direction and size of the prediction are not affected. It does change how a served run must count a resumed turn:
+  the rule P2 of score98.py allows one chunk plus the template's few rows before a turn counts as not resumed.
+- **Inputs the reviewer re-read from the boot and probe records (the lane's figures, checked).** The stack on the pin's boot record reads
+  `prompt_cache_budget_bytes` 8,426,464,256 and `prompt_cache_minimum_state_bytes` 176,160,768; its three cold probes grow the held cache
+  from 202 to 554 to 1,442 MiB, which are single states of 202, 352 and 888 MiB at 8,005, 32,014 and 120,388 tokens. The `/metrics`
+  gauge `prompt_cache_bytes` is "storage held by retained prompt states and spare buffers" (the engine's own help text) and reads
+  8,426,356,736 at boot with no state held, so it is not occupancy; `prompt_cache_states` is the count.
 
 ## 8. Files and reproduction (the patch is archived beside this record as `cache-agent-sweep-46c6ee2.patch`)
 
