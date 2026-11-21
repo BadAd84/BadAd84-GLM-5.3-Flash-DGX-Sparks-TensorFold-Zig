@@ -53,24 +53,28 @@ must be measured with drafts on before the gap is attributed. That arm is the ne
 
 ## Where the Zig stack stands against it
 
-Current cells (2026-11-21): the recipe as committed on the pin, image `m130a`, `KNOBS=prod`, two boots of queue91 (`mn1`, `mn2`), three rounds a cell, the campaign's own field
-(`agg_tok_s`, which is what `scripts/queue-scores/score91.py` reads). Rows: `docs/audit-2026-11-12/queue-rows/queue91/f91-c`.
+Current cells (2026-11-21): the recipe as committed on the pin, image `m130a`, `KNOBS=prod`, the boots of queue91 (`mn1`, `mn2`) and queue95 (`mn3`), three rounds a cell, the
+campaign's own field (`agg_tok_s`, which is what `scripts/queue-scores/score91.py` reads). The production column is the MEAN of that serve's three rounds per level, in the same field:
+its own run wrote `agg_tok_s` and `decode_agg_tok_s` per round (`work/drafter-lever/spark1/bench/pyprod/P<n>.out`, three rounds a file), and the earlier version of this table quoted
+round 2's `decode_agg_tok_s` against our `agg_tok_s`, which is two different fields and, at six clients, one round of three whose own spread is 10%. Rows:
+`docs/audit-2026-11-12/queue-rows/queue91/f91-c`, `.../queue95/f95-c`.
 
-| streams | production (Python) | Zig recipe, 2026-11-21 | delta |
+| streams | production, `agg_tok_s` mean of 3 rounds | Zig recipe, 2026-11-21 | delta |
 |---:|---:|---:|---:|
-| 1 | 83.43 | 82.72 | -0.86% |
-| 2 | 91.07 | 85.85 | -5.74% |
-| 4 | 119.97 | 114.27 | -4.75% |
-| 6 | 111.99 | 114.68 | +2.40% |
-| 8 | 136.18 | 125.32 | -7.98% |
+| 1 | 81.73 | 82.72 | +1.20% |
+| 2 | 89.22 | 85.85 | -3.78% |
+| 4 | 117.98 | 114.27 | -3.14% |
+| 6 | 114.78 | 114.68 | -0.09% |
+| 8 | 131.28 | 125.32 | -4.54% |
 
 Cold first token is where the gap actually is: production 2,908 / 11,054 / 41,904 ms against 3,990 / 14,910 / 55,653 ms at 8k / 32k / 120k, so 1.08 / 3.86 / 13.75 seconds behind
-(OVERNIGHT section 72). A warm turn of a ~113k conversation is 1,313 ms against 668 ms (section 72), and 1,326 against 869 ms on queue100's control arm (section 80).
+(OVERNIGHT section 72, the two-boot figures; with queue95's third boot of the same image and recipe the deficit is 1.11 / 3.95 / 14.12 s). A warm turn of a ~113k conversation is
+1,313 ms against 668 ms (section 72), and 1,326 against 869 ms on queue100's control arm (section 80).
 
-The shape of the gap, as corrected: decode at one stream is level, at two and four it is about 5% behind, at six it is ahead, and at eight it is 8% behind with that cell's own spread
-larger than the deficit (the six rows there are 118.2, 127.4, 138.3, 118.5, 125.9 and 125.3). **The prompt path is the real gap**, not decode: a cold 120k prompt is 13.75 s behind
-production and a warm resumed turn is about 2x it. The 11 November table of 39-patch drafts-off values, which called six and eight streams parity and one to four 32% to 39% behind,
-was measured on the v1.2.9-era stack before the draft, X3, item-plan and prompt work landed; it is superseded and its numbers are in git history.
+The shape of the gap, as corrected: decode at one stream is 1.2% AHEAD, at two and four it is about 3% behind, at six it is level, and at eight it is 4.5% behind with that cell's own
+spread larger than the deficit (production's three rounds there are 129.36, 128.71 and 135.77 on `agg_tok_s`). **The prompt path is the real gap**, not decode: a cold 120k prompt is
+about 14 s behind production and a warm resumed turn is about 2x it. The 11 November table of 39-patch drafts-off values, which called six and eight streams parity and one to four
+32% to 39% behind, was measured on the v1.2.9-era stack before the draft, X3, item-plan and prompt work landed; it is superseded and its numbers are in git history.
 
 Parity work: the gap per level is the production column minus the best bit-exact Zig column at that
 level; the coverage and the open levers are tracked in PORT-LEDGER and BENCH.

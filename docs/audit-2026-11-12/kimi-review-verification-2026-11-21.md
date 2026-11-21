@@ -7,18 +7,35 @@ it was checked here, how, and what was done, so no claim in it is taken on trust
 ## Its central numbers, recomputed here
 
 The gap table reproduces exactly from the committed rows, with the field the campaign's own scorer reads (`agg_tok_s`, `scripts/queue-scores/score91.py`), from
-`docs/audit-2026-11-12/queue-rows/queue91/f91-c/dec-mn{1,2}/P{n}.jsonl`, six rows a cell:
+`docs/audit-2026-11-12/queue-rows/queue91/f91-c/dec-mn{1,2}/P{n}.jsonl`, six rows a cell. **Its production column, however, was not in that field.** The five values it compared against
+(83.43 / 91.07 / 119.97 / 111.99 / 136.18) are each round 2's `decode_agg_tok_s` from production's own run (`work/drafter-lever/spark1/bench/pyprod/P<n>.out`, which writes both
+fields per round), while the Zig side is a six-row mean of `agg_tok_s`. A cross-check flagged it and the source confirms it. Like for like, production's mean over its three rounds in
+the same field, the table is:
 
-| streams | recomputed mean | production target | gap |
+| streams | production, `agg_tok_s` mean of 3 rounds | our mean (6 rows) | gap |
 |---:|---:|---:|---:|
-| 1 | 82.715 | 83.43 | -0.86% |
-| 2 | 85.847 | 91.07 | -5.74% |
-| 4 | 114.272 | 119.97 | -4.75% |
-| 6 | 114.680 | 111.99 | +2.40% |
-| 8 | 125.318 | 136.18 | -7.98% |
+| 1 | 81.733 | 82.715 | +1.20% |
+| 2 | 89.220 | 85.847 | -3.78% |
+| 4 | 117.980 | 114.272 | -3.14% |
+| 6 | 114.783 | 114.680 | -0.09% |
+| 8 | 131.280 | 125.318 | -4.54% |
 
-(The first attempt at this check used `decode_agg_tok_s` and disagreed by about 2% at every level; the scorer's field is `agg_tok_s`, so the reviewer was right and the check was
-wrong. Recorded because it is the same class of mistake the campaign keeps making: a number is only meaningful with its field and its reader named.)
+(The first attempt at this check used `decode_agg_tok_s` on OUR side and disagreed by about 2% at every level; the scorer's field is `agg_tok_s`, so the reviewer was right about our
+side and the check was wrong. The reviewer was then wrong about production's side in the same way, and the cross-check caught it. Recorded because a number is only meaningful with its
+field, its boots and its reader named together: one stream is 1.2% ahead rather than 0.86% behind, six clients is level rather than 2.4% ahead, and the eight-stream deficit is 4.54%,
+not 7.98%, against production rounds that themselves span 129.36 to 135.77.)
+
+## What the cross-check changed in the review's ranking
+
+A bounded second review (mythos5.2) tested Kimi's nine ranked speed items against the record, not the patches, and returned 7 SUPPORTED, 0 STALE at a primary claim, 2 WRONG, in
+`work/crosscheck/GAP-CROSSCHECK.md`:
+
+- **Item 1 as ranked is wrong.** Its 11.90 / 12.99 / 13.37% is the stock ladder's gain from upstream #3697 (a stock user's cold prompt), not ours to bank: our recipe already reaches the
+  staged tiles through `KDA_PAD=1`, and the open question, our `=1` against upstream's per-rank default, `docs/KNOBS.md` sizes at "0.3 ms of a 61 ms round, 0.5%" with a likely bf16
+  numerics consequence. It should not be ranked first on that number.
+- **Item 4's 128.3 ms dense-attention prize is a cross-pattern subtraction.** The 174.5 ms in 88 launches is real and worth kernel work; the 46.2 ms is the sparse pipeline on the
+  following 2,048 rows, so subtracting them compares dense-with-all-keys against sparse-with-selected-keys on a different row range. It needs sizing offline before it holds a rank.
+- The other seven items stand as Kimi ranked them, with item 2's candidate gains and its queue95 clause superseded by section 81.
 
 ## Its concrete code findings, checked against the patch text
 
