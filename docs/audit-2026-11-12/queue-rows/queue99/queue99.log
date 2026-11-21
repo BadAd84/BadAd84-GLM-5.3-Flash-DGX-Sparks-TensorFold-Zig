@@ -1,0 +1,71 @@
+[q99] 04:35:03 start; waiting for queue98.sh
+[q99] 08:05:06 E3 showed a gain: the five-level check runs (rebuilt rows a 14396073, b 7572137, 47.4% fewer)
+[q99] 08:05:06 queue98.sh is done; IMG=glm53-zig:m130a; deadline 12:05:06; 249G free
+[q99] glm53-zig:m130a ids: sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527 sha256:b
+[q99] serve.sh sha256 (first 12): f1b2266976ad; env/prod.env: 653156b86cda (KNOBS=prod applies this file)
+[q99] check-env rc=0: check-env: CLEAN
+[q99] KNOBS=prod names no TF_CACHE_EVICT (env/prod.env, and 13 runtime settings), so ca1 and ca2 are the unset arm and the CE boots' XENV is the only source of the policy
+[prod-stop] 08:05:07 production stopped on spark1-3
+[q99] 08:07:42 ca1 environment read back on all three ranks: TF_CACHE_EVICT unset
+[q99] 08:07:47 ca1 up (image glm53-zig:m130a, KNOBS=prod, XENV=''); {"tag": "ca1", "n": 4, "case": "boot", "ctx": 1048576, "boot_rc": 0, "ok": true, "image": "glm53-zig:m130a", "xenv": "",
+[q99] 08:08:02 smoke: longctx probe rc=0 chain rc=0, streams_ids rc=0, streams_sampled rc=0, per_prompt rc=0
+[q99] 08:10:31 ca1 cold rc=0 986 14972 55740 4087 15025 56313 
+[q99] 08:11:42 ca1 chain: 52592 837 1596 1041 1787 1418 887 1648
+[q99] 08:12:08 dec-ca1 1 greedy prose rc=0 "agg_tok_s": 82.57 code rc=0 "agg_tok_s": 114.81
+[q99] 08:12:56 dec-ca1 2 greedy prose rc=0 "agg_tok_s": 85.39 code rc=0 "agg_tok_s": 136.89
+[q99] 08:14:11 dec-ca1 4 greedy prose rc=0 "agg_tok_s": 112.39 code rc=0 "agg_tok_s": 165.85
+[q99] 08:16:02 dec-ca1 6 greedy prose rc=0 "agg_tok_s": 108.26 code rc=0 "agg_tok_s": 172.83
+[q99] 08:18:21 dec-ca1 8 greedy prose rc=0 "agg_tok_s": 118.04 code rc=0 "agg_tok_s": 178.79
+[q99] 08:18:48 dec-ca1 1 sampled prose rc=0 "agg_tok_s": 77.5 code rc=0 "agg_tok_s": 112.55
+[q99] 08:19:35 dec-ca1 2 sampled prose rc=0 "agg_tok_s": 82.74 code rc=0 "agg_tok_s": 142.88
+[q99] 08:20:53 dec-ca1 4 sampled prose rc=0 "agg_tok_s": 107.82 code rc=0 "agg_tok_s": 157.86
+[q99] 08:22:47 dec-ca1 6 sampled prose rc=0 "agg_tok_s": 126.42 code rc=0 "agg_tok_s": 166.14
+[q99] 08:25:09 dec-ca1 8 sampled prose rc=0 "agg_tok_s": 108.2 code rc=0 "agg_tok_s": 186.84
+[q99] 08:27:30 dec-ca1 24 prompts rc=0
+[q99] 08:29:59 ce1 environment read back on all three ranks: TF_CACHE_EVICT=decayed_resume
+[q99] 08:30:04 ce1 up (image glm53-zig:m130a, KNOBS=prod, XENV='-e TF_CACHE_EVICT=decayed_resume'); {"tag": "ce1", "n": 4, "case": "boot", "ctx": 1048576, "boot_rc": 0, "ok": true, "image": "glm53-zig:m130a", "xenv": "-e
+[q99] 08:32:36 ce1 cold rc=0 3977 14850 55603 4006 15045 56118 
+[q99] 08:33:46 ce1 chain: 52529 816 1594 1048 1784 1424 889 1640
+[q99] 08:34:12 dec-ce1 1 greedy prose rc=0 "agg_tok_s": 82.92 code rc=0 "agg_tok_s": 115.45
+[q99] 08:34:59 dec-ce1 2 greedy prose rc=0 "agg_tok_s": 86.41 code rc=0 "agg_tok_s": 138.57
+[q99] 08:36:14 dec-ce1 4 greedy prose rc=0 "agg_tok_s": 114.33 code rc=0 "agg_tok_s": 168.63
+[q99] 08:37:59 dec-ce1 6 greedy prose rc=0 "agg_tok_s": 119.7 code rc=0 "agg_tok_s": 172.52
+[q99] 08:40:19 dec-ce1 8 greedy prose rc=0 "agg_tok_s": 119.68 code rc=0 "agg_tok_s": 168.59
+[q99] 08:40:45 dec-ce1 1 sampled prose rc=0 "agg_tok_s": 78.72 code rc=0 "agg_tok_s": 114.87
+[q99] 08:41:32 dec-ce1 2 sampled prose rc=0 "agg_tok_s": 83.65 code rc=0 "agg_tok_s": 143.99
+[q99] 08:42:49 dec-ce1 4 sampled prose rc=0 "agg_tok_s": 110.09 code rc=0 "agg_tok_s": 160.42
+[q99] 08:44:40 dec-ce1 6 sampled prose rc=0 "agg_tok_s": 104.41 code rc=0 "agg_tok_s": 156.94
+[q99] 08:47:06 dec-ce1 8 sampled prose rc=0 "agg_tok_s": 111.96 code rc=0 "agg_tok_s": 163.01
+[q99] 08:49:27 dec-ce1 24 prompts rc=0
+[q99] 08:51:56 ce2 environment read back on all three ranks: TF_CACHE_EVICT=decayed_resume
+[q99] 08:52:01 ce2 up (image glm53-zig:m130a, KNOBS=prod, XENV='-e TF_CACHE_EVICT=decayed_resume'); {"tag": "ce2", "n": 4, "case": "boot", "ctx": 1048576, "boot_rc": 0, "ok": true, "image": "glm53-zig:m130a", "xenv": "-e
+[q99] 08:54:32 ce2 cold rc=0 3978 14830 55644 4020 15049 56023 
+[q99] 08:55:43 ce2 chain: 52520 814 1590 1043 1782 1414 885 1641
+[q99] 08:56:09 dec-ce2 1 greedy prose rc=0 "agg_tok_s": 81.54 code rc=0 "agg_tok_s": 114.11
+[q99] 08:56:57 dec-ce2 2 greedy prose rc=0 "agg_tok_s": 85.17 code rc=0 "agg_tok_s": 137.6
+[q99] 08:58:12 dec-ce2 4 greedy prose rc=0 "agg_tok_s": 112.52 code rc=0 "agg_tok_s": 166.83
+[q99] 08:59:53 dec-ce2 6 greedy prose rc=0 "agg_tok_s": 118.77 code rc=0 "agg_tok_s": 172.14
+[q99] 09:02:12 dec-ce2 8 greedy prose rc=0 "agg_tok_s": 119.16 code rc=0 "agg_tok_s": 179.31
+[q99] 09:02:39 dec-ce2 1 sampled prose rc=0 "agg_tok_s": 78.42 code rc=0 "agg_tok_s": 113.15
+[q99] 09:03:27 dec-ce2 2 sampled prose rc=0 "agg_tok_s": 82.33 code rc=0 "agg_tok_s": 142.12
+[q99] 09:04:45 dec-ce2 4 sampled prose rc=0 "agg_tok_s": 108.27 code rc=0 "agg_tok_s": 159.56
+[q99] 09:06:38 dec-ce2 6 sampled prose rc=0 "agg_tok_s": 105.55 code rc=0 "agg_tok_s": 156.08
+[q99] 09:09:02 dec-ce2 8 sampled prose rc=0 "agg_tok_s": 121.21 code rc=0 "agg_tok_s": 174.81
+[q99] 09:11:23 dec-ce2 24 prompts rc=0
+[q99] 09:13:52 ca2 environment read back on all three ranks: TF_CACHE_EVICT unset
+[q99] 09:13:57 ca2 up (image glm53-zig:m130a, KNOBS=prod, XENV=''); {"tag": "ca2", "n": 4, "case": "boot", "ctx": 1048576, "boot_rc": 0, "ok": true, "image": "glm53-zig:m130a", "xenv": "",
+[q99] 09:16:29 ca2 cold rc=0 4002 14874 55715 4034 15075 56146 
+[q99] 09:17:39 ca2 chain: 52597 822 1599 1043 1791 1430 891 1647
+[q99] 09:18:05 dec-ca2 1 greedy prose rc=0 "agg_tok_s": 82.84 code rc=0 "agg_tok_s": 115.45
+[q99] 09:18:53 dec-ca2 2 greedy prose rc=0 "agg_tok_s": 86.03 code rc=0 "agg_tok_s": 139.13
+[q99] 09:20:07 dec-ca2 4 greedy prose rc=0 "agg_tok_s": 114.56 code rc=0 "agg_tok_s": 168.41
+[q99] 09:21:51 dec-ca2 6 greedy prose rc=0 "agg_tok_s": 110.22 code rc=0 "agg_tok_s": 196.84
+[q99] 09:24:13 dec-ca2 8 greedy prose rc=0 "agg_tok_s": 120.57 code rc=0 "agg_tok_s": 168.2
+[q99] 09:24:39 dec-ca2 1 sampled prose rc=0 "agg_tok_s": 79.16 code rc=0 "agg_tok_s": 114.48
+[q99] 09:25:26 dec-ca2 2 sampled prose rc=0 "agg_tok_s": 83.8 code rc=0 "agg_tok_s": 144.13
+[q99] 09:26:43 dec-ca2 4 sampled prose rc=0 "agg_tok_s": 110.3 code rc=0 "agg_tok_s": 161.23
+[q99] 09:28:32 dec-ca2 6 sampled prose rc=0 "agg_tok_s": 105.91 code rc=0 "agg_tok_s": 194.16
+[q99] 09:30:57 dec-ca2 8 sampled prose rc=0 "agg_tok_s": 120.9 code rc=0 "agg_tok_s": 161.39
+[q99] 09:33:18 dec-ca2 24 prompts rc=0
+[q99] 09:33:22 done; score the run with: python scripts/queue-scores/score99.py --q99 ~/bench/f99-c
+QUEUE99-DONE 09:33:33

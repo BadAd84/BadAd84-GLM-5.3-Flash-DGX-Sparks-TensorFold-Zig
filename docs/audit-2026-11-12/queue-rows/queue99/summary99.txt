@@ -1,0 +1,19 @@
+##### cells
+decode cells at 1, 2, 4 clients: 12 cells, the policy arm slower by -0.51% to +0.59% (a negative number is faster), mean -0.06%, 5 of 12 slower, 0 over the 1.0% limit
+decode cells at 6, 8 clients: 8 cells, the policy arm slower by -4.74% to +2.41% (a negative number is faster), mean -0.61%, 3 of 8 slower, 3 over the 1.0% limit
+prompt cells (cold 8k, 32k, 120k, conversation turns 2+): the policy arm slower by -1.41%, -0.29%, -0.23%, -0.40%
+##### flagged
+3 cell(s) over the 1.0% limit; boots in run order ca1 ce1 ce2 ca2, then each adjacent pair's change (policy arm slower, negative faster):
+  greedy code at 8 clients       180.0   173.3   175.3   173.9 | pair ca1-ce1 +3.87%, pair ca2-ce2 -0.80% | group means +1.49%
+  sampled prose at 8 clients     115.7   111.9   117.7   117.9 | pair ca1-ce1 +3.40%, pair ca2-ce2 +0.17% | group means +1.71%
+  sampled code at 6 clients      165.6   166.0   168.4   177.1 | pair ca1-ce1 -0.24%, pair ca2-ce2 +5.17% | group means +2.41%
+##### spreads
+decode cells at 1, 2, 4 clients: 24 group spreads (two boots each), from 0.12% to 1.99% of the mean, median 1.42%
+decode cells at 6, 8 clients: 16 group spreads (two boots each), from 0.60% to 11.47% of the mean, median 2.69%
+##### counters
+boot    budget bytes log lines states held MiB  hits misses evicted trimmed
+ca1       8377967616       383     12     7478     8    375       3       0
+ce1       8381965312       375     11     7262     7    368       3       0
+ce2       8369972224       375     11     7262     7    368       3       0
+ca2       8198267904       375     11     7262     7    368       3       0
+budget across the four boots of one recipe: 8,198,267,904 to 8,381,965,312 bytes, spread 2.24%

@@ -1,0 +1,64 @@
+== score99: q99 <queue-rows>/queue99/f99-c
+== C1 sync: CE (ce1 ce2) against CA (ca1 ca2); slower is positive, the limit 1.0%
+cold 8k first token: CA mean 4052.5 (boots 4087.0 4018.0) | CE mean 3995.2 (boots 3991.5 3999.0) | -1.41% slower
+cold 32k first token: CA mean 14986.5 (boots 14998.5 14974.5) | CE mean 14943.5 (boots 14947.5 14939.5) | -0.29% slower
+cold 120k first token: CA mean 55978.5 (boots 56026.5 55930.5) | CE mean 55847.0 (boots 55860.5 55833.5) | -0.23% slower
+conversation turns 2+ first token: CA mean 1316.9 (boots 1316.3 1317.6) | CE mean 1311.7 (boots 1313.6 1309.9) | -0.40% slower
+greedy prose at 1 clients: CA mean 82.7 (boots 82.6 82.7) | CE mean 82.2 (boots 82.8 81.5) | +0.59% slower
+greedy prose at 2 clients: CA mean 85.7 (boots 85.3 86.1) | CE mean 85.7 (boots 86.6 84.9) | -0.02% slower
+greedy prose at 4 clients: CA mean 113.7 (boots 112.6 114.8) | CE mean 113.7 (boots 114.5 112.8) | +0.01% slower
+greedy prose at 6 clients: CA mean 118.3 (boots 111.6 125.1) | CE mean 122.6 (boots 121.8 123.3) | -3.55% slower
+greedy prose at 8 clients: CA mean 119.9 (boots 120.3 119.4) | CE mean 122.0 (boots 121.6 122.3) | -1.77% slower
+greedy code at 1 clients: CA mean 115.1 (boots 114.9 115.3) | CE mean 115.0 (boots 115.6 114.3) | +0.12% slower
+greedy code at 2 clients: CA mean 137.7 (boots 136.6 138.8) | CE mean 137.9 (boots 138.6 137.2) | -0.17% slower
+greedy code at 4 clients: CA mean 167.9 (boots 166.6 169.2) | CE mean 168.1 (boots 168.9 167.3) | -0.15% slower
+greedy code at 6 clients: CA mean 173.3 (boots 174.6 171.9) | CE mean 181.5 (boots 174.4 188.6) | -4.74% slower
+greedy code at 8 clients: CA mean 176.9 (boots 180.0 173.9) | CE mean 174.3 (boots 173.3 175.3) | +1.49% slower  <- over the limit (CE 173.3..175.3)
+sampled prose at 1 clients: CA mean 78.4 (boots 77.9 78.8) | CE mean 78.8 (boots 78.9 78.6) | -0.51% slower
+sampled prose at 2 clients: CA mean 83.2 (boots 82.8 83.6) | CE mean 83.0 (boots 83.8 82.3) | +0.15% slower
+sampled prose at 4 clients: CA mean 109.2 (boots 108.3 110.2) | CE mean 109.1 (boots 110.0 108.3) | +0.09% slower
+sampled prose at 6 clients: CA mean 112.0 (boots 110.9 113.0) | CE mean 112.3 (boots 115.8 108.8) | -0.25% slower
+sampled prose at 8 clients: CA mean 116.8 (boots 115.7 117.9) | CE mean 114.8 (boots 111.9 117.7) | +1.71% slower  <- over the limit (CE 111.9..117.7)
+sampled code at 1 clients: CA mean 113.6 (boots 112.8 114.4) | CE mean 113.9 (boots 114.7 113.0) | -0.24% slower
+sampled code at 2 clients: CA mean 143.3 (boots 141.9 144.7) | CE mean 143.6 (boots 144.4 142.7) | -0.20% slower
+sampled code at 4 clients: CA mean 159.4 (boots 157.8 161.0) | CE mean 160.0 (boots 160.5 159.6) | -0.41% slower
+sampled code at 6 clients: CA mean 171.3 (boots 165.6 177.1) | CE mean 167.2 (boots 166.0 168.4) | +2.41% slower  <- over the limit (CE 166.0..168.4 inside CA 165.6..177.1)
+sampled code at 8 clients: CA mean 171.8 (boots 178.4 165.1) | CE mean 172.1 (boots 175.1 169.1) | -0.19% slower
+reply digests: 58 keys over 4 boots, 0 key(s) missing a boot's report, 0 with more than one digest across the boots
+C1 SYNC: NOT ACCEPTED: 3 cell(s) more than 1% slower (1 inside CA's boots' range): greedy code at 8 clients; sampled prose at 8 clients; sampled code at 6 clients
+== C2 prompt cells: the fraction faster for CE than CA (report only, no verdict)
+cold 8k first token: CA mean 4052.5 (boots 4087.0 4018.0) | CE mean 3995.2 (boots 3991.5 3999.0) | +1.41% faster
+cold 32k first token: CA mean 14986.5 (boots 14998.5 14974.5) | CE mean 14943.5 (boots 14947.5 14939.5) | +0.29% faster
+cold 120k first token: CA mean 55978.5 (boots 56026.5 55930.5) | CE mean 55847.0 (boots 55860.5 55833.5) | +0.23% faster
+conversation turns 2+ first token: CA mean 1316.9 (boots 1316.3 1317.6) | CE mean 1311.7 (boots 1313.6 1309.9) | +0.40% faster
+== C3 boot noise: (max - min) of a group's boots over its mean, per cell (report only, no verdict)
+cold 8k first token: CA spread 1.70% of mean | CE spread 0.19% of mean
+cold 32k first token: CA spread 0.16% of mean | CE spread 0.05% of mean
+cold 120k first token: CA spread 0.17% of mean | CE spread 0.05% of mean
+conversation turns 2+ first token: CA spread 0.10% of mean | CE spread 0.28% of mean
+greedy prose at 1 clients: CA spread 0.12% of mean | CE spread 1.55% of mean
+greedy prose at 2 clients: CA spread 0.98% of mean | CE spread 1.98% of mean
+greedy prose at 4 clients: CA spread 1.89% of mean | CE spread 1.48% of mean
+greedy prose at 6 clients: CA spread 11.47% of mean | CE spread 1.29% of mean
+greedy prose at 8 clients: CA spread 0.79% of mean | CE spread 0.60% of mean
+greedy code at 1 clients: CA spread 0.38% of mean | CE spread 1.11% of mean
+greedy code at 2 clients: CA spread 1.57% of mean | CE spread 1.00% of mean
+greedy code at 4 clients: CA spread 1.54% of mean | CE spread 0.95% of mean
+greedy code at 6 clients: CA spread 1.52% of mean | CE spread 7.83% of mean
+greedy code at 8 clients: CA spread 3.48% of mean | CE spread 1.14% of mean
+sampled prose at 1 clients: CA spread 1.21% of mean | CE spread 0.47% of mean
+sampled prose at 2 clients: CA spread 1.00% of mean | CE spread 1.85% of mean
+sampled prose at 4 clients: CA spread 1.81% of mean | CE spread 1.60% of mean
+sampled prose at 6 clients: CA spread 1.90% of mean | CE spread 6.22% of mean
+sampled prose at 8 clients: CA spread 1.88% of mean | CE spread 5.03% of mean
+sampled code at 1 clients: CA spread 1.39% of mean | CE spread 1.46% of mean
+sampled code at 2 clients: CA spread 1.92% of mean | CE spread 1.16% of mean
+sampled code at 4 clients: CA spread 1.99% of mean | CE spread 0.55% of mean
+sampled code at 6 clients: CA spread 6.69% of mean | CE spread 1.44% of mean
+sampled code at 8 clients: CA spread 7.70% of mean | CE spread 3.48% of mean
+== C4 digests: ce1 and ce2 against ca1 (<queue-rows>/queue99/f99-c)
+ce1: 58 digest key(s), 0 on one side only, 0 differing
+ce1: EQUAL to ca1 at every key
+ce2: 58 digest key(s), 0 on one side only, 0 differing
+ce2: EQUAL to ca1 at every key
+C4 DIGESTS: EQUAL, every reply digest of ce1 and ce2 equals ca1's
