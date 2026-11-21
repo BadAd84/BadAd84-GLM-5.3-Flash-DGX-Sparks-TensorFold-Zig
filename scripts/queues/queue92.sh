@@ -172,7 +172,7 @@ want ut2d && unit ut2d glm53-zig:ut2 off "-e TF_GLM_DSCORES=0"
 want ut2b && unit ut2b glm53-zig:ut2 off ""
 want tn1 && unit tn1 glm53-zig:m140a prod ""
 want tn2 && unit tn2 glm53-zig:m140a prod ""
-want pd && unit pd glm53-zig:p3616 off "-e TF_GLM_DRAFT_SPLIT=1" "${EXPECT_PD:-DRAFT_SPLIT}"
+want pd && unit pd glm53-zig:p3616 off "-e TF_GLM_DRAFT_SPLIT=1" "${EXPECT_PD:-DRAFT_SPLIT}" 1
 want pm && unit pm glm53-zig:p3659 off "-e TF_GLM_MOE_DIRECT=1" "${EXPECT_PM:-MOE_DIRECT}"
 want pg && unit pg glm53-zig:p2279 off "-e TF_GLM_GRAPHS=1" "${EXPECT_PG:-GRAPHS}"
 want s10a && unit s10a glm53-zig:u1210 off ""
