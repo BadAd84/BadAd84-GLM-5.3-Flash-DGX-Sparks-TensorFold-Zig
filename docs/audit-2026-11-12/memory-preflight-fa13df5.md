@@ -48,11 +48,17 @@ The pin-era boots never met any of this because their admission read MemAvailabl
 
 ## What will settle it
 
-A queue that, before each boot attempt, writes an idle snapshot of all three boxes, then boots and records the engine's own "N GiB free less a M GiB reserve" line from rank 0, and climbs rungs in
-this order: snapshot only; wait 60 s, then 120 s, then 240 s (each its own attempt and snapshot, so the drain curve is in the files); drop the page cache; drop it and compact. The rung that passes
-is kept for the rest of the queue, and the queue then re-runs queue101's four arms. Guessing between the three candidates is what this is designed to prevent.
+`scripts/bootfix-probe.sh` is that measurement, committed 2026-11-21. Before each boot attempt it writes an idle snapshot of all three boxes (MemAvailable, Cached, MemFree and the
+pages parked on the per-CPU lists, read with `awk` on the box so no python is needed remotely), then boots the image and records the engine's own "N GiB free less a M GiB reserve" line
+from rank 0, and climbs rungs in this order: snapshot only; wait 60 s; wait 180 s; drop the page cache in a throwaway container from the same image; drop it and compact as well. Each
+rung is its own attempt with its own snapshot, so the drain curve is in the files, and the row that boots names the fix. It leaves `$OUT/attempts.tsv`, one row an attempt.
+
+Its first version had a dry-run mode that still called the serve's stop script, which would have killed a live arm; every stop, container removal and cache drop is now gated on
+`BOOTFIX_DRYRUN`. Recorded because a probe whose "read-only" mode writes is worse than no probe: the run it interrupts is the one whose numbers it was going to explain.
+
+Guessing between the three candidates is what this is designed to prevent.
 
 ## Who is affected
 
 Every measurement on the re-seated series, and every retirement window that follows it, boots a tree with `c896bfc0c`. The pin-era image `m130a` is unaffected: it reads MemAvailable, which is
-why queue95 through queue102 can run on it while this is open. Production (the Python stack) is not affected; it stays down for the campaign.
+why queue95, 97, 98, 99, 100, 102, 105 and 106 all run on it while this is open. Production (the Python stack) is not affected; it stays down for the campaign.
