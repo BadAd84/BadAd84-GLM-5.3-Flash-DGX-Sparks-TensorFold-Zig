@@ -53,23 +53,24 @@ must be measured with drafts on before the gap is attributed. That arm is the ne
 
 ## Where the Zig stack stands against it
 
-From `docs/BENCH.md` (same instrument, same prompts, TP=3 on spark1-3, DRAFTER=0, KNOBS=off unless
-stated):
+Current cells (2026-11-21): the recipe as committed on the pin, image `m130a`, `KNOBS=prod`, two boots of queue91 (`mn1`, `mn2`), three rounds a cell, the campaign's own field
+(`agg_tok_s`, which is what `scripts/queue-scores/score91.py` reads). Rows: `docs/audit-2026-11-12/queue-rows/queue91/f91-c`.
 
-| streams | production (Python) | Zig 39 patches, drafts on | delta | Zig stock pin | Zig 39 patches, drafts off |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 83.43 | 51.28 | -38.6% | 49.69 | 48.95 |
-| 2 | 91.07 | 59.46 | -34.7% | 54.72 | 54.78 |
-| 4 | 119.97 | 81.42 | -32.1% | 72.34 | 72.54 |
-| 6 | 111.99 | 108.05 | -3.5% | 90.77 | 93.04 |
-| 8 | 136.18 | 134.45 | -1.3% | 109.35 | 110.95 |
+| streams | production (Python) | Zig recipe, 2026-11-21 | delta |
+|---:|---:|---:|---:|
+| 1 | 83.43 | 82.72 | -0.86% |
+| 2 | 91.07 | 85.85 | -5.74% |
+| 4 | 119.97 | 114.27 | -4.75% |
+| 6 | 111.99 | 114.68 | +2.40% |
+| 8 | 136.18 | 125.32 | -7.98% |
 
-The shape of the gap is the useful result: at six and eight streams the Zig stack is at parity (within
-1.3 to 3.5 percent) and at one to four streams production is 32 to 39 percent ahead. The drafts-on arm
-also runs L2PF/PREFILL_ROWS/FILL_ROWS off (it predates their addition to the measured set), so those
-three pin knobs are unmeasured headroom here. The low-concurrency lead matches production's
-cache-and-keeps family (`CACHE_ENTRIES`, `KEEP_PER_CHAT`, `KEPT_BYTES_GIB`), which the Zig tree does not
-have at all, on top of the prefill/overlap knobs.
+Cold first token is where the gap actually is: production 2,908 / 11,054 / 41,904 ms against 3,990 / 14,910 / 55,653 ms at 8k / 32k / 120k, so 1.08 / 3.86 / 13.75 seconds behind
+(OVERNIGHT section 72). A warm turn of a ~113k conversation is 1,313 ms against 668 ms (section 72), and 1,326 against 869 ms on queue100's control arm (section 80).
+
+The shape of the gap, as corrected: decode at one stream is level, at two and four it is about 5% behind, at six it is ahead, and at eight it is 8% behind with that cell's own spread
+larger than the deficit (the six rows there are 118.2, 127.4, 138.3, 118.5, 125.9 and 125.3). **The prompt path is the real gap**, not decode: a cold 120k prompt is 13.75 s behind
+production and a warm resumed turn is about 2x it. The 11 November table of 39-patch drafts-off values, which called six and eight streams parity and one to four 32% to 39% behind,
+was measured on the v1.2.9-era stack before the draft, X3, item-plan and prompt work landed; it is superseded and its numbers are in git history.
 
 Parity work: the gap per level is the production column minus the best bit-exact Zig column at that
 level; the coverage and the open levers are tracked in PORT-LEDGER and BENCH.
@@ -102,20 +103,25 @@ stack runs without any of them, and that is the parity gap to close:
 | `DISPLAY_KV_MIB` / `DISPLAY_KV_BACKEND` | `2032` / `dispram` | python | the display-KV overlay (absent at the pin) |
 | `SPILL_GIB` | `120` | python | the spill tier (the pin has `--spill-gib`/`--snapshot-dir` only) |
 
-Also measured: the prompt cache is NOT part of the gap. The pin's serve already exposes `--prompt-cache-gib`
-and `--prompt-cache-disk`, and our boots log a 16 GiB prompt cache, so both engines keep prompt states; the
-P1 decode difference is in the decode-path knobs, not in cache reuse.
+Also measured: **cache and kept-state policy IS part of the warm-turn gap, though cache reuse at the pin was not.** The pin's serve already exposed `--prompt-cache-gib` and
+`--prompt-cache-disk` and our boots log a 16 GiB prompt cache, so both engines keep prompt states, and the one-stream decode difference is in the decode path. But the warm resumed
+turn is the largest single deficit (about 2x production), and two upstream switches move exactly it: `TF_CACHE_EVICT=decayed_resume` rebuilt 47.40% fewer prompt rows on six concurrent
+conversations (14,396,073 to 7,572,137), cut the summed first-token times 47.16% and took an agent turn's mean first token from 23.7 s to 2.1 s, with 103 of 138 agent turns losing their
+conversation's state without it and none with it (section 75); `TF_GLM_REQUEST_STARTS=1` takes 34.51% off a warm turn (section 80). Neither is in `prod.env`: the first is held by
+three 6- and 8-client decode cells inside their own spread (section 78), the second by six cells, one of them the cold 8k that `patches/solo-cuts` exists to fix (section 80).
 
 Tiers, by exact-name grep of the clean pin and the newer era tree (`ai-engine` fair-base): **pin** = the
 pinned upstream already implements it, so it is an env switch today; **era** = absent at the pin but
 implemented in the newer Zig tree, so the port has a reference; **python** = present only in the
-production Python stack. Where the knobs stand at the pinned upstream (measured by grepping the clean pin tree, `work/pin/tree`,
-for each name): only `TF_GLM_L2PF`, `TF_GLM_PREFILL_ROWS` and `TF_GLM_FILL_ROWS` exist there; the other
-fourteen are absent from the whole pin, so they are not a wiring job in our GLM path but code the recipe
-carries that upstream does not. Each is a port item: carry the knob's code as a numbered patch, prove it
-bit-exact where the knob is numeric-only, and A/B it at 1/2/4/6/8 before it joins the measured set. The parked rows in
-PORT-LEDGER already name several (MULTI_WINDOW, DRAFT_WIDE, the disk family); this table is the
-target's own list, which is why it lives with the numbers.
+production Python stack.
+
+**This table is an 11 November snapshot and its absence count is obsolete.** It has 19 rows (two of them
+pairs), three of which existed at the pin, so the earlier sentence here, "the other fourteen are absent",
+never described it, and several rows have since been ported, adopted or superseded by upstream itself
+(`TF_GLM_EXL3_DEC_ORDER`, kept states, `CHUNK_SOLO`, the GLM disk tier, request starts, `TF_GLM_DSCORES`
+for the decode index, and upstream #3697's per-rank KDA padding). The current list of what is ours and what
+upstream now does itself is the overlap ledger in `docs/KNOBS.md` and the per-patch audit in
+`work/absorb/ABSORPTION.md`; a row of this table is a lead to check against those, not a current gap.
 
 ## The round-time target, as their production states it (MiaAI-Lab AGENT-v2, 2026-11-11)
 
@@ -133,6 +139,7 @@ Their conclusion, which is the shape of our problem too: the per-step FIXED cost
 more than per-row cost, because 1 ms off the plain step is ~+8% real decode while 0.1 ms off each verify row is
 only ~+2%.
 
-Against that, ours on the same class of hardware: a verify round of 20.1 ms at one row (their 7.05), and a
-DFlash2 draft pass of 26.2 ms (their 1.1). The drafter is the widest single gap in the stack, then the plain
-step, and both sit in the fixed per-site machinery rather than in per-row work.
+Against that, ours at the same moment (11 November) was a verify round of 20.1 ms at one row (their 7.05) and a DFlash2 draft pass of 26.2 ms (their 1.1). **That 26.2 ms figure is
+superseded and should not be used to rank work:** later captures put our drafter step at 3.40 ms against their 2.3 (OVERNIGHT section 24) and find drafting level between the arms
+(section 44), and the drafter's acceptance is in theirs and ours' band (section 44). What is left of the one-row gap is the fixed per-site machinery of the decode step, not the
+drafter; the prompt path, measured separately above, is the larger deficit.

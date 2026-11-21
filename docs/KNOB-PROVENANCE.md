@@ -36,7 +36,10 @@ the speed, add the setting, and then never turn it on? This file answers it knob
 
 `TF_GLM_KDA_DUMP` (0005) is not a speed lever: it writes the KDA input stack to a file for the pad's FP64 gate, and goes with that gate, not with this list.
 
-## B. Proven faster, not turned on
+## B. Benefit measured, adoption blocked (not speed left on by oversight)
+
+Every row here has a measured gain and a measured reason it is not in `prod.env`; none of them is a switch someone forgot. The reason is a failing cell that the repo's own rule
+refuses, or an owner-only decision. Read the "why it is off" column as the blocker, not as a note.
 
 | knob | the speed, and why it is off |
 |---|---|
