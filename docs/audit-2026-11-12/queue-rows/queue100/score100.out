@@ -1,0 +1,73 @@
+== score100: q100 <queue-rows>/queue100/f100-c
+== C1 sync: CE (ce1 ce2) against CA (ca1 ca2); slower is positive, the limit 1.0%
+cold 8k first token: CA mean 4028.8 (boots 3992.5 4065.0) | CE mean 4081.2 (boots 4054.5 4108.0) | +1.30% slower  <- over the limit (CE 4054.5..4108.0)
+cold 32k first token: CA mean 14992.5 (boots 14829.0 15156.0) | CE mean 15134.8 (boots 15040.0 15229.5) | +0.95% slower
+cold 120k first token: CA mean 55951.0 (boots 55311.0 56591.0) | CE mean 56413.5 (boots 56013.0 56814.0) | +0.83% slower
+conversation turns 2+ first token: CA mean 1326.3 (boots 1311.7 1340.9) | CE mean 868.6 (boots 868.4 868.9) | -34.51% slower
+greedy prose at 1 clients: CA mean 81.6 (boots 82.5 80.6) | CE mean 81.4 (boots 82.7 80.2) | +0.18% slower
+greedy prose at 2 clients: CA mean 85.4 (boots 86.0 84.7) | CE mean 85.6 (boots 86.5 84.7) | -0.27% slower
+greedy prose at 4 clients: CA mean 113.1 (boots 113.8 112.5) | CE mean 112.3 (boots 112.5 112.1) | +0.71% slower
+greedy prose at 6 clients: CA mean 114.2 (boots 114.3 114.1) | CE mean 120.3 (boots 118.3 122.3) | -5.33% slower
+greedy prose at 8 clients: CA mean 119.8 (boots 122.2 117.3) | CE mean 120.0 (boots 118.9 121.1) | -0.21% slower
+greedy code at 1 clients: CA mean 114.4 (boots 115.5 113.3) | CE mean 114.1 (boots 115.4 112.8) | +0.25% slower
+greedy code at 2 clients: CA mean 137.3 (boots 138.2 136.4) | CE mean 137.3 (boots 137.6 137.0) | +0.01% slower
+greedy code at 4 clients: CA mean 166.6 (boots 167.4 165.8) | CE mean 166.3 (boots 166.2 166.4) | +0.20% slower
+greedy code at 6 clients: CA mean 173.4 (boots 175.7 171.1) | CE mean 169.3 (boots 177.8 160.9) | +2.34% slower  <- over the limit (CE 160.9..177.8)
+greedy code at 8 clients: CA mean 181.2 (boots 184.5 177.9) | CE mean 175.9 (boots 178.3 173.4) | +2.94% slower  <- over the limit (CE 173.4..178.3)
+sampled prose at 1 clients: CA mean 78.0 (boots 78.6 77.5) | CE mean 76.9 (boots 77.3 76.5) | +1.45% slower  <- over the limit (CE 76.5..77.3)
+sampled prose at 2 clients: CA mean 82.3 (boots 82.8 81.9) | CE mean 82.0 (boots 82.0 82.0) | +0.37% slower
+sampled prose at 4 clients: CA mean 108.5 (boots 109.4 107.6) | CE mean 108.0 (boots 108.0 108.1) | +0.44% slower
+sampled prose at 6 clients: CA mean 112.7 (boots 114.8 110.7) | CE mean 112.2 (boots 105.3 119.1) | +0.48% slower
+sampled prose at 8 clients: CA mean 117.4 (boots 118.6 116.2) | CE mean 112.8 (boots 113.2 112.5) | +3.89% slower  <- over the limit (CE 112.5..113.2)
+sampled code at 1 clients: CA mean 112.6 (boots 113.2 112.0) | CE mean 112.9 (boots 112.6 113.2) | -0.25% slower
+sampled code at 2 clients: CA mean 142.6 (boots 143.0 142.2) | CE mean 141.4 (boots 142.0 140.8) | +0.81% slower
+sampled code at 4 clients: CA mean 158.3 (boots 159.1 157.6) | CE mean 157.6 (boots 157.6 157.5) | +0.48% slower
+sampled code at 6 clients: CA mean 169.2 (boots 165.0 173.5) | CE mean 160.8 (boots 158.1 163.4) | +4.99% slower  <- over the limit (CE 158.1..163.4)
+sampled code at 8 clients: CA mean 171.6 (boots 172.9 170.2) | CE mean 171.7 (boots 174.5 168.8) | -0.06% slower
+reply digests: 58 keys over 4 boots, 0 key(s) missing a boot's report, 0 with more than one digest across the boots
+C1 SYNC: NOT ACCEPTED: 6 cell(s) more than 1% slower (0 inside CA's boots' range): cold 8k first token; greedy code at 6 clients; greedy code at 8 clients; sampled prose at 1 clients; sampled prose at 8 clients; sampled code at 6 clients
+== C2 prompt cells: the fraction faster for CE than CA (report only, no verdict)
+cold 8k first token: CA mean 4028.8 (boots 3992.5 4065.0) | CE mean 4081.2 (boots 4054.5 4108.0) | -1.30% faster
+cold 32k first token: CA mean 14992.5 (boots 14829.0 15156.0) | CE mean 15134.8 (boots 15040.0 15229.5) | -0.95% faster
+cold 120k first token: CA mean 55951.0 (boots 55311.0 56591.0) | CE mean 56413.5 (boots 56013.0 56814.0) | -0.83% faster
+conversation turns 2+ first token: CA mean 1326.3 (boots 1311.7 1340.9) | CE mean 868.6 (boots 868.4 868.9) | +34.51% faster
+== C3 boot noise: (max - min) of a group's boots over its mean, per cell (report only, no verdict)
+cold 8k first token: CA spread 1.80% of mean | CE spread 1.31% of mean
+cold 32k first token: CA spread 2.18% of mean | CE spread 1.25% of mean
+cold 120k first token: CA spread 2.29% of mean | CE spread 1.42% of mean
+conversation turns 2+ first token: CA spread 2.20% of mean | CE spread 0.05% of mean
+greedy prose at 1 clients: CA spread 2.32% of mean | CE spread 3.14% of mean
+greedy prose at 2 clients: CA spread 1.55% of mean | CE spread 2.16% of mean
+greedy prose at 4 clients: CA spread 1.19% of mean | CE spread 0.38% of mean
+greedy prose at 6 clients: CA spread 0.10% of mean | CE spread 3.31% of mean
+greedy prose at 8 clients: CA spread 4.12% of mean | CE spread 1.88% of mean
+greedy code at 1 clients: CA spread 1.96% of mean | CE spread 2.34% of mean
+greedy code at 2 clients: CA spread 1.26% of mean | CE spread 0.42% of mean
+greedy code at 4 clients: CA spread 0.93% of mean | CE spread 0.08% of mean
+greedy code at 6 clients: CA spread 2.66% of mean | CE spread 10.01% of mean
+greedy code at 8 clients: CA spread 3.66% of mean | CE spread 2.77% of mean
+sampled prose at 1 clients: CA spread 1.32% of mean | CE spread 1.00% of mean
+sampled prose at 2 clients: CA spread 1.13% of mean | CE spread 0.04% of mean
+sampled prose at 4 clients: CA spread 1.71% of mean | CE spread 0.11% of mean
+sampled prose at 6 clients: CA spread 3.57% of mean | CE spread 12.33% of mean
+sampled prose at 8 clients: CA spread 1.98% of mean | CE spread 0.68% of mean
+sampled code at 1 clients: CA spread 1.09% of mean | CE spread 0.51% of mean
+sampled code at 2 clients: CA spread 0.55% of mean | CE spread 0.80% of mean
+sampled code at 4 clients: CA spread 0.96% of mean | CE spread 0.08% of mean
+sampled code at 6 clients: CA spread 5.02% of mean | CE spread 3.30% of mean
+sampled code at 8 clients: CA spread 1.59% of mean | CE spread 3.36% of mean
+== C4 digests: ce1 and ce2 against ca1 (<queue-rows>/queue100/f100-c)
+ce1: 58 digest key(s), 0 on one side only, 0 differing
+ce1: EQUAL to ca1 at every key
+ce2: 58 digest key(s), 0 on one side only, 0 differing
+ce2: EQUAL to ca1 at every key
+C4 DIGESTS: EQUAL, every reply digest of ce1 and ce2 equals ca1's
+== C5 adoption: TF_GLM_REQUEST_STARTS=1 against the recipe; the gain read is C2's 'conversation turns 2+ first token' cell and the threshold is 5.0% faster for CE than CA
+warm turns: CA mean 1326.3 (boots 1311.7 1340.9) | CE mean 868.6 (boots 868.4 868.9) | +34.51% faster for CE than CA
+  over C1's limit: cold 8k first token: CE 4054.5..4108.0, CA 3992.5..4065.0
+  over C1's limit: greedy code at 6 clients: CE 160.9..177.8, CA 171.1..175.7
+  over C1's limit: greedy code at 8 clients: CE 173.4..178.3, CA 177.9..184.5
+  over C1's limit: sampled prose at 1 clients: CE 76.5..77.3, CA 77.5..78.6
+  over C1's limit: sampled prose at 8 clients: CE 112.5..113.2, CA 116.2..118.6
+  over C1's limit: sampled code at 6 clients: CE 158.1..163.4, CA 165.0..173.5
+C5 ADOPTION: HOLD BACK: C1 not accepted: 6 cell(s) more than 1% slower (0 inside CA's boots' range): cold 8k first token; greedy code at 6 clients; greedy code at 8 clients; sampled prose at 1 clients; sampled prose at 8 clients; sampled code at 6 clients
