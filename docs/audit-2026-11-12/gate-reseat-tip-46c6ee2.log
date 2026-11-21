@@ -1,0 +1,87 @@
+SG run sg-20261121-000728
+SG pin 46c6ee229d2ea28bde8b273381c0f0443861cdd6 commit=46c6ee229d2ea28bde8b273381c0f0443861cdd6 tree=56ccf3b8bf3a621c094e6cfb1981af904dd517e7 zig=0.17.0 sha256=a501a46973e3bed791324002ef378c3851f9e06db80c22e165a4b68fb466916c
+SG dir d0 work/reseat-tip-lane/out/patches/engine files=38
+SG dir d1 work/reseat-tip-lane/out/patches/pr1411 files=2
+SG dir d2 work/reseat-tip-lane/out/patches/cache-salt files=2
+SG dir d3 work/reseat-tip-lane/out/patches/learn-starts files=1
+SG dir d4 work/reseat-tip-lane/out/patches/solo-cuts files=2
+SG dir d5 work/reseat-tip-lane/out/patches/disk-any-position files=1
+SG dir d6 work/reseat-tip-lane/out/patches/restore-held files=1
+SG tree base patches=0 dirs=-
+SG tree stack patches=47 dirs=d0,d1,d2,d3,d4,d5,d6
+SG expect stack 1fd680b2b681e80d1e40492f881b444602a5bc89 from=--expect
+SG expect base 56ccf3b8bf3a621c094e6cfb1981af904dd517e7 from=pin-tree
+SG options host=<user>@<host> jobs=4 nice=15 mem-max=8G max-load=90 clean=0
+SG start 2026-11-21T00:07:42Z host=<gate-host> arch=x86_64 cpus=16 nice=15 memory.max=8589934592 jobs=4
+SG script 25658bdc60f7ccb69fc8f2e155db9176a1d1732f0485cefae385a19eb982858d  scripts/gate-names.sh
+SG script 879798709f6fe9e490704bdd8d5d551b8d4419864aafafee6186f62846c3c5a7  scripts/gates.sh
+SG script e23865c7698ddc71e0b4c98963f09d72e9990834dd07c02d33175498ab8214d9  scripts/lean.sh
+== build base 00:07:42
+SG id base 56ccf3b8bf3a621c094e6cfb1981af904dd517e7 applied=0
+== build stack 00:07:49
+SG id stack 1fd680b2b681e80d1e40492f881b444602a5bc89 applied=47
+SG home ~/spark-gates/sg-20261121-000728/home tools: zig-x86_64-linux-0.17.0 
+== gates base 00:08:14
+[base gates] check-native-cuda-host rc=0 | Build Summary: 8/8 steps succeeded
+[base gates] test-cuda-host rc=0 | Build Summary: 440/440 steps succeeded; 7811/7854 tests passed (43 skipped)
+[base gates] compile-cuda-tests rc=0 | Build Summary: 10/10 steps succeeded
+[base gates] test-glm-ring-host rc=0 | Build Summary: 4/4 steps succeeded; 2/2 tests passed
+[base gates] test-glm-logprobs-host rc=0 | Build Summary: 4/4 steps succeeded; 10/10 tests passed
+[base gates] test-glm-onepass-order-host: not a step of this tree
+[base gates] test-rows-host rc=0 | Build Summary: 3/3 steps succeeded
+[base gates] test-glm-pdl-scan rc=0 | Build Summary: 4/4 steps succeeded; 3/3 tests passed
+[base gates] test-kernel-contract rc=0 | Build Summary: 38/38 steps succeeded; 269/269 tests passed
+[base gates] fmt rc=0 
+[base gates] GATES-DONE sg-20261121-000728-base bad=0
+SG gates base rc=0
+== gates stack 00:34:02
+[stack gates] check-native-cuda-host rc=0 | Build Summary: 8/8 steps succeeded
+[stack gates] test-cuda-host rc=0 | Build Summary: 444/444 steps succeeded; 8027/8070 tests passed (43 skipped)
+[stack gates] compile-cuda-tests rc=0 | Build Summary: 10/10 steps succeeded
+[stack gates] test-glm-ring-host rc=0 | Build Summary: 4/4 steps succeeded; 3/3 tests passed
+[stack gates] test-glm-logprobs-host rc=0 | Build Summary: 4/4 steps succeeded; 10/10 tests passed
+[stack gates] test-glm-onepass-order-host rc=0 | Build Summary: 3/3 steps succeeded
+[stack gates] test-rows-host rc=0 | Build Summary: 3/3 steps succeeded
+[stack gates] test-glm-pdl-scan rc=0 | Build Summary: 4/4 steps succeeded; 3/3 tests passed
+[stack gates] test-kernel-contract rc=0 | Build Summary: 38/38 steps succeeded; 269/269 tests passed
+[stack gates] fmt rc=0 
+[stack gates] GATES-DONE sg-20261121-000728-stack bad=0
+SG gates stack rc=0
+== gate-names base stack 00:53:28
+[stack names] sg-20261121-000728-base: 0 failing names | 7811/7854 tests passed (43 skipped)
+[stack names] sg-20261121-000728-stack: 0 failing names | 8027/8070 tests passed (43 skipped)
+[stack names] only sg-20261121-000728-stack fails: none
+[stack names] only sg-20261121-000728-base fails: none
+SG names stack rc=0
+== lean base stack 00:53:28
+[stack lean] base ~/spark-gates/sg-20261121-000728/trees/base: 7202 files, 168 problems
+[stack lean] head ~/spark-gates/sg-20261121-000728/trees/stack: 7272 files, 168 problems
+[stack lean] lean: 168 problems, 168 on the base, 0 new
+SG lean stack rc=0
+== verdict 00:53:33
+[verdict] run sg-20261121-000728; pin 46c6ee229d2ea28bde8b273381c0f0443861cdd6 commit=46c6ee229d2ea28bde8b273381c0f0443861cdd6 tree=56ccf3b8bf3a621c094e6cfb1981af904dd517e7 zig=0.17.0 sha256=a501a46973e3bed791324002ef378c3851f9e06db80c22e165a4b68fb466916c
+[verdict]                              base          stack
+[verdict] patches                      0/0           47/47
+[verdict] tree id                      56ccf3b8bf3a  1fd680b2b681
+[verdict] expected                     match         match
+[verdict] check-native-cuda-host       0             0
+[verdict] test-cuda-host               0             0
+[verdict] compile-cuda-tests           0             0
+[verdict] test-glm-ring-host           0             0
+[verdict] test-glm-logprobs-host       0             0
+[verdict] test-glm-onepass-order-host  n/a           0
+[verdict] test-rows-host               0             0
+[verdict] test-glm-pdl-scan            0             0
+[verdict] test-kernel-contract         0             0
+[verdict] fmt                          0             0
+[verdict] gate-names                   -             0
+[verdict] lean new                     -             0
+[verdict] verdict                      reference     PASS
+[verdict] rc per step from scripts/gates.sh (n/a: not a step of that tree, -: no result); test-cuda-host at rc 1 passes only when gate-names finds every failing name in base's set
+[verdict] test-cuda-host failing names, as gates.sh listed them:
+[verdict]   base: none listed
+[verdict]   stack: none listed, none new
+[verdict] lean stack: base 7202 files 168 problems, head 7272 files 168 problems, 0 new
+[verdict] VERDICT PASS: stack pass against base
+SG verdict rc=0
+SPARK-GATES-DONE 2026-11-21T00:53:33Z verdict=PASS
