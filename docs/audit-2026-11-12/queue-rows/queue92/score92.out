@@ -1,0 +1,216 @@
+== the ladder: stock upstream at four points, KNOBS=off, the same boxes and instrument; faster is positive
+-- v1.2.10 against v1.2.9 (and against v1.2.9)
+cold 8k first token: +1.18% (cumulative +1.18%)  CLEAR gain
+cold 32k first token: +1.30% (cumulative +1.30%)  CLEAR gain
+cold 120k first token: +1.49% (cumulative +1.49%)  CLEAR gain
+conversation turns 2+ first token: +0.74% (cumulative +0.74%)  CLEAR gain
+greedy prose at 1 clients: +1.26% (cumulative +1.26%)  CLEAR gain
+greedy prose at 2 clients: +0.90% (cumulative +0.90%)
+greedy prose at 4 clients: +1.15% (cumulative +1.15%)  CLEAR gain
+greedy prose at 6 clients: +0.86% (cumulative +0.86%)  CLEAR gain
+greedy prose at 8 clients: -2.17% (cumulative -2.17%)
+greedy code at 1 clients: +1.43% (cumulative +1.43%)  CLEAR gain
+greedy code at 2 clients: +0.60% (cumulative +0.60%)
+greedy code at 4 clients: +1.23% (cumulative +1.23%)  CLEAR gain
+greedy code at 6 clients: -2.62% (cumulative -2.62%)  CLEAR loss
+greedy code at 8 clients: +3.55% (cumulative +3.55%)  CLEAR gain
+sampled prose at 1 clients: +1.08% (cumulative +1.08%)  CLEAR gain
+sampled prose at 2 clients: +1.46% (cumulative +1.46%)  CLEAR gain
+sampled prose at 4 clients: +0.93% (cumulative +0.93%)
+sampled prose at 6 clients: -2.98% (cumulative -2.98%)  CLEAR loss
+sampled prose at 8 clients: +1.96% (cumulative +1.96%)  CLEAR gain
+sampled code at 1 clients: +1.19% (cumulative +1.19%)
+sampled code at 2 clients: +1.30% (cumulative +1.30%)
+sampled code at 4 clients: +0.95% (cumulative +0.95%)
+sampled code at 6 clients: +1.79% (cumulative +1.79%)  CLEAR gain
+sampled code at 8 clients: -7.34% (cumulative -7.34%)  CLEAR loss
+reply digests v1.2.9 -> v1.2.10: 0 key(s) with more than one digest
+-- v1.3.0 against v1.2.10 (and against v1.2.9)
+cold 8k first token: -0.75% (cumulative +0.44%)  CLEAR loss
+cold 32k first token: -0.92% (cumulative +0.39%)  CLEAR loss
+cold 120k first token: -1.00% (cumulative +0.51%)  CLEAR loss
+conversation turns 2+ first token: -0.27% (cumulative +0.47%)
+greedy prose at 1 clients: -0.00% (cumulative +1.26%)
+greedy prose at 2 clients: +0.45% (cumulative +1.35%)  CLEAR gain
+greedy prose at 4 clients: -0.05% (cumulative +1.10%)
+greedy prose at 6 clients: -1.08% (cumulative -0.23%)
+greedy prose at 8 clients: -0.12% (cumulative -2.29%)
+greedy code at 1 clients: -0.31% (cumulative +1.11%)  CLEAR loss
+greedy code at 2 clients: +0.56% (cumulative +1.16%)  CLEAR gain
+greedy code at 4 clients: -0.50% (cumulative +0.72%)  CLEAR loss
+greedy code at 6 clients: +1.90% (cumulative -0.78%)
+greedy code at 8 clients: -1.36% (cumulative +2.14%)  CLEAR loss
+sampled prose at 1 clients: -0.12% (cumulative +0.95%)  CLEAR loss
+sampled prose at 2 clients: -0.10% (cumulative +1.36%)  CLEAR loss
+sampled prose at 4 clients: -0.18% (cumulative +0.75%)
+sampled prose at 6 clients: -3.94% (cumulative -6.80%)  CLEAR loss
+sampled prose at 8 clients: -1.71% (cumulative +0.21%)  CLEAR loss
+sampled code at 1 clients: +0.07% (cumulative +1.26%)
+sampled code at 2 clients: -0.48% (cumulative +0.81%)  CLEAR loss
+sampled code at 4 clients: -0.46% (cumulative +0.49%)  CLEAR loss
+sampled code at 6 clients: +0.64% (cumulative +2.44%)
+sampled code at 8 clients: +6.88% (cumulative -0.97%)  CLEAR gain
+reply digests v1.2.10 -> v1.3.0: 0 key(s) with more than one digest
+-- PDL in (3661a4281) against v1.3.0 (and against v1.2.9)
+cold 8k first token: -0.09% (cumulative +0.35%)
+cold 32k first token: +0.01% (cumulative +0.40%)
+cold 120k first token: -0.07% (cumulative +0.44%)
+conversation turns 2+ first token: -0.76% (cumulative -0.29%)  CLEAR loss
+greedy prose at 1 clients: +1.99% (cumulative +3.28%)  CLEAR gain
+greedy prose at 2 clients: +0.72% (cumulative +2.09%)  CLEAR gain
+greedy prose at 4 clients: +0.30% (cumulative +1.40%)  CLEAR gain
+greedy prose at 6 clients: -1.54% (cumulative -1.77%)
+greedy prose at 8 clients: -0.18% (cumulative -2.46%)
+greedy code at 1 clients: +1.60% (cumulative +2.73%)  CLEAR gain
+greedy code at 2 clients: -0.27% (cumulative +0.89%)
+greedy code at 4 clients: +0.05% (cumulative +0.77%)
+greedy code at 6 clients: +0.47% (cumulative -0.31%)
+greedy code at 8 clients: -0.47% (cumulative +1.66%)
+sampled prose at 1 clients: +1.47% (cumulative +2.44%)  CLEAR gain
+sampled prose at 2 clients: +0.79% (cumulative +2.17%)  CLEAR gain
+sampled prose at 4 clients: +0.78% (cumulative +1.53%)  CLEAR gain
+sampled prose at 6 clients: +2.24% (cumulative -4.71%)  CLEAR gain
+sampled prose at 8 clients: +4.81% (cumulative +5.03%)  CLEAR gain
+sampled code at 1 clients: +0.82% (cumulative +2.10%)  CLEAR gain
+sampled code at 2 clients: +0.54% (cumulative +1.35%)  CLEAR gain
+sampled code at 4 clients: +0.55% (cumulative +1.04%)  CLEAR gain
+sampled code at 6 clients: +0.87% (cumulative +3.33%)
+sampled code at 8 clients: -7.26% (cumulative -8.16%)  CLEAR loss
+reply digests v1.3.0 -> PDL in (3661a4281): 0 key(s) with more than one digest
+-- item plan in (32c361db9) against PDL in (3661a4281) (and against v1.2.9)
+cold 8k first token: +0.53% (cumulative +0.88%)  CLEAR gain
+cold 32k first token: +0.82% (cumulative +1.21%)  CLEAR gain
+cold 120k first token: +0.90% (cumulative +1.34%)  CLEAR gain
+conversation turns 2+ first token: +1.05% (cumulative +0.76%)  CLEAR gain
+greedy prose at 1 clients: +1.04% (cumulative +4.35%)  CLEAR gain
+greedy prose at 2 clients: +1.83% (cumulative +3.96%)  CLEAR gain
+greedy prose at 4 clients: +1.97% (cumulative +3.40%)  CLEAR gain
+greedy prose at 6 clients: +7.99% (cumulative +6.09%)  CLEAR gain
+greedy prose at 8 clients: +2.33% (cumulative -0.20%)  CLEAR gain
+greedy code at 1 clients: +0.98% (cumulative +3.73%)  CLEAR gain
+greedy code at 2 clients: +2.44% (cumulative +3.35%)  CLEAR gain
+greedy code at 4 clients: +3.04% (cumulative +3.83%)  CLEAR gain
+greedy code at 6 clients: -0.76% (cumulative -1.07%)  CLEAR loss
+greedy code at 8 clients: +6.95% (cumulative +8.73%)  CLEAR gain
+sampled prose at 1 clients: +0.61% (cumulative +3.06%)  CLEAR gain
+sampled prose at 2 clients: +1.53% (cumulative +3.73%)  CLEAR gain
+sampled prose at 4 clients: +1.56% (cumulative +3.11%)  CLEAR gain
+sampled prose at 6 clients: -0.84% (cumulative -5.51%)  CLEAR loss
+sampled prose at 8 clients: -3.18% (cumulative +1.69%)  CLEAR loss
+sampled code at 1 clients: +0.91% (cumulative +3.03%)  CLEAR gain
+sampled code at 2 clients: +1.84% (cumulative +3.21%)  CLEAR gain
+sampled code at 4 clients: +2.83% (cumulative +3.90%)  CLEAR gain
+sampled code at 6 clients: +3.92% (cumulative +7.38%)  CLEAR gain
+sampled code at 8 clients: +6.18% (cumulative -2.49%)  CLEAR gain
+reply digests PDL in (3661a4281) -> item plan in (32c361db9): 0 key(s) with more than one digest
+-- main 1ece6e6 against item plan in (32c361db9) (and against v1.2.9)
+cold 8k first token: -1.42% (cumulative -0.53%)  CLEAR loss
+cold 32k first token: -1.67% (cumulative -0.44%)  CLEAR loss
+cold 120k first token: -2.00% (cumulative -0.64%)  CLEAR loss
+conversation turns 2+ first token: -1.38% (cumulative -0.61%)  CLEAR loss
+greedy prose at 1 clients: -1.58% (cumulative +2.70%)  CLEAR loss
+greedy prose at 2 clients: -1.35% (cumulative +2.55%)  CLEAR loss
+greedy prose at 4 clients: -1.37% (cumulative +1.99%)
+greedy prose at 6 clients: -3.36% (cumulative +2.53%)  CLEAR loss
+greedy prose at 8 clients: -3.44% (cumulative -3.62%)  CLEAR loss
+greedy code at 1 clients: -1.23% (cumulative +2.45%)
+greedy code at 2 clients: -1.42% (cumulative +1.88%)  CLEAR loss
+greedy code at 4 clients: -1.26% (cumulative +2.52%)
+greedy code at 6 clients: +4.35% (cumulative +3.23%)
+greedy code at 8 clients: -2.71% (cumulative +5.78%)
+sampled prose at 1 clients: -0.42% (cumulative +2.63%)
+sampled prose at 2 clients: -0.99% (cumulative +2.70%)
+sampled prose at 4 clients: -1.03% (cumulative +2.05%)  CLEAR loss
+sampled prose at 6 clients: +4.44% (cumulative -1.32%)  CLEAR gain
+sampled prose at 8 clients: +0.62% (cumulative +2.32%)
+sampled code at 1 clients: -0.37% (cumulative +2.64%)
+sampled code at 2 clients: -1.13% (cumulative +2.04%)  CLEAR loss
+sampled code at 4 clients: -1.27% (cumulative +2.58%)  CLEAR loss
+sampled code at 6 clients: -1.93% (cumulative +5.31%)  CLEAR loss
+sampled code at 8 clients: -0.18% (cumulative -2.66%)
+reply digests item plan in (32c361db9) -> main 1ece6e6: 0 key(s) with more than one digest
+LADDER: complete
+== smr: request starts on stock main (TF_GLM_REQUEST_STARTS=1) against the main group (mps sm2 sm3); faster is positive
+cold 8k first token: -0.11% against the mean, -1.19% against the best boot
+cold 32k first token: +0.40% against the mean, -0.83% against the best boot
+cold 120k first token: +0.86% against the mean, -0.65% against the best boot
+conversation turns 2+ first token: +36.36% against the mean, +35.72% against the best boot
+greedy prose at 1 clients: +1.64% against the mean, +0.17% against the best boot
+greedy prose at 2 clients: +1.20% against the mean, -0.15% against the best boot
+greedy prose at 4 clients: +1.41% against the mean, -0.23% against the best boot
+greedy prose at 6 clients: -1.18% against the mean, -3.78% against the best boot
+greedy prose at 8 clients: -0.70% against the mean, -2.70% against the best boot
+greedy code at 1 clients: +1.13% against the mean, -0.45% against the best boot
+greedy code at 2 clients: +1.17% against the mean, -0.22% against the best boot
+greedy code at 4 clients: +1.25% against the mean, -0.38% against the best boot
+greedy code at 6 clients: +0.87% against the mean, -2.43% against the best boot
+greedy code at 8 clients: -1.91% against the mean, -5.68% against the best boot
+sampled prose at 1 clients: +0.28% against the mean, -0.58% against the best boot
+sampled prose at 2 clients: +0.76% against the mean, -0.54% against the best boot
+sampled prose at 4 clients: +1.10% against the mean, +0.31% against the best boot
+sampled prose at 6 clients: +2.06% against the mean, -2.52% against the best boot
+sampled prose at 8 clients: -0.97% against the mean, -3.29% against the best boot
+sampled code at 1 clients: +1.19% against the mean, +0.17% against the best boot
+sampled code at 2 clients: +1.30% against the mean, +0.46% against the best boot
+sampled code at 4 clients: +1.17% against the mean, +0.32% against the best boot
+sampled code at 6 clients: -1.56% against the mean, -1.98% against the best boot
+sampled code at 8 clients: +1.23% against the mean, -0.42% against the best boot
+smr: NOT A CANDIDATE: 3 cell(s) more than 1% slower: greedy prose at 6 clients -1.18%; greedy code at 8 clients -1.91%; sampled code at 6 clients -1.56%
+== pd: #3616 TF_GLM_DRAFT_SPLIT=1 against the main group (mps sm2 sm3); faster is positive
+
+pd: NOT DECIDED: no rows for pd
+== pm: #3659 TF_GLM_MOE_DIRECT=1 against the main group (mps sm2 sm3); faster is positive
+
+pm: NOT DECIDED: no rows for pm
+== smz: stock main with TF_GLM_PDL=0: the dependent launches off, so PDL's share is the negative of these cells; against the main group, faster positive
+cold 8k first token: +0.31% against the mean, -0.77% against the best boot
+cold 32k first token: +0.42% against the mean, -0.80% against the best boot
+cold 120k first token: +0.86% against the mean, -0.66% against the best boot
+conversation turns 2+ first token: +0.56% against the mean, -0.44% against the best boot
+greedy prose at 1 clients: +0.31% against the mean, -1.14% against the best boot
+greedy prose at 2 clients: +0.33% against the mean, -1.01% against the best boot
+greedy prose at 4 clients: +1.16% against the mean, -0.48% against the best boot
+greedy prose at 6 clients: +1.13% against the mean, -1.52% against the best boot
+greedy prose at 8 clients: +2.44% against the mean, +0.37% against the best boot
+greedy code at 1 clients: +0.48% against the mean, -1.08% against the best boot
+greedy code at 2 clients: +0.76% against the mean, -0.63% against the best boot
+greedy code at 4 clients: +1.41% against the mean, -0.22% against the best boot
+greedy code at 6 clients: -1.90% against the mean, -5.11% against the best boot
+greedy code at 8 clients: +3.25% against the mean, -0.72% against the best boot
+sampled prose at 1 clients: -0.13% against the mean, -0.98% against the best boot
+sampled prose at 2 clients: +0.50% against the mean, -0.79% against the best boot
+sampled prose at 4 clients: +1.08% against the mean, +0.28% against the best boot
+sampled prose at 6 clients: +1.24% against the mean, -3.30% against the best boot
+sampled prose at 8 clients: +3.99% against the mean, +1.55% against the best boot
+sampled code at 1 clients: +0.41% against the mean, -0.60% against the best boot
+sampled code at 2 clients: +0.88% against the mean, +0.04% against the best boot
+sampled code at 4 clients: +1.36% against the mean, +0.51% against the best boot
+sampled code at 6 clients: -2.95% against the mean, -3.36% against the best boot
+sampled code at 8 clients: -1.55% against the mean, -3.15% against the best boot
+== ut1: the main tip 46c6ee229, KNOBS=off, what upstream merged after our pin 1ece6e6db (the KDA padding at TP=3, a default decode share for long fills, the sampler's small top_k); a report beside the ladder; against the main group, faster positive
+NOT DECIDED: no rows for ut1
+== the stack on main (mn1 mn2) against the main group; faster is positive
+cold 8k first token: +24.44%
+cold 32k first token: +28.06%
+cold 120k first token: +28.48%
+conversation turns 2+ first token: +19.34%
+greedy prose at 1 clients: +54.12%
+greedy prose at 2 clients: +41.93%
+greedy prose at 4 clients: +43.71%
+greedy prose at 6 clients: +43.46%
+greedy prose at 8 clients: +49.52%
+greedy code at 1 clients: +49.82%
+greedy code at 2 clients: +44.16%
+greedy code at 4 clients: +42.43%
+greedy code at 6 clients: +45.09%
+greedy code at 8 clients: +40.33%
+sampled prose at 1 clients: +38.84%
+sampled prose at 2 clients: +43.24%
+sampled prose at 4 clients: +43.11%
+sampled prose at 6 clients: +45.00%
+sampled prose at 8 clients: +44.20%
+sampled code at 1 clients: +40.41%
+sampled code at 2 clients: +50.11%
+sampled code at 4 clients: +42.93%
+sampled code at 6 clients: +50.61%
+sampled code at 8 clients: +42.24%

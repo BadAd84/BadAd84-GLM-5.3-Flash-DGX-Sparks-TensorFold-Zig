@@ -1,0 +1,163 @@
+[q92] 18:51:20 start; arms: s9a sm2 smz s13a ud1 ui1 smr s10a s9b s13b sm3; images to build:  u129 u130 ud ui u1210; waiting for queue91.sh
+[q92] 21:57:23 queue91 is done; deadline 06:57:23; 266G free
+[q92] 22:04:41 built glm53-zig:u129: f2e38345ab6d
+[q92] 22:12:29 built glm53-zig:u130: 045c3fb5896e
+[q92] 22:19:52 built glm53-zig:ud: 9f8d3f8c5085
+[q92] 22:27:32 built glm53-zig:ui: 671d662a6781
+[q92] 22:36:23 built glm53-zig:u1210: 9bfe5f27c4ac
+[q92] distributed glm53-zig:u129: f2e38345ab6d f2e38345ab6d f2e38345ab6d DIST-DONE u129
+[q92] glm53-zig:u129 ids: sha256:f2e38345ab6d0e7dba7cd5581d0c8fa54d5791fc574ba9194635e98d94f9c51a sha256:f2e38345ab6d0e7dba7cd5581d0c8fa54d5791fc574ba9194635e98d94f9c51a sha256:f2e38345ab6d0e7dba7cd5581d0c8fa54d5791fc574ba9194635e98d94f9c51a
+[q92] distributed glm53-zig:u130: 045c3fb5896e 045c3fb5896e 045c3fb5896e DIST-DONE u130
+[q92] glm53-zig:u130 ids: sha256:045c3fb5896e34a72ccd5252db01f6d6a6c089683b11cd2ff101e1d9acb76776 sha256:045c3fb5896e34a72ccd5252db01f6d6a6c089683b11cd2ff101e1d9acb76776 sha256:045c3fb5896e34a72ccd5252db01f6d6a6c089683b11cd2ff101e1d9acb76776
+[q92] distributed glm53-zig:ud: 9f8d3f8c5085 9f8d3f8c5085 9f8d3f8c5085 DIST-DONE ud
+[q92] glm53-zig:ud ids: sha256:9f8d3f8c508517bf836b514bbf009eb415b49194d7430d35daee4021016cf74d sha256:9f8d3f8c508517bf836b514bbf009eb415b49194d7430d35daee4021016cf74d sha256:9f8d3f8c508517bf836b514bbf009eb415b49194d7430d35daee4021016cf74d
+[q92] distributed glm53-zig:ui: 671d662a6781 671d662a6781 671d662a6781 DIST-DONE ui
+[q92] glm53-zig:ui ids: sha256:671d662a6781b1f744edc167d073547906d58e6829903ecbefd1251e85289e6b sha256:671d662a6781b1f744edc167d073547906d58e6829903ecbefd1251e85289e6b sha256:671d662a6781b1f744edc167d073547906d58e6829903ecbefd1251e85289e6b
+[q92] distributed glm53-zig:u1210: 9bfe5f27c4ac 9bfe5f27c4ac 9bfe5f27c4ac DIST-DONE u1210
+[q92] glm53-zig:u1210 ids: sha256:9bfe5f27c4ac069c96ceab58b123a7d6b563b7a300323937c665c5aaeb681fea sha256:9bfe5f27c4ac069c96ceab58b123a7d6b563b7a300323937c665c5aaeb681fea sha256:9bfe5f27c4ac069c96ceab58b123a7d6b563b7a300323937c665c5aaeb681fea
+[q92] images ready: u129 u130 ud ui u1210  m130base; serve.sh sha256 (first 12): f1b2266976ad; env: d0160e2e9291
+[prod-stop] 22:44:37 production stopped on spark1-3
+[q92] 22:50:27 s9a cold rc=0 5199 20610 77411 5347 20786 77812 
+[q92] 22:52:07 s9a chain: 72970 992 2009 1257 2225 1777 1097 2034
+[q92] 22:52:48 dec-s9a 1 greedy prose rc=0 "agg_tok_s": 51.88 code rc=0 "agg_tok_s": 74.65
+[q92] 22:53:58 dec-s9a 2 greedy prose rc=0 "agg_tok_s": 58.46 code rc=0 "agg_tok_s": 93.56
+[q92] 22:55:49 dec-s9a 4 greedy prose rc=0 "agg_tok_s": 77.69 code rc=0 "agg_tok_s": 113.71
+[q92] 22:58:37 dec-s9a 6 greedy prose rc=0 "agg_tok_s": 78.96 code rc=0 "agg_tok_s": 111.74
+[q92] 23:02:09 dec-s9a 8 greedy prose rc=0 "agg_tok_s": 79.17 code rc=0 "agg_tok_s": 114.32
+[q92] 23:02:48 dec-s9a 1 sampled prose rc=0 "agg_tok_s": 54.69 code rc=0 "agg_tok_s": 78.23
+[q92] 23:04:00 dec-s9a 2 sampled prose rc=0 "agg_tok_s": 56.48 code rc=0 "agg_tok_s": 93.12
+[q92] 23:05:56 dec-s9a 4 sampled prose rc=0 "agg_tok_s": 74.68 code rc=0 "agg_tok_s": 106.67
+[q92] 23:08:45 dec-s9a 6 sampled prose rc=0 "agg_tok_s": 74.89 code rc=0 "agg_tok_s": 104.87
+[q92] 23:12:19 dec-s9a 8 sampled prose rc=0 "agg_tok_s": 83.35 code rc=0 "agg_tok_s": 123.28
+[q92] 23:15:38 dec-s9a 24 prompts rc=0
+[q92] 23:21:29 sm2 cold rc=0 5149 20389 77387 5371 20828 78130 
+[q92] 23:23:08 sm2 chain: 73176 991 1981 1281 2225 1785 1092 2046
+[q92] 23:23:48 dec-sm2 1 greedy prose rc=0 "agg_tok_s": 53.44 code rc=0 "agg_tok_s": 77.16
+[q92] 23:24:56 dec-sm2 2 greedy prose rc=0 "agg_tok_s": 59.88 code rc=0 "agg_tok_s": 95.17
+[q92] 23:26:44 dec-sm2 4 greedy prose rc=0 "agg_tok_s": 79.52 code rc=0 "agg_tok_s": 117.43
+[q92] 23:29:23 dec-sm2 6 greedy prose rc=0 "agg_tok_s": 83.38 code rc=0 "agg_tok_s": 117.71
+[q92] 23:32:46 dec-sm2 8 greedy prose rc=0 "agg_tok_s": 88.77 code rc=0 "agg_tok_s": 126.59
+[q92] 23:33:23 dec-sm2 1 sampled prose rc=0 "agg_tok_s": 56.89 code rc=0 "agg_tok_s": 82.03
+[q92] 23:34:32 dec-sm2 2 sampled prose rc=0 "agg_tok_s": 58.87 code rc=0 "agg_tok_s": 96.71
+[q92] 23:36:24 dec-sm2 4 sampled prose rc=0 "agg_tok_s": 77.5 code rc=0 "agg_tok_s": 112.23
+[q92] 23:39:06 dec-sm2 6 sampled prose rc=0 "agg_tok_s": 87.64 code rc=0 "agg_tok_s": 110.39
+[q92] 23:42:34 dec-sm2 8 sampled prose rc=0 "agg_tok_s": 78.88 code rc=0 "agg_tok_s": 128.49
+[q92] 23:45:48 dec-sm2 24 prompts rc=0
+[q92] 23:51:38 smz cold rc=0 5195 20539 77072 5333 20736 77231 
+[q92] 23:53:16 smz chain: 72341 987 1969 1264 2215 1776 1094 2029
+[q92] 23:53:55 dec-smz 1 greedy prose rc=0 "agg_tok_s": 53.78 code rc=0 "agg_tok_s": 77.73
+[q92] 23:55:03 dec-smz 2 greedy prose rc=0 "agg_tok_s": 60.59 code rc=0 "agg_tok_s": 96.45
+[q92] 23:56:49 dec-smz 4 greedy prose rc=0 "agg_tok_s": 80.7 code rc=0 "agg_tok_s": 119.42
+[q92] 23:59:32 dec-smz 6 greedy prose rc=0 "agg_tok_s": 78.71 code rc=0 "agg_tok_s": 110.63
+[q92] 00:02:52 dec-smz 8 greedy prose rc=0 "agg_tok_s": 86.88 code rc=0 "agg_tok_s": 125.72
+[q92] 00:03:30 dec-smz 1 sampled prose rc=0 "agg_tok_s": 56.42 code rc=0 "agg_tok_s": 81.68
+[q92] 00:04:39 dec-smz 2 sampled prose rc=0 "agg_tok_s": 59.08 code rc=0 "agg_tok_s": 96.78
+[q92] 00:06:30 dec-smz 4 sampled prose rc=0 "agg_tok_s": 77.7 code rc=0 "agg_tok_s": 113.07
+[q92] 00:09:16 dec-smz 6 sampled prose rc=0 "agg_tok_s": 82.04 code rc=0 "agg_tok_s": 112.49
+[q92] 00:12:44 dec-smz 8 sampled prose rc=0 "agg_tok_s": 82.6 code rc=0 "agg_tok_s": 120.0
+[q92] 00:16:00 dec-smz 24 prompts rc=0
+[q92] 00:21:34 s13a cold rc=0 5150 20377 76721 5285 20632 76842 
+[q92] 00:23:12 s13a chain: 71995 977 1942 1243 2209 1764 1086 2012
+[q92] 00:23:52 dec-s13a 1 greedy prose rc=0 "agg_tok_s": 53.12 code rc=0 "agg_tok_s": 76.5
+[q92] 00:25:00 dec-s13a 2 greedy prose rc=0 "agg_tok_s": 59.87 code rc=0 "agg_tok_s": 94.89
+[q92] 00:26:49 dec-s13a 4 greedy prose rc=0 "agg_tok_s": 79.1 code rc=0 "agg_tok_s": 115.7
+[q92] 00:29:36 dec-s13a 6 greedy prose rc=0 "agg_tok_s": 82.11 code rc=0 "agg_tok_s": 112.52
+[q92] 00:33:04 dec-s13a 8 greedy prose rc=0 "agg_tok_s": 81.2 code rc=0 "agg_tok_s": 116.95
+[q92] 00:33:42 dec-s13a 1 sampled prose rc=0 "agg_tok_s": 55.7 code rc=0 "agg_tok_s": 79.89
+[q92] 00:34:52 dec-s13a 2 sampled prose rc=0 "agg_tok_s": 57.88 code rc=0 "agg_tok_s": 94.63
+[q92] 00:36:47 dec-s13a 4 sampled prose rc=0 "agg_tok_s": 75.46 code rc=0 "agg_tok_s": 109.24
+[q92] 00:39:41 dec-s13a 6 sampled prose rc=0 "agg_tok_s": 72.6 code rc=0 "agg_tok_s": 111.16
+[q92] 00:43:16 dec-s13a 8 sampled prose rc=0 "agg_tok_s": 77.44 code rc=0 "agg_tok_s": 110.08
+[q92] 00:46:34 dec-s13a 24 prompts rc=0
+[q92] 00:52:14 ud1 cold rc=0 5155 20414 76890 5313 20690 77076 
+[q92] 00:53:52 ud1 chain: 72325 983 1996 1278 2223 1770 1090 2021
+[q92] 00:54:31 dec-ud1 1 greedy prose rc=0 "agg_tok_s": 54.13 code rc=0 "agg_tok_s": 77.56
+[q92] 00:55:40 dec-ud1 2 greedy prose rc=0 "agg_tok_s": 60.05 code rc=0 "agg_tok_s": 94.46
+[q92] 00:57:29 dec-ud1 4 greedy prose rc=0 "agg_tok_s": 79.15 code rc=0 "agg_tok_s": 115.77
+[q92] 01:00:17 dec-ud1 6 greedy prose rc=0 "agg_tok_s": 77.81 code rc=0 "agg_tok_s": 109.09
+[q92] 01:03:43 dec-ud1 8 greedy prose rc=0 "agg_tok_s": 85.37 code rc=0 "agg_tok_s": 122.94
+[q92] 01:04:21 dec-ud1 1 sampled prose rc=0 "agg_tok_s": 56.6 code rc=0 "agg_tok_s": 80.94
+[q92] 01:05:31 dec-ud1 2 sampled prose rc=0 "agg_tok_s": 58.29 code rc=0 "agg_tok_s": 95.35
+[q92] 01:07:24 dec-ud1 4 sampled prose rc=0 "agg_tok_s": 76.26 code rc=0 "agg_tok_s": 109.86
+[q92] 01:10:14 dec-ud1 6 sampled prose rc=0 "agg_tok_s": 81.91 code rc=0 "agg_tok_s": 119.63
+[q92] 01:13:47 dec-ud1 8 sampled prose rc=0 "agg_tok_s": 81.84 code rc=0 "agg_tok_s": 111.98
+[q92] 01:17:04 dec-ud1 24 prompts rc=0
+[q92] 01:22:36 ui1 cold rc=0 5132 20283 76208 5281 20484 76372 
+[q92] 01:24:14 ui1 chain: 71559 981 1934 1267 2214 1754 1087 2005
+[q92] 01:24:52 dec-ui1 1 greedy prose rc=0 "agg_tok_s": 54.41 code rc=0 "agg_tok_s": 78.41
+[q92] 01:25:59 dec-ui1 2 greedy prose rc=0 "agg_tok_s": 61.33 code rc=0 "agg_tok_s": 96.86
+[q92] 01:27:46 dec-ui1 4 greedy prose rc=0 "agg_tok_s": 80.76 code rc=0 "agg_tok_s": 119.28
+[q92] 01:30:27 dec-ui1 6 greedy prose rc=0 "agg_tok_s": 82.24 code rc=0 "agg_tok_s": 115.25
+[q92] 01:33:46 dec-ui1 8 greedy prose rc=0 "agg_tok_s": 86.24 code rc=0 "agg_tok_s": 126.75
+[q92] 01:34:23 dec-ui1 1 sampled prose rc=0 "agg_tok_s": 56.85 code rc=0 "agg_tok_s": 81.98
+[q92] 01:35:32 dec-ui1 2 sampled prose rc=0 "agg_tok_s": 59.16 code rc=0 "agg_tok_s": 97.0
+[q92] 01:37:23 dec-ui1 4 sampled prose rc=0 "agg_tok_s": 77.51 code rc=0 "agg_tok_s": 112.83
+[q92] 01:40:10 dec-ui1 6 sampled prose rc=0 "agg_tok_s": 75.02 code rc=0 "agg_tok_s": 113.84
+[q92] 01:43:42 dec-ui1 8 sampled prose rc=0 "agg_tok_s": 80.38 code rc=0 "agg_tok_s": 121.39
+[q92] 01:46:57 dec-ui1 24 prompts rc=0
+[q92] 01:52:47 smr cold rc=0 5206 20554 77062 5366 20731 77232 
+[q92] 01:54:21 smr chain: 72211 1060 1053 1044 1036 1012 1024 1024
+[q92] 01:55:00 dec-smr 1 greedy prose rc=0 "agg_tok_s": 54.35 code rc=0 "agg_tok_s": 78.19
+[q92] 01:56:07 dec-smr 2 greedy prose rc=0 "agg_tok_s": 61.03 code rc=0 "agg_tok_s": 96.35
+[q92] 01:57:54 dec-smr 4 greedy prose rc=0 "agg_tok_s": 80.65 code rc=0 "agg_tok_s": 119.14
+[q92] 02:00:36 dec-smr 6 greedy prose rc=0 "agg_tok_s": 82.13 code rc=0 "agg_tok_s": 114.65
+[q92] 02:04:04 dec-smr 8 greedy prose rc=0 "agg_tok_s": 82.04 code rc=0 "agg_tok_s": 118.83
+[q92] 02:04:41 dec-smr 1 sampled prose rc=0 "agg_tok_s": 57.03 code rc=0 "agg_tok_s": 82.1
+[q92] 02:05:50 dec-smr 2 sampled prose rc=0 "agg_tok_s": 58.75 code rc=0 "agg_tok_s": 97.28
+[q92] 02:07:41 dec-smr 4 sampled prose rc=0 "agg_tok_s": 77.34 code rc=0 "agg_tok_s": 113.0
+[q92] 02:10:24 dec-smr 6 sampled prose rc=0 "agg_tok_s": 79.74 code rc=0 "agg_tok_s": 116.31
+[q92] 02:13:56 dec-smr 8 sampled prose rc=0 "agg_tok_s": 83.71 code rc=0 "agg_tok_s": 128.23
+[q92] 02:17:11 dec-smr 24 prompts rc=0
+[q92] 02:22:44 s10a cold rc=0 5119 20277 76083 5262 20456 76258 
+[q92] 02:24:21 s10a chain: 71434 983 1943 1248 2212 1766 1086 2007
+[q92] 02:25:01 dec-s10a 1 greedy prose rc=0 "agg_tok_s": 52.6 code rc=0 "agg_tok_s": 76.6
+[q92] 02:26:10 dec-s10a 2 greedy prose rc=0 "agg_tok_s": 59.29 code rc=0 "agg_tok_s": 94.07
+[q92] 02:27:59 dec-s10a 4 greedy prose rc=0 "agg_tok_s": 79.16 code rc=0 "agg_tok_s": 116.36
+[q92] 02:30:46 dec-s10a 6 greedy prose rc=0 "agg_tok_s": 76.0 code rc=0 "agg_tok_s": 108.89
+[q92] 02:34:12 dec-s10a 8 greedy prose rc=0 "agg_tok_s": 87.15 code rc=0 "agg_tok_s": 123.81
+[q92] 02:34:49 dec-s10a 1 sampled prose rc=0 "agg_tok_s": 55.93 code rc=0 "agg_tok_s": 80.0
+[q92] 02:36:00 dec-s10a 2 sampled prose rc=0 "agg_tok_s": 57.8 code rc=0 "agg_tok_s": 94.7
+[q92] 02:37:54 dec-s10a 4 sampled prose rc=0 "agg_tok_s": 75.5 code rc=0 "agg_tok_s": 109.96
+[q92] 02:40:42 dec-s10a 6 sampled prose rc=0 "agg_tok_s": 76.69 code rc=0 "agg_tok_s": 108.39
+[q92] 02:44:18 dec-s10a 8 sampled prose rc=0 "agg_tok_s": 81.61 code rc=0 "agg_tok_s": 109.17
+[q92] 02:47:37 dec-s10a 24 prompts rc=0
+[q92] 02:53:11 s9b cold rc=0 5157 20452 76938 5307 20688 77144 
+[q92] 02:54:50 s9b chain: 72193 979 1950 1249 2211 1773 1087 2017
+[q92] 02:55:30 dec-s9b 1 greedy prose rc=0 "agg_tok_s": 53.13 code rc=0 "agg_tok_s": 76.38
+[q92] 02:56:39 dec-s9b 2 greedy prose rc=0 "agg_tok_s": 59.53 code rc=0 "agg_tok_s": 94.36
+[q92] 02:58:28 dec-s9b 4 greedy prose rc=0 "agg_tok_s": 78.57 code rc=0 "agg_tok_s": 116.07
+[q92] 03:01:13 dec-s9b 6 greedy prose rc=0 "agg_tok_s": 83.77 code rc=0 "agg_tok_s": 114.29
+[q92] 03:04:33 dec-s9b 8 greedy prose rc=0 "agg_tok_s": 93.01 code rc=0 "agg_tok_s": 121.75
+[q92] 03:05:11 dec-s9b 1 sampled prose rc=0 "agg_tok_s": 55.82 code rc=0 "agg_tok_s": 80.03
+[q92] 03:06:21 dec-s9b 2 sampled prose rc=0 "agg_tok_s": 57.52 code rc=0 "agg_tok_s": 95.38
+[q92] 03:08:15 dec-s9b 4 sampled prose rc=0 "agg_tok_s": 76.05 code rc=0 "agg_tok_s": 110.58
+[q92] 03:11:00 dec-s9b 6 sampled prose rc=0 "agg_tok_s": 86.37 code rc=0 "agg_tok_s": 107.96
+[q92] 03:14:32 dec-s9b 8 sampled prose rc=0 "agg_tok_s": 75.73 code rc=0 "agg_tok_s": 124.94
+[q92] 03:17:51 dec-s9b 24 prompts rc=0
+[q92] 03:23:31 s13b cold rc=0 5153 20500 76998 5329 20707 77170 
+[q92] 03:25:10 s13b chain: 72310 985 1972 1259 2225 1771 1086 2019
+[q92] 03:25:50 dec-s13b 1 greedy prose rc=0 "agg_tok_s": 52.78 code rc=0 "agg_tok_s": 76.24
+[q92] 03:26:59 dec-s13b 2 greedy prose rc=0 "agg_tok_s": 59.44 code rc=0 "agg_tok_s": 94.75
+[q92] 03:28:48 dec-s13b 4 greedy prose rc=0 "agg_tok_s": 78.81 code rc=0 "agg_tok_s": 115.1
+[q92] 03:31:36 dec-s13b 6 greedy prose rc=0 "agg_tok_s": 76.98 code rc=0 "agg_tok_s": 114.35
+[q92] 03:35:01 dec-s13b 8 greedy prose rc=0 "agg_tok_s": 82.69 code rc=0 "agg_tok_s": 117.03
+[q92] 03:35:39 dec-s13b 1 sampled prose rc=0 "agg_tok_s": 55.73 code rc=0 "agg_tok_s": 79.73
+[q92] 03:36:49 dec-s13b 2 sampled prose rc=0 "agg_tok_s": 57.7 code rc=0 "agg_tok_s": 94.75
+[q92] 03:38:43 dec-s13b 4 sampled prose rc=0 "agg_tok_s": 75.63 code rc=0 "agg_tok_s": 109.62
+[q92] 03:41:34 dec-s13b 6 sampled prose rc=0 "agg_tok_s": 73.62 code rc=0 "agg_tok_s": 113.73
+[q92] 03:45:06 dec-s13b 8 sampled prose rc=0 "agg_tok_s": 77.15 code rc=0 "agg_tok_s": 142.83
+[q92] 03:48:25 dec-s13b 24 prompts rc=0
+[q92] 03:54:13 sm3 cold rc=0 5169 20374 76569 5279 20573 76721 
+[q92] 03:55:51 sm3 chain: 71863 974 1960 1251 2238 1764 1085 2012
+[q92] 03:56:30 dec-sm3 1 greedy prose rc=0 "agg_tok_s": 54.27 code rc=0 "agg_tok_s": 78.48
+[q92] 03:57:37 dec-sm3 2 greedy prose rc=0 "agg_tok_s": 61.29 code rc=0 "agg_tok_s": 96.93
+[q92] 03:59:23 dec-sm3 4 greedy prose rc=0 "agg_tok_s": 81.0 code rc=0 "agg_tok_s": 119.63
+[q92] 04:02:02 dec-sm3 6 greedy prose rc=0 "agg_tok_s": 77.72 code rc=0 "agg_tok_s": 120.71
+[q92] 04:05:23 dec-sm3 8 greedy prose rc=0 "agg_tok_s": 81.46 code rc=0 "agg_tok_s": 130.82
+[q92] 04:06:00 dec-sm3 1 sampled prose rc=0 "agg_tok_s": 56.8 code rc=0 "agg_tok_s": 81.98
+[q92] 04:07:09 dec-sm3 2 sampled prose rc=0 "agg_tok_s": 59.06 code rc=0 "agg_tok_s": 96.9
+[q92] 04:09:00 dec-sm3 4 sampled prose rc=0 "agg_tok_s": 77.38 code rc=0 "agg_tok_s": 112.5
+[q92] 04:11:46 dec-sm3 6 sampled prose rc=0 "agg_tok_s": 78.82 code rc=0 "agg_tok_s": 110.79
+[q92] 04:15:18 dec-sm3 8 sampled prose rc=0 "agg_tok_s": 79.33 code rc=0 "agg_tok_s": 126.57
+[q92] 04:18:34 dec-sm3 24 prompts rc=0
+QUEUE92-DONE 04:18:45
