@@ -1,0 +1,44 @@
+== score98: <queue-rows>/queue98/f98-c (ce-A/trace.json, ce-B/trace.json, compare.json)
+== P0 QUALIFIED: the client's own qualified and completed_schedule flags on both traces
+ce-A: qualified True, completed_schedule True, 432 row(s), setup_error None
+ce-B: qualified True, completed_schedule True, 432 row(s), setup_error None
+P0 QUALIFIED: both traces are qualified and their schedules completed
+== P1 EXACT: every request's reply equal across the arms (the tool's compare verdict plus the rows' token hashes and request fingerprints)
+the tool's compare: token_exact True, qualified True, issues []
+the rows: 432 paired request(s), 0 differing or unverified
+P1 EXACT: EXACT at every one of 432 requests
+== P2 NOT VACUOUS: A's agent turns that did not resume the previous turn's prompt (the previous agent row of the same conversation; a turn resumed in full when cached_tokens >= that prompt minus the 2056-row allowance: 2048 chunk plus 8 template rows)
+gaps (previous prompt minus cached, over A's 138 counted turns): min 12, median 60753.5, max 86655
+chunk alignment: 140 of 140 nonzero cached counts in A are multiples of 2048
+A's agent turns with turn >= 1: 138; not resumed in full: 103 (74.64%); the threshold is 10%
+P2 NOT VACUOUS: OVERSUSCRIBED, 103 of 138 agent turns did not resume the previous turn's whole prompt
+== P3 GAIN: R = 1 - B_rebuilt / A_rebuilt over the whole trace, rebuilt rows from the tool's summarize (compare.json traces.agent_loops.a and .b)
+rebuilt rows: A 14396073, B 7572137
+R = 1 - 7572137/14396073 = 47.40%
+P3 GAIN: R 47.40% is at or above the 10% threshold, the gain clause holds
+== P4 TIME: the sum of all requests' TTFT, B against A (the gate), and the mean TTFT of agent requests (reported)
+TTFT sum: B 3494.75 s against A 6614.12 s (-47.16%); the allowance is +1.00%: within the allowance
+agent-request mean TTFT: B 2.102 s against A 23.732 s (-91.14%)
+== CACHE: the prompt cache's own gauges around each run (report only: no verdict, no exit code)
+ce-A metrics-before: budget 8290411520, minimum state 176160768, states 0, bytes 8290041856 (states plus spare buffers, not occupancy)
+ce-A metrics-after: budget 8290411520, minimum state 176160768, states 16, bytes 8290041856 (states plus spare buffers, not occupancy)
+ce-B metrics-before: budget 8370693120, minimum state 176160768, states 0, bytes 8369733632 (states plus spare buffers, not occupancy)
+ce-B metrics-after: budget 8370693120, minimum state 176160768, states 14, bytes 8369733632 (states plus spare buffers, not occupancy)
+budget: the replay assumed 8426464256 B; ce-A's gauge (before) reads 8290411520 B: different
+budget: the replay assumed 8426464256 B; ce-B's gauge (before) reads 8370693120 B: different
+== P5 REPLAY AGREEMENT (report only: no verdict, no exit code)
+measured R 47.40% against the simulation's predicted 44% to 50%: within
+per-conversation rebuilt rows, A and B (6 conversation(s)):
+  conversation 0: A 1185616, B 120656
+  conversation 1: A 1210261, B 92053
+  conversation 2: A 1308710, B 96294
+  conversation 3: A 1210192, B 87888
+  conversation 4: A 1210192, B 91984
+  conversation 5: A 1284062, B 96222
+  rounds 1 to 4: A 1489037, B 1456269, R 2.20%
+  rounds 1 to 8: A 3147865, B 2621529, R 16.72%
+  rounds 1 to 12: A 5580589, B 3843885, R 31.12%
+  rounds 1 to 16: A 8214017, B 4978177, R 39.39%
+  rounds 1 to 20: A 11248725, B 6317141, R 43.84%
+  rounds 1 to 24: A 14396073, B 7572137, R 47.40%
+VERDICT: HOLDS (R 47.40% >= 10% and the TTFT sum is within +1.00%)

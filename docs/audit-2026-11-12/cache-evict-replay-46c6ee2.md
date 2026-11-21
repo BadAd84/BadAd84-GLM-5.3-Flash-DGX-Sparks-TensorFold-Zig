@@ -581,3 +581,15 @@ in section 1, with the patch reproduced in appendix A. The logs it read were
 `~/spark-gates/iter-cacheev/zig-cache-agent-sweep.log` (one JSON line per cell and policy, with `set`, `trace`,
 `seed`, `cell`, `policy`, `budget_bytes`, `ref_rows`, `requests`, `hits`, `prompt_rows`, `rebuilt_rows`,
 `evictions`, `peak_bytes` and the three fitted state sizes).
+
+## 9. The served check (added after queue98 ran; the lane's text above is unchanged)
+
+The prediction in section 6 was 43 to 52% fewer rebuilt rows for six conversations at a 32k prefix. Queue98 ran that case on the engine: one fresh boot per arm of the stack on the pin (`TF_CACHE_EVICT` unset, then `decayed_resume`), upstream's `tools/bench_cache_agents.py` with `agent_loops`, 6 conversations, 24 rounds, a 32,768-token prefix, 16 reply tokens and seed 11 (432 requests). The score is OVERNIGHT section 75 and the rows are `docs/audit-2026-11-12/queue-rows/queue98`.
+
+| | predicted | served |
+|---|---|---|
+| rebuilt rows, whole trace | 43 to 52% fewer (scorer window 44% to 50%) | 14,396,073 to 7,572,137: **47.40% fewer** |
+| agent turns that did not resume the previous turn | not modelled per kind | 103 of 138 without the policy, 0 of 138 with it |
+| replies | not modelled | all 432 equal (the client's compare is `token_exact`) |
+
+The agent turns' own rebuilt rows fell 92.10% and the unique one-off prompts' did not move (6,987,040 rows in both arms), so the whole-trace figure is diluted by rows no eviction choice can save: the one-off prompts share no prefix with anything, and their cached count is 0 on all 288 requests in both arms. The two boots' cache budgets read 7,906 and 7,982 MiB (the engine derives it at boot), 1.61% and 0.66% below the 8,036 MiB the replay assumed. The reviewer's chunk-boundary note in section 7 held: all 140 nonzero cached counts in the unset arm and all 143 in the policy arm are multiples of 2,048.

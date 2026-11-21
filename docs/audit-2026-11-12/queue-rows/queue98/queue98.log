@@ -1,0 +1,23 @@
+[q98] 02:26:34 start; waiting for queue96.sh
+[q98] 05:07:37 queue96.sh is done; IMG=glm53-zig:m130a; deadline 11:07:37; 249G free
+[q98] glm53-zig:m130a ids: sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527 sha256:b
+[q98] serve.sh sha256 (first 12): f1b2266976ad; env: d0160e2e9291
+[q98] check-env rc=0: check-env: CLEAN
+[q98] KNOBS=prod names no TF_CACHE_EVICT (env/prod.env, and 13 runtime settings), so ce-A is the unset arm and ce-B's XENV is the only source of the policy
+[prod-stop] 05:07:38 production stopped on spark1-3
+[q98] upstream tools (46c6ee229, stage/tools-up98.tar): 54 python files, bench_cache_agents sha256 e05e4ce97dab
+[q98] 05:10:18 ce-A environment read back on all three ranks: TF_CACHE_EVICT unset
+[q98] 05:10:18 ce-A up (image glm53-zig:m130a, KNOBS=prod, XENV=''): 
+[q98] 05:10:22 ce-A metrics-before: 15 prompt cache gauge line(s); # HELP tensorfold:prompt_cache_bytes Storage held by retained prompt states and spare buffers, insid
+[q98] 05:10:24 ce-A smoke (1 conversation, 1 round, prefix 1024, 8 reply tokens, seed 3) rc=0: qualified True completed_schedule True requests 3 rebuilt_rows 3110 ttft_sum_s 1.9766672551631927 setup_error None
+[q98] 07:02:17 ce-A E3 trace (6 conversations, 24 rounds, prefix 32768, seed 11) rc=0 wall=6709s: qualified True completed_schedule True requests 432 rebuilt_rows 14396073 ttft_sum_s 6614.116552983411 setup_error None
+[q98] 07:02:17 ce-A metrics-after: 17 prompt cache gauge line(s); r0-after: 434 prompt cache log line(s)
+[q98] 07:04:42 ce-B environment read back on all three ranks: TF_CACHE_EVICT=decayed_resume
+[q98] 07:04:42 ce-B up (image glm53-zig:m130a, KNOBS=prod, XENV='-e TF_CACHE_EVICT=decayed_resume'): 
+[q98] 07:04:46 ce-B metrics-before: 15 prompt cache gauge line(s); # HELP tensorfold:prompt_cache_bytes Storage held by retained prompt states and spare buffers, insid
+[q98] 07:04:48 ce-B smoke (1 conversation, 1 round, prefix 1024, 8 reply tokens, seed 3) rc=0: qualified True completed_schedule True requests 3 rebuilt_rows 3110 ttft_sum_s 1.9870926151052117 setup_error None
+[q98] 08:04:42 ce-B E3 trace (6 conversations, 24 rounds, prefix 32768, seed 11) rc=0 wall=3591s: qualified True completed_schedule True requests 432 rebuilt_rows 7572137 ttft_sum_s 3494.7549251676537 setup_error None
+[q98] 08:04:42 ce-B metrics-after: 17 prompt cache gauge line(s); r0-after: 433 prompt cache log line(s)
+[q98] 08:04:42 compare rc=0: qualified True token_exact True issues [] rebuilt_rows A 14396073 B 7572137 ttft_sum_s A 6614.116552983411 B 3494.7549251676537
+[q98] 08:04:42 done; score the run with: python scripts/queue-scores/score98.py --dir ~/bench/f98-c
+QUEUE98-DONE 08:04:54

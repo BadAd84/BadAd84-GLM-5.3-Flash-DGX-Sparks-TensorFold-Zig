@@ -1,0 +1,18 @@
+##### split
+ce-A agent turns      144 requests, rebuilt  7,409,033 rows, TTFT sum   3417.4 s
+ce-A one-off prompts  288 requests, rebuilt  6,987,040 rows, TTFT sum   3196.7 s
+ce-B agent turns      144 requests, rebuilt    585,097 rows, TTFT sum    302.6 s
+ce-B one-off prompts  288 requests, rebuilt  6,987,040 rows, TTFT sum   3192.1 s
+agent turns     A to B: rebuilt rows 92.10% lower, TTFT sum 91.14% lower
+one-off prompts A to B: rebuilt rows 0.00% lower, TTFT sum 0.14% lower
+P2 reading on ce-A: gaps (previous prompt minus cached, over A's 138 counted turns): min 12, median 60753.5, max 86655 | chunk alignment: 140 of 140 nonzero cached counts in A are multiples of 2048 | A's agent turns with turn >= 1: 138; not resumed in full: 103 (74.64%); the threshold is 10%
+P2 reading on ce-B: gaps (previous prompt minus cached, over B's 138 counted turns): min 12, median 321.5, max 639 | chunk alignment: 143 of 143 nonzero cached counts in B are multiples of 2048 | B's agent turns with turn >= 1: 138; not resumed in full: 0 (0.00%); the threshold is 10%
+##### counters
+ce-A: 434 log lines; budget 7906 MiB; end: 16 states, 7766 MiB held; hits 140, misses 295, evicted 494, refused 0, failed 0, trimmed 251
+   requests that resumed at all: 140 of 434; mean rows resumed over those 43271, median 32768
+ce-B: 433 log lines; budget 7982 MiB; end: 14 states, 7698 MiB held; hits 143, misses 292, evicted 522, refused 0, failed 0, trimmed 106
+   requests that resumed at all: 143 of 433; mean rows resumed over those 90083, median 92160
+##### walls
+ce-A: client rc 0, wall 6709 s (1 h 51 min 49 s)
+ce-B: client rc 0, wall 3591 s (0 h 59 min 51 s)
+wall A to B: 46.47% lower

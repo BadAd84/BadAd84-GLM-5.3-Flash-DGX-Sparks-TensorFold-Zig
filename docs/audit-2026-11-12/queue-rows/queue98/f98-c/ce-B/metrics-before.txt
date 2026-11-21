@@ -1,0 +1,15 @@
+# HELP tensorfold:prompt_cache_budget_bytes Startup budget for retained prompt states.
+# TYPE tensorfold:prompt_cache_budget_bytes gauge
+tensorfold:prompt_cache_budget_bytes 8370693120
+# HELP tensorfold:prompt_cache_minimum_state_bytes Smallest planned retained state, with the family's admission rounding.
+# TYPE tensorfold:prompt_cache_minimum_state_bytes gauge
+tensorfold:prompt_cache_minimum_state_bytes 176160768
+# HELP tensorfold:prompt_cache_can_keep_state Startup budget holds at least one planned state; not current occupancy.
+# TYPE tensorfold:prompt_cache_can_keep_state gauge
+tensorfold:prompt_cache_can_keep_state 1
+# HELP tensorfold:prompt_cache_states All retained prompt states, including long-message interior cuts.
+# TYPE tensorfold:prompt_cache_states gauge
+tensorfold:prompt_cache_states 0
+# HELP tensorfold:prompt_cache_bytes Storage held by retained prompt states and spare buffers, inside their budget.
+# TYPE tensorfold:prompt_cache_bytes gauge
+tensorfold:prompt_cache_bytes 8369733632
