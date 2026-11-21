@@ -20,6 +20,10 @@
 #      ut1         the main tip, KNOBS=off (not in the default ARMS: queue96.sh, a copy of this script, runs it alone after queue92.sh; score92.py reads it against the main group)
 #      tn1 tn2     the stack on the tip, KNOBS=prod, no XENV, on m140a (not in the default ARMS: queue97.sh, a copy of this script, runs them after queue95.sh; score97.py reads them
 #                  against the stack on the pin, mn1 mn2 of queue91 and mn3 of queue95)
+#      ut2a ut2s   the main at fa13df5dd (206 commits after the tip: TF_GLM_DSCORES default on, the decode-score tile rules, #3616), KNOBS=off, image ut2 (stage/src-ut2.tar), not in the default ARMS:
+#      ut2d ut2b   queue101.sh, a copy of this script, runs them in the order ut2a ut2s ut2d ut2b. ut2a and ut2b carry no XENV (the rung's two boots), ut2s TF_GLM_DRAFT_SPLIT=1, ut2d
+#                  TF_GLM_DSCORES=0. Every boot's environment is read back on all three ranks, and f92-c/LABEL-drafter.txt and LABEL-dscores.txt keep rank 0's own proof of what the switches
+#                  did (the drafter's device size, and the TF_GLM_DSCORES lines); ut2s is skipped when its drafter is not split. score101.py reads them against ut1 and the main group.
 #      pd pm       the pin plus #3616 (TF_GLM_DRAFT_SPLIT=1) and #3659 (TF_GLM_MOE_DIRECT=1), each with its switch on; pg (#2279, TF_GLM_GRAPHS=1) is not run: with a drafter
 #                  loaded the graphs path refuses every window (graphed() returns false when taps are set), so it would measure nothing on this serve
 #   scripts/queue-scores/score92.py reads the rows; its rules were written before they existed.
@@ -40,7 +44,7 @@ finish() { stop; docker rm -f glm53-zig-r0 > /dev/null 2>&1; echo "QUEUE92-DONE 
 ARMS=${ARMS:-"s9a sm2 smz s13a ud1 ui1 smr s10a s9b s13b sm3"}
 WAIT_FOR=${WAIT_FOR:-queue91.sh}
 want() { case " $ARMS " in *" $1 "*) return 0 ;; esac; return 1; }
-armtag() { case $1 in s9a|s9b) echo u129 ;; s10a) echo u1210 ;; s13a|s13b) echo u130 ;; ud1) echo ud ;; ui1) echo ui ;; ut1) echo ut ;; tn1|tn2) echo m140a ;; pd) echo p3616 ;; pm) echo p3659 ;; pg) echo p2279 ;; esac; }
+armtag() { case $1 in s9a|s9b) echo u129 ;; s10a) echo u1210 ;; s13a|s13b) echo u130 ;; ud1) echo ud ;; ui1) echo ui ;; ut1) echo ut ;; ut2a|ut2b|ut2s|ut2d) echo ut2 ;; tn1|tn2) echo m140a ;; pd) echo p3616 ;; pm) echo p3659 ;; pg) echo p2279 ;; esac; }
 NEED=""; for a in $ARMS; do t=$(armtag "$a"); [ -n "$t" ] && case " $NEED " in *" $t "*) ;; *) NEED="$NEED $t" ;; esac; done
 echo "[q92] $(date -u +%T) start; arms: $ARMS; images to build: ${NEED:- none}; waiting for $WAIT_FOR"
 while pgrep -f "$WAIT_FOR" > /dev/null; do sleep 60; done
@@ -80,6 +84,27 @@ boot() { # boot LABEL IMAGE KNOBS XENV: the Zig serve up on :8300 at --parallel 
   echo "[q92] BOOT FAILED $label: $(tail -3 "$OUT/f92-boots/$label.log" | tr '\n' ' ' | cut -c1-300)"; return 1
 }
 keeplog() { docker logs glm53-zig-r0 2>&1 | grep -a -E "^(info|warn|error)" | tail -n 800 > "$1"; }
+cenv() { # cenv HOST CONTAINER: the container's environment, one NAME=value a line; HOST - is spark1
+  if [ "$1" = "-" ]; then docker inspect "$2" --format '{{range .Config.Env}}{{println .}}{{end}}' 2> /dev/null
+  else ssh -n -o BatchMode=yes -o ConnectTimeout=15 "$1" "docker inspect $2 --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null"; fi
+}
+readback() { # readback LABEL XENV: every rank's container carries exactly this arm's TF_GLM_DRAFT_SPLIT and TF_GLM_DSCORES (unset when XENV does not name them), else the queue stops
+  local label=$1 xenv=$2 pair envs name want seen
+  for pair in "-:glm53-zig-r0" "$W1:glm53-zig-r1" "$W2:glm53-zig-r2"; do
+    envs=$(cenv "${pair%%:*}" "${pair#*:}")
+    printf '%s\n' "$envs" | grep -a -q '^TF_GLM_RANK=' || { echo "[q92] $label: cannot read the environment of ${pair#*:} (host ${pair%%:*}): stopping the queue"; exit 1; }
+    for name in TF_GLM_DRAFT_SPLIT TF_GLM_DSCORES; do
+      want=$(printf '%s\n' "$xenv" | grep -o "$name=[A-Za-z0-9_]*" | head -1); seen=$(printf '%s\n' "$envs" | grep -a "^$name=" | head -1)
+      [ "$seen" = "$want" ] || { echo "[q92] $label: ${pair#*:} carries '${seen:-$name unset}' but this arm needs '${want:-$name unset}', so the arms would not differ as designed: stopping the queue"; exit 1; }
+    done
+  done
+  echo "[q92] $(date -u +%T) $label environment read back on all three ranks: ${xenv:-no extra environment}"
+}
+effect() { # effect LABEL: rank 0's drafter-load line and its TF_GLM_DSCORES lines, kept as the boot's own proof of what the switches did (MISSING and NONE when there are none)
+  local label=$1 log; log=$(docker logs glm53-zig-r0 2>&1)
+  printf '%s\n' "$log" | grep -a -m1 'dflash2: drafter from' > "$OUT/f92-c/$label-drafter.txt"; [ -s "$OUT/f92-c/$label-drafter.txt" ] || echo MISSING > "$OUT/f92-c/$label-drafter.txt"
+  printf '%s\n' "$log" | grep -a 'TF_GLM_DSCORES' > "$OUT/f92-c/$label-dscores.txt"; [ -s "$OUT/f92-c/$label-dscores.txt" ] || echo NONE > "$OUT/f92-c/$label-dscores.txt"
+}
 greedy() { # greedy DIR LEVELS...
   local dir=$1 tag; tag=$(basename "$1"); shift; mkdir -p "$dir"
   for N in "$@"; do
@@ -112,11 +137,17 @@ facts() { # facts LABEL IMAGE XENV: longctx facts row for the boot just made
   python3 longctx.py facts 8300 --tag "$label" --n 4 --ctx 1048576 --boot-rc 0 --image "$image" "--xenv=$xenv" --out "$OUT/f92-c/rows.jsonl" --log-cmd "$ZLOG" > "$OUT/f92-c/$label-facts.out" 2>&1
 }
 mkdir -p "$OUT/f92-c"
-unit() { # unit LABEL IMAGE KNOBS XENV [EXPECT]: a P=4 boot and everything the queue measures on it; EXPECT is a regex that rank 0's log must hold when the arm's switch took effect
-  local label=$1 image=$2 knobs=$3 xenv=$4 expect=${5:-}
+unit() { # unit LABEL IMAGE KNOBS XENV [EXPECT] [SPLIT]: a P=4 boot and everything the queue measures on it; EXPECT is a regex that rank 0's log must hold when the arm's switch took effect; SPLIT=1 skips the arm unless rank 0's drafter line shows a split drafter (under 0.6 GiB)
+  local label=$1 image=$2 knobs=$3 xenv=$4 expect=${5:-} split=${6:-} gib
   room || return
   case "$image" in glm53-zig:u*|glm53-zig:p*|glm53-zig:m140a) case "$HAVE" in *" ${image#glm53-zig:} "*) ;; *) echo "[q92] $label: image $image not ready: skipped"; return ;; esac ;; esac
   boot "c92-$label" "$image" "$knobs" "$xenv" || return
+  readback "$label" "$xenv"
+  effect "$label"
+  if [ "$split" = 1 ]; then
+    gib=$(grep -a -o '[0-9.]* GiB on the device' "$OUT/f92-c/$label-drafter.txt" | head -1 | cut -d' ' -f1)
+    awk -v g="${gib:-}" 'BEGIN { exit !(g != "" && g + 0 < 0.6) }' || { echo "[q92] $label: rank 0's drafter line reads '${gib:-MISSING} GiB' (a split drafter is under 0.6), so the switch did not take effect: arm skipped"; return; }
+  fi
   facts "$label" "$image" "$xenv"
   if [ -n "$expect" ]; then echo "[q92] $label switch line /$expect/ in rank 0's log: $(docker logs glm53-zig-r0 2>&1 | grep -a -c -E "$expect") line(s)"; fi
   python3 longctx.py probe 8300 --tag "$label" --n 4 --out "$OUT/f92-c/rows.jsonl" --log-cmd "$ZLOG" --seed pf74 --cold-sizes 8000,32000,120000 --warm-base 0 --reps 2 --load 0 > "$OUT/f92-c/$label-probe.out" 2>&1
@@ -135,6 +166,10 @@ want ud1 && unit ud1 glm53-zig:ud off ""
 want ui1 && unit ui1 glm53-zig:ui off ""
 want smr && unit smr "$IMGB" off "$RSX"
 want ut1 && unit ut1 glm53-zig:ut off ""
+want ut2a && unit ut2a glm53-zig:ut2 off ""
+want ut2s && unit ut2s glm53-zig:ut2 off "-e TF_GLM_DRAFT_SPLIT=1" "" 1
+want ut2d && unit ut2d glm53-zig:ut2 off "-e TF_GLM_DSCORES=0"
+want ut2b && unit ut2b glm53-zig:ut2 off ""
 want tn1 && unit tn1 glm53-zig:m140a prod ""
 want tn2 && unit tn2 glm53-zig:m140a prod ""
 want pd && unit pd glm53-zig:p3616 off "-e TF_GLM_DRAFT_SPLIT=1" "${EXPECT_PD:-DRAFT_SPLIT}"
