@@ -38,10 +38,10 @@ switch's, so patches/pr1411's environment.zig and docs/environment.md hunks stil
 New here, not a re-seat: written on this series at v1.2.9.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 55668cdb891b086fa56250b9f2413eab035b5f51..f503763f0d703c53d143ae99562b5d930f7b5133 100644
+index e1d2e1b4e8b8fdc01c246d8fc323a6689d96fddb..c552e368c55a69c91eb87179be7ad54e9df97c18 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -100,6 +100,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -103,6 +103,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
@@ -202,10 +202,10 @@ index 241b66add5ac772e9b054dbf89b98abbc3de2180..b091925a247ce6b8c0cf77826c137a36
  
  // Row r's first element in a cache of `width`-element rows: in order (pt null), or row r % P of page pt[r / P].
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 05e23cd56895b439b17208d0cde2ae58ec730e31..164077eccad608c33dbda405355aa740652c11e8 100644
+index 296a3193831c0a68279a6603e98628ee45ccd064..d682ab48ae9c8ba526b5e3d5ff6d02629694bcad 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -27,21 +27,27 @@ pub const Set = struct {
+@@ -29,21 +29,27 @@ pub const Set = struct {
      onepass_pipe: ?cuda.Function = null,
  };
  
@@ -237,7 +237,7 @@ index 05e23cd56895b439b17208d0cde2ae58ec730e31..164077eccad608c33dbda405355aa740
      }
  };
  
-@@ -124,6 +130,11 @@ pub const Kernels = struct {
+@@ -126,6 +132,11 @@ pub const Kernels = struct {
      expand_v_vec: cuda.Function,
      absorb_q8: cuda.Function,
      expand_v8: cuda.Function,
@@ -249,7 +249,7 @@ index 05e23cd56895b439b17208d0cde2ae58ec730e31..164077eccad608c33dbda405355aa740
      router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
  
      pub fn load(m: cuda.Module) !Kernels {
-@@ -403,3 +414,17 @@ test "the wrappers' shape rules as glue.py's" {
+@@ -405,3 +416,17 @@ test "the wrappers' shape rules as glue.py's" {
      try std.testing.expectEqual(@as(i64, 512), pow2(288 + 1)); // _topk's BLOCK for 288 experts
      try std.testing.expectEqual(@as(i64, 16), pow2(8 + 1)); // its SLOTP for top-8 and the shared slot
  }
@@ -370,10 +370,10 @@ index 0595fcf12c8726ae92adf94bdefdfe0f2c4e3cf7..4620b2d492844bf49e77fe402377f1c0
 +    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 4599c2690a0cb66dc534242c8e4bbbfbf0ba46b8..3e5d78e966ae9bffddfcfad356da359acc86aa8d 100644
+index 8357ccef54c9582be9d652287f1e325687429bf2..b6b88d949805e7e04cafccb3cf0181ba8eaa0e32 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -159,6 +159,7 @@ pub const rules = [_]Rule{
+@@ -171,6 +171,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

@@ -120,10 +120,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: the render-once pieces onto v1.2.9's template limits/steps/stack and tokenizer RegexBudget; eval.Ctx.enter's brace and the kept table's RegexBudget arm are in this patch, and the two probes call Once; eval.Ctx's watch field sits with the other fields; server.zig stays at 600 by moving needsUserAfterTool to prompt.zig
 
 diff --git a/docs/environment.md b/docs/environment.md
-index d2eca9059d0fb08e6bbdcd745cf47dd656183e88..c06a05e52259de89053ae089cefaa8c8c217f508 100644
+index 130bdf0624f76f2abe738844c6f2ca4190b02c8f..662ff927f9156b9cdbf370279e4414fc20b15a13 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -108,6 +108,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -111,6 +111,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_FUSE` | Whole row count; a decode window of at most this many rows runs each hc_post with the next site's hc_pre in one kernel; default 0 (off) |
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
@@ -132,10 +132,10 @@ index d2eca9059d0fb08e6bbdcd745cf47dd656183e88..c06a05e52259de89053ae089cefaa8c8
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/cuda_server_host.zig b/zig/build/cuda_server_host.zig
-index 04848283ae53ae979c5ba4525a232ce18ce09fbb..660cf0ecafa440c692935547602e6e10f6652714 100644
+index 60376a37bc3c5d2cec5fcf81b5050ce42f1fd285..1aebb3b09d9800d0be6ee86f44da7d6cfc95135d 100644
 --- a/zig/build/cuda_server_host.zig
 +++ b/zig/build/cuda_server_host.zig
-@@ -78,6 +78,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
+@@ -79,6 +79,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
      b.step("test-prompt-interior-host", "Last-user metadata excludes later messages without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"interior prompt:"} })).step);
      b.step("test-cors-template-host", "Exact CORS and special-preserving template route regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "CORS", "apply-template:" } })).step);
      b.step("test-ocr-host", "OCR route readers, shared page steps and dialects without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"ocr "} })).step);
@@ -1050,10 +1050,10 @@ index c0b4de1583e96481576d9ff6d052678e0bab30c5..e33f956d8c03c0e6598b30cc41037eeb
  }
  
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index aa511ae8d1c362e857fa3e2fdbf7f179b35c77b9..d5625992a82afa9a011f93ba56bcc6e651665628 100644
+index d563790609e6c9dab0440494b33574ebdb1cf8cd..99098027a5ef33d71d2a62a92ed53ccb3a1b9af7 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -167,6 +167,7 @@ pub const rules = [_]Rule{
+@@ -179,6 +179,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_FUSE", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the most rows a decode window glues in one fused kernel" },
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
@@ -1278,7 +1278,7 @@ index 0000000000000000000000000000000000000000..15bf200ee8fb7ca3c5bdd362429aa801
 +    <|assistant|>{{- '<think>' -}}
 +{%- endif -%}
 diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
-index 1a5c73eea3a98fba4f6d645ae43314e1914c76a5..3bfc1ed6a570add84262bb8e92f60bc3c45a9288 100644
+index 204046b33ca9149f56b915718e72f55c22f6d6c7..d1c4f11d76cc794969f7f04e23251ed9db4ed4f7 100644
 --- a/zig/src/server/hf_text.zig
 +++ b/zig/src/server/hf_text.zig
 @@ -4,6 +4,7 @@ const tokenizer = @import("tokenizer");
@@ -1384,10 +1384,10 @@ index 0000000000000000000000000000000000000000..cd45d3c5e84fd7a9485e2f555a1a59b5
 +    return error.Template;
 +}
 diff --git a/zig/src/server/messages.zig b/zig/src/server/messages.zig
-index 15d9f623a2f7a2167ac992a3d37cf786d7173182..0f8cbcd7237af5c8cf658e01ff33d64e469b52ea 100644
+index 7489ee123de21c7bdf2aa05cbb98b3cdf26d31e4..6f417507d7583b37426742ed2c6688aad2a5534f 100644
 --- a/zig/src/server/messages.zig
 +++ b/zig/src/server/messages.zig
-@@ -233,15 +233,26 @@ fn orderResultRun(a: std.mem.Allocator, calls: []const Value, results: []Value)
+@@ -245,15 +245,26 @@ fn orderResultRun(a: std.mem.Allocator, calls: []const Value, results: []Value)
      }
      @memcpy(results, ordered);
  }
@@ -1414,7 +1414,7 @@ index 15d9f623a2f7a2167ac992a3d37cf786d7173182..0f8cbcd7237af5c8cf658e01ff33d64e
          var touched = false;
          const new_calls = try cx.a.alloc(Value, calls.array.len);
          for (calls.array, new_calls) |call, *dst| {
-@@ -269,6 +280,7 @@ pub fn toolArguments(cx: *Cx, messages: Value) errors.Refused!Value {
+@@ -281,6 +292,7 @@ pub fn toolArguments(cx: *Cx, messages: Value) errors.Refused!Value {
              touched = true;
          }
          if (touched) slot.* = .{ .object = try withField(cx, message.object, "tool_calls", .{ .array = new_calls }) };
@@ -1423,7 +1423,7 @@ index 15d9f623a2f7a2167ac992a3d37cf786d7173182..0f8cbcd7237af5c8cf658e01ff33d64e
      return .{ .array = out };
  }
 diff --git a/zig/src/server/model_text.zig b/zig/src/server/model_text.zig
-index b21306e43a762cde4888fe92611a3238a5d08c50..0364cdcb3f50cff551841859b39e41549cf833ee 100644
+index cc5a61552b788d725c0a16f666a5ab99ec49ebfb..b80580713dde8514592cd11731190172848e9ddf 100644
 --- a/zig/src/server/model_text.zig
 +++ b/zig/src/server/model_text.zig
 @@ -18,18 +18,30 @@ pub const RenderOptions = struct {
@@ -1485,7 +1485,7 @@ index b21306e43a762cde4888fe92611a3238a5d08c50..0364cdcb3f50cff551841859b39e4154
      pub fn appendPlain(r: Rendered, a: Allocator, label: []const u8) Allocator.Error!Rendered {
          if (label.len == 0) return r;
          const spans = try a.alloc(Span, r.spans.len + 1);
-@@ -175,6 +208,12 @@ pub const Text = struct {
+@@ -177,6 +210,12 @@ pub const Text = struct {
          encode_masked: ?*const fn (ctx: *anyopaque, a: Allocator, text: []const u8, spans: []const Span, problem: *[]const u8) Error![]u32 = null,
          /// A token's own bytes (a partial UTF-8 sequence kept whole) for logprob rows; null: the tokenizer can't say.
          token_bytes: ?*const fn (ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 = null,
@@ -1990,10 +1990,10 @@ index 0000000000000000000000000000000000000000..eccc45aba0a9bcc290fd9b8da3a0d4ea
 +    try std.testing.expect(try check(@embedFile("fixtures/glm53/chat_template.jinja"), true, true, 400, 0x637574) > 300);
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index 093606cc5226b2d4cc67149ce6fbf20583d850e9..cb956c6fb22067e1f7a5e958370e685ac8a8ee7b 100644
+index 33d85911408002d3b7638205faf231d28e28b5e7..b81e8ca88f4517d9507e43b9863541c2c8ca5e33 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
-@@ -329,6 +329,7 @@ test {
+@@ -337,6 +337,7 @@ test {
      _ = @import("quoted_markers_test.zig");
      _ = @import("request_cost_test.zig");
      _ = @import("prompt_tool_turn_test.zig");

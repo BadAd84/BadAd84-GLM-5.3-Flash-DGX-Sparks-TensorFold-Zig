@@ -1,70 +1,53 @@
 # RECORD.md - patches/cache-salt
 
-## Current base (re-seated 2026-11-20)
+## Base: upstream main `fa13df5dd1fdd23ada775510a464c9aa03a39e09` (re-seated 2026-11-21, lane reseat2)
 
-This package applies to upstream TensorFold main `1ece6e6dbbc073582d50738ce8e73e3c3261a73b` (1.3.0) with the packages before it in the order engine, pr1411, cache-salt, learn-starts,
-solo-cuts, disk-any-position, restore-held: it takes the tree `7ddf34d11e9578140fbb37fe544b4d3353c417e6` to `fd6d279df5e17e1d0f817b8dc16545b2075797e1` (2 patches, 42 in all; both ids are
-`git write-tree` on the tree built with `scripts/apply.sh` and the packages' `apply.sh` in that order). What each patch needed is in `docs/audit-2026-11-12/reseat-main-1ece6e6.md`.
+Source: the same package of the series on the tip `46c6ee229d2ea28bde8b273381c0f0443861cdd6` (`archive/reseat-tip-46c6ee2-patches.tar`, tree `1fd680b2b681e80d1e40492f881b444602a5bc89`), each patch's own delta played onto `fa13df5dd1fdd23ada775510a464c9aa03a39e09` by a chain of three-way merges (`work/reseat2/series.py`); a patch that merged clean keeps its header and every added and removed line, only offsets and context moved. Hand resolutions in this package: 0001 (both-sides-added lines in `engine_api.zig` and `server/root.zig`: upstream's kept first). Every decision, with the upstream commits, is in `work/reseat2/DECISIONS.md`.
 
-Gate: full run `sg-20261120-165217` on the gate host, the pristine main (tree `3a37e287fb1c`) against this series (47 patches in the seven packages, tree `5ae4bbe5e418`, the id the run expected): `check-native-cuda-host`, `compile-cuda-tests` (10 of 10 steps), `test-glm-ring-host`, `test-glm-logprobs-host`, `test-rows-host`, `test-glm-pdl-scan` (3 of 3 tests), `test-kernel-contract` (258 of 258 tests) and `fmt` rc 0 on both, `test-glm-onepass-order-host` rc 0 on the stack (not a step of the base); `test-cuda-host` rc 1 on both with the base's one failing name, `cli_config_test`'s `serve --config` case (7,903 of 7,947 tests passed on the stack, 43 skipped, 1 failed; 7,687 of 7,731 on the base); no new failing name; lean base 6,993 files and 168 problems, head 7,063 files and 168 problems, 0 new. Verdict PASS. An earlier run of the same series (`sg-20261120-145609`) failed with 7 new failing names, every one an abort inside `cuLaunchKernelEx`: upstream's `7948cc42d` launches every GLM kernel through it and asks every fake test driver to forward it (`cuda_pdl.forwardEx`), and the fakes in tests our patches add (`cuda_mla_ovn_test`, the latent-rows test in `cuda_latent`, `cuda_disk_ranks_test`) did not. The lanes' quick checkpoints had not run the host test step, so only the full gate saw it; each of the five fakes now carries the line, inside the patch that owns the test (23, 36 and the `pr1411` package).
+This package applies to `fa13df5dd1fdd23ada775510a464c9aa03a39e09` with the packages before it in the order engine, pr1411, cache-salt, learn-starts, solo-cuts, disk-any-position, restore-held: it takes the tree `4719d486cd5f348fe0e600b0f6d8518613acd108` to `5764817835691f245426ab7f2b7aa02cce07f464` (2 patches, 42 in all; ids are `git write-tree` on the tree built in that order). The base tree is `efd5bccea8b50fc9c98966f4a9f4161d2a6864d7`; the whole stack's tree is `19c545b35927ecbf59924852e6d5d07465c2bfe7`.
 
-The text below was written for the v1.2.9 series (base `6b9de695104b6b8b30c20458da87ac06c9480289`): its file and line references, tree ids and measurements are to that base.
+Gate: [stack gates] GATES-DONE sg-20261121-100241-stack bad=0
+SG gates stack rc=0
+== gate-names base stack 10:50:23
+[stack names] sg-20261121-100241-base: 0 failing names | 7869/7912 tests passed (43 skipped)
+[stack names] sg-20261121-100241-stack: 0 failing names | 8087/8130 tests passed (43 skipped)
+[stack names] only sg-20261121-100241-stack fails: none
+[stack names] only sg-20261121-100241-base fails: none
+SG names stack rc=0
+== lean base stack 10:50:23
+[stack lean] base ~/spark-gates/sg-20261121-100241/trees/base: 7306 files, 168 problems
+[stack lean] head ~/spark-gates/sg-20261121-100241/trees/stack: 7376 files, 168 problems
+[stack lean] lean: 168 problems, 168 on the base, 0 new
+SG lean stack rc=0
+== verdict 10:50:30
+[verdict] run sg-20261121-100241; pin fa13df5dd1fdd23ada775510a464c9aa03a39e09 commit=fa13df5dd1fdd23ada775510a464c9aa03a39e09 tree=efd5bccea8b50fc9c98966f4a9f4161d2a6864d7 zig=0.17.0 sha256=f0dadfe4d23a0e63055ce9560ffe2f81a313af8697492bcd8c23a41f028d483a
+[verdict]                              base          stack
+[verdict] patches                      0/0           47/47
+[verdict] tree id                      efd5bccea8b5  19c545b35927
+[verdict] expected                     match         match
+[verdict] check-native-cuda-host       0             0
+[verdict] test-cuda-host               0             0
+[verdict] compile-cuda-tests           0             0
+[verdict] test-glm-ring-host           0             0
+[verdict] test-glm-logprobs-host       0             0
+[verdict] test-glm-onepass-order-host  n/a           0
+[verdict] test-rows-host               0             0
+[verdict] test-glm-pdl-scan            0             0
+[verdict] test-kernel-contract         0             0
+[verdict] fmt                          0             0
+[verdict] gate-names                   -             0
+[verdict] lean new                     -             0
+[verdict] verdict                      reference     PASS
+[verdict] rc per step from scripts/gates.sh (n/a: not a step of that tree, -: no result); test-cuda-host at rc 1 passes only when gate-names finds every failing name in base's set
+[verdict] test-cuda-host failing names, as gates.sh listed them:
+[verdict]   base: none listed
+[verdict]   stack: none listed, none new
+[verdict] lean stack: base 7306 files 168 problems, head 7376 files 168 problems, 0 new
+[verdict] VERDICT PASS: stack pass against base
+SG verdict rc=0
+SPARK-GATES-DONE 2026-11-21T10:50:30Z verdict=PASS
 
-What it is: upstream PR ashhart/TensorFold#3222 (prompt cache salts: `cache_salt` and `serve --cache-salt-per-key` keep
-kept prompt states apart), by Ash, on the recipe's engine series after `patches/pr1411`. A request's salt masks the
-first four words of the lane host's cache key with high-bit words, so a kept state is resumed only by a request of the
-same salt; the rows writer, the rows reader and `--learn` already refuse high-bit words (`cache_images.diskSafe`), so the
-GLM disk tier of `patches/pr1411` never writes a salted state or reads one for a salted request. Retire the package when
-the pin moves past #3222's landing on upstream main.
+Patches, in file-name order:
 
-Source: repository `ashhart/TensorFold`, branch `lead/cache-salt`, head `2a870a8b0508e06362224de64fdbefc3bb43062b`
-(2 commits) on upstream main `d6c4cce602eef4aff235625a5325bb617a9674ff`; checked 2026-11-15 with `gh pr view 3222 -R
-ashhart/TensorFold --json state,mergedAt,headRefOid`: OPEN, not merged, the same head.
-
-Base it applies to: v1.2.9 `6b9de695104b6b8b30c20458da87ac06c9480289` + the engine series (tree `e02b8a89c2ccbb7fe67e42fb4bf300bec1a5f2c3`) +
-`patches/pr1411`, tree `3b06d167fd742683f210ffc7f69eef5199640664`. Final tree, the whole stack: `27a87244e7dca097007c8b086b7c49a76a8e69d2`.
-
-How it was made (`work/V129B/recut_combined.py`): lane V129B's per-commit package on pristine v1.2.9
-(`work/V129B/package/patches/cache-salt/`, gated on spark5; its RECORD.md has the details) applied to the tree above and
-re-emitted with `git diff-tree -p --full-index`; each patch adds and removes exactly the lines of its pristine
-counterpart (checked by the builder), only index lines and offsets differ.
-
-| patch | source | how |
-|---|---|---|
-| 0001 | `33ec18b31` | merged three-way on v1.2.9; one conflict (`zig/src/server/errors.zig`: upstream's `skip_request_log` and the PR's `cache_salt` at one anchor, both kept); edited by us: the comment above `var asked` in `zig/src/server/openai.zig` moved onto that line, so the file stays at 600 lines |
-| 0002 | `2a870a8b0` | the PR's golden edit redone on v1.2.9's goldens (the same 17 files, 34 `/v1/models` capability bodies, each Content-Length 21 more an object) |
-| 0003 | ours | retired: v1.2.9 has `zig/src/server/private_files_test.zig` and 0001's own hunk carries the PR's salted-note assertions |
-| 0004 | ours | 0004 (ours: five field comments of `core/engine_api.zig` moved onto their fields' lines) is not carried: that file is 595 lines after 0002 here, inside the lean gate's 600 |
-
-Apply after the series and pr1411: `scripts/apply.sh WORK`, `patches/pr1411/apply.sh WORK/tree`, then
-`patches/cache-salt/apply.sh WORK/tree` (`--check` writes nothing and prints the tree it would make). Hashes: `SHA256SUMS`.
-
-## Gate (spark5, 2026-11-15T17:28:49Z; `python work/V129B/recut_combined.py SERIES_DIR --gate`)
-
-```
-v129b-comb base tree 4be51cc6beefee860f611b5bb928dd06a4f3c72c
-v129b-comb tree id 27a87244e7dca097007c8b086b7c49a76a8e69d2 (35 patches)
-v129b-comb check rc=0 | 
-v129b-comb fmt rc=0
-[v129b-comb gates] check-native-cuda-host rc=0 | Build Summary: 7/7 steps succeeded
-[v129b-comb gates] test-cuda-host rc=1 | Build Summary: 410/412 steps succeeded (1 failed); 6850/6885 tests passed (33 skipped, 2 failed)
-[v129b-comb gates] compile-cuda-tests rc=0 | Build Summary: 10/10 steps succeeded
-[v129b-comb gates] test-glm-ring-host rc=0 | Build Summary: 4/4 steps succeeded; 3/3 tests passed
-[v129b-comb gates] test-glm-logprobs-host rc=0 | Build Summary: 4/4 steps succeeded; 10/10 tests passed
-[v129b-comb gates] test-glm-onepass-order-host rc=0 | Build Summary: 3/3 steps succeeded
-[v129b-comb gates] test-rows-host rc=0 | Build Summary: 3/3 steps succeeded
-[v129b-comb gates] fmt rc=0 
-[v129b-comb gates] GATES-DONE v129b-comb bad=1
-[v129b-comb gates] rc=1
-[v129b-comb names] v129-base: 2 failing names | 3836/3852 tests passed (14 skipped, 2 failed)
-[v129b-comb names] v129b-comb: 2 failing names | 6850/6885 tests passed (33 skipped, 2 failed)
-[v129b-comb names] only v129b-comb fails: none
-[v129b-comb names] only v129-base fails: none
-[v129b-comb names] rc=0
-[v129b-comb lean] base /home/adam/v129/trees/base: 6454 files, 341 problems
-[v129b-comb lean] head /home/adam/v129/trees/v129b-comb: 6512 files, 341 problems
-[v129b-comb lean] lean: 341 problems, 341 on the base, 0 new
-[v129b-comb lean] rc=0
-[v129b-comb gates] error: 'cli_config_test.test.serve --config: expand reads the file, passes other commands through and names what it cannot read' failed:
-[v129b-comb gates] error: 'listener.test.accepted IPv4 and IPv6 TCP streams disable Nagle for incremental responses' failed:
-```
+- `0001-server-cache-salt-and-cache-salt-per-key-keep-kept-prompt-states-apart.patch`
+- `0002-tests-the-server-goldens-model-capabilities-carry-cache-salt.patch`

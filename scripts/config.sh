@@ -1,3 +1,3 @@
 # The engine this recipe builds: upstream TensorFold at an immutable pin. Advance deliberately, not daily.
 TF_REPO="https://github.com/ashhart/TensorFold.git"
-TF_REF="1ece6e6dbbc073582d50738ce8e73e3c3261a73b"
+TF_REF="fa13df5dd1fdd23ada775510a464c9aa03a39e09"

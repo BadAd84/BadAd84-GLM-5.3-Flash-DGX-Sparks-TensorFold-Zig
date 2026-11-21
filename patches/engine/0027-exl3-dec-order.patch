@@ -100,10 +100,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index be940aaf5a2e084b9a700220dddefee67d3fcf13..d2eca9059d0fb08e6bbdcd745cf47dd656183e88 100644
+index 9e0533dad98d3d59a7e8ac13beff33ef2b688ad6..130bdf0624f76f2abe738844c6f2ca4190b02c8f 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -50,6 +50,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -52,6 +52,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
  | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
  | `TF_QWEN35_CHUNK_SOLO` | Qwen 3.5/3.6/3.8 on CUDA: 4096 or 8192 rows a foreground prompt pass while no other stream decodes (a background warm pass keeps 4096); unset, empty or 4096 is off, with main's scratch. Checked when the model loads, with the family's own message |
@@ -198,10 +198,10 @@ index b907b3a3044a400ff9447895e0dc5efb796bcff3..95bb251bb5ab9a8b4056c619ac7aeffe
          var cb: launch_.Args = .{};
          cb.add(sc.z);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index a58f582fbd2c2f6ecd1d5b479574213c75ad77c3..aa511ae8d1c362e857fa3e2fdbf7f179b35c77b9 100644
+index 1cc2372b9c90960f114480c3c8d718b6356083ea..d563790609e6c9dab0440494b33574ebdb1cf8cd 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -81,6 +81,7 @@ pub const rules = [_]Rule{
+@@ -83,6 +83,7 @@ pub const rules = [_]Rule{
      .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
      .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
      .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
@@ -210,10 +210,10 @@ index a58f582fbd2c2f6ecd1d5b479574213c75ad77c3..aa511ae8d1c362e857fa3e2fdbf7f179
      .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
      .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
 diff --git a/zig/src/platform/environment_test.zig b/zig/src/platform/environment_test.zig
-index f817bb59bf01aaf687838a4e3bc5c59abe99905f..80309aa699baf78b05be6801449cc2abebe09ba5 100644
+index fffcfad7973dd679b3f3f0eee9a3eff651462feb..dd78fee4b1ca7d9453dd44c6679f0d8cc2d5b07f 100644
 --- a/zig/src/platform/environment_test.zig
 +++ b/zig/src/platform/environment_test.zig
-@@ -108,6 +108,8 @@ const valid = [_]Case{
+@@ -109,6 +109,8 @@ const valid = [_]Case{
      .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
      .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
      .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },

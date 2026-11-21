@@ -49,10 +49,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
-index 96a9a4a69a19b9198145d9957460c3035c8dba63..6988fc9e4675f91e4009b55c1fce31fbe93cf149 100644
+index 45af00968276d280a3d508b8c9da8c62e8772c3a..50d3fe40e3384f7c847747048c26cf096d3a9207 100644
 --- a/zig/build/cuda.zig
 +++ b/zig/build/cuda.zig
-@@ -368,8 +368,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
+@@ -370,8 +370,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
      b.step("test-save-reopen-host", "Unresolved save through actual checkpoint admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"Save recovery:"} })).step);
      b.step("test-trainer-close-host", "Actual native close and real Flash Next trainer ownership sentinels").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"Save recovery:"} })).step);
      const template, const server_tests = @import("cuda_server_host.zig").steps(b, host, cuda, mods, native_modules, build_options, windows_port, step, server_steps);

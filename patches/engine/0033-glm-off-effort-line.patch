@@ -40,10 +40,10 @@ prompt as ids is 33 tokens with reply digest 9eb3186f9480; the same prompt as a 
 against the image without this patch, order A T T A, production's prompts as ids: -0.2, +0.1, -0.1, -0.4, +0.3%, inside
 the pairs' spread of 0.2 to 0.8%, replies equal.
 diff --git a/docs/environment.md b/docs/environment.md
-index a2ab32bc9204cde51e1d7886565b0b3c0a83dc32..cc46a13445ded42318521be4f4345531da3cc46a 100644
+index fcc311478b1b7cf22ad7e8d835eae9fce7a0421d..d43f3a6c65baa7093498418503d88f4c98c676a7 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -109,6 +109,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -112,6 +112,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
  | `TF_GLM_OVN_HOST_ONCE` | Exactly `0` or `1`; default off (the rewind probe's render stops a few KiB past where it leaves the prompt) |
@@ -52,10 +52,10 @@ index a2ab32bc9204cde51e1d7886565b0b3c0a83dc32..cc46a13445ded42318521be4f4345531
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 7055d0c8e1970fd9edfea4607ac2741449a5abc7..18f07df8c684bb8ca4ba458760156e16cb271b75 100644
+index d43c2868094be1b49ba355677f1814947956ac50..ed2df88383d67610add993ebd400039e42b73e27 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -168,6 +168,7 @@ pub const rules = [_]Rule{
+@@ -180,6 +180,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
      .{ .name = "TF_GLM_OVN_HOST_ONCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -64,7 +64,7 @@ index 7055d0c8e1970fd9edfea4607ac2741449a5abc7..18f07df8c684bb8ca4ba458760156e16
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
-index 3bfc1ed6a570add84262bb8e92f60bc3c45a9288..0054e2b69cf2dc62dcfb1e5eafaec6734b3eb873 100644
+index d1c4f11d76cc794969f7f04e23251ed9db4ed4f7..3dc4300183c1b30e73f7d6251b8f8c78493e2c13 100644
 --- a/zig/src/server/hf_text.zig
 +++ b/zig/src/server/hf_text.zig
 @@ -130,7 +130,8 @@ pub const HfText = struct {
@@ -108,10 +108,10 @@ index 0000000000000000000000000000000000000000..50ee3c60736307b0f129165bfc2a11e6
 +    return offEffortLine(a, source);
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index cb956c6fb22067e1f7a5e958370e685ac8a8ee7b..2db814599a03db6c589d5dc19048ce62c4012d8a 100644
+index b81e8ca88f4517d9507e43b9863541c2c8ca5e33..3d5508355658f37b48f9650713b7af5f6cce512c 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
-@@ -347,6 +347,7 @@ test {
+@@ -355,6 +355,7 @@ test {
      _ = @import("drama_voice_store.zig");
      if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
      _ = @import("grafana_dashboard_test.zig");

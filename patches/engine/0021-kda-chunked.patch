@@ -34,10 +34,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 324d27b21973f720d58b575048d60190d0e0e80d..39add30cd7f5a2c431261262b4e5fcc70aa32fd1 100644
+index 8f91ab1792bfa29516b1b07ad580b32739f5e1f0..6bb6a4c61dbdff06521b8e72a996aebfb6f9f2a6 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -98,6 +98,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -101,6 +101,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
@@ -46,7 +46,7 @@ index 324d27b21973f720d58b575048d60190d0e0e80d..39add30cd7f5a2c431261262b4e5fcc7
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
-index 28803f44cfb469dbf260af4029a5ff4198ef9311..5b7eca3c0287cfee3161a4f1f85b8c1c2deb41a2 100644
+index 9467d396b19a77ffc6877b8eb9783687465098c1..40df0115e57860f43cd4a730903cc10589cfa515 100644
 --- a/zig/build/cuda_kernels.zig
 +++ b/zig/build/cuda_kernels.zig
 @@ -145,6 +145,8 @@ pub const kernels = [_]Kernel{
@@ -782,10 +782,10 @@ index 0000000000000000000000000000000000000000..b34bf5f39a063852e79c553ee5ba96b4
 +    if (mode == 2 && acc == 0x9e3779b9u && sink != nullptr) sink[0] = acc;  // keeps the loads; never true in practice
 +}
 diff --git a/zig/src/cuda/kernels.zig b/zig/src/cuda/kernels.zig
-index 1c811476d5481db4fa524de1336c5cc38fdb6f7f..8524a295ab9d429e98978cabceb842f9f47ebf8a 100644
+index 8be1d79b1e461d2fe373042e0f9da6b7fe93df5a..dc9a88f112889bbf3307aef0f0797ae1c456e2f9 100644
 --- a/zig/src/cuda/kernels.zig
 +++ b/zig/src/cuda/kernels.zig
-@@ -108,6 +108,8 @@ pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").byt
+@@ -120,6 +120,8 @@ pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").byt
  pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
  pub const glm_dflash: []const u8 = if (available) &Blob("fatbin_glm_dflash").bytes else &.{};
  pub const glm_kda: []const u8 = if (available) &Blob("fatbin_glm_kda").bytes else &.{};
@@ -815,7 +815,7 @@ index d4c2fba53f8184cdaf1809b1ba79c3ad2b865b22..17b1681e194f1fa98604de9bfe47e3f1
      _ = latent;
      _ = sparse;
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index d85bf5cef7218c1c04068b5019c4ad36bbbfff0f..15ac183633814926c929d560442265dce8326061 100644
+index d15ef692202bcf65d45c6413bfab2337e197f4cb..9994cb729fffd2d922698b3dd9132c016b24cdef 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
 @@ -28,7 +28,7 @@ const index_mod = @import("cuda_index.zig");
@@ -827,8 +827,8 @@ index d85bf5cef7218c1c04068b5019c4ad36bbbfff0f..15ac183633814926c929d560442265dc
  pub const prefill_rows = state.prefill_rows;
  pub const solo_rows = state.solo_rows;
  pub const window_rows = state.window_rows;
-@@ -49,8 +49,9 @@ pub const Modules = struct {
-     dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
+@@ -50,8 +50,9 @@ pub const Modules = struct {
+     dscore: ?index_mod.Kernels, // TF_GLM_DSCORES (default on): a decode window's index scores on glm_index_scores
      pools32: bool = false, // TF_GLM_OVN_POOLS32: a split prompt indexer gathers its picks as int32
      onepass: ?onepass_mod.Kernels, // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows' sparse attention in one pass
 -    onepass_pipe: ?onepass_mod.PipeKernels, // TF_GLM_OVN_ONEPASS_PIPE: the pipeline with bit-exact switches    tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
@@ -839,7 +839,7 @@ index d85bf5cef7218c1c04068b5019c4ad36bbbfff0f..15ac183633814926c929d560442265dc
      packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
      copy_rows: cuda.Function,
      put_slot: cuda.Function,
-@@ -86,6 +87,8 @@ pub const Modules = struct {
+@@ -87,6 +88,8 @@ pub const Modules = struct {
          m.exl3 = try exl3.Kernels.load(d);
          errdefer m.exl3.unload();
          m.mm = try mm_mod.Kernels.load(m.mods[7]);
@@ -848,15 +848,15 @@ index d85bf5cef7218c1c04068b5019c4ad36bbbfff0f..15ac183633814926c929d560442265dc
          m.index = null;
          errdefer if (m.index) |*x| x.unload();
          const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
-@@ -117,6 +120,7 @@ pub const Modules = struct {
+@@ -126,6 +129,7 @@ pub const Modules = struct {
      }
  
      pub fn deinit(m: *Modules) void {
 +        if (m.chunked) |*x| x.unload();
          if (m.index) |*x| x.unload();
+         if (m.dscore) |*x| x.unload();
          if (m.onepass) |*x| x.unload();
-         if (m.onepass_pipe) |*x| x.unload();
-@@ -225,8 +229,7 @@ pub const Forward = struct {
+@@ -235,8 +239,7 @@ pub const Forward = struct {
                      s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                  }
                  const conv = st.conv + li * 3 * st.conv_c * 2;
@@ -867,7 +867,7 @@ index d85bf5cef7218c1c04068b5019c4ad36bbbfff0f..15ac183633814926c929d560442265dc
              },
              .mla => |a| {
 diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
-index a8a2e09efa533d08e1c95187804db377e9e74d44..0ae81ea0698218eb4cf9be5732dc42c40e5dfbfc 100644
+index 01ffd4dc9b70d654ac752d935e4d4a579202f53e..5cca6971a975ea1d8a6ef9efc7861162d53615b5 100644
 --- a/zig/src/families/glm/cuda_kda_block.zig
 +++ b/zig/src/families/glm/cuda_kda_block.zig
 @@ -5,6 +5,7 @@ const cuda = @import("cuda");
@@ -878,7 +878,7 @@ index a8a2e09efa533d08e1c95187804db377e9e74d44..0ae81ea0698218eb4cf9be5732dc42c4
  const b16 = @import("cuda_b16.zig");
  const prof = @import("cuda_prof.zig");
  const l2pf = @import("cuda_l2pf.zig");
-@@ -82,17 +83,18 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
+@@ -90,17 +91,18 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
  
  /// The block up to its out_proj: the projections, the chain, and a prompt chunk's conv window commit.
  pub fn body(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, conv_state: u64, state_in: u64, wide: bool, prompt: bool) !void {
@@ -900,7 +900,7 @@ index a8a2e09efa533d08e1c95187804db377e9e74d44..0ae81ea0698218eb4cf9be5732dc42c4
      if (prompt) try glue.convShift(set, stream, conv_state, s.p, rows, rows * l.matWidth(), l.matWidth(), 1, 3 * l.heads * kda.dk);
  }
  
-@@ -149,11 +151,12 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64,
+@@ -157,11 +159,12 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64,
      try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
  }
  
@@ -1024,10 +1024,10 @@ index 1c669938d782cb317b20a20a1efc3bde6344e0a9..da3673d1b87a6a1808981d479c1660d2
              if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
          },
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index ebd49f98f4ba500fa3bcf16e0d946f6f771665c4..2a7de7767bf67b18938164474f6906f701a587c2 100644
+index 9bbf5ea67acd30db4299effe694e69d3e8a6a5f0..7f35c62122f798204daa33e23f1c90e5f6c6e1f6 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -157,6 +157,7 @@ pub const rules = [_]Rule{
+@@ -169,6 +169,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

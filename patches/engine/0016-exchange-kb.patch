@@ -21,10 +21,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 380a0c1e5ab4f32a2a28d459ecbe733d0fd9b901..173e1785848788940ee2bce25d28047df372c06c 100644
+index 4d5be523b3aef413afff98475547238e2685c2eb..7224ac270895ecd8f5b9f2a2f2705844773f3c8c 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -90,6 +90,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -93,6 +93,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
  | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
  | `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
@@ -142,10 +142,10 @@ index 34e681b08e6e5adbe09f9e6237c473faa3b06311..4082b1b91e4654363e364acac30bcf55
 +    }
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index cf07950b48e6319ac046720ad770a699e12effe9..eb3642cfcc36fe6a7f60d412f14492a8ec8209d9 100644
+index f998aa2451c18106f3d812a360a6e72107e8014b..00b2300aefa25a2f18e390484d39f091f60f22d3 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -149,6 +149,7 @@ pub const rules = [_]Rule{
+@@ -161,6 +161,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },

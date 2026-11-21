@@ -17,10 +17,10 @@ per-commit package on pristine v1.2.9 (work/V129B/package/patches/pr1411); settl
 ---
 
 diff --git a/docs/api.md b/docs/api.md
-index fbb0fe9ed496d1f805d648732eb5e4a0cc42b17c..a1450089b50f65447910b1815b3490a2450c625e 100644
+index 8461ee5a65f3d4d2c5230f07531c9b0a65c55672..1032304a71e44cd6a2dd93f30073499de7f329d1 100644
 --- a/docs/api.md
 +++ b/docs/api.md
-@@ -1358,7 +1358,9 @@ store for each model and build. That store takes the place of `--learn`'s store
+@@ -1385,7 +1385,9 @@ store for each model and build. That store takes the place of `--learn`'s store
  with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
  cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
  instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
@@ -32,10 +32,10 @@ index fbb0fe9ed496d1f805d648732eb5e4a0cc42b17c..a1450089b50f65447910b1815b3490a2
  The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
  and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on
 diff --git a/docs/environment.md b/docs/environment.md
-index 4369ef5ee3af7fccaf798c5aada8c89e94846799..b7126f64f3bc52c93c9ee113a33f75273e5c449e 100644
+index 8d40040fe397b128d872ec2c60a7b250262dd60d..514689484e493c98ce3448368de675515a34ef13 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -122,6 +122,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -125,6 +125,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
  | `TF_GLM_OVN_KEEP_SEQS` | Exactly `0` or `1`; default off (a released stream's sequence stays allocated for the next request on its slot, as slot 0's always does, so a request starts with no allocation, fill or free) |
@@ -72,10 +72,10 @@ index 002134ad2eb08f7ae7d9179b898d064f28aa87ca..81a99c33261f257761fe2806fb17ecf8
      }
  };
 diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
-index c0cf7231390f4d994f28fd10520f2eceb4f68c4f..687b340c4ac76a7c75e43438ee62cf2b4db7e8e5 100644
+index 1811a856251d4b9f0e2e9fc7e38d5c1d92f9aa76..b6338b40166a7c962ed0842b31b7334832ad4669 100644
 --- a/zig/src/core/lane_host.zig
 +++ b/zig/src/core/lane_host.zig
-@@ -524,6 +524,7 @@ pub const LaneHost = struct {
+@@ -526,6 +526,7 @@ pub const LaneHost = struct {
              ends.takeCancels(h);
              pressure.step(h);
              rows_host.answer(h);
@@ -83,6 +83,14 @@ index c0cf7231390f4d994f28fd10520f2eceb4f68c4f..687b340c4ac76a7c75e43438ee62cf2b
              scoring.answer(h);
              learn.refuse(h);
              while (h.admitOne()) {}
+@@ -587,7 +588,6 @@ pub const LaneHost = struct {
+         }
+     }
+ };
+-
+ test {
+     _ = @import("lane_trace.zig");
+     _ = @import("lane_host_decode_share_test.zig");
 diff --git a/zig/src/core/lane_host_fetch.zig b/zig/src/core/lane_host_fetch.zig
 index a1f7007bfd20be6713a36bfb1f024bf86d94a7f2..827790587353c8e82ff970858892f5f7a37db6d0 100644
 --- a/zig/src/core/lane_host_fetch.zig
@@ -2573,10 +2581,10 @@ index 51e146ea86238ff6ded340bb1d468f345e1ea93c..30005efb465732234e82088d953ab2cd
      // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
      const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
 diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
-index c7aedeac472f24e6133e643cffb4d2a4803ecc56..a6843012f708edd2aecb82d965eff2f55819659e 100644
+index 9fbf97acbd1071bc0db8cc43363713ec2559cc98..59ce70619b8f7ec26e86e686f96fc8a358ca6da5 100644
 --- a/zig/src/native/cuda.zig
 +++ b/zig/src/native/cuda.zig
-@@ -400,7 +400,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
+@@ -401,7 +401,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
          const store = try gpa.create(pc.Store);
          errdefer gpa.destroy(store);
          // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
@@ -2585,7 +2593,7 @@ index c7aedeac472f24e6133e643cffb4d2a4803ecc56..a6843012f708edd2aecb82d965eff2f5
          const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
          store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
          errdefer {
-@@ -412,7 +412,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
+@@ -413,7 +413,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
          try kv_pages.store(F, store, loaded, kept); // its snapshot slots, before a disk probe takes one
          h.store = store;
          if (o.learn_conversations) if (o.learn) |root| {
@@ -2594,7 +2602,7 @@ index c7aedeac472f24e6133e643cffb4d2a4803ecc56..a6843012f708edd2aecb82d965eff2f5
              if (comptime cuda_disk.keptDisk(F)) |K| try cuda_disk.attachKept(K, F.model_type, a, io, &g.ctx, o, root, kernels, loaded, store);
          };
      }
-@@ -548,6 +548,7 @@ test {
+@@ -551,6 +551,7 @@ test {
      _ = kv_pages;
      _ = drafted;
      _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
@@ -2961,10 +2969,10 @@ index bf2d0c6761779270debdbb1785d72d5e12d8aeaf..d9005419aeb1f0832b52411b2ab21b3f
  
  /// The scopes this open's startup check covers, from its flags and model type.
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 6c2db6021717905ac57672defa9a2e5a6ea4cb82..3dbf9e9b48bcbf3c6edf28152f12e3d521b05299 100644
+index dc0d5fab56406ceedac87673eb681e500c26dc42..0fd48959584bfbea615063a6ef0897e947081379 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -181,6 +181,7 @@ pub const rules = [_]Rule{
+@@ -193,6 +193,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KEEP_SEQS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

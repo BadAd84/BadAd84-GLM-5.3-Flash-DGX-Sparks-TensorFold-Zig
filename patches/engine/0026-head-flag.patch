@@ -101,7 +101,7 @@ index d042bdf4566818922ae861ca61acdf40a11887ee..6bd9b067d485c13878a578a4f43f9641
      const minimum = glm.native.snap_min_bytes(&e);
      const budget: u64 = 322122547;
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index c006e1dd886493d95dbde828b678378551a1e02d..2f44e68cc0e72aa31c2445d0371b42a0f7160751 100644
+index 0294441d84bd7aa25532743424ef5effa10b68eb..0b1a69b9365ae7c19557cec6ccde9e71ff146ef7 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
 @@ -89,6 +89,7 @@ pub const Engine = struct {
@@ -112,7 +112,7 @@ index c006e1dd886493d95dbde828b678378551a1e02d..2f44e68cc0e72aa31c2445d0371b42a0
      heat_gate: heat.Gate, // upstream's bands (off unless set), read before each prompt chunk on the gathered maximum
      shared_buf: cuda.DeviceBuffer, // one f64 every rank all-reduces to its maximum
      snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
-@@ -164,7 +165,7 @@ pub const Engine = struct {
+@@ -165,7 +166,7 @@ pub const Engine = struct {
          if (o.settings.layers > c.layers) return error.BadLayers;
          const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
          for (layers, 0..) |*l, i| l.* = @intCast(i);
@@ -121,7 +121,7 @@ index c006e1dd886493d95dbde828b678378551a1e02d..2f44e68cc0e72aa31c2445d0371b42a0
          const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
          if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
          const Tile = struct {
-@@ -428,7 +429,7 @@ pub const Engine = struct {
+@@ -430,7 +431,7 @@ pub const Engine = struct {
          if (f.prof) |p| p.mark(e.stream, .draw);
          if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
          stamp = prof_mod.span(f.prof, e.stream, .mtp);

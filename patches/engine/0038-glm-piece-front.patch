@@ -37,10 +37,10 @@ New here, not a re-seat: written on this series at v1.2.9.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index fbbfc09cdb22558bd6aaf52ea19cb3345d549134..87a36aad1bde78e0d07442d959d83cbbdc2bbd25 100644
+index 542305097e1bcd17a972986da8febcf88df9f591..3ec4d92be7c723fb53fdb7b2bc405ad3cc6546c7 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -102,6 +102,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -105,6 +105,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
  | `TF_GLM_OVN_SIDE_PRIO` | Exactly `0` or `1`; default off (the prompt chunk's exchanges run on a side stream at the highest priority, ahead of the main stream's grids, as they do with `TF_GLM_PROMPT_PAIR`; the bits are the same) |
@@ -130,10 +130,10 @@ index 7c6bee7ce0605e51cbd39b8fc470b9bd618ca48d..cbb4ee0a1ceae45ed9de9ffb5f8755b1
  
  /// One sequence's rows r0..r0 + rows at pos: latent and index keys written, dense then sparse attention into s.ol.
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index 0e4616835a185be8c54c42a13c628a68a1b67438..56f51a7ba9f085f7df03aff2997c396913f61ecd 100644
+index 10a9d9fe7aba93271875b07462e916889b5e40f0..17a861e2ff0b77668c8f3cb01284f14359198cf7 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
-@@ -204,6 +204,7 @@ pub const Engine = struct {
+@@ -206,6 +206,7 @@ pub const Engine = struct {
          if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
          if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
          if (world > 1 and rank == 0 and side_high and !pair) std.log.info("glm: the exchanges' side stream runs at the highest priority", .{});
@@ -142,10 +142,10 @@ index 0e4616835a185be8c54c42a13c628a68a1b67438..56f51a7ba9f085f7df03aff2997c3969
          errdefer if (e.pair) |*p| p.deinit();
          e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index cbe4829e47de82f12d5817fec04bac028d7b0d8a..1ebcc862b6c8914007a4ae53d62fd164424391e0 100644
+index ffb04e14e838e8ff286d7b0c2a287214e14aeae7..4fa1b59dfc31f3a6a7f72f43425b66261bc243e2 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -144,6 +144,10 @@ pub const row_step = pieces_mod.row_step;
+@@ -154,6 +154,10 @@ pub const row_step = pieces_mod.row_step;
  pub const max_pieces = pieces_mod.max_pieces;
  pub const ranges = pieces_mod.ranges;
  pub const Pieces = pieces_mod.Pieces;
@@ -156,7 +156,7 @@ index cbe4829e47de82f12d5817fec04bac028d7b0d8a..1ebcc862b6c8914007a4ae53d62fd164
  
  /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
  pub const Exchange = union(enum) {
-@@ -221,6 +225,11 @@ pub const Forward = struct {
+@@ -231,6 +235,11 @@ pub const Forward = struct {
  
      /// forward._mixer: the layer's KDA or DSA block on b.normed; `li`/`di`: its index among loaded KDA / DSA layers.
      pub fn mixer(f: *const Forward, r: Rank, l: weights.Layer, li: usize, di: usize, rows: usize, nch: usize, out: ?u64) !void {
@@ -168,7 +168,7 @@ index cbe4829e47de82f12d5817fec04bac028d7b0d8a..1ebcc862b6c8914007a4ae53d62fd164
          const c = &r.w.config;
          const b = r.b;
          const st = r.st;
-@@ -238,12 +247,15 @@ pub const Forward = struct {
+@@ -248,12 +257,15 @@ pub const Forward = struct {
                      s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                  }
                  const conv = st.conv + li * 3 * st.conv_c * 2;
@@ -186,7 +186,7 @@ index cbe4829e47de82f12d5817fec04bac028d7b0d8a..1ebcc862b6c8914007a4ae53d62fd164
                  if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
              },
          }
-@@ -260,17 +272,23 @@ pub const Forward = struct {
+@@ -270,17 +282,23 @@ pub const Forward = struct {
  
      /// forward._ffn: the dense MLP or MoE block on b.normed into this rank's slot.
      pub fn ffn(f: *const Forward, r: Rank, l: weights.Layer, rows: usize, out: ?u64) !void {
@@ -211,7 +211,7 @@ index cbe4829e47de82f12d5817fec04bac028d7b0d8a..1ebcc862b6c8914007a4ae53d62fd164
                  if (out) |o| try moe.fill(f.moeKernels(), f.stream, m, b.moe, b.normed, c.hidden, 0, rows, b.prefill, o);
              },
          }
-@@ -330,22 +348,41 @@ pub const Forward = struct {
+@@ -340,22 +358,41 @@ pub const Forward = struct {
      const gluePieces = @import("cuda_forward_pieces.zig").gluePieces;
      const tapPieces = @import("cuda_forward_pieces.zig").tapPieces;
      const shareTaps = @import("cuda_forward_pieces.zig").shareTaps;
@@ -442,10 +442,10 @@ index 353b1a27f4a01263b660d1be08f2d11317c1eb49..37c236676a081ba99c70c8e6288e18bf
          prof.context(f.prof, j, q, if (site == .mixer) .mixer else .ffn);
          const stamp = prof.span(f.prof, f.stream, .wait_shared);
 diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
-index 0ae81ea0698218eb4cf9be5732dc42c40e5dfbfc..d5ae4a89de5506ebd78402af8ec68ca3de136db9 100644
+index 5cca6971a975ea1d8a6ef9efc7861162d53615b5..f0ca787b365e19d02af730e3e15690db7471a15d 100644
 --- a/zig/src/families/glm/cuda_kda_block.zig
 +++ b/zig/src/families/glm/cuda_kda_block.zig
-@@ -94,10 +94,25 @@ pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l
+@@ -102,10 +102,25 @@ pub fn bodyProfile(set: glue.Set, ks: *const kda.Kernels, stream: cuda.Stream, l
      if (o_site) |at| try at.fork(stream); // TF_GLM_L2PF: o read into L2 while the chain runs
      stamp = prof.span(profile, stream, .kda);
      defer stamp.end();
@@ -582,10 +582,10 @@ index 0000000000000000000000000000000000000000..80912a16a93de2e0b9e06f30e30fa107
 +    try std.testing.expectEqual(@as(usize, 768), try pieces.frontRows());
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 67a523e253fef353538c2b0a28f3cb81ff50e800..cf779c2256e562ebdec3d91e69d88453abc0d07c 100644
+index 98cc884a1af7681c034b8bb7883787221dbb8c20..f0aa6b8940d44afef7c7e61bc251ff05ed78a8ed 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -161,6 +161,10 @@ pub const rules = [_]Rule{
+@@ -173,6 +173,10 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
      .{ .name = "TF_GLM_OVN_SIDE_PRIO", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

@@ -22,10 +22,10 @@ New here, not a re-seat: written on this series at v1.2.9.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index f503763f0d703c53d143ae99562b5d930f7b5133..fbbfc09cdb22558bd6aaf52ea19cb3345d549134 100644
+index c552e368c55a69c91eb87179be7ad54e9df97c18..542305097e1bcd17a972986da8febcf88df9f591 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -101,6 +101,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -104,6 +104,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
@@ -46,10 +46,10 @@ index 46c44320bba14aabd55ba10fb4575855b585eb25..4dede439235a280b500a6d1f9e2740d2
      _ = @import("cuda_ranks_test.zig");
      _ = @import("cuda_ranks_roce_test.zig");
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index 4b6930a700aed9545eb84e7c5d0ebadf2a2472df..0e4616835a185be8c54c42a13c628a68a1b67438 100644
+index 3c5b43b578c4632ab901003e4ec608c794abd823..10a9d9fe7aba93271875b07462e916889b5e40f0 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
-@@ -160,7 +160,8 @@ pub const Engine = struct {
+@@ -161,7 +161,8 @@ pub const Engine = struct {
          var m = try fw.Modules.load(d, ctx, block32);
          errdefer m.deinit();
          const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
@@ -59,7 +59,7 @@ index 4b6930a700aed9545eb84e7c5d0ebadf2a2472df..0e4616835a185be8c54c42a13c628a68
          errdefer pieces.deinit();
          if (o.settings.layers > c.layers) return error.BadLayers;
          const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
-@@ -202,6 +203,7 @@ pub const Engine = struct {
+@@ -204,6 +205,7 @@ pub const Engine = struct {
          errdefer e.bp.deinit();
          if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
          if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
@@ -113,10 +113,10 @@ index 0000000000000000000000000000000000000000..219a71612e3a7398bf7835f726c55442
 +    try std.testing.expect(Pieces.high(true));
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 3e5d78e966ae9bffddfcfad356da359acc86aa8d..67a523e253fef353538c2b0a28f3cb81ff50e800 100644
+index b6b88d949805e7e04cafccb3cf0181ba8eaa0e32..98cc884a1af7681c034b8bb7883787221dbb8c20 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -160,6 +160,7 @@ pub const rules = [_]Rule{
+@@ -172,6 +172,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },

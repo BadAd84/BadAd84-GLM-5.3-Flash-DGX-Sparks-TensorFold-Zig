@@ -26,10 +26,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 1a1db37151bac481656c25071cddbc40baaa9bb4..8487c1998c1db1819f9a4df239f4cfa80a23f8dc 100644
+index 4b31b434897e16748a96a207ccd0267a3fdcb2b9..7b6f7e579cc6e06359ba800cbde1008b1ea40c81 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -92,6 +92,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -95,6 +95,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
  | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
  | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
@@ -349,10 +349,10 @@ index 1565e95cd726f3ff2361407282a46a439751fe15..a6634caacf670cd4e54842be2004c8ee
              .batch_rows = if (sharing) engine.shared_rows else 0,
              .max_streams = if (sharing) engine.max_shared else 1,
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index e1c831265e9dc7f0aee388017fe4af4288506983..a4eacccbada3c004e410a8a40eda89553d207650 100644
+index 2fe399446e141781b25e8bc327aa030831570b78..c6bab4c9b55e296b3eec123116f10903cb48424e 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -151,6 +151,7 @@ pub const rules = [_]Rule{
+@@ -163,6 +163,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },
      .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
      .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },

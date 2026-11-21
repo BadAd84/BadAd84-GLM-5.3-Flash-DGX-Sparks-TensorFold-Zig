@@ -31,12 +31,18 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - 5b80e93ac moved the KDA chain to zig/src/cuda/kda.zig (cuda_kda_block.zig now `const kda = cuda.kda`); the hook sits in project(), which that commit left in place.
 - source: work/fold/0006-kda-pad-one-width.patch
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9 added TF_GLM_CONTEXT_CEILING at the same table line; both rows kept
+Re-seated on 46c6ee229 (upstream main) by the 2026-11-20 re-seat: #3697 (ae8f0a10f) pads
+every rank's KDA input at load to its own 16-byte rows and keeps TF_GLM_KDA_PAD=1 as the
+common width plus glm_mm's tiles, so the pad layout this patch was written for is upstream's
+default now. What this patch still adds is its own: the TF_GLM_KDA_DUMP row and the dump of
+the first fused input stack. One conflict (the pad_to declarations, against #3697's
+tile_pad) kept both sides; nothing else moved.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 0f302bb129b280a8875989f461fb27a71f9364de..ab4470acea8816a199fd711f0dc0488a29907959 100644
+index 6f16c823f959a31461da27f3ec24cbc75a6873a7..d0c8699d929390f2c61d69cc844510a92d0afc8f 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -67,6 +67,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -70,6 +70,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_EXPERT_FORM` | `classic` or `factored`: the expert form GLM's CUDA decode windows use at every width (the same bits either way), also at a load that times nothing; unset or blank races the two at each timed width when a build first loads with drafts and scratch context and keeps each width's winner, else classic; read on rank 0, which chooses every rank's forms |
  | `TF_GLM_INDEX_CUDA` | GLM on CUDA: exactly `1` (both DSA indexer kernels), `0` (neither) or `scores` (scores only); unset or blank is `both` |
  | `TF_GLM_KV_HOST_GIB` | GLM on CUDA: a finite GiB amount of at least 0 for the DSA layers' pinned host pages; unset or blank uses one full window and 16 rows a page |
@@ -45,10 +51,10 @@ index 0f302bb129b280a8875989f461fb27a71f9364de..ab4470acea8816a199fd711f0dc0488a
  | `TF_GLM_WORLD` | GLM-5.3-Flash on CUDA: a whole rank count from 1 through 4294967295, set with `TF_GLM_RANK`; unset with it gives one rank |
  | `TF_NEMOTRON_RANK` | Nemotron 3.5 Super on CUDA: a whole rank index from 0 through 4294967295, set with `TF_NEMOTRON_WORLD`; unset with it gives one rank |
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
-index a4db878d8050e0e052eec504fbcccdfe3344fb5a..4333dd2ae21525ffaae103963da1655548134faa 100644
+index cecc33b81061aabfdb90b905a1f35010e705c709..59a6d5a8f279f27c7bdceb41cd5b846ccef52efa 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
-@@ -25,6 +25,10 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
+@@ -26,6 +26,10 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
  const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
  const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
  const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
@@ -59,7 +65,7 @@ index a4db878d8050e0e052eec504fbcccdfe3344fb5a..4333dd2ae21525ffaae103963da16555
  
  /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
  fn row(name: []const u8) !e.Rule {
-@@ -65,12 +69,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
+@@ -66,12 +70,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
      for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
      for (added) |name| try t.expect((try row(name)).kind != .flag);
      for (ranks) |name| try t.expectEqual(e.Kind.u32, (try row(name)).kind);
@@ -75,7 +81,7 @@ index a4db878d8050e0e052eec504fbcccdfe3344fb5a..4333dd2ae21525ffaae103963da16555
  }
  
  test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {
-@@ -83,6 +88,15 @@ test "GLM strict env: the expert form takes classic or factored, leaves blank to
+@@ -84,6 +89,15 @@ test "GLM strict env: the expert form takes classic or factored, leaves blank to
      for ([_][]const u8{ "Classic", "FACTORED", "0", "1", "race", "auto", " classic", "factored " }) |raw| try check(words[0], raw, false);
  }
  
@@ -92,12 +98,12 @@ index a4db878d8050e0e052eec504fbcccdfe3344fb5a..4333dd2ae21525ffaae103963da16555
      for (e.rules) |r| if (std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) {
          try t.expectEqual(e.Scope.glm, r.scope);
 diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
-index 8408249ff7ba0fe362b1f78a8b00ae7b1f5cf482..a8a2e09efa533d08e1c95187804db377e9e74d44 100644
+index dcdd63d1caafe3cfe7807af4690540dfc04b99db..01ffd4dc9b70d654ac752d935e4d4a579202f53e 100644
 --- a/zig/src/families/glm/cuda_kda_block.zig
 +++ b/zig/src/families/glm/cuda_kda_block.zig
-@@ -49,6 +49,10 @@ pub const Layer = struct {
- /// TF_GLM_KDA_PAD's one eight-aligned row width for every rank, set once at load (Engine.open); 0: no pad.
- pub var pad_to: usize = 0;
+@@ -52,6 +52,10 @@ pub var pad_to: usize = 0;
+ /// TF_GLM_KDA_PAD=1: a stack padded to the common width, tiled for glm_mm (its sums); unset, row-major bf16.
+ pub var tile_pad: bool = false;
  
 +/// TF_GLM_KDA_DUMP: driver and path for one dump of a projection's output, set at load, spent on first use.
 +pub var dump_driver: ?*const cuda.Driver = null;
@@ -106,7 +112,7 @@ index 8408249ff7ba0fe362b1f78a8b00ae7b1f5cf482..a8a2e09efa533d08e1c95187804db377
  /// The pad width for `kda_heads` split over `world` ranks: the widest rank's row, rounded up to eight columns.
  pub fn padWidth(kda_heads: usize, world: usize) usize {
      const heads = (kda_heads + world - 1) / world;
-@@ -113,6 +117,23 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
+@@ -121,6 +125,23 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
      }
      try b16.matmul(selected, stream, s.p + fa * 2, w, l.fb, s.ka, s.mm_part, rows, n, kda.dk, false);
      try b16.matmul(selected, stream, s.p + (fa + kda.dk) * 2, w, l.gb, s.kg, s.mm_part, rows, n, kda.dk, false);
@@ -131,12 +137,12 @@ index 8408249ff7ba0fe362b1f78a8b00ae7b1f5cf482..a8a2e09efa533d08e1c95187804db377
  
  /// `rows` rows of `cols` bf16 packed at `src` into `dst`, rows `stride` apart (tf_glm_copy_rows).
 diff --git a/zig/src/families/glm/cuda_tile.zig b/zig/src/families/glm/cuda_tile.zig
-index 592a24dd2cbc57c1a4a3239137386a0dd335205a..5b25327969b82d29bf9e3a7b78ec67d37a73dad0 100644
+index 3fef15dd2ad55d9183ff8130e28871930eacbc3e..425e7baf59a66e9e2426c65ea7296f61d8698fa6 100644
 --- a/zig/src/families/glm/cuda_tile.zig
 +++ b/zig/src/families/glm/cuda_tile.zig
 @@ -63,6 +63,12 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
  
- /// Move an uneven fused KDA stack into an eight-aligned buffer so tiledInput() passes; pad columns are ignored.
+ /// Move an uneven fused KDA stack into an eight-aligned buffer (16-byte rows out); pad columns are ignored.
  pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
 +    const dump = @import("profile").lookup("TF_GLM_KDA_DUMP");
 +    if (try @import("sys").environment.path("TF_GLM_KDA_DUMP", dump)) |_| { // one projected stack, for the pad's checks
@@ -148,10 +154,10 @@ index 592a24dd2cbc57c1a4a3239137386a0dd335205a..5b25327969b82d29bf9e3a7b78ec67d3
          .kda => |*x| try padOneKdaInput(w, d, s, x),
          else => {},
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 40c747683f103a0a5f4e713c5d308cd8223072f4..e07101bb4a36c8de292dbda28a6ca00046a07ca4 100644
+index cb6c59570f0cb69b441a51f6ab5a622e4fce12ac..da491a18778c88caf7f48f3dbdf6ea95da82cfdb 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -132,6 +132,7 @@ pub const rules = [_]Rule{
+@@ -144,6 +144,7 @@ pub const rules = [_]Rule{
      // 2^31 - 32: GLM's slots, the window and its 32 verify rows (glm/cuda_native.zig's capacity), keep i32 positions
      .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
      .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },

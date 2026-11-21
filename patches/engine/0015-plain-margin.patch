@@ -21,10 +21,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9's floor_rates and our plain_margin are one struct literal's fields; both kept
 
 diff --git a/docs/environment.md b/docs/environment.md
-index a2a6d312d71881d8b1807a1ecbef90c670c1c259..380a0c1e5ab4f32a2a28d459ecbe733d0fd9b901 100644
+index d28b1b662ecd16e098259f77394f9786283019b8..4d5be523b3aef413afff98475547238e2685c2eb 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -89,6 +89,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -92,6 +92,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
  | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
  | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
@@ -73,10 +73,10 @@ index 46340b0351cfc1b60ec0cdac063cc90532b31ba9..1565e95cd726f3ff2361407282a46a43
              .batch_rows = if (sharing) engine.shared_rows else 0,
              .max_streams = if (sharing) engine.max_shared else 1,
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 3b71b2e43d65d014b020a76c9635f2a327f1503b..cf07950b48e6319ac046720ad770a699e12effe9 100644
+index f2bdd67c62a4e4cdda34a34f71eed1b095922943..f998aa2451c18106f3d812a360a6e72107e8014b 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -148,6 +148,7 @@ pub const rules = [_]Rule{
+@@ -160,6 +160,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

@@ -23,10 +23,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 96440c0d236c47d8bb34d5a18e92f4852d26547e..a2a6d312d71881d8b1807a1ecbef90c670c1c259 100644
+index d0dacd16c38187fc814c02e77ca95ad835b38ec8..d28b1b662ecd16e098259f77394f9786283019b8 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -88,6 +88,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -91,6 +91,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_DECODE_INDEX` | Whole row count; a decode window of fewer rows scores with shared key tiles and selects with the split select; default 0 (off) |
  | `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
  | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
@@ -163,10 +163,10 @@ index 0000000000000000000000000000000000000000..88f9ae0d162e77a9536e3441bba1e5b3
 +  }
 +}
 diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_index.zig
-index 0a34e3082496707014957a42f34d55c4424f34ce..ac1205edc7ab4b1e4c7dcf14536f947a1859240c 100644
+index d2f671864ae665383fb8f4380a13cb5d3bec8b10..6ef2d54afadedca2eae90c6a013dfa0a8002ee78 100644
 --- a/zig/src/families/glm/cuda_index.zig
 +++ b/zig/src/families/glm/cuda_index.zig
-@@ -103,6 +103,8 @@ pub const Kernels = struct {
+@@ -104,6 +104,8 @@ pub const Kernels = struct {
      split_fn: ?cuda.Function = null,
      /// TF_GLM_OVN_INDEX_SCHED (read at load): prompt-sized launches score with tf_glm_index_scores_sched.
      sched_fn: ?cuda.Function = null,
@@ -175,7 +175,7 @@ index 0a34e3082496707014957a42f34d55c4424f34ce..ac1205edc7ab4b1e4c7dcf14536f947a
  
      /// `image`: cuda.kernels.glm_index.
      pub fn load(d: *const cuda.Driver, image: []const u8, mode: Mode) !Kernels {
-@@ -120,6 +122,7 @@ pub const Kernels = struct {
+@@ -121,6 +123,7 @@ pub const Kernels = struct {
              .split_rows = sr,
              .split_fn = if (sr > 0) try m.function("tf_glm_index_split") else null,
              .sched_fn = if (cuda.ovn.on("INDEX_SCHED")) try m.function("tf_glm_index_scores_sched") else null,
@@ -183,7 +183,7 @@ index 0a34e3082496707014957a42f34d55c4424f34ce..ac1205edc7ab4b1e4c7dcf14536f947a
          };
      }
  
-@@ -142,12 +145,24 @@ pub const Kernels = struct {
+@@ -150,6 +153,14 @@ pub const Kernels = struct {
          return k.split_fn != null and rows < k.split_rows and rows < rows_from and np >= split_from;
      }
  
@@ -197,9 +197,11 @@ index 0a34e3082496707014957a42f34d55c4424f34ce..ac1205edc7ab4b1e4c7dcf14536f947a
 +
      /// tf_glm_scores' launch for `rows` rows at `at` into out [rows][np]; the first `nb` 64-pool blocks are written.
      pub fn scores(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64) !void {
-         const g = scoresGrid(rows, nb);
+         return k.scoresTiles(s, qi, wts, w_stride, pk, out, at, rows, np, nb, scale, wscale, heads, pt, ps, score_tiles);
+@@ -160,7 +171,11 @@ pub const Kernels = struct {
+         const g: [2]u32 = .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, loop))) };
          var a: cuda.Args = .{};
-         inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(tileLoop(rows))), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
+         inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(loop)), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
 -        const f = if (k.sched_fn) |x| (if (rows >= rows_from) x else k.scores_fn) else k.scores_fn;
 +        const f = switch (k.scorer(rows)) {
 +            .regroup => k.regroup_fn.?,
@@ -209,7 +211,7 @@ index 0a34e3082496707014957a42f34d55c4424f34ce..ac1205edc7ab4b1e4c7dcf14536f947a
          try cuda_pdl.launch(f, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
      }
  
-@@ -175,6 +190,23 @@ pub const Kernels = struct {
+@@ -188,6 +203,23 @@ pub const Kernels = struct {
      }
  };
  
@@ -234,10 +236,10 @@ index 0a34e3082496707014957a42f34d55c4424f34ce..ac1205edc7ab4b1e4c7dcf14536f947a
  pub fn decodeFrom(raw: ?[]const u8) !usize {
      return try @import("sys").environment.value(usize, "TF_GLM_INDEX_DECODE_FROM", raw, 0) / sparse.pool;
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 2d490c28b68c011e65b7e893bce00e9e44d53e43..3b71b2e43d65d014b020a76c9635f2a327f1503b 100644
+index 3f1d278c687dbff5e4eac3f5e3fc4c298788d4eb..f2bdd67c62a4e4cdda34a34f71eed1b095922943 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -147,6 +147,7 @@ pub const rules = [_]Rule{
+@@ -159,6 +159,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_DECODE_INDEX", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows below which a decode window scores with shared key tiles and the split select" },
      .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

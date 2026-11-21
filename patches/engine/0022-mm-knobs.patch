@@ -26,10 +26,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 39add30cd7f5a2c431261262b4e5fcc70aa32fd1..cb13d9f870cff94f5f5dda6c6a6599af65c7b318 100644
+index 6bb6a4c61dbdff06521b8e72a996aebfb6f9f2a6..be80876bbcabc93c9f5e917788557770be73f10f 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -99,6 +99,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -102,6 +102,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
@@ -366,10 +366,10 @@ index 9662db17283cbf10c5907871b82a844dfafe7f6d..99c1363cd7e0730dfa1ab352017a44aa
      }
      const sk = splitK(n, k);
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 8ae1b42b303e0650a401d9a5e6ac31829d406b54..bbcae3dafb49c4548d3fbc4345deff60b68dc2c3 100644
+index 2f8f5e151c6743dae907f309a16f38175c66642d..5dfecd44754f12c4387289847cd70f99fde43a10 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -98,10 +98,15 @@ pub const Kernels = struct {
+@@ -100,10 +100,15 @@ pub const Kernels = struct {
      chunks_32_fp8: cuda.Function,
      merge: cuda.Function,
      scores: cuda.Function,
@@ -386,7 +386,7 @@ index 8ae1b42b303e0650a401d9a5e6ac31829d406b54..bbcae3dafb49c4548d3fbc4345deff60
          try k.bmm_tile.allowDynamicShared(bmm_tile_smem);
          try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
          try k.chunks_16.allowDynamicShared(chunksSmem(16));
-@@ -209,6 +214,10 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
+@@ -211,6 +216,10 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
      if (x % 16 != 0 or x_stride % 8 != 0 or w % 16 != 0) return error.RowShape; // the tiles stage rows by cp.async
      var a: cuda.Args = .{};
      inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
@@ -692,10 +692,10 @@ index b1ec249595200f7ee88fe7b62247a649a6b7fb91..9b3f539b824905ddbcf03aedc36da0fd
      var a: cuda.Args = .{};
      a.add(s.sy + lo * d * 4);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 2a7de7767bf67b18938164474f6906f701a587c2..63cb95b404a717f7d888d95ba52d9944c16ea39e 100644
+index 7f35c62122f798204daa33e23f1c90e5f6c6e1f6..df18a045bbd2351ec3edae4dbf2cf3e24ea44c4b 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -158,6 +158,11 @@ pub const rules = [_]Rule{
+@@ -170,6 +170,11 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

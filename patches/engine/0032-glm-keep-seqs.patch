@@ -55,10 +55,10 @@ Receipts (lane RequestStartCost, 2026-11-14; base = v1.2.7 + 0001..0034, tree f5
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 9122611dd1042be72b2d4d90807ff41c5224c24f..a2ab32bc9204cde51e1d7886565b0b3c0a83dc32 100644
+index b9a43de5cddffa5b685fc3d31b9916ff322238df..fcc311478b1b7cf22ad7e8d835eae9fce7a0421d 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -112,6 +112,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -115,6 +115,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_X3_NC` | Whole level `0`, `1` or `2`: a decode window's routed-expert GEMMs load each warp's trellis in 16-byte reads that many k steps ahead (4-bit mcg layers with whole steps), the same bits; default 0 (off) |
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
@@ -91,10 +91,10 @@ index a25a3c0aa1e092e57b671f9b588dd8da4268db27..46c44320bba14aabd55ba10fb4575855
      _ = @import("cuda_ranks_test.zig");
      _ = @import("cuda_ranks_roce_test.zig");
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index 2f44e68cc0e72aa31c2445d0371b42a0f7160751..4b6930a700aed9545eb84e7c5d0ebadf2a2472df 100644
+index 0b1a69b9365ae7c19557cec6ccde9e71ff146ef7..3c5b43b578c4632ab901003e4ec608c794abd823 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
-@@ -313,15 +313,20 @@ pub const Engine = struct {
+@@ -315,15 +315,20 @@ pub const Engine = struct {
          if (e.images) |v| try v.activate(slot);
      }
  
@@ -322,10 +322,10 @@ index 0000000000000000000000000000000000000000..6d847e67ba756a1808ab4e850b334b14
 +    try expect(f.e.seqs.items[1].?.st.capacity == 0 and p.pool.idle() and p.pool.census().free == 8);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index e851a1bcda89dbfab5814b112699391d2c127198..7055d0c8e1970fd9edfea4607ac2741449a5abc7 100644
+index d6cacde8b0b601e50dbbe7c6205721bf2dbf19ad..d43c2868094be1b49ba355677f1814947956ac50 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -171,6 +171,7 @@ pub const rules = [_]Rule{
+@@ -183,6 +183,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_X3_NC", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 or 2 (the routed experts' decode trellis loads, 16 bytes, that many k steps ahead)" },
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

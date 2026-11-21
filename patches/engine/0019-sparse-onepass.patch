@@ -28,12 +28,16 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - The fatbin catalog entry keeps no .native_fp (a v1.2.7 test asserts exactly three native_fp units).
 - source: work/fold/0020-sparse-onepass.patch
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9's dsel field and our onepass kernel share the glue.Set literal; both kept
+Re-seated on 46c6ee229 (upstream main) by the 2026-11-20 re-seat: upstream added its
+inkling2_attn/inkling2_pattn fatbin rows at the line this patch adds glm_onepass's, so the
+registration hunk was settled by keeping upstream's two rows and putting glm_onepass after
+them. No other line moved.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 8487c1998c1db1819f9a4df239f4cfa80a23f8dc..290f90d4bc392b55986827e50211ed5e2f1f67b9 100644
+index 7b6f7e579cc6e06359ba800cbde1008b1ea40c81..334354a05632fe4792f987892946ddeb26639071 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -93,6 +93,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -96,6 +96,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
  | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
  | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
@@ -42,7 +46,7 @@ index 8487c1998c1db1819f9a4df239f4cfa80a23f8dc..290f90d4bc392b55986827e50211ed5e
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
-index 6dc95046a32550d4890d06b363225e6b88e55260..1c4dd693fe5e109aeed782fbfbff7b2ffc59b863 100644
+index 375dd9dd9f3492164de9dafffd25c33aa47a2e6d..16bcb2ca72a1071464a0d0232abde0212bdc8c7e 100644
 --- a/zig/build/cuda_kernels.zig
 +++ b/zig/build/cuda_kernels.zig
 @@ -145,6 +145,7 @@ pub const kernels = [_]Kernel{
@@ -527,13 +531,13 @@ index 0000000000000000000000000000000000000000..f2c7882633607c6e33bb7193865faab5
 +#endif
 +}
 diff --git a/zig/src/cuda/kernels.zig b/zig/src/cuda/kernels.zig
-index c1f96bf4533bd05fd8ea473c495960e888f89bb2..2df91e3189472679dabf12034ef7340cb18799b7 100644
+index 2dd79a73f516e007d26c33ab4342dd616ac3e132..22fb0530d4e63797bdf4578c1208c9846665a1ea 100644
 --- a/zig/src/cuda/kernels.zig
 +++ b/zig/src/cuda/kernels.zig
-@@ -101,6 +101,7 @@ pub const glm_index: []const u8 = if (available) &Blob("fatbin_glm_index").bytes
- pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").bytes else &.{};
- pub const minimax_m3_attn: []const u8 = if (available) &Blob("fatbin_minimax_m3_attn").bytes else &.{};
- pub const idol: []const u8 = if (available) &Blob("fatbin_idol").bytes else &.{};
+@@ -113,6 +113,7 @@ pub const inkling2_attn: []const u8 = if (available) &Blob("fatbin_inkling2_attn
+ pub const inkling2_pattn: []const u8 = if (available) &Blob("fatbin_inkling2_pattn").bytes else &.{};
+ pub const inkling2_ops: []const u8 = if (available) &Blob("fatbin_inkling2_ops").bytes else &.{};
+ pub const inkling2_rows: []const u8 = if (available) &Blob("fatbin_inkling2_rows").bytes else &.{};
 +pub const glm_onepass: []const u8 = if (available) &Blob("fatbin_glm_onepass").bytes else &.{};
  pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
  pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
@@ -583,7 +587,7 @@ index 61d9c15aa6379cdc1f0c127d59f6553b02418ad0..26707ab229185d8f9f69a9ee726436e8
  }
  
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index 9a69473faed5f28a5ae2622a984bb2570874d145..ed240d086d26530338d5cf3e4528ce7e4b5c040b 100644
+index 482d5a6ad8bb08fcfa1996b29de8b43a0b361dce..c881ff1ebc1020622ce9f49614aa1bbc40dbf112 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
 @@ -27,6 +27,7 @@ const shared = @import("cuda_shared.zig");
@@ -594,18 +598,18 @@ index 9a69473faed5f28a5ae2622a984bb2570874d145..ed240d086d26530338d5cf3e4528ce7e
  
  pub const prefill_rows = state.prefill_rows;
  pub const solo_rows = state.solo_rows;
-@@ -47,6 +48,7 @@ pub const Modules = struct {
-     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
+@@ -48,6 +49,7 @@ pub const Modules = struct {
      dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
+     dscore: ?index_mod.Kernels, // TF_GLM_DSCORES (default on): a decode window's index scores on glm_index_scores
      pools32: bool = false, // TF_GLM_OVN_POOLS32: a split prompt indexer gathers its picks as int32
 +    onepass: ?onepass_mod.Kernels, // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows' sparse attention in one pass
      tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
      packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
      copy_rows: cuda.Function,
-@@ -93,6 +95,12 @@ pub const Modules = struct {
-         };
-         m.dsel = try @import("sys").environment.read(bool, "TF_GLM_DSEL", true);
-         if (!m.dsel) std.log.warn("TF_GLM_DSEL=0: a decode window's DSA select keeps one 1,024-thread CTA a row", .{});
+@@ -102,6 +104,12 @@ pub const Modules = struct {
+                 break :blk null;
+             };
+         } else std.log.warn("TF_GLM_DSCORES=0: a decode window's index scores keep tf_glm_scores", .{});
 +        m.onepass = null;
 +        errdefer if (m.onepass) |*x| x.unload();
 +        if (onepass_mod.wanted()) m.onepass = onepass_mod.Kernels.load(d, k.glm_onepass, @intCast(try ctx.attribute(.compute_capability_major))) catch |err| blk: {
@@ -615,31 +619,31 @@ index 9a69473faed5f28a5ae2622a984bb2570874d145..ed240d086d26530338d5cf3e4528ce7e
          m.tiled = false;
          m.pools32 = cuda.ovn.on("POOLS32");
          m.packs = null; // `m` starts undefined: the field default does not apply
-@@ -110,6 +118,7 @@ pub const Modules = struct {
- 
+@@ -120,6 +128,7 @@ pub const Modules = struct {
      pub fn deinit(m: *Modules) void {
          if (m.index) |*x| x.unload();
+         if (m.dscore) |*x| x.unload();
 +        if (m.onepass) |*x| x.unload();
          m.exl3.unload();
          for (&m.mods) |*x| x.unload();
          m.lane.unload();
-@@ -168,7 +177,7 @@ pub const Forward = struct {
+@@ -178,7 +187,7 @@ pub const Forward = struct {
      }
  
      pub fn set(f: *const Forward) glue.Set {
--        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel };
-+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .onepass = if (f.m.onepass) |x| x.f else null };
+-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null };
++        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .onepass = if (f.m.onepass) |x| x.f else null };
      }
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index b2b088ac715f14849f5c7ba28e9873d4ddb7258b..2cffb0f76af30ab8acc86e73076f7d354adb2294 100644
+index 631d570dcd1125ee425b66721c9802a420e02d01..30c1ce6c5cddbe331983cb6d5b303f400cab4230 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -17,6 +17,8 @@ pub const Set = struct {
-     copy_rows: ?cuda.Function = null,
-     /// A decode window's DSA select on many CTAs (cuda_sparse.decodeSelect; TF_GLM_DSEL, default on).
+@@ -19,6 +19,8 @@ pub const Set = struct {
      dsel: bool = false,
+     /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
+     dscore: ?*const index_mod.Kernels = null,
 +    /// TF_GLM_OVN_SPARSE_ONEPASS's kernel, or null with the switch off.
 +    onepass: ?cuda.Function = null,
  };
@@ -715,10 +719,10 @@ index 0000000000000000000000000000000000000000..c89e2c55d41d08a34126b65a08440ffb
 +    try std.testing.expectEqual(@as(u32, 100416), smem); // glm_onepass.cu's static_assert
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index a4eacccbada3c004e410a8a40eda89553d207650..42283d3a25e31a12fa6787c3e0bd0fee9f8be32f 100644
+index c6bab4c9b55e296b3eec123116f10903cb48424e..39927ef7804b6c0ea631bb2e53409d40274cae51 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -152,6 +152,7 @@ pub const rules = [_]Rule{
+@@ -164,6 +164,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
      .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
      .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

@@ -614,10 +614,10 @@ index 0d51711a7c005a0f0a678cf1b1e90db6b4d83fa0..e395dbdfb976317d0c003feaf2d20ef0
  }
  
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index 15ac183633814926c929d560442265dce8326061..b035457091d27aec3c49470620a9b4cf02fa04f1 100644
+index 9994cb729fffd2d922698b3dd9132c016b24cdef..785f7171a3dc4d396d8955c87aad5295ca48dc1b 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -58,6 +58,7 @@ pub const Modules = struct {
+@@ -59,6 +59,7 @@ pub const Modules = struct {
      pack_dense: cuda.Function,
      quant: quant.Kernels,
      q4: q4.Kernels,
@@ -625,7 +625,7 @@ index 15ac183633814926c929d560442265dce8326061..b035457091d27aec3c49470620a9b4cf
  
      /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
      pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
-@@ -90,6 +91,7 @@ pub const Modules = struct {
+@@ -91,6 +92,7 @@ pub const Modules = struct {
          m.chunked = if (kda_chunk.enabled()) try kda_chunk.Kernel.load(d) else null;
          errdefer if (m.chunked) |*x| x.unload();
          m.index = null;
@@ -633,20 +633,20 @@ index 15ac183633814926c929d560442265dce8326061..b035457091d27aec3c49470620a9b4cf
          errdefer if (m.index) |*x| x.unload();
          const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
          _ = index_mod.splitRows() catch return error.BadIndexSetting; // TF_GLM_OVN_DECODE_INDEX: a typo is refused
-@@ -182,7 +184,7 @@ pub const Forward = struct {
+@@ -192,7 +194,7 @@ pub const Forward = struct {
      }
  
      pub fn set(f: *const Forward) glue.Set {
--        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
-+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .mla = f.m.mla, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
+-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
++        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = f.m.mla, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
      }
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index bbcae3dafb49c4548d3fbc4345deff60b68dc2c3..3afa003d7e485fa62d8c29eda8c4c2ce471f1cda 100644
+index 5dfecd44754f12c4387289847cd70f99fde43a10..0e9fd3904e2033e5f82b157c47e59925fa17b39f 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -39,9 +39,9 @@ pub const Mla = struct {
+@@ -41,9 +41,9 @@ pub const Mla = struct {
          return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC") };
      }
  
@@ -658,7 +658,7 @@ index bbcae3dafb49c4548d3fbc4345deff60b68dc2c3..3afa003d7e485fa62d8c29eda8c4c2ce
      }
  };
  
-@@ -98,12 +98,29 @@ pub const Kernels = struct {
+@@ -100,12 +100,29 @@ pub const Kernels = struct {
      chunks_32_fp8: cuda.Function,
      merge: cuda.Function,
      scores: cuda.Function,
@@ -690,7 +690,7 @@ index bbcae3dafb49c4548d3fbc4345deff60b68dc2c3..3afa003d7e485fa62d8c29eda8c4c2ce
          }
          const router16 = try cuda.ovn.int("ROUTER16", 0);
          k.router16 = if (router16 == 0) null else try m.function(if (router16 == 4) "tf_glm_router16_s4" else "tf_glm_router16_s3");
-@@ -113,6 +130,13 @@ pub const Kernels = struct {
+@@ -115,6 +132,13 @@ pub const Kernels = struct {
          try k.chunks_32.allowDynamicShared(chunksSmem(32));
          try k.chunks_16_fp8.allowDynamicShared(chunksSmem(16));
          try k.chunks_32_fp8.allowDynamicShared(chunksSmem(32));
@@ -1018,7 +1018,7 @@ index 3f03b5c9d298ae9f8f8e8917f8053542ccc1e8fe..be531f6263ae023df4ff054a173d7af0
          const sel = selectLs(rows, prefill, seg, np_max);
          var mm: usize = 4;
 diff --git a/zig/src/families/glm/cuda_weights.zig b/zig/src/families/glm/cuda_weights.zig
-index ac9f7aea111396814975c01b503a4cfe7f8e6164..645f01d948659e6a0f1141e774258ff34cfe400c 100644
+index 696a42381461af7702f7345ed0f53970b3ef9d95..69f2d021086819fb852ea9994c71e7caf2e09c9a 100644
 --- a/zig/src/families/glm/cuda_weights.zig
 +++ b/zig/src/families/glm/cuda_weights.zig
 @@ -17,6 +17,7 @@ const mm_mod = @import("cuda_mm.zig");

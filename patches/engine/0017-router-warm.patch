@@ -23,10 +23,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 173e1785848788940ee2bce25d28047df372c06c..1a1db37151bac481656c25071cddbc40baaa9bb4 100644
+index 7224ac270895ecd8f5b9f2a2f2705844773f3c8c..4b31b434897e16748a96a207ccd0267a3fdcb2b9 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -91,6 +91,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -94,6 +94,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_INDEX_REGROUP` | Exactly `0` or `1`; default off (prompt launches score with the reduce-scatter head sum) |
  | `TF_GLM_OVN_PLAIN_MARGIN` | Whole number of hundredths a drafted depth must beat plain rounds' tokens a ms by; default 0 (the core's 1.05) |
  | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
@@ -47,10 +47,10 @@ index caaa814f51acad0d227af6d09c47ae336b34c69a..399d5c7b05f9e02e3fdcc9a8740be67e
      _ = @import("cuda_prompt_cuts.zig");
      _ = @import("cuda_request_starts_test.zig");
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index 135f9a892daa51a896561403f127420b1729abb7..c006e1dd886493d95dbde828b678378551a1e02d 100644
+index 2a0115dad0c9faf0113bdfd762d6ec1696d71eff..0294441d84bd7aa25532743424ef5effa10b68eb 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
-@@ -229,6 +229,8 @@ pub const Engine = struct {
+@@ -231,6 +231,8 @@ pub const Engine = struct {
          errdefer e.shared_buf.free();
          errdefer @import("cuda_load_owner.zig").drain(stream, d);
          try e.stream.synchronize();
@@ -60,10 +60,10 @@ index 135f9a892daa51a896561403f127420b1729abb7..c006e1dd886493d95dbde828b6783785
      }
  
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index fe9337a1a8d428abd57c1057219d256a98df3417..9a69473faed5f28a5ae2622a984bb2570874d145 100644
+index f7729588b6e38035e11f83f619bf4246f7313045..482d5a6ad8bb08fcfa1996b29de8b43a0b361dce 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -189,7 +189,7 @@ pub const Forward = struct {
+@@ -199,7 +199,7 @@ pub const Forward = struct {
          try glue.hcPre(f.set(), f.stream, b.x, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc);
      }
  
@@ -72,7 +72,7 @@ index fe9337a1a8d428abd57c1057219d256a98df3417..9a69473faed5f28a5ae2622a984bb257
          const stamp = prof_mod.span(f.prof, f.stream, .glue);
          defer stamp.end();
          const c = &r.w.config;
-@@ -257,7 +257,7 @@ pub const Forward = struct {
+@@ -267,7 +267,7 @@ pub const Forward = struct {
          return .{ .set = f.set(), .linear = .{ .lane = &f.m.lane, .nvfp4_prompt = &f.m.prompt }, .copy_rows = f.m.copy_rows };
      }
  
@@ -244,10 +244,10 @@ index 0000000000000000000000000000000000000000..c407544dab44546e6ca6be921238cd05
 +    return n;
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index eb3642cfcc36fe6a7f60d412f14492a8ec8209d9..e1c831265e9dc7f0aee388017fe4af4288506983 100644
+index 00b2300aefa25a2f18e390484d39f091f60f22d3..2fe399446e141781b25e8bc327aa030831570b78 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -150,6 +150,7 @@ pub const rules = [_]Rule{
+@@ -162,6 +162,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_INDEX_REGROUP", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_PLAIN_MARGIN", .scope = .glm, .kind = .u64, .forms = "a whole number of hundredths, 0 (the core's 1.05) or the margin a drafted depth must beat plain rounds by" },
      .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },

@@ -54,10 +54,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/build.zig b/build.zig
-index 8eedd401e6d4111a2c3646c28fc3b963bf644c14..750d32c54a4e060d75dda5b9356c113fc088ad75 100644
+index 54d7e47382df24dd51b6fe41037d688fd9af8d4d..619b140cbb887f68e7e1bc5677deea62a920fb57 100644
 --- a/build.zig
 +++ b/build.zig
-@@ -264,6 +264,7 @@ pub fn build(b: *std.Build) void {
+@@ -265,6 +265,7 @@ pub fn build(b: *std.Build) void {
      @import("zig/build/startup_states_timing.zig").step(b);
      // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
      @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
@@ -90,7 +90,7 @@ index a157e0143b74177c83fa3f8ee41c9cd396bfbe83..565acac98271cd10be121645c25952c2
 +    b.step("prompt-bench", "The server's request preparation on the parity probe's r2, ms per site (no GPU)").dependOn(&b.addInstallArtifact(exe, .{}).step);
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index 72499119c8328b27e16310449c1a75afe0b4e81e..093606cc5226b2d4cc67149ce6fbf20583d850e9 100644
+index 9807c7574731db61dc4d27a2fae7754bdc45c99c..33d85911408002d3b7638205faf231d28e28b5e7 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
 @@ -15,6 +15,10 @@ pub const hub = @import("hub.zig");

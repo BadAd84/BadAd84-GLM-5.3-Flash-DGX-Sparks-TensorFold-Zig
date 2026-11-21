@@ -22,11 +22,11 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9 8fe15871c makes the kernels the default and dropped a separate 'all'; our Mode keeps all/decode on upstream's default-on parse (TF_GLM_INDEX_DECODE_FROM); Kernels.decode defaults false (v1.2.9's recorded-launch test builds a Kernels literal), comment within 120 columns
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 676923d76c3ef6eaf589b13868aaaf8cfc6938fe..cb863d4e5616a7326de05725c0fa119aee2b0cb8 100644
+index eb3401026287c871510a86c3e105c78c79c38af4..c4cc955c475db9671b9808b00f8940b5474f8f5e 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -65,7 +65,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
- | `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 |
+@@ -68,7 +68,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 on CUDA, 0.5 on Metal |
  | `TF_GLM_CONTEXT_CEILING` | GLM-5.3-Flash on CUDA: whole token count 1 through 2147483616, the window `--context` may ask for and `--context 0` serves, in place of config.json's 1048576; read at GLM's open. Past that length the model's quality is the operator's to check. Unset keeps config.json's window |
  | `TF_GLM_EXPERT_FORM` | `classic` or `factored`: the expert form GLM's CUDA decode windows use at every width (the same bits either way), also at a load that times nothing; unset or blank races the two at each timed width when a build first loads with drafts and scratch context and keeps each width's winner, else classic; read on rank 0, which chooses every rank's forms |
 -| `TF_GLM_INDEX_CUDA` | GLM on CUDA: exactly `1` (both DSA indexer kernels), `0` (neither) or `scores` (scores only); unset or blank is `both` |
@@ -34,7 +34,7 @@ index 676923d76c3ef6eaf589b13868aaaf8cfc6938fe..cb863d4e5616a7326de05725c0fa119a
  | `TF_GLM_KV_HOST_GIB` | GLM on CUDA: a finite GiB amount of at least 0 for the DSA layers' pinned host pages; unset or blank uses one full window and 16 rows a page |
  | `TF_GLM_KDA_DUMP` | A file path without control characters; the first KDA input projection after load writes its `rows` x width bf16 stack there once, for the pad's own float64 check. Unset or blank writes none |
  | `TF_GLM_RANK` | GLM-5.3-Flash on CUDA: a whole rank index from 0 through 4294967295, set with `TF_GLM_WORLD`; unset with it gives one rank |
-@@ -83,6 +83,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -86,6 +86,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_DRAFT_NOISE` | Finite number of at least 0, the keyed Gumbel draw's weight in a sampled stream's pick; default 0 (off) |
  | `TF_GLM_OVN_DRAFT_CUTS` | Comma-separated `streams:cut` pairs (`1:0.3,4:0.7`): a pass of N streams takes the cut of the largest key at most N, else `TF_GLM_DRAFT_CONFIDENCE`; checked as text at startup and as pairs when the drafter loads; default unset |
  | `TF_GLM_DFLASH2_WIN` | Whole count from 0 through 2048 of the context positions a DFlash2 draft attends to; drafts only, never replies; default 2048 |
@@ -43,10 +43,10 @@ index 676923d76c3ef6eaf589b13868aaaf8cfc6938fe..cb863d4e5616a7326de05725c0fa119a
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
-index 64b972af9b9c5180309f649cb9de96abf47635ed..80fb489da206803ac9c8681ba4b741e13433b96a 100644
+index aa229f39641d5502674f68351bd4c80d23550e1e..dd91619459919e75d5a7e741a45887fde0ec4406 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
-@@ -29,6 +29,7 @@ const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
+@@ -30,6 +30,7 @@ const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
  const levers = [_]struct { name: [:0]const u8, kind: e.Kind }{
      .{ .name = "TF_GLM_KDA_DUMP", .kind = .path },
      .{ .name = "TF_GLM_DFLASH2_WIN", .kind = .u64 },
@@ -55,7 +55,7 @@ index 64b972af9b9c5180309f649cb9de96abf47635ed..80fb489da206803ac9c8681ba4b741e1
  
  /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 diff --git a/zig/src/families/glm/cuda_index.zig b/zig/src/families/glm/cuda_index.zig
-index 70f986ce4e022cb4ea1da1402b39fbbb06cd6561..58c2b2162c4402cc51941a78615534224aec5f4d 100644
+index 78b727bf681731b4c1a37db90ce2588041bbfc4b..7dde5f1c1fc84a58a24a2c7826bcc1b91380af36 100644
 --- a/zig/src/families/glm/cuda_index.zig
 +++ b/zig/src/families/glm/cuda_index.zig
 @@ -1,4 +1,4 @@
@@ -91,24 +91,7 @@ index 70f986ce4e022cb4ea1da1402b39fbbb06cd6561..58c2b2162c4402cc51941a7861553422
              else => unreachable,
          };
      }
-@@ -38,9 +40,14 @@ pub const Mode = enum {
-     }
- };
- 
--/// glm_index_scores' grid: rows in CTAs of 8, the `nb` pool blocks in runs of score_tiles.
-+/// The 64-pool tiles a CTA scores: score_tiles runs for prompt chunks, one tile a CTA for a decode window.
-+pub fn tileLoop(rows: usize) usize {
-+    return if (rows >= rows_from) score_tiles else 1;
-+}
-+
-+/// glm_index_scores' grid: rows in CTAs of 8, the `nb` pool blocks in runs of tileLoop(rows).
- pub fn scoresGrid(rows: usize, nb: usize) [2]u32 {
--    return .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, score_tiles))) };
-+    return .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, tileLoop(rows)))) };
- }
- 
- /// The candidates a row of the pools kernel keeps and the floor's target (speed only; the pools are the same).
-@@ -56,15 +63,26 @@ pub const Kernels = struct {
+@@ -62,15 +64,19 @@ pub const Kernels = struct {
      module: cuda.Module,
      scores_fn: cuda.Function,
      pools_fn: cuda.Function,
@@ -117,7 +100,7 @@ index 70f986ce4e022cb4ea1da1402b39fbbb06cd6561..58c2b2162c4402cc51941a7861553422
      select: bool,
 +    /// Whether decode windows (fewer than rows_from rows) take the kernels too (Mode.all).
 +    decode: bool = false,
-+    /// The pools a decode window needs before it takes them (TF_GLM_INDEX_DECODE_FROM, read at load; 0: any depth).
++    /// The pools a decode window needs before Mode.all takes it (TF_GLM_INDEX_DECODE_FROM, read at load; 0: any depth).
 +    decode_from: usize = 0,
  
      /// `image`: cuda.kernels.glm_index.
@@ -126,18 +109,11 @@ index 70f986ce4e022cb4ea1da1402b39fbbb06cd6561..58c2b2162c4402cc51941a7861553422
          var m = try cuda.Module.load(d, image);
          errdefer m.unload();
 -        return .{ .module = m, .scores_fn = try m.function("tf_glm_index_scores"), .pools_fn = try m.function("tf_glm_index_pools"), .select = mode == .both };
-+        return .{
-+            .module = m,
-+            .scores_fn = try m.function("tf_glm_index_scores"),
-+            .pools_fn = try m.function("tf_glm_index_pools"),
-+            .select = mode == .both or mode == .all,
-+            .decode = mode == .all,
-+            .decode_from = try decodeFrom(@import("profile").lookup("TF_GLM_INDEX_DECODE_FROM")),
-+        };
++        return .{ .module = m, .scores_fn = try m.function("tf_glm_index_scores"), .pools_fn = try m.function("tf_glm_index_pools"), .select = mode == .both or mode == .all, .decode = mode == .all, .decode_from = try decodeFrom(@import("profile").lookup("TF_GLM_INDEX_DECODE_FROM")) };
      }
  
      pub fn unload(k: *Kernels) void {
-@@ -73,15 +91,14 @@ pub const Kernels = struct {
+@@ -79,8 +85,7 @@ pub const Kernels = struct {
  
      /// Whether `rows` rows over `np` pools with this key cache layout go through the kernels.
      pub fn takes(k: *const Kernels, rows: usize, np: usize, pk: u64, ps: u64) bool {
@@ -146,16 +122,8 @@ index 70f986ce4e022cb4ea1da1402b39fbbb06cd6561..58c2b2162c4402cc51941a7861553422
 +        return (rows >= rows_from or (k.decode and np >= k.decode_from)) and np >= topk and pk % 16 == 0 and ps % 16 == 0;
      }
  
-     /// tf_glm_scores' launch for `rows` rows at `at` into out [rows][np]; the first `nb` 64-pool blocks are written.
-     pub fn scores(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64) !void {
-         const g = scoresGrid(rows, nb);
-         var a: cuda.Args = .{};
--        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, score_tiles), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
-+        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(tileLoop(rows))), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
-         try cuda_pdl.launch(k.scores_fn, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
-     }
- 
-@@ -94,26 +111,48 @@ pub const Kernels = struct {
+     /// Whether a decode window takes the scores kernel: under rows_from rows, 8 from 64 blocks (4 from 2,048), aligned.
+@@ -112,6 +117,27 @@ pub const Kernels = struct {
      }
  };
  
@@ -183,12 +151,7 @@ index 70f986ce4e022cb4ea1da1402b39fbbb06cd6561..58c2b2162c4402cc51941a7861553422
  fn cdiv(a: usize, b: usize) usize {
      return (a + b - 1) / b;
  }
- 
--test "GLM index: TF_GLM_INDEX_CUDA is on unless 0, scores bisects, and a typo is refused" {
--    try std.testing.expectEqual(Mode.both, try Mode.parse(null));
--    try std.testing.expectEqual(Mode.both, try Mode.parse(""));
--    try std.testing.expectEqual(Mode.both, try Mode.parse(" \t"));
-+test "GLM index: TF_GLM_INDEX_CUDA is on unless 0, scores bisects, all adds decode windows, and a typo is refused" {
+@@ -123,6 +149,7 @@ test "GLM index: TF_GLM_INDEX_CUDA is on unless 0, scores bisects, and a typo is
      try std.testing.expectEqual(Mode.both, try Mode.parse("1"));
      try std.testing.expectEqual(Mode.off, try Mode.parse("0"));
      try std.testing.expectEqual(Mode.scores, try Mode.parse("scores"));
@@ -196,48 +159,39 @@ index 70f986ce4e022cb4ea1da1402b39fbbb06cd6561..58c2b2162c4402cc51941a7861553422
      try std.testing.expectError(error.InvalidEnvironment, Mode.parse("on"));
      try std.testing.expectError(error.InvalidEnvironment, Mode.parse("off"));
  }
- 
--test "GLM index: the scores grid covers 8 rows a CTA and 16 pool blocks a CTA" {
-+test "GLM index: the scores grid covers 8 rows a CTA, 16 pool blocks a prompt CTA and one a decode CTA" {
-     // a 512-row chunk over 147,456 pools: 2,304 blocks
-     try std.testing.expectEqual([2]u32{ 64, 144 }, scoresGrid(512, 2304));
-     try std.testing.expectEqual([2]u32{ 9, 1 }, scoresGrid(65, 16));
-     try std.testing.expectEqual([2]u32{ 8, 2 }, scoresGrid(64, 17));
-+    // a 4-row decode window over 596k tokens' 149,000 pools: one CTA a 64-pool block
-+    try std.testing.expectEqual([2]u32{ 1, 2329 }, scoresGrid(4, 2329));
-+    try std.testing.expectEqual([2]u32{ 2, 32 }, scoresGrid(9, 32));
-     try std.testing.expectEqual([2]u32{ 1, 1 }, scoresGrid(1, 0));
+@@ -170,7 +197,9 @@ test "GLM index: decode windows on aligned key caches take the scores kernel" {
  }
  
-@@ -125,13 +164,21 @@ test "GLM index: the candidate cap follows the pool count and stays in shared me
-     try std.testing.expect(tile(1 << 30).cap <= cap_max);
- }
- 
--test "GLM index: only prompt-sized launches on aligned key caches take the kernels" {
+ test "GLM index: only prompt-sized launches on aligned key caches take the kernels" {
 -    const k: Kernels = undefined;
-+test "GLM index: prompt-sized launches on aligned key caches take the kernels, decode windows only with Mode.all" {
 +    var k: Kernels = undefined;
-+    k.decode = false;
++    k.decode = false; // the decode fields Mode.all sets; off here, as upstream's rule has it
 +    k.decode_from = 0;
      try std.testing.expect(k.takes(rows_from, 1024, 0x1000, 32768));
      try std.testing.expect(!k.takes(rows_from - 1, 1024, 0x1000, 32768));
-+    try std.testing.expect(!k.takes(4, 1 << 18, 0x1000, 32768));
      try std.testing.expect(!k.takes(512, 1024, 0x1008, 32768));
-     try std.testing.expect(!k.takes(512, 1024, 0x1000, 32760));
+@@ -178,6 +207,16 @@ test "GLM index: only prompt-sized launches on aligned key caches take the kerne
      try std.testing.expect(!k.takes(512, topk - 1, 0x1000, 32768));
+ }
+ 
++test "GLM index: Mode.all sends decode windows of any row count to the kernels, on aligned key caches only" {
++    var k: Kernels = undefined;
 +    k.decode = true;
++    k.decode_from = 0;
 +    try std.testing.expect(k.takes(1, 1024, 0x1000, 32768));
 +    try std.testing.expect(k.takes(rows_from - 1, 1 << 18, 0x1000, 32768));
 +    try std.testing.expect(!k.takes(4, topk - 1, 0x1000, 32768));
 +    try std.testing.expect(!k.takes(4, 1024, 0x1008, 32768));
- }
- 
++}
++
  /// A driver that records each launched function's handle, in order (selectTokens below, without a device).
+ const Recorded = struct {
+     var n: usize = 0;
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 9cc8ec0accce86a65d6eb010a8c441dd8b6a774a..25f83bbc2a9ce4709a6c8473f410c0f7b43f7301 100644
+index 95ab2b585661fb7ce8f5d7d9cc36f4042b4259e7..6f585210eb2c3ecddb76c8f86a02af547d265861 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -142,6 +142,7 @@ pub const rules = [_]Rule{
+@@ -154,6 +154,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_DRAFT_NOISE", .scope = .glm, .kind = .real, .trim = " ", .forms = "a finite weight of at least 0 (default 0, off)" },
      .{ .name = "TF_GLM_OVN_DRAFT_CUTS", .scope = .glm, .kind = .path, .forms = "comma-separated streams:cut pairs such as 1:0.3,4:0.7, without control characters" },
      .{ .name = "TF_GLM_DFLASH2_WIN", .scope = .glm, .kind = .u64, .trim = " ", .max = 2048, .forms = "a whole count of context positions from 0 to 2048 (default 2048)" },
@@ -245,7 +199,7 @@ index 9cc8ec0accce86a65d6eb010a8c441dd8b6a774a..25f83bbc2a9ce4709a6c8473f410c0f7
      .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
      .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
      .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
-@@ -262,7 +263,7 @@ pub const rules = [_]Rule{
+@@ -277,7 +278,7 @@ pub const rules = [_]Rule{
      .{ .name = "HUGGING_FACE_HUB_TOKEN", .scope = .hub, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "a Hugging Face token without control characters (pull only)" },
      .{ .name = "HF_TOKEN_PATH", .scope = .hub, .kind = .path, .forms = "a path without control characters to the Hugging Face token file (pull only)" },
      // Family rank and prompt settings below are read through their own family's startup scope.
@@ -255,7 +209,7 @@ index 9cc8ec0accce86a65d6eb010a8c441dd8b6a774a..25f83bbc2a9ce4709a6c8473f410c0f7
  };
  
 diff --git a/zig/tests/cuda/glm_index_check.zig b/zig/tests/cuda/glm_index_check.zig
-index db1e4738738dfa874a405e4713f8cf7cd6640099..3c98960b52fa7f95ff39afc575cff6d3e57ae705 100644
+index 0bd928f32812451090a344bb71c0b5d51b1f04e6..c92d62a5e05ba8ff4b9ef69d756fb0f1757a3123 100644
 --- a/zig/tests/cuda/glm_index_check.zig
 +++ b/zig/tests/cuda/glm_index_check.zig
 @@ -20,6 +20,15 @@ const cases = [_]Case{

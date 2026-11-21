@@ -51,10 +51,10 @@ New here, not a re-seat: written on this stack at v1.2.9.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 5416590c2f2743fd72c6a8299ef544c93d630d99..222e385e91c8eea88fdfb2fcffd584be8ea2385c 100644
+index 13745d5003b3fc98cad1ef988d82a741cf2b74f7..d6e1c3d0517e97dd0e9a8ead9f1746608a3a9e61 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -107,6 +107,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -110,6 +110,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
  | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
  | `TF_GLM_OVN_PIECE_KDA` | Exactly `0` or `1`; default off (a prompt chunk's KDA mixer site runs its chain piece by piece, each range of rows ahead of its pieces' o_proj and exchange, instead of the whole chain before the first piece; the bits are the same) |
@@ -627,10 +627,10 @@ index d88ea117ba7af322d2c267b58d583e08bfd4dd32..0bbe849e717fed6a0aa2f76b54c4d4bd
          if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
          if (st.pos + rows > st.base + st.ring_rows) return error.PastRing; // rows past the ring overwrite its neighbour
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 20be7098cee96066fd38ceb3da2c67c71faee369..79acfa8a67368c71e2f39efdb5476eb780599c30 100644
+index 68e866e81e0663f265935e0643ea9bc23f7d400f..7fced792315379ecdedd2101b9f96e40b2639ae4 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -166,6 +166,7 @@ pub const rules = [_]Rule{
+@@ -178,6 +178,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },
      .{ .name = "TF_GLM_OVN_PIECE_KDA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

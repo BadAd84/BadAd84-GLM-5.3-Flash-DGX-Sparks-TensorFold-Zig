@@ -25,10 +25,10 @@ base's own cli_config_test, lean 0 new; series and series+pr1411+cache-salt PASS
 pristine base in the three-tree run.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index cc46a13445ded42318521be4f4345531da3cc46a..55668cdb891b086fa56250b9f2413eab035b5f51 100644
+index d43f3a6c65baa7093498418503d88f4c98c676a7..e1d2e1b4e8b8fdc01c246d8fc323a6689d96fddb 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -94,6 +94,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -97,6 +97,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
  | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
  | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
@@ -200,10 +200,10 @@ index 328f16113239eee4ee4923dc9f9a9ec2e7dc0202..9af867eb4fb21b58632b192c04d60e2e
 +    try std.testing.expect(self.facts().copy_drafts);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 18f07df8c684bb8ca4ba458760156e16cb271b75..4599c2690a0cb66dc534242c8e4bbbfbf0ba46b8 100644
+index ed2df88383d67610add993ebd400039e42b73e27..8357ccef54c9582be9d652287f1e325687429bf2 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -153,6 +153,7 @@ pub const rules = [_]Rule{
+@@ -165,6 +165,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
      .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
      .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

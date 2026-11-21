@@ -75,10 +75,10 @@ Receipts (lane VerifyGap, 2026-11-14; base = v1.2.7 + 0001..0033, head = base + 
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: 0029's whole-chunk test dropped with 0029 (absorbed); compact() takes the prompt flag v1.2.9's call no longer passes (always false: prompts go to the whole-pass plan), and the X3 kernels are kept; one newline at the end of cuda_exl3.zig
 
 diff --git a/docs/environment.md b/docs/environment.md
-index c06a05e52259de89053ae089cefaa8c8c217f508..9122611dd1042be72b2d4d90807ff41c5224c24f 100644
+index 662ff927f9156b9cdbf370279e4414fc20b15a13..b9a43de5cddffa5b685fc3d31b9916ff322238df 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -109,6 +109,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -112,6 +112,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
  | `TF_GLM_OVN_HOST_ONCE` | Exactly `0` or `1`; default off (the rewind probe's render stops a few KiB past where it leaves the prompt) |
@@ -703,10 +703,10 @@ index 9c30d9129799d71e5b238019c56ee075586c1aef..bade7ff10d746e6a5d9726539f86ca2e
          return;
      }
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index d5625992a82afa9a011f93ba56bcc6e651665628..e851a1bcda89dbfab5814b112699391d2c127198 100644
+index 99098027a5ef33d71d2a62a92ed53ccb3a1b9af7..d6cacde8b0b601e50dbbe7c6205721bf2dbf19ad 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -168,6 +168,9 @@ pub const rules = [_]Rule{
+@@ -180,6 +180,9 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
      .{ .name = "TF_GLM_OVN_HOST_ONCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

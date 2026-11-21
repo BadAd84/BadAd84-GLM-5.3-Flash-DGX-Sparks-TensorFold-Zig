@@ -33,10 +33,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9 c8ad9872d generalised our sum2 into df_sumn (world-ordered) and gated the split with mlpSplit/RoCE wide; our sumw dropped, MLPSPLIT slices, DOWN4, ONEPASS, KEEPWIN, WIN, BETA/NOISE/EDGE/CUTS kept; zig fmt's column widths for the scratch table
 
 diff --git a/docs/environment.md b/docs/environment.md
-index ab4470acea8816a199fd711f0dc0488a29907959..676923d76c3ef6eaf589b13868aaaf8cfc6938fe 100644
+index d0c8699d929390f2c61d69cc844510a92d0afc8f..eb3401026287c871510a86c3e105c78c79c38af4 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -74,6 +74,15 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -77,6 +77,15 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_NEMOTRON_WORLD` | Nemotron 3.5 Super on CUDA: a whole rank count from 1 through 4294967295, set with `TF_NEMOTRON_RANK`; unset with it gives one rank |
  | `TF_MINIMAX_RANK` | MiniMax-M3.1-Flash on CUDA: a whole rank index, 0 or 1 at two ranks, set with `TF_MINIMAX_WORLD`; unset with it gives one rank |
  | `TF_MINIMAX_WORLD` | MiniMax-M3.1-Flash on CUDA: a whole rank count, 2 at CUDA, set with `TF_MINIMAX_RANK`; unset with it gives one rank |
@@ -145,10 +145,10 @@ index 21ccf5d6934cbe5dc95699ef7dff22ce1b42540a..13fd9e4ef78cba071dc34c775a792d8e
              e.device = record.device();
              e.queue = record.queue();
 diff --git a/zig/residency_owner_tests.zig b/zig/residency_owner_tests.zig
-index 3799a4279921c7c72853db756c72f787e24ab56d..8c9095ed69949e97c1c4f7f91af59b43cf0fccd9 100644
+index 1d6c0661ce29179daa098bd5f1167cf50eb2c096..61f1ea4ece4520fac42363b164d4a63481c40df6 100644
 --- a/zig/residency_owner_tests.zig
 +++ b/zig/residency_owner_tests.zig
-@@ -40,6 +40,7 @@ test "residency owner GLM: actual arena slots tower and snapshots match live uni
+@@ -41,6 +41,7 @@ test "residency owner GLM: actual arena slots tower and snapshots match live uni
              defer weights.buffers.deinit(a);
              try weights.buffers.append(a, weight);
              var e: glm.engine.Engine = undefined;
@@ -156,7 +156,7 @@ index 3799a4279921c7c72853db756c72f787e24ab56d..8c9095ed69949e97c1c4f7f91af59b43
              e.gpa = a;
              e.device = device;
              e.queue = record.queue();
-@@ -135,6 +136,7 @@ test "residency owner GLM: zero and a failed bound never publish a set or keepal
+@@ -136,6 +137,7 @@ test "residency owner GLM: zero and a failed bound never publish a set or keepal
              defer weights.buffers.deinit(a);
              try weights.buffers.append(a, weight);
              var e: glm.engine.Engine = undefined;
@@ -177,10 +177,10 @@ index 588f1481ec9e0f42bb9031790fa3202a0bfb4531..caaa814f51acad0d227af6d09c47ae33
  
  pub const dflash = @import("dflash.zig");
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index ac91dc2c2a8d4b55af8bab7f587bb35f01edf66f..135f9a892daa51a896561403f127420b1729abb7 100644
+index 86e3453b9e4307a76bc4183f85f304fbf7b4708d..2a0115dad0c9faf0113bdfd762d6ec1696d71eff 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
-@@ -369,7 +369,7 @@ pub const Engine = struct {
+@@ -371,7 +371,7 @@ pub const Engine = struct {
          const r = from orelse return 0;
          if (r.at == 0 or r.at >= len or !prompt_cuts.coldCut(len, e.cur.cuts.items, r.at)) return error.BadResume;
          try e.restoreState(r.id);
@@ -189,7 +189,7 @@ index ac91dc2c2a8d4b55af8bab7f587bb35f01edf66f..135f9a892daa51a896561403f127420b
          return r.at;
      }
  
-@@ -494,7 +494,7 @@ pub const Engine = struct {
+@@ -496,7 +496,7 @@ pub const Engine = struct {
      /// DFlash2's round (every rank, the same `reqs`): each stream's kept rows into its context, then the block pass.
      pub fn draftBlock(e: *Engine, reqs: []dflash.Req) !void {
          const dr = e.drafter orelse return error.NoDrafter;
@@ -221,10 +221,10 @@ index 280f12aa2a6f84d413dde70c6393291b8279c5c0..8835fe3c7f0750001d2c3b498c22522c
  
  const ranks = @import("cuda_ranks.zig");
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
-index 4333dd2ae21525ffaae103963da1655548134faa..64b972af9b9c5180309f649cb9de96abf47635ed 100644
+index 59a6d5a8f279f27c7bdceb41cd5b846ccef52efa..aa229f39641d5502674f68351bd4c80d23550e1e 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
-@@ -28,6 +28,7 @@ const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
+@@ -29,6 +29,7 @@ const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
  /// The other GLM settings the speed-hunt levers read, each with its row's kind.
  const levers = [_]struct { name: [:0]const u8, kind: e.Kind }{
      .{ .name = "TF_GLM_KDA_DUMP", .kind = .path },
@@ -447,7 +447,7 @@ index 77a0119b34d21483190ca13c2dbd283b4b9650a2..878dee4b7e98a47234063ec6fa0af399
  
  pub fn restore(e: anytype, id: u64) !void {
 diff --git a/zig/src/families/glm/dflash.zig b/zig/src/families/glm/dflash.zig
-index aa039ffc299d13b357ef8033a92dfa8d4460a45a..42a71867b1387a204231926f7ed946f0317d54e5 100644
+index 9a66e875e70c3a1c011ccdc79bb841a39957b05f..4096039f1aced2d6828e377b286347ca731e51f9 100644
 --- a/zig/src/families/glm/dflash.zig
 +++ b/zig/src/families/glm/dflash.zig
 @@ -82,8 +82,8 @@ pub const Kernels = struct {
@@ -713,7 +713,7 @@ index db958a3303e2640dbb8ff13b2a7be7e717f6bec3..da1f99a07beda61e2008bba1827c4589
          try q4.matmul(&e.m.q4, e.stream, dr.hn + r0 * D * 2, D, dr.xs + r0 * (D / 64) * 4, head, dr.logits + r0 * head.n * 2, rows);
      }
 diff --git a/zig/src/families/glm/dflash_load.zig b/zig/src/families/glm/dflash_load.zig
-index a20965797764f69f46a1326987c069abd8a2e738..539ccffb01822251fa58c9f06e21f048d28c0fa5 100644
+index 404bea9b6cbeac1e0e35eb50ebe0ab74cde9aba5..3815609028ba3bd6b4bd9d1ab2d7f174c6c4f314 100644
 --- a/zig/src/families/glm/dflash_load.zig
 +++ b/zig/src/families/glm/dflash_load.zig
 @@ -122,6 +122,31 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
@@ -748,13 +748,12 @@ index a20965797764f69f46a1326987c069abd8a2e738..539ccffb01822251fa58c9f06e21f048
  /// The drafter from `dir` (config.json and model.safetensors, bf16) for rank `rank` of `world`, on engine `e`.
  pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
      if (bits != 0 and bits != 4) return error.BadDrafterBits;
-@@ -145,13 +170,21 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
-     var ents = std.StringHashMap(Ent).init(gpa);
+@@ -146,12 +171,20 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
      defer ents.deinit();
      try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
+     const mlp = df.mlpSplit(world, e.settings.draftWide()); // the MLP split across the ranks, or whole
 +    var temp: f64 = 1.0;
 +    const knobs = try @import("dflash_ovn.zig").Knobs.read(&temp);
-     const mlp = df.mlpSplit(world, e.settings.roce_wide); // the MLP split across the ranks, or whole
      const split = mlp.split;
      const ff = mlp.ff;
 +    const down4 = knobs.down4 and bits == 4; // DOWN4: every down form at 4 bits (production's dflash2.py:403)
@@ -1068,10 +1067,10 @@ index 996398e1d812dc011ac90a812777ca25ab6d4c44..714c77c7f135261e7a4b5906ce4fd81f
 +    for (out) |id| try std.testing.expectEqual(@as(u32, 1), id); // EDGE 0 drops the codebook term: the logit alone
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index e07101bb4a36c8de292dbda28a6ca00046a07ca4..9cc8ec0accce86a65d6eb010a8c441dd8b6a774a 100644
+index da491a18778c88caf7f48f3dbdf6ea95da82cfdb..95ab2b585661fb7ce8f5d7d9cc36f4042b4259e7 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -133,6 +133,15 @@ pub const rules = [_]Rule{
+@@ -145,6 +145,15 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
      .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },
      .{ .name = "TF_GLM_KDA_DUMP", .scope = .glm, .kind = .path, .forms = "a file path without control characters, where one projected KDA input stack is written" },

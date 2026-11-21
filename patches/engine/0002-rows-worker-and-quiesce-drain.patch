@@ -232,10 +232,10 @@ index f2c6620df8df44d4b35111f5f339fa8213135ae3..1a35eac479f93b36370a41e6d60c7ea1
  
  test "with keys configured, /health sends only its status, with and without a valid key, whatever the identity" {
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index d6ae7b479a79b89c506df0e8babbd2432d49c09a..72499119c8328b27e16310449c1a75afe0b4e81e 100644
+index 30d9a5ee76f5c33f86d6e790301d2abf64d37ca0..9807c7574731db61dc4d27a2fae7754bdc45c99c 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
-@@ -114,6 +114,7 @@ test {
+@@ -118,6 +118,7 @@ test {
      if (comptime @import("builtin").os.tag != .windows) _ = @import("pdf_worker.zig"); // spawns /bin/sh workers
      _ = @import("drama_prompt.zig");
      _ = @import("health_test.zig");
