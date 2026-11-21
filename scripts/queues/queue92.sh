@@ -1,6 +1,6 @@
 #!/bin/bash
 # queue92.sh - on spark1, detached, after queue91: did anyone else's work speed the serve up. The same boxes, instrument and shape as queue91 (--parallel 4 --context 1048576, 6 and 8
-# clients queue on it), every arm KNOBS=off (the runtime section of env/prod.env, no knob of ours), so a rung is what a user of upstream gets.
+# clients queue on it), every stock arm KNOBS=off (the runtime section of env/prod.env, no knob of ours), so a rung is what a user of upstream gets; the two stack arms tn1 tn2 run KNOBS=prod, the recipe as committed.
 # queue92.env: WORKERS, HOURS, IMGB (the pristine main of queue91, glm53-zig:m130base). Production is down for the campaign and stays down. QUEUE92-DONE.
 # ARMS (env, default the stock ladder): the units to run, in order; only the images those arms need are built. WAIT_FOR (default queue91.sh): the process to wait out first, so the pull
 # request arms can be run later as their own start (ARMS="pd pm" WAIT_FOR=queue93.sh, from a copy named queue92b.sh so queue93's wait on queue92.sh does not see it) and the pilots' receipts go between.
@@ -8,6 +8,7 @@
 #   0  wait for QUEUE91-DONE in ~/bench/queue91.log, then build from stage/src-TAG.tar when the image is absent and copy it to the other two ranks, one image id on all three:
 #        u129 u1210 u130   pristine upstream v1.2.9, v1.2.10 and v1.3.0 (git archive of the tag)
 #        ut                the main tip 46c6ee229 (git archive; what upstream merged after our pin 1ece6e6db: the KDA padding at TP=3, a default decode share for long fills, the sampler's small top_k)
+#        m140a             the 47-patch series re-seated on the main tip 46c6ee229 (stage/src-m140a.tar, result tree 1fd680b2b681; docs/audit-2026-11-12/reseat-tip-46c6ee2.md)
 #        ud ui             main 3661a4281 (the dependent launches in, our 16-pair item plan out) and main 32c361db9 (the item plan in, the lanes' draft-depth hold out)
 #        p3616 p3659 p2279 the pin 1ece6e6db plus one open pull request's own change (work/pr-trees/RECORD.md); an arm whose tar is not staged is skipped and logged
 #   1  units, each a fresh P=4 boot: the cold first token at 8k / 32k / 120k (two requests, one seed on every boot), a growing conversation (salt c74: a 100k first turn and seven
@@ -17,6 +18,8 @@
 #      ud1 ui1     the two main commits between v1.3.0 and the pin            smz sm with TF_GLM_PDL=0 (the dependent launches off)
 #      smr         sm with TF_GLM_REQUEST_STARTS=1 (upstream's own warm-turn setting)
 #      ut1         the main tip, KNOBS=off (not in the default ARMS: queue96.sh, a copy of this script, runs it alone after queue92.sh; score92.py reads it against the main group)
+#      tn1 tn2     the stack on the tip, KNOBS=prod, no XENV, on m140a (not in the default ARMS: queue97.sh, a copy of this script, runs them after queue95.sh; score97.py reads them
+#                  against the stack on the pin, mn1 mn2 of queue91 and mn3 of queue95)
 #      pd pm       the pin plus #3616 (TF_GLM_DRAFT_SPLIT=1) and #3659 (TF_GLM_MOE_DIRECT=1), each with its switch on; pg (#2279, TF_GLM_GRAPHS=1) is not run: with a drafter
 #                  loaded the graphs path refuses every window (graphed() returns false when taps are set), so it would measure nothing on this serve
 #   scripts/queue-scores/score92.py reads the rows; its rules were written before they existed.
@@ -37,7 +40,7 @@ finish() { stop; docker rm -f glm53-zig-r0 > /dev/null 2>&1; echo "QUEUE92-DONE 
 ARMS=${ARMS:-"s9a sm2 smz s13a ud1 ui1 smr s10a s9b s13b sm3"}
 WAIT_FOR=${WAIT_FOR:-queue91.sh}
 want() { case " $ARMS " in *" $1 "*) return 0 ;; esac; return 1; }
-armtag() { case $1 in s9a|s9b) echo u129 ;; s10a) echo u1210 ;; s13a|s13b) echo u130 ;; ud1) echo ud ;; ui1) echo ui ;; ut1) echo ut ;; pd) echo p3616 ;; pm) echo p3659 ;; pg) echo p2279 ;; esac; }
+armtag() { case $1 in s9a|s9b) echo u129 ;; s10a) echo u1210 ;; s13a|s13b) echo u130 ;; ud1) echo ud ;; ui1) echo ui ;; ut1) echo ut ;; tn1|tn2) echo m140a ;; pd) echo p3616 ;; pm) echo p3659 ;; pg) echo p2279 ;; esac; }
 NEED=""; for a in $ARMS; do t=$(armtag "$a"); [ -n "$t" ] && case " $NEED " in *" $t "*) ;; *) NEED="$NEED $t" ;; esac; done
 echo "[q92] $(date -u +%T) start; arms: $ARMS; images to build: ${NEED:- none}; waiting for $WAIT_FOR"
 while pgrep -f "$WAIT_FOR" > /dev/null; do sleep 60; done
@@ -112,7 +115,7 @@ mkdir -p "$OUT/f92-c"
 unit() { # unit LABEL IMAGE KNOBS XENV [EXPECT]: a P=4 boot and everything the queue measures on it; EXPECT is a regex that rank 0's log must hold when the arm's switch took effect
   local label=$1 image=$2 knobs=$3 xenv=$4 expect=${5:-}
   room || return
-  case "$image" in glm53-zig:u*|glm53-zig:p*) case "$HAVE" in *" ${image#glm53-zig:} "*) ;; *) echo "[q92] $label: image $image not ready: skipped"; return ;; esac ;; esac
+  case "$image" in glm53-zig:u*|glm53-zig:p*|glm53-zig:m140a) case "$HAVE" in *" ${image#glm53-zig:} "*) ;; *) echo "[q92] $label: image $image not ready: skipped"; return ;; esac ;; esac
   boot "c92-$label" "$image" "$knobs" "$xenv" || return
   facts "$label" "$image" "$xenv"
   if [ -n "$expect" ]; then echo "[q92] $label switch line /$expect/ in rank 0's log: $(docker logs glm53-zig-r0 2>&1 | grep -a -c -E "$expect") line(s)"; fi
@@ -132,6 +135,8 @@ want ud1 && unit ud1 glm53-zig:ud off ""
 want ui1 && unit ui1 glm53-zig:ui off ""
 want smr && unit smr "$IMGB" off "$RSX"
 want ut1 && unit ut1 glm53-zig:ut off ""
+want tn1 && unit tn1 glm53-zig:m140a prod ""
+want tn2 && unit tn2 glm53-zig:m140a prod ""
 want pd && unit pd glm53-zig:p3616 off "-e TF_GLM_DRAFT_SPLIT=1" "${EXPECT_PD:-DRAFT_SPLIT}"
 want pm && unit pm glm53-zig:p3659 off "-e TF_GLM_MOE_DIRECT=1" "${EXPECT_PM:-MOE_DIRECT}"
 want pg && unit pg glm53-zig:p2279 off "-e TF_GLM_GRAPHS=1" "${EXPECT_PG:-GRAPHS}"
