@@ -2278,3 +2278,27 @@ positive in all four cells (T +4.00 / +2.22 / +0.89 / +12.15%, X +4.43 / +6.98 /
 at 116.9, 119.9, 128.4 and 132.2 tok/s on greedy prose, and X's at 114.1, 120.7, 126.0 and 136.9, so a 2-boot mean there measures which mode a boot landed in. **Queue105
 is that measurement**: eight boots A B B A twice at `--parallel 4 --context 1048576`, T and X together against the recipe, the four 8-client cells only, `score105.py`'s
 rules written before any row (promote when no cell is more than 1.0% slower and the eight boots carry one digest a cell).
+
+## 82. Upstream v1.3.3 (published 20:58 on 2026-11-21): its GLM decode headline is already in our pin, and one new prompt path is not
+
+Read at the release page and in the fetched clone after the owner asked about a new GLM decode kernel. The tag is `2071d0a21` (committed 19:39), published 20:58; `up/main` is
+`9b2f99f6f` at 21:25, 393 commits past our pin `fa13df5dd` (08:16). Our pin is an ancestor of the tag.
+
+**The headline, and why it is not work for us.** "GLM-5.3-Flash drafted decode after a 1,040,384-token prompt takes its DSA index scores from `tf_glm_index_scores`, 13.8% faster at
+TP=4 (172.39 against 151.51 tok/s median), byte-identical scores and the same tokens" (#3689). The mechanism is `Kernels.takesDecode` in `zig/src/families/glm/cuda_index.zig`, and it
+was introduced by `c1bfb2853` and `76e0c0b27`, both committed 2026-11-21 05:50, three hours before our pin; `git log -S takesDecode fa13df5dd..up/main` returns nothing, so nothing
+after the pin touches it. The pin's own tests state the gate: 8 rows over 4,096 pools takes the kernel, under 64 pool blocks keeps `tf_glm_scores`, and 4 rows from about 512K
+(`takesDecode(4, 216080, 2048)`), with `decodeLoop(48, 1<<20)` returning `score_tiles` at a million. It is default-on there (`TF_GLM_DSCORES`), so the recipe we re-seated onto this
+morning already takes it at depth, and our patch 0007's `TF_GLM_INDEX_CUDA=all` is a superset of it (any row count, with its own depth gate). `TF_GLM_DRAFT_SPLIT` (#3616) is in the
+pin for the same reason: merged 05:49.
+
+**What is genuinely new for GLM on CUDA since the pin.** `196b93eef` (13:45), "exl3 cuda: the common prompt kernels take 3-bit mcg gate/up and down, by projection group", with
+EXL3 `mcg` routed experts loading at any whole-bit width from 1 to 8 (#2094): a PROMPT-path lever, the 4-bit path unchanged, and it pays only with a 3-bit checkpoint, so it needs
+weights we do not have and a quality and numerics decision. Everything else with a GLM label in the release is Metal (DFlash2 sampling overhead #4257, vectorised prompt, KDA and
+indexer kernels #3921), which this fleet has no hardware for, or is parameterisation rather than speed (#3063: the DSA indexer's pool size, key store and index rope become
+parameters).
+
+**Consequence.** No CUDA GLM decode lever to port from this release, and no new overlap with our patches to put in the overlap ledger: the three overlaps already open (`TF_GLM_DSCORES`,
+`TF_GLM_DRAFT_SPLIT`, #3697's padding) all sit at or before our pin and their windows run on it. The series stays on `fa13df5dd`. A re-seat onto the tag is 393 commits and the same
+full gate, so it is deferred until something needs it, with the 3-bit prompt experts as the one new reason it might.
+
