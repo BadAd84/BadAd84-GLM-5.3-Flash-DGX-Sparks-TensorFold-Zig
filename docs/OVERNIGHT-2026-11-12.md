@@ -2302,3 +2302,11 @@ parameters).
 `TF_GLM_DRAFT_SPLIT`, #3697's padding) all sit at or before our pin and their windows run on it. The series stays on `fa13df5dd`. A re-seat onto the tag is 393 commits and the same
 full gate, so it is deferred until something needs it, with the 3-bit prompt experts as the one new reason it might.
 
+**The re-seat cost, measured rather than assumed** (`work/reseat3/survey.py`, which walks the engine series in `scripts/apply.sh`'s own order and flags, in a temporary index, no
+checkout and no compile). Against our pin as the control, every patch of the series now in `patches/engine` applies: 32 of 32 clean. Against the tag `v1.3.3`, 9 apply clean and 23 do
+not, including `0003-prompt-bench`, `0006-draft-knobs`, `0007-index-decode-windows`, `0012`, `0020`, `0021`, `0022`, `0023`, `0024`, `0027`, `0030`, `0031` and `0038`. So v1.3.3 is a
+full re-seat job of the same size as the one landed this morning, not a tag bump, which is what "deferred" rests on. (The control also caught a defect in the probe itself: its first
+run passed repo-relative paths while git ran inside the clone, so all 41 "refused" including on the base where they demonstrably apply. A survey without a base it must reproduce is a
+survey you cannot read.)
+
+
