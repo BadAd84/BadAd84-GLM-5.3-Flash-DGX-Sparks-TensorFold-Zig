@@ -1,0 +1,21 @@
+[q92] 22:13:33 start; arms: ut1; images to build:  ut; waiting for queue92.sh
+[q92] 04:19:40 queue91 is done; deadline 13:19:40; 252G free
+[q92] 04:27:53 built glm53-zig:ut: 028a6c3135cb
+[q92] distributed glm53-zig:ut: 028a6c3135cb 028a6c3135cb 028a6c3135cb DIST-DONE ut
+[q92] glm53-zig:ut ids: sha256:028a6c3135cbed20be2363288edc9eae78a471050ff3d31311cb6ed473d842a5 sha256:028a6c3135cbed20be2363288edc9eae78a471050ff3d31311cb6ed473d842a5 sha256:028a6c3135cbed20be2363288edc9eae78a471050ff3d31311cb6ed473d842a5
+[q92] images ready: ut  m130base; serve.sh sha256 (first 12): f1b2266976ad; env: d0160e2e9291
+[prod-stop] 04:36:58 production stopped on spark1-3
+[q92] 04:42:31 ut1 cold rc=0 4582 17939 67301 4722 18127 67526 
+[q92] 04:43:59 ut1 chain: 63321 916 1759 1191 1999 1593 1000 1812
+[q92] 04:44:38 dec-ut1 1 greedy prose rc=0 "agg_tok_s": 54.52 code rc=0 "agg_tok_s": 78.58
+[q92] 04:45:46 dec-ut1 2 greedy prose rc=0 "agg_tok_s": 60.83 code rc=0 "agg_tok_s": 96.98
+[q92] 04:47:32 dec-ut1 4 greedy prose rc=0 "agg_tok_s": 80.89 code rc=0 "agg_tok_s": 119.89
+[q92] 04:50:10 dec-ut1 6 greedy prose rc=0 "agg_tok_s": 79.3 code rc=0 "agg_tok_s": 118.88
+[q92] 04:53:34 dec-ut1 8 greedy prose rc=0 "agg_tok_s": 87.75 code rc=0 "agg_tok_s": 120.37
+[q92] 04:54:11 dec-ut1 1 sampled prose rc=0 "agg_tok_s": 57.49 code rc=0 "agg_tok_s": 81.92
+[q92] 04:55:20 dec-ut1 2 sampled prose rc=0 "agg_tok_s": 59.27 code rc=0 "agg_tok_s": 96.89
+[q92] 04:57:10 dec-ut1 4 sampled prose rc=0 "agg_tok_s": 78.1 code rc=0 "agg_tok_s": 113.4
+[q92] 04:59:56 dec-ut1 6 sampled prose rc=0 "agg_tok_s": 75.52 code rc=0 "agg_tok_s": 109.22
+[q92] 05:03:27 dec-ut1 8 sampled prose rc=0 "agg_tok_s": 80.08 code rc=0 "agg_tok_s": 117.26
+[q92] 05:06:41 dec-ut1 24 prompts rc=0
+QUEUE92-DONE 05:06:53

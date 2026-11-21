@@ -165,7 +165,7 @@ def print_mr1(q91):
 
 def print_cold(q91, q92):
     s92 = load_s92()
-    groups = list(s92.rungs(q91, q92)) + [("our stack on main (mn1 mn2)", [(q91, "mn1"), (q91, "mn2")])]
+    groups = list(s92.rungs(q91, q92)) + [("stock main at the tip (ut1)", [(q92, "ut1")]), ("our stack on main (mn1 mn2)", [(q91, "mn1"), (q91, "mn2")])]
     print(f"{'rung':30s} {'boots':>5s} | cold 8k ms | cold 32k ms | cold 120k ms | warm turns ms")
     for name, boots in groups:
         missing, vals, _ = S91.group(boots)

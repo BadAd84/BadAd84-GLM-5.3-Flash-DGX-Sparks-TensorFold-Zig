@@ -188,7 +188,30 @@ sampled code at 4 clients: +1.36% against the mean, +0.51% against the best boot
 sampled code at 6 clients: -2.95% against the mean, -3.36% against the best boot
 sampled code at 8 clients: -1.55% against the mean, -3.15% against the best boot
 == ut1: the main tip 46c6ee229, KNOBS=off, what upstream merged after our pin 1ece6e6db (the KDA padding at TP=3, a default decode share for long fills, the sampler's small top_k); a report beside the ladder; against the main group, faster positive
-NOT DECIDED: no rows for ut1
+cold 8k first token: +11.90% against the mean, +10.95% against the best boot
+cold 32k first token: +12.99% against the mean, +11.92% against the best boot
+cold 120k first token: +13.37% against the mean, +12.04% against the best boot
+conversation turns 2+ first token: +9.89% against the mean, +8.99% against the best boot
+greedy prose at 1 clients: +1.84% against the mean, +0.37% against the best boot
+greedy prose at 2 clients: +0.79% against the mean, -0.55% against the best boot
+greedy prose at 4 clients: +1.71% against the mean, +0.06% against the best boot
+greedy prose at 6 clients: +0.84% against the mean, -1.81% against the best boot
+greedy prose at 8 clients: +3.03% against the mean, +0.95% against the best boot
+greedy code at 1 clients: +1.87% against the mean, +0.28% against the best boot
+greedy code at 2 clients: +1.29% against the mean, -0.10% against the best boot
+greedy code at 4 clients: +1.91% against the mean, +0.27% against the best boot
+greedy code at 6 clients: +4.63% against the mean, +1.21% against the best boot
+greedy code at 8 clients: -3.01% against the mean, -6.74% against the best boot
+sampled prose at 1 clients: +1.47% against the mean, +0.61% against the best boot
+sampled prose at 2 clients: +1.36% against the mean, +0.06% against the best boot
+sampled prose at 4 clients: +1.56% against the mean, +0.76% against the best boot
+sampled prose at 6 clients: +0.84% against the mean, -3.69% against the best boot
+sampled prose at 8 clients: -0.47% against the mean, -2.80% against the best boot
+sampled code at 1 clients: +1.40% against the mean, +0.38% against the best boot
+sampled code at 2 clients: +1.29% against the mean, +0.45% against the best boot
+sampled code at 4 clients: +1.68% against the mean, +0.82% against the best boot
+sampled code at 6 clients: -2.02% against the mean, -2.44% against the best boot
+sampled code at 8 clients: +0.72% against the mean, -0.92% against the best boot
 == the stack on main (mn1 mn2) against the main group; faster is positive
 cold 8k first token: +24.44%
 cold 32k first token: +28.06%

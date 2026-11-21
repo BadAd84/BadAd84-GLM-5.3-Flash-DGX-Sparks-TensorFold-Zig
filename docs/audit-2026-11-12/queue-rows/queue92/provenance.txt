@@ -1,0 +1,9 @@
+f92-c is the one rows directory on the serve host that three queues write into, keyed by boot tag (rows.jsonl is shared):
+
+  queue92  eleven stock boots, KNOBS=off, 21:57 to 04:18 UTC: s9a sm2 smz s13a ud1 ui1 smr s10a s9b s13b sm3
+           (v1.2.9 twice, v1.2.10, v1.3.0 twice, the PDL commit, the item plan commit, main 1ece6e6db twice, main with PDL off, main with request starts)
+  queue96  one boot, ut1: stock main at the tip 46c6ee229, KNOBS=off, 04:19 to 05:06 UTC (image built 04:27); score92.py reads it as its ut1 row
+  queue97  (when it has run) tn1 and tn2: our stack re-seated on the tip
+
+queue96 and queue97 are copies of queue92.sh run with ARMS set, so their logs carry the [q92] prefix and the QUEUE92-DONE marker; queue92.log and queue96.log sit beside the rows.
+The main group of score92.py is mps (queue91's boot of stock main), sm2 and sm3; mps lives in queue-rows/queue91/f91-c.
