@@ -2257,3 +2257,24 @@ Three of the six are clean separations in which every boot of the change arm is 
 **What the cold cost is, and what fixes it.** The 8k cold cell is +1.30% with the spreads overlapping: that is the documented mechanism of this switch (a request that carries a cut runs no solo pass, section 50), and `patches/solo-cuts`, `TF_GLM_OVN_SOLO_TO_START`, exists for exactly it (queue89: cold first token 4.14% faster at 8k, 1.23% at 32k, level at 120k). So the rewrite the rule asks for is not speculative: the next arm is this switch plus the `dev.env` winners queue95 is splitting now (its X set carries `SOLO_TO_START` and `RESTORE_HELD`), measured at the same five levels with a rule written first. If the cold cell comes back clean and the 6/8 cells stay outside the control spans, what is left is a trade for the owner: 34.51% of a warm turn against a few percent of 6- and 8-client round time, with tokens a round unchanged.
 
 **Two side readings.** The queue now snapshots memory on all three boxes before and after each boot (`<label>-mem-idle.txt`, `-mem-after.txt`, added to `work/copy-rows.py`'s keep rules): at 09:55:58 spark1 showed `available` 34.3 GiB of 123.7 GiB, with the three containers at 3.63 / 3.32 / 3.33 GiB RSS, and that boot then admitted 77.0 GiB of device memory (`facts.out`, `memory.active`), which is section 79's preflight question seen from the other side. And the 24 prompts one at a time read 114.3 s against 115.3 s (+0.90%, inside C1's limit, so not flagged) with identical rounds a prompt (129.88 both arms), and the prompt-cache budgets stay inside queue99's 8,198 to 8,382 MB range (8,200 to 8,374 MB here), so nothing here disturbs the cache-policy result.
+
+## 81. Queue95: the ten `dev.env` candidates split cleanly, and both halves are promotable
+
+**What ran.** The stack on the pin, image `m130a`, `KNOBS=prod`, six fresh boots: `mn3` (the recipe as committed), `mt1` and `mt2` (T: `MM_WIDE`, `SIDE_PRIO`,
+`LATENT_ROWS=2`, `NCCL_NCHANNELS_PER_NET_PEER=4`), `mx1` and `mx2` (X: `OVERLAP_PIECES=4`, `PIECE_FRONT`, `PIECE_FFN`, `PIECE_MLA`, `SOLO_TO_START`, `RESTORE_HELD`),
+and `mo4` (the old stack, the fourth boot of the O group). Cells exactly as queue91: cold first token at 8k / 32k / 120k, the growing conversation, greedy and sampled
+decode at 1 to 8 clients, the 24 prompts. Rules in `score95.py`, written before any row. Rows and the scorer output: `docs/audit-2026-11-12/queue-rows/queue95`.
+
+**Verdict: `T: PROMOTABLE` and `X: PROMOTABLE`, and the ten are additive.**
+- K2 decode attribution, the 12 cells at 1, 2 and 4 clients: T is CLEAN (mean change inside +-0.5% per cell), X is CLEAN and positive in seven of the ten it prints.
+- K3 prompt gains: T +5.24 / +5.89 / +5.71% cold at 8k / 32k / 120k and +4.64% on the conversation's warm turns; X +3.03 / +2.91 / +2.74% and +3.72%.
+- K4 digests: both EQUAL to the recipe at all 58 keys.
+- K5 additivity: T plus X read +8.26 / +8.81 / +8.45 / +8.35% against the whole bundle D's +8.88 / +9.44 / +8.99 / +8.47%, so the bundle is its parts and nothing is left in the
+  interaction.
+- K1 sync (the new stack against the old): NOT ACCEPTED on one cell, greedy code at 8 clients. That is the re-seat's own question, not the candidates'.
+
+**Why they are not in `prod.env` yet.** The rule needs 1, 2, 4, 6 and 8 streams, and `score95.py` attributes only the 12 cells at 1, 2 and 4. At 6 clients both halves are
+positive in all four cells (T +4.00 / +2.22 / +0.89 / +12.15%, X +4.43 / +6.98 / +1.51 / +10.84%). At 8 clients both are bimodal inside a single arm: T's four boots land
+at 116.9, 119.9, 128.4 and 132.2 tok/s on greedy prose, and X's at 114.1, 120.7, 126.0 and 136.9, so a 2-boot mean there measures which mode a boot landed in. **Queue105
+is that measurement**: eight boots A B B A twice at `--parallel 4 --context 1048576`, T and X together against the recipe, the four 8-client cells only, `score105.py`'s
+rules written before any row (promote when no cell is more than 1.0% slower and the eight boots carry one digest a cell).
