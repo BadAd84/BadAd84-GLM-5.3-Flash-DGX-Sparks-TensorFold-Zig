@@ -11,6 +11,7 @@ set -u
 G=$HOME/work/glm53-zig; cd "$G" || exit 1
 . ./queue105.env
 IMG=${IMG:?set IMG}; WAIT_FOR=${WAIT_FOR:-queue94.sh}
+WORKERS=${WORKERS:?set WORKERS}; W1=${WORKERS%% *}; W2=${WORKERS##* }  # the worker hosts live in queue105.env, never in this file
 OUT=$HOME/bench; R=$OUT/f105-c
 T="-e TF_GLM_OVN_MM_WIDE=1 -e TF_GLM_OVN_SIDE_PRIO=1 -e TF_GLM_OVN_LATENT_ROWS=2 -e NCCL_NCHANNELS_PER_NET_PEER=4"
 X="-e TF_GLM_OVERLAP_PIECES=4 -e TF_GLM_OVN_PIECE_FRONT=1 -e TF_GLM_OVN_PIECE_FFN=1 -e TF_GLM_OVN_PIECE_MLA=1 -e TF_GLM_OVN_SOLO_TO_START=1 -e TF_GLM_OVN_RESTORE_HELD=1"
@@ -22,7 +23,7 @@ while pgrep -f "$WAIT_FOR" > /dev/null; do sleep 60; done
 trap finish EXIT
 mkdir -p "$R" "$OUT/f105-boots"
 flag() { echo "[q105] $*" > "$R/ABORT"; echo "[q105] $*"; }
-ids=$( { docker images --no-trunc --format '{{.ID}}' "$IMG" | head -1; for h in spark2 spark3; do ssh -n -o BatchMode=yes -o ConnectTimeout=15 "adam@$h.ots-int.net" "docker images --no-trunc --format '{{.ID}}' $IMG | head -1"; done; } )
+ids=$( { docker images --no-trunc --format '{{.ID}}' "$IMG" | head -1; for h in "$W1" "$W2"; do ssh -n -o BatchMode=yes -o ConnectTimeout=15 "$h" "docker images --no-trunc --format '{{.ID}}' $IMG | head -1"; done; } )
 if [ "$(echo "$ids" | grep -c .)" != 3 ] || [ "$(echo "$ids" | sort -u | wc -l)" != 1 ]; then flag "IMAGE $IMG IS NOT ONE ID ON ALL THREE RANKS: nothing measured (ids: $(echo $ids | tr '\n' ' '))"; exit 1; fi
 echo "[q105] $IMG ids: $(echo $ids | cut -c1-80); serve.sh $(sha256sum serve.sh | cut -c1-12); env $(cat env/prod.env env/dev.env | sha256sum | cut -c1-12)"
 bash prod-stop.sh || { flag "PRODUCTION DID NOT STOP"; exit 1; }
