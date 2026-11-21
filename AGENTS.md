@@ -48,6 +48,13 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
   removed from the stack and recorded as superseded, naming the upstream commit that absorbed it. A patch that no
   longer applies is NOT automatically redundant; re-seat it, then test. Never carry a patch forward because it was
   there, and never drop one without the test.
+  **An upstream equivalent makes ours a retirement candidate, never an incumbent (owner 2026-11-21).** When upstream
+  lands code that does the same job as one of our patches or knobs, the docs say exactly that and name the window
+  that decides it; a sentence of the form "ours already covers it" is the failure this rule exists to stop (it was
+  written about the drafter split on the day upstream merged `TF_GLM_DRAFT_SPLIT`, and withdrawn). Every overlap is a
+  row of the overlap ledger in `docs/KNOBS.md` with the state of its window, a version bump is not closed until each
+  overlap has a verdict (retired, or kept with the numbers that earn it), and the windows run on a base that has the
+  upstream code, so the re-seat onto the new main comes first and is not deferred behind other queues.
 - **Everything external arrives as .patch files (owner 2026-11-11).** A contributor's branch, an upstream PR's
   commits or our own delta against a pin is carried as numbered `.patch` files in a package under `patches/`, applied
   to a pristine checkout at a recorded base sha. Each package carries `RECORD.md` (repository, branch, sha, the base
