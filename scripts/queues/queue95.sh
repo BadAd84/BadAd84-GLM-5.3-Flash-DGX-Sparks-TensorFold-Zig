@@ -116,7 +116,7 @@ SMOKED=0
 smoke() { # the first boot only: each of THIS queue's instruments once, tiny, so one that cannot talk to the serve stops the queue before a unit is spent on it
   local d="$OUT/smoke95" a b c e f; mkdir -p "$d"
   python3 -c "import json; d=json.load(open('prompts24.json')); json.dump(d[:2], open('$d/ids-smoke.json', 'w'))"
-  python3 longctx.py probe 8300 --tag smoke --n 4 --out "$d/rows.jsonl" --log-cmd "$ZLOG" --seed pf74 --cold-sizes 8000 --warm-base 0 --reps 1 --load 0 > "$d/probe.out" 2>&1; a=$?
+  python3 longctx.py probe 8300 --tag smoke --n 4 --out "$d/rows.jsonl" --log-cmd "$ZLOG" --seed smk --cold-sizes 8000 --warm-base 0 --reps 1 --load 0 > "$d/probe.out" 2>&1; a=$?
   python3 longctx.py chain 8300 "$d/chain.json" --t1 8000 --add 500 --salt smk --tag smk --n 4 --out "$d/chain.jsonl" --log-cmd "$ZLOG" > "$d/chain.out" 2>&1; b=$?
   python3 streams_ids.py 8300 1 --ids prose33.json --max-tokens 32 --rounds 1 --tag smoke-P1 --out "$d/P1.jsonl" > "$d/P1.out" 2>&1; c=$?
   python3 streams_sampled.py 8300 1 --ids prose33.json --max-tokens 32 --rounds 1 --tag smoke-SP1 --out "$d/SP1.jsonl" > "$d/SP1.out" 2>&1; e=$?

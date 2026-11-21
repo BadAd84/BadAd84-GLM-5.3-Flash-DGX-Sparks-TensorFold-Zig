@@ -40,10 +40,11 @@ def boot(d, label):
     allrows = rows(f"{d}/rows.jsonl")
     for size in SIZES:
         c = [r for r in allrows if r.get("case") == "cold" and r.get("tag") == label and r.get("target_tokens") == size]
-        if c:
-            val[("cold", size)] = st.mean(r["ttft_ms"] for r in c)
-            for r in c:
-                dig[("cold", size, r.get("rep"))] = r.get("token_sha")
+        cold = [r for r in c if "NOTCOLD" not in (r.get("flags") or [])]  # a row flagged NOTCOLD had part of its prompt cached: not a cold first token
+        if cold:
+            val[("cold", size)] = st.mean(r["ttft_ms"] for r in cold)
+        for r in c:
+            dig[("cold", size, r.get("rep"))] = r.get("token_sha")
     ch = [r for r in rows(f"{d}/{label}/chain.jsonl") if r.get("tag") == "c74"]
     if len(ch) > 1:
         val[("warm",)] = st.mean(r["ttft_ms"] for r in ch[1:])

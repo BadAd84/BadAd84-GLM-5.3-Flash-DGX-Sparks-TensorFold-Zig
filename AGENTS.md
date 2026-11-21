@@ -236,6 +236,7 @@ Run on the applied tree on a shared gate host, never on the workstation (`script
   problem, and so is a file past 600 lines.
 - `scripts/check-patch-packages.sh` - every package dir with `.patch` files has `RECORD.md` and `SHA256SUMS` and the
   hashes match.
+- `python scripts/tests/check_smoke_probe.py` - run before any queue script is deployed: it fails when a script's first-boot `smoke()` sends a `longctx.py probe` with the same `--seed` and a common size as one of its unit probes, because the smoke then warms the first boot's cold prompt (queue99's first cold 8k request read 986 ms for a 4,000 ms prompt; the instrument had flagged it `NOTCOLD`). `scripts/queue-scores/score91.py` leaves a flagged row out of a cold cell's mean, so a missed case costs a request, not a verdict. 14 tests and 11 mutants: `scripts/tests/test_check_smoke_probe.py`, `scripts/tests/mutants_check_smoke_probe.py`.
 - The image build on spark1 is the only gate for `.cu` and `.cuh`: nothing local compiles a kernel.
 
 ## Gotchas (each cost real time)

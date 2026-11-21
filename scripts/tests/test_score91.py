@@ -5,13 +5,15 @@ Run from the top-level shell: python scripts/tests/test_score91.py
 """
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location("score91", ROOT / "scripts/queue-scores/score91.py")
+_OVER = os.environ.get("SCORE91")
+spec = importlib.util.spec_from_file_location("score91", pathlib.Path(_OVER) if _OVER else ROOT / "scripts/queue-scores/score91.py")
 s91 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(s91)
 
@@ -27,14 +29,18 @@ def put(path, rows):
             fh.write(json.dumps(r) + "\n")
 
 
-def write_boot(d, label, cold=1.0, warm=1.0, dec=1.0, digest="a", only=None, cold2=None):
-    """One boot's rows: latencies scaled by `cold` and `warm`, throughputs by `dec`; every reply digest `digest`; `only` limits what is written."""
+def write_boot(d, label, cold=1.0, warm=1.0, dec=1.0, digest="a", only=None, cold2=None, notcold=None):
+    """One boot's rows: latencies scaled by `cold` and `warm`, throughputs by `dec`; every reply digest `digest`; `only` limits what is written; `notcold` maps (size, rep) to the
+    latency of a cold request the instrument flagged NOTCOLD (part of its prompt was already cached)."""
     d = pathlib.Path(d)
     if only in (None, "cold"):
         for size, ms in COLD.items():
             for rep in (1, 2):
                 scale = cold2 if (rep == 2 and cold2 is not None) else cold
-                put(d / "rows.jsonl", [{"tag": label, "case": "cold", "target_tokens": size, "rep": rep, "ttft_ms": ms * scale, "token_sha": f"{digest}{size}{rep}"}])
+                row = {"tag": label, "case": "cold", "target_tokens": size, "rep": rep, "ttft_ms": ms * scale, "token_sha": f"{digest}{size}{rep}"}
+                if (size, rep) in (notcold or {}):
+                    row.update({"ttft_ms": notcold[(size, rep)], "cached_tokens": 6144, "flags": ["NOTCOLD"]})
+                put(d / "rows.jsonl", [row])
     if only in (None, "chain"):
         put(d / label / "chain.jsonl", [{"tag": "c74", "turn": t, "ttft_ms": ms * (warm if t > 1 else 1.0), "token_sha": f"{digest}t{t}"} for t, ms in enumerate(TURNS, 1)])
     if only in (None, "dec"):
@@ -153,6 +159,33 @@ class Score91(unittest.TestCase):
             write_boot(f.old, label)
         write_boot(f.new, "mo3")
         self.assertIn("cold 8k first token", self.verdict(f))
+
+    def test_a_notcold_row_is_left_out_of_its_cells_mean_and_its_digest_is_kept(self):
+        f = Fixture()
+        self.addCleanup(f.close)
+        write_boot(f.new, "mn1", notcold={(8000, 1): 900.0})  # the first 8k request had 6,144 rows cached; the second is the normal 3,600 ms
+        val, dig = s91.boot(str(f.new), "mn1")
+        self.assertEqual(val[("cold", 8000)], 3600.0)
+        self.assertEqual(val[("cold", 32000)], 13400.0)  # a cell with no flagged request keeps both
+        self.assertEqual(dig.get(("cold", 8000, 1)), "a80001")  # the flagged request's reply still counts for the digests
+
+    def test_a_cell_whose_requests_are_all_notcold_has_no_value_but_keeps_its_digests(self):
+        f = Fixture()
+        self.addCleanup(f.close)
+        write_boot(f.new, "mn1", notcold={(8000, 1): 900.0, (8000, 2): 950.0})
+        val, dig = s91.boot(str(f.new), "mn1")
+        self.assertNotIn(("cold", 8000), val)
+        self.assertEqual({dig.get(("cold", 8000, 1)), dig.get(("cold", 8000, 2))}, {"a80001", "a80002"})
+
+    def test_a_notcold_control_boot_does_not_make_the_new_stack_look_slower(self):
+        f = Fixture()
+        self.addCleanup(f.close)
+        for label in ("mn1", "mn2", "mo3"):
+            write_boot(f.new, label)
+        write_boot(f.old, "P1", notcold={(8000, 1): 900.0})  # counted, the old group's 8k mean would be 3,150 ms against the new 3,600
+        write_boot(f.old, "P2")
+        v = self.verdict(f)
+        self.assertTrue(v.startswith("SYNC: ACCEPTED"), v)
 
     def test_a_changed_first_turn_digest_alone_is_found(self):
         f = self.fx()
