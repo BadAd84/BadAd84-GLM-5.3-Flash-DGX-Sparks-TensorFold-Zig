@@ -2647,3 +2647,28 @@ rather than a systematic cost in either bundle.** Two facts now stand beside eac
 worth -6.90% at 8k and -7.36% at 32k on the cold prompt with every four-client decode cell inside 0.18%, and the only
 eight-client cell that could contradict it is unmeasurable here. Adopting T on that evidence is a judgement about an
 unmeasured cell, which is the owner's to make, not mine to make by editing the rule after the rows.
+
+## 96. Every eight-client cell in this campaign measured an oversubscribed serve
+
+queue114's control spread of 19.78% is not clocks and not load: the GB10 is locked at 2,418 MHz application clocks with
+no throttle reasons, and the box sat at 0.10 load with no containers once the queue ended. It is the configuration.
+
+Every queue in this campaign boots `--parallel 4 --context 1048576` and then sends eight concurrent clients. That is a
+2:1 oversubscribed serve: eight streams share four slots, so per-boot throughput depends on how the requests interleave
+and which waits, and that interleaving is not fixed by the boot. The evidence has been in every run: queue95's T boots at
+eight clients read 116.9, 119.9, 128.4 and 132.2; queue105's control read 125.9 to 145.9; queue113's control read 160.6 to
+180.1; queue114's read 157.4 to 190.9.
+
+Three consequences, and the third is uncomfortable.
+
+1. An eight-client cell is a valid measurement of the oversubscribed configuration, which is what production runs
+   (`--parallel 4` with queued requests), so the cells are not wrong; they are noisy by construction.
+2. A verdict from four or six boots on such a cell cannot resolve anything smaller than its spread, which is 8 to 20%.
+   That is why queue105, queue113 and queue114 all failed at the same cell while agreeing everywhere else.
+3. **We have been blocking a bundle worth 6.9% of the cold prompt on a cell that cannot be measured in the configuration
+   we test it in.** The right probe for an eight-client decode question is `--parallel 8`, where nothing queues, and the
+   right probe for the oversubscribed question is many more boots than any queue has run.
+
+The next run therefore measures the same cell at `--parallel 8`, where the serve has a slot for every stream and the
+interleaving question disappears; if it comes back quiet, the bundle's last open cell closes on a measurement rather than
+on a judgement about noise.
