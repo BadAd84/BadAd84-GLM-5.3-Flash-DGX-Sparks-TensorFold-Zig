@@ -2692,3 +2692,23 @@ verdict from it needs more boots rather than a different slot count.
 among them, so the question "do T and X belong in the production env" is answered by queue116's whole-env comparison
 against the current recipe at the five levels, which is the table that ships. If the dev env wins at every level, T and X
 ship inside it and the eight-client cell becomes a documented property of the configuration rather than a gate.
+
+## 98. The residual side-stream "exposure" is the main stream's own idle, and it is 4.7% of a pass
+
+The item on the list read "close the residual side-stream and NCCL exposure (77.8 ms a pass after 0038) on transport and
+host staging, not EXCHANGE_KB". The capture already in the repo bounds it, and the bound is smaller and better defined
+than the note implied.
+
+One steady prompt pass: wall 1,697.3 ms, main stream busy 1,643.9 ms (96.9%), idle **79.8 ms (4.7%)**, NCCL stream busy
+475.6 ms. Seven consecutive chunks of the same shape take 1,679.7 to 1,713.8 ms, a 2% spread.
+
+So the exposure a patch could touch is the 79.8 ms of idle in the main stream, not the 475.6 ms of NCCL busy time: the
+overlap is already doing most of its job, and the figure to move is a twentieth of the pass. Two figures in circulation
+describe it and they are not the same measurement: the lane's per-window reading gave the exchange 97% hidden, and the
+pass-level arithmetic here gives at most 83.2% hidden if every idle millisecond is the wire, which it will not be, because
+some is kernel-to-kernel gap. The honest sentence is "79.8 ms of main-stream idle a pass, of which an unmeasured share is
+the exchange".
+
+That makes the next step a measurement rather than a patch: mark the idle intervals in the capture against the NCCL
+stream's activity, and only the overlap attributable to the wire is available to a transport or host-staging change. Until
+that is done, "close the residual exposure" has no size to close.
