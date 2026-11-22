@@ -2468,3 +2468,35 @@ the expert GEMM money is.
 
 The dense-window clip at `0025` (section 89 above this table's subject, commit `7d1286a`) is worth about 130 ms on the
 8k first token and remains worth taking, but attention cannot yield more than 3.3% of the path however it is shaped.
+
+## 90. The two biggest prompt families are at their ceilings, so the gap is not a knob
+
+Both leads that section 89 ranked as "the money" were taken apart against the capture and the source, and both refutations
+hold on the arithmetic.
+
+**The exchange is not a launch problem.** 720 NCCL groups a 4,096-row chunk (45 layers x 2 sites x 4 pieces x 2 exchanges),
+712 and 720 measured in two consecutive passes, 2,880 postings a rank. Each group carries 11.18 MB of fp32 partials out
+and 5.59 MB of bf16 glued rows out, so 6.04 GB a rank a chunk, which is the reduce-scatter plus all-gather minimum for a
+K-split; the same bytes cannot go in fewer exchanges without changing what is exchanged. Measured 475.6 ms of NCCL stream
+time a pass, 13 GB/s a direction against roughly half of one ~27 GB/s link, and the stream is 97% hidden behind the main
+stream. A 454 us launch moving 11 to 17 MB is 2% overhead, and the 5,327 ms in the kernel ranking is side-stream busy time
+that overlaps compute. No patch exists here; the only count-related change left is `TF_GLM_OVERLAP_PIECES`, which is
+already the measured 2-against-4 scheduling trade from queue84.
+
+**The EXL3 prompt pair is at the HBM ceiling.** `tf_exl3_prompt_gu` is a 6 x 865 grid of 256-thread CTAs on 64-member by
+128-column items, one launch a layer, and it moves 805 MB of gate and up weights a layer a rank; `tf_exl3_prompt_down`
+moves 403 MB plus the pair output, `y` fp32 at 604 MB. Against those bytes: gu at 110 to 220 GB/s, and down at 271 GB/s
+plus 604 MB of y, which is the GB10's 273 GB/s peak. The pair plus combine is 659 ms of the 1,643.9 ms busy main stream,
+40% of it, so "little work per launch" was a property of the launch-count metric, not of the kernels: each launch moves
+0.8 to 1.4 GB.
+
+**The one structural waste named, and it is a kernel project:** a 4,096-row chunk gives each expert about 128 pairs against
+a 64-item tile, so each expert's weights are read twice. At peak rate that is 4.4 ms a layer, about 185 ms a chunk, 11% of
+the main stream, and whether the second read hits DRAM or L2 is not visible in the trace. A 128-member item is not
+available either, because `acc[2][TNB][4]` becomes 128 floats a thread and spills.
+
+**What this means for the campaign.** The engine's prompt path is at memory peak on the expert GEMMs and at half a link on
+a 97%-hidden exchange, with the main stream busy 1,643.9 of 1,697.3 ms. So the remaining 1.33x against production is not a
+knob, an unfilled overlap or an idle stall; it is either less work in production's prompt path or the same work placed
+better, and closing it needs a kernel project priced first by two counter readings (ncu DRAM bytes on one gu launch and on
+one down launch), not a patch.
