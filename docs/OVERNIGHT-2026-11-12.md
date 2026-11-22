@@ -2672,3 +2672,23 @@ Three consequences, and the third is uncomfortable.
 The next run therefore measures the same cell at `--parallel 8`, where the serve has a slot for every stream and the
 interleaving question disappears; if it comes back quiet, the bundle's last open cell closes on a measurement rather than
 on a judgement about noise.
+
+## 97. The parallel-8 probe is refused by its own readback, and the reason ends that idea
+
+queue115 started at 16:17 and stopped at 16:20 on its first boot, with its own guard: `c1: glm53-zig-r0 has no
+TF_GLM_ROCE_MULTI=1, so the recipe's own OVERLAP_PIECES would resolve to 3 and the control would not be the recipe`. The
+boot had resolved `--context 524288` cleanly, so the context was never the problem.
+
+The refusal is correct and it invalidates the comparison rather than the run: at `--parallel 8` this image does not set
+`TF_GLM_ROCE_MULTI=1`, and that single variable is what resolves the recipe's own `OVERLAP_PIECES` from 3 to 8. So a P=8
+boot differs from a P=4 boot in the wire mode as well as in the slot count, and an eight-client cell measured at P=8 would
+not be the production configuration with the oversubscription removed; it would be a different serve.
+
+**That closes the idea of measuring the variance away by changing P.** Production runs `--parallel 4` with eight clients
+queuing, so the oversubscribed cell is the production configuration, its spread is a property of that configuration, and a
+verdict from it needs more boots rather than a different slot count.
+
+**What decides the bundle instead:** not that cell. `dev.env` already enables all eleven candidates together, T and X
+among them, so the question "do T and X belong in the production env" is answered by queue116's whole-env comparison
+against the current recipe at the five levels, which is the table that ships. If the dev env wins at every level, T and X
+ship inside it and the eight-client cell becomes a documented property of the configuration rather than a gate.
