@@ -2410,8 +2410,11 @@ level across all eight boots. So the lever costs nothing on decode, which is the
 have, and its gain is where queue102 found it: cold first token +0.96, +1.04 and +0.84% at 8k, 32k and 120k with both
 arm boots under both control boots.
 
-**Promoted:** `TF_GLM_OVN_ABSORB_VEC=1` is a line of `scripts/env/prod.env`'s recipe section and of `dev.env`'s, in this
-commit, with its cells. It is the first switch this campaign has carried through the whole ladder. The launcher test's
+**Where the line lives:** `TF_GLM_OVN_ABSORB_VEC=1` is a line of `dev.env`'s candidates section, with its cells, and it
+stays out of `prod.env` for the duration of the campaign. `prod.env` is the baseline every arm is measured against, so a
+line there silently becomes part of the control and moves the reference every later queue is compared with; the campaign
+is chasing parity with production, and its baseline does not move while it does. It is the first switch this campaign has
+carried through the whole ladder, and promoting it into the baseline is the first thing after parity. The launcher test's
 allowlist gains an `ADDED` set for exactly this case: a knob the pre-split launcher had no line for, dropped from both
 sides of the comparison so every other name stays held to the old launcher.
 
