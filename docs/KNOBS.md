@@ -134,15 +134,18 @@ retired names, so no recipe line changed.
 Withdrawn 2026-11-22: the registry rows and doc rows of WIN_FREE, PLAIN_MARGIN, EXCHANGE_KB,
 ROUTER_WARM and INDEX_REGROUP left `0020` (their code had already gone), so those five are no longer
 accepted names at boot and are not settings of this engine: docs/KNOB-PROVENANCE.md class A is
-their record. Engine tree `99e1898460eaec8f37e39aae76a1ae5345364c92`, whole stack `78b7ce7198b37ae9c7ae4003844dc39581dc220c` (gate run sg-20261122-060328).
+their record. Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32` (gate run sg-20261122-064752).
 
 Withdrawn 2026-11-22 (second pass): SPARSE_ONEPASS's last comment, ROUTER16's dead field and its two unlaunched
 entry points, and INDEX_SCHED and POOLS32's rows, readers and doc rows left the series at their owning patches
-(`0020`, `0022`, `0012`). DECODE_INDEX and the whole index path stay. Engine tree `99e1898460eaec8f37e39aae76a1ae5345364c92`, whole stack `78b7ce7198b37ae9c7ae4003844dc39581dc220c`
-(gate run sg-20261122-060328, PASS).
+(`0020`, `0022`, `0012`). DECODE_INDEX and the whole index path stay. Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`
+(gate run sg-20261122-064752, PASS).
 
 2026-11-22: `tf_glm_hc_partial8_pdl` now instantiates `partial8<true>` (it launched `<false>`, so the PDL_EARLY arm's
-dependent wait never existed). Default path untouched. Engine tree `99e1898460eaec8f37e39aae76a1ae5345364c92`, whole stack `78b7ce7198b37ae9c7ae4003844dc39581dc220c`, gate run sg-20261122-060328 PASS.
+dependent wait never existed). Default path untouched. Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`, gate run sg-20261122-064752 PASS.
 
 2026-11-22 (second pass): `0023` had its identity tile block removed (byte-identical by construction) and `0024` now
-instantiates `partial8<true>`. Engine tree `99e1898460eaec8f37e39aae76a1ae5345364c92`, whole stack `78b7ce7198b37ae9c7ae4003844dc39581dc220c`, gate run sg-20261122-060328 PASS.
+instantiates `partial8<true>`. Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`, gate run sg-20261122-064752 PASS.
+
+2026-11-22 (third pass): patches 0019 and 0020 skip the speculative next-tile QK block on the last tile (low-value
+speed candidate, receipts in their headers). Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`, gate run sg-20261122-064752 PASS.

@@ -33,6 +33,12 @@ inkling2_attn/inkling2_pattn fatbin rows at the line this patch adds glm_onepass
 registration hunk was settled by keeping upstream's two rows and putting glm_onepass after
 them. No other line moved.
 
+
+Speed candidate 2026-11-22 (low value, not a correctness fix): the QK pipeline computed the next tile's first 8 scores
+on every iteration, the last included, where nothing reads them. The speculative block is now skipped when
+t + 1 == ntile; no arithmetic that reaches a reply changes, so replies are byte-identical by construction. Receipt
+still owed (GPU): scripts/prefill_passes.py over an nsys capture of rank 0, passes compared kernel by kernel, for the
+one-tile saving in the QK kernel's time, with reply digests equal on the same boot (8k, 32k, 120k cold prompts).
 Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
 
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
@@ -49,10 +55,10 @@ index 375dd9dd9..16bcb2ca7 100644
      .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
 diff --git a/zig/kernels/cuda/glm_onepass.cu b/zig/kernels/cuda/glm_onepass.cu
 new file mode 100644
-index 000000000..f2c788263
+index 000000000..638c5a540
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass.cu
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,469 @@
 +// TensorFold glm5_next/cuda/sparse_onepass.cu (OTS 0085 + 0094) as is; the cache addressing (FP8 slabs/pages) is ours.
 +#include <cuda_bf16.h>
 +#include <stdint.h>
@@ -316,11 +322,13 @@ index 000000000..f2c788263
 +        for (int t = 0; t < ntile; ++t) {
 +            const int t0 = t * KT, bn = b + 1 == NB ? 0 : b + 1;
 +            if (t + 1 < ntile) bar_sync(BAR_FULL + bn, N_FULL);
-+            // the last tile's "next" scores run on its own buffer and are dropped (no branch in the block below)
-+            ktn = (unsigned)__cvta_generic_to_shared(S.kt[t + 1 < ntile ? bn : b]);
-+            QKBEGIN()
++            // the next tile's first scores, skipped after the last: nothing would read them
++            if (t + 1 < ntile) {
++                ktn = (unsigned)__cvta_generic_to_shared(S.kt[bn]);
++                QKBEGIN()
 +#pragma unroll
-+            for (int s = 0; s < 8; ++s) QKSTEP(s)
++                for (int s = 0; s < 8; ++s) QKSTEP(s)
++            }
 +            // acc[i][e]: key 16 i + g (e < 2) or 16 i + 8 + g (e >= 2), head 8 j + 2 t + (e & 1)
 +            float sc[2][4], kk[2][2];
 +            bool val[2][2];

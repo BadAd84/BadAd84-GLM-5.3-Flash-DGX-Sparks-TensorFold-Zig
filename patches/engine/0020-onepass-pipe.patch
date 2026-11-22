@@ -37,6 +37,12 @@ follows glm_onepass, which 0019 now places after upstream's inkling2 rows; the c
 three-way merge settled it there with every added and removed line of the patch intact (no
 line moved, no other file changed).
 
+
+Speed candidate 2026-11-22 (low value, not a correctness fix): the QK pipeline computed the next tile's first 8 scores
+on every iteration, the last included, where nothing reads them. The speculative block is now skipped when
+t + 1 == ntile; no arithmetic that reaches a reply changes, so replies are byte-identical by construction. Receipt
+still owed (GPU): scripts/prefill_passes.py over an nsys capture of rank 0, passes compared kernel by kernel, for the
+one-tile saving in the QK kernel's time, with reply digests equal on the same boot (8k, 32k, 120k cold prompts).
 diff --git a/docs/environment.md b/docs/environment.md
 index 0e9eedb58..b2e6920f1 100644
 --- a/docs/environment.md
@@ -276,10 +282,10 @@ index 000000000..d08ab7fac
 +PIPE_VARIANT(tf_glm_onepass_pipe_exact, true, true, true)
 diff --git a/zig/kernels/cuda/glm_onepass_pipe.cuh b/zig/kernels/cuda/glm_onepass_pipe.cuh
 new file mode 100644
-index 000000000..70e3f637e
+index 000000000..928ee99b5
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass_pipe.cuh
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,377 @@
 +// TF_GLM_OVN_ONEPASS_PIPE: glm_onepass.cu's pipeline with switches reverting each byte difference; all on == fused.
 +#pragma once
 +#include "glm_onepass_common.cuh"
@@ -429,10 +435,13 @@ index 000000000..70e3f637e
 +            const int t0 = t * KT, bn = b + 1 == NB ? 0 : b + 1;
 +            const bool boundary = CHUNK && ((t + 1) % CHUNK_TILES == 0 || t + 1 == ntile);
 +            if (t + 1 < ntile) bar_sync(BAR_FULL + bn, N_FULL);
-+            ktn = (unsigned)__cvta_generic_to_shared(S.kt[t + 1 < ntile ? bn : b]);
-+            QKBEGIN()
++            // the next tile's first scores, skipped after the last: nothing would read them
++            if (t + 1 < ntile) {
++                ktn = (unsigned)__cvta_generic_to_shared(S.kt[bn]);
++                QKBEGIN()
 +#pragma unroll
-+            for (int s = 0; s < 8; ++s) QKSTEP(s)
++                for (int s = 0; s < 8; ++s) QKSTEP(s)
++            }
 +            float sc[2][4], kk[2][2];
 +            bool val[2][2];
 +#pragma unroll
