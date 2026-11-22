@@ -2500,3 +2500,24 @@ a 97%-hidden exchange, with the main stream busy 1,643.9 of 1,697.3 ms. So the r
 knob, an unfilled overlap or an idle stall; it is either less work in production's prompt path or the same work placed
 better, and closing it needs a kernel project priced first by two counter readings (ncu DRAM bytes on one gu launch and on
 one down launch), not a patch.
+
+## 91. The 11% expert double-read is an L2 hit, so it is not 11%
+
+The last named waste in the prompt path was that a 4,096-row chunk gives each expert about 128 pairs against a 64-item
+tile, so its weights are read twice, worth about 185 ms a chunk if the second read missed DRAM. It does not miss.
+
+`place_items` (`zig/kernels/cuda/experts.cu:149`, the emission at `:191`, `int* it = items + 3 * (ioff + j)`) writes an
+expert's items consecutively and experts in ascending order, so an expert's two 64-member items are adjacent in the
+plan. CTAs dispatch x fastest, which puts the same expert's two item-blocks six column blocks apart, and their weight
+blocks are 6 x 262 KB = 1.57 MB, inside L2. The second read therefore costs L2 bandwidth, not HBM.
+
+What survives is smaller and belongs to `gu` alone: gate and up move 805 MB of weights and about 0.6 GB of x in 7.31 ms,
+191 GB/s, or 70% of the GB10's 273 GB/s peak, where `down` reads 271 GB/s, 99% of it. So the open question is whether
+`gu`'s 29% is DRAM idle (about 90 ms a chunk, 5% of the main stream) or the 4-bit decode pipeline's own limit: a fifth of
+the item as first priced, decided by two ncu DRAM counters and not by a patch.
+
+The receipt exists as a runnable script (`work/retire/receipts/ncu-exl3-prompt.sh`): the exact `WRAP` line for rank 0
+(`ncu --replay-mode kernel --launch-count 1 --kernel-name regex:tf_exl3_prompt_gu`, then the same for `down`, with dram
+and lts bytes, duration and both throughputs), one cold 8k client call, and a `report` mode printing each reading beside
+the verdict its outcome implies. It states in its own header that a profiled boot is counters only, because ncu
+serialises kernels, and that digests come from an unprofiled boot.
