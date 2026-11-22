@@ -62,3 +62,24 @@ Guessing between the three candidates is what this is designed to prevent.
 
 Every measurement on the re-seated series, and every retirement window that follows it, boots a tree with `c896bfc0c`. The pin-era image `m130a` is unaffected: it reads MemAvailable, which is
 why queue95, 97, 98, 99, 100, 102, 105 and 106 all run on it while this is open. Production (the Python stack) is not affected; it stays down for the campaign.
+
+## The rung that boots a stock run: drop the page cache first
+
+Measured 2026-11-22 on spark1-3, image `glm53-zig:m130a`, `KNOBS=off`, `--parallel 4 --context 1048576`.
+
+| state | MemAvailable on spark1 | boot |
+|---|---|---|
+| as the preceding queue left it (queue101's four attempts) | 68.6 GiB free against a 13 GiB reserve, so 55.6 GiB granted | refused: 61.3 GiB of weights do not fit |
+| after `sync; echo 3 > /proc/sys/vm/drop_caches; echo 1 > /proc/sys/vm/compact_memory` in a privileged container on all three boxes | **114.4 GiB** | **booted, up in 125 s** |
+
+So the refusal is not a hardware limit. The weights load through the page cache, so a boot that follows another boot
+finds the cache full of the previous one's weights and the preflight counts that as occupied. Dropping the cache returns
+about 46 GiB and the stock configuration fits with room to spare.
+
+Two consequences. A stock rung measurement must drop the cache before **every** boot, not once at the start, because the
+boot itself refills it. And this belongs in the measurement record as a precondition: nothing about the serve changes,
+and a rung that needs a cache drop says so beside its cells.
+
+The automated ladder (`scripts/bootfix-probe.sh`) was abandoned after it hung in its first three-box snapshot with six
+concurrent instances and wrote no rows in 47 minutes; the rung it walks is four commands, and running them by hand was
+faster than debugging the harness. The script stays with that as its known defect.
