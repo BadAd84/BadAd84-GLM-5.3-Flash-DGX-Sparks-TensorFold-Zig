@@ -2521,3 +2521,25 @@ The receipt exists as a runnable script (`work/retire/receipts/ncu-exl3-prompt.s
 and lts bytes, duration and both throughputs), one cold 8k client call, and a `report` mode printing each reading beside
 the verdict its outcome implies. It states in its own header that a profiled boot is counters only, because ncu
 serialises kernels, and that digests come from an unprofiled boot.
+
+## 92. queue111: none of upstream's prompt-behind-decode controls helps, and the probe finally measured it
+
+queue108 could not grade these controls because its probe never carried a long prompt. queue111 fixed the instrument
+(`--prompts` with a JSON pool, since the tool refuses `--prompts` with `--mixed`) and ran the same eight mirrored arms on
+`KNOBS=dev`, the recipe plus every candidate this repo carries. The guard confirms the fix: the longest prompt in the
+8-stream cell was 8,711 tokens on all eight boots, and every cell reported zero failures.
+
+| arm | 4 streams decode | 4 streams worst wait | 8 streams decode | 8 streams worst wait |
+|---|---|---|---|---|
+| `TENSORFOLD_PREFILL_BUDGET=512` | -0.46% | -0.09% | -0.08% | +1.01% |
+| `TENSORFOLD_PREFILL_BUDGET=2048` | +0.00% | +2.07% | **-2.43%** | +2.60% |
+| `TENSORFOLD_PREFILL_SHARE=0.5` | **-10.46%** | **-24.37%** | **-13.27%** | **-27.78%** |
+
+Against the rule written before the rows: decode within 1.0% and the worst wait at least 10% better, at both levels.
+**None qualifies.** A 512-row budget is level on both metrics; a 2,048-row budget costs 2.43% of decode at eight streams
+and improves the wait by under 3%; a 0.5 share costs 10 to 13% of decode and makes the worst wait 24 to 28% *worse*,
+which is the opposite of what the control is for.
+
+So the recipe keeps its own prompt handling and takes none of upstream's three controls, on the configuration we actually
+run. That is the answer the sweep was opened for, and it is a negative that costs nothing to keep: the controls stay
+available, unset, and the row in `docs/KNOBS.md` records why.

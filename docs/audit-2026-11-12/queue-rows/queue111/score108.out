@@ -1,0 +1,8 @@
+== score108: q108 work\pp111\f111-c
+== W0 boots: missing none; longest prompt in the 8-stream cell per boot: b2048a=8711, b2048b=8711, b512a=8711, b512b=8711, c1=8711, c2=8711, s50a=8711, s50b=8711
+== W1 clean: every cell reports 0 failed and no errors
+== b512: 4 streams: decode -0.46% (limit -1.0%), worst wait -0.09% (needs +10.0%) | 8 streams: decode -0.08% (limit -1.0%), worst wait +1.01% (needs +10.0%)
+== b2048: 4 streams: decode +0.00% (limit -1.0%), worst wait +2.07% (needs +10.0%) | 8 streams: decode -2.43% (limit -1.0%), worst wait +2.60% (needs +10.0%)
+== s50: 4 streams: decode -10.46% (limit -1.0%), worst wait -24.37% (needs +10.0%) | 8 streams: decode -13.27% (limit -1.0%), worst wait -27.78% (needs +10.0%)
+== W4 verdict
+W4 VERDICT: NONE: no setting holds decode within 1.0% and cuts the worst wait by 10% at both levels; the numbers above show how near each came
