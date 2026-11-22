@@ -1,0 +1,5 @@
+== score114: q114 <queue-rows>/queue114/f114-c, cell sampled code at 8 clients
+== Q1 boots: 6 control and 6 + 6 arm expected; missing: none
+== Q3 noise: the control's six boots spread 19.78%, above the 5% clause
+== Q4 decisions and Q5 bundle
+Q5 BUNDLE: NOT DECIDED: NOISE: the control's six-boot spread is 19.78%, above 5%, so the cell has no verdict

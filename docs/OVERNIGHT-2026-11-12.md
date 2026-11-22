@@ -2624,3 +2624,26 @@ a 2% change from a boot.
 token; T alone is 6.9% at 8k and 7.4% at 32k, which is the largest cold result of the campaign and more than both
 together. It stays in `dev.env` until the one cell is settled, and settling it is a targeted rerun of that cell rather
 than a reinterpretation of this run.
+
+## 95. queue114: the disputed cell is not measurable, and one control boot explains why
+
+Eighteen boots, six a group, one cell each (`sampled code`, 8 clients), mirrored. Digests one value across the eighteen.
+The scorer's noise clause fired: the control's own six-boot spread is **19.78%**, above the 5% bar, so the cell gets
+`NOT DECIDED: NOISE` and no verdict for either arm. Per-boot means, read from the rows for the record only:
+
+| group | mean | boots | spread |
+|---|---|---|---|
+| control | 169.5 | 167.8 157.4 **190.9** 168.0 168.2 164.7 | 19.78% |
+| T | 171.1 | 172.0 170.5 167.1 174.5 166.3 176.3 | 5.84% |
+| X | 168.5 | 175.0 167.6 171.7 162.7 171.7 162.0 | 7.71% |
+
+One control boot at 190.9 sits 12.6% above its own group's mean and is what makes the spread 19.78%; the other five sit
+between 157.4 and 168.2. T's mean is 0.94% above the control's and X's 0.6% below, both inside the 1.0% limit that
+queue113's rule set, and both arms' own spreads (5.84 and 7.71) are of the same order as the control's without its
+outlier.
+
+**So the honest reading is: this cell cannot be decided by six boots on this serve, and the reason is a single fast boot
+rather than a systematic cost in either bundle.** Two facts now stand beside each other and neither is a verdict: T is
+worth -6.90% at 8k and -7.36% at 32k on the cold prompt with every four-client decode cell inside 0.18%, and the only
+eight-client cell that could contradict it is unmeasurable here. Adopting T on that evidence is a judgement about an
+unmeasured cell, which is the owner's to make, not mine to make by editing the rule after the rows.
