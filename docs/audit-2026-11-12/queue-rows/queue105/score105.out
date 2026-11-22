@@ -1,0 +1,10 @@
+== score105: q105 work\pp105\f105-c
+== Q1 boots: 4 ca and 4 tx expected; missing: none
+== Q2 digests: 0 cell(s) whose eight boots are not one value
+== Q3 eight-client cells: change is tx over ca minus one, so positive is slower, the limit 1.0%
+greedy prose at 8 clients: ca 133.23 (boots 125.9 140.0 145.9 121.2, spread 18.54%) | tx 123.22 (boots 118.3 123.5 120.3 130.8, spread 10.09%) | -7.51% slower
+greedy code at 8 clients: ca 172.32 (boots 176.4 169.6 178.8 164.5, spread 8.27%) | tx 172.78 (boots 174.2 174.1 174.1 168.8, spread 3.13%) | +0.27% slower
+sampled prose at 8 clients: ca 115.24 (boots 110.5 119.0 115.6 115.9, spread 7.34%) | tx 117.75 (boots 120.5 115.9 114.5 120.2, spread 5.11%) | +2.18% slower
+sampled code at 8 clients: ca 165.27 (boots 169.0 161.3 163.6 167.1, spread 4.66%) | tx 164.70 (boots 163.7 166.7 165.4 163.0, spread 2.21%) | -0.34% slower
+== Q4 verdict
+Q4 VERDICT: HOLD: 1 cell(s) more than 1% slower at 8 clients (sampled prose)

@@ -2320,3 +2320,33 @@ survey you cannot read.)
 **What that means for the lever.** The failure is not "the switch costs speed"; it is "the branch carrying the switch is not main plus the switch". The next run for it needs a branch built as main plus this one change, or a B0 measured on main's own image, so S2's control clause tests something real. Until then `TF_GLM_OVN_SOLO_TO_START` stays in `dev.env` and out of the recipe, which is where it already is.
 
 
+
+## 84. 8-client confirmation of T+X: HOLD on one cell
+
+queue105 (`scripts/queues/queue105.sh`, scorer `score105.py`, rows in
+`docs/audit-2026-11-12/queue-rows/queue105`) ran the eight-boot mirrored confirmation the 8-client cells of queue95
+asked for: four control boots `ca` (recipe as committed, neither bundle applied) and four arm boots `tx`
+(`TF_GLM_OVN_MM_WIDE` + `_SIDE_PRIO` + `_LATENT_ROWS=2` + `NCCL_NCHANNELS_PER_NET_PEER=4` from T, and
+`TF_GLM_OVERLAP_PIECES=4` + `_PIECE_FRONT` + `_PIECE_FFI` + `_PIECE_MLA` + `_SOLO_TO_START` + `_RESTORE_HELD` from X),
+alternated `ca1 tx1 tx2 ca2 ca3 tx3 tx4 ca4` so drift lands on both sides. All eight boots pass their digests: 0 cells
+whose eight boots are not one value.
+
+The rule, written into the scorer before any row was read: HOLD if any eight-client cell is more than 1.0% slower,
+PROMOTE only when no cell is.
+
+| cell, 8 clients | control `ca` mean (four boots) | arm `tx` mean (four boots) | change |
+|---|---|---|---|
+| greedy prose | 133.23 (125.9 140.0 145.9 121.2, spread 18.54%) | 123.22 (118.3 123.5 120.3 130.8) | 7.51% faster |
+| greedy code | 172.32 (176.4 169.6 178.8 164.5, 8.27%) | 172.78 (174.2 174.1 174.1 168.8) | 0.27% slower |
+| sampled prose | 115.24 (110.5 119.0 115.6 115.9, 7.34%) | 117.75 (120.5 115.9 114.5 120.2) | **2.18% slower** |
+| sampled code | 165.27 (169.0 161.3 163.6 167.1, 4.66%) | 164.70 (163.7 166.7 165.4 163.0) | 0.34% faster |
+
+**Verdict: HOLD.** Sampled prose is 2.18% slower at eight clients, and greedy prose is 7.51% faster on the same
+arm; the control's own 8-client spread is 18.54%, which is why the confirmation ran eight boots. The cell that fails is
+inside a spread far larger than its change, but the rule is the rule and the gate does not get rewritten after the
+rows: T and X stay in `scripts/env/dev.env`'s candidates section and nothing moves to `prod.env`.
+
+**What would decide it.** The failing cell at eight clients is prose with sampling. The mechanism candidates are
+`_LATENT_ROWS=2` and `NCCL_NCHANNELS_PER_NET_PEER=4`, both of which act on decode rows rather than on prompt work;
+splitting T from X across sixteen boots at levels 4 and 8 is the measurement that separates them, and neither bundle
+carries a five-level cell of its own yet.
