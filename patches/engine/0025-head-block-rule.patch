@@ -20,6 +20,17 @@ Separately, 0022 moved the stepped pass into `cuda_lanes_step.zig`, which calls
 `Leader.chunkOf`; the pin's `prefill_widths_glm_host.zig` stub declared `chunk` only and
 stopped compiling. The stub gains `chunkOf` delegating to `chunk`, cap ignored.
 
+Third change, from the cold-prompt review: the dense call took every row of a chunk whose first row sits
+below `dense_limit`, so a 4,096-row first chunk ran dense attention over all 4,096 rows and the sparse pass then
+wrote the rows from 2,051 on - three quarters of the dense kernel's key rows were dead. `denseRows` bounds the call
+to the rows the select leaves alone (`tf_glm_dsa_tokens` writes counts 0 while a row's visible tokens fit its
+pools, exactly the rows below `dense_limit`). Rows below the bound keep the same launches, each row's kernel work
+does not depend on how many rows a launch carries, and the sparse pass still writes every row at or past the limit,
+so replies are byte-identical by construction. A unit test (`dense rows:`) is part of the glm module's tests.
+Receipt owed (GPU): `scripts/prefill_passes.py` over an nsys capture of rank 0 at 8k, 32k and 120k - the dense
+kernel's share of the first chunk falls from its whole-chunk share toward the 2,051-row share, reply digests equal,
+decode cells at 1 and 4 clients unchanged.
+
 Gates on pin+0001..0031: check-native-cuda-host green, whole-tree fmt green, lean
 base-vs-head 0 new, and `test-cuda-host` exits 0 with zero named failures - the same
 result a clean 9c9bf542 checkout gives, from 27 named failures at 0001..0023.
@@ -30,10 +41,56 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
-index 44cbc26a4..ea1e99970 100644
+index 44cbc26a4..97d923aab 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -208,7 +208,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -105,6 +105,12 @@ pub fn sparseRows(l: Layer, host_pos: usize, rows: usize) bool {
+     return host_pos + rows - 1 >= l.dense_limit;
+ }
+ 
++/// The rows whose dense value survives: the select leaves a row alone while its visible tokens fit its pools.
++pub fn denseRows(host_pos: usize, rows: usize, limit: usize) usize {
++    if (host_pos >= limit) return 0;
++    return @min(rows, limit - host_pos);
++}
++
+ /// The block's row-by-row part for a shared window: projections, norms, q_b, indexer, absorbed query, `qi`'s query.
+ pub fn prepare(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool) !void {
+     return prepareProfile(set, stream, l, s, x, x_stride, rows, qi, null);
+@@ -142,13 +148,14 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
+     try writeKeys(k, stream, l, c, v, rows, pos);
+     const t, const tk = try tables(l, c);
+     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+-    if (host_pos < l.dense_limit) {
++    const dense_rows = denseRows(host_pos, rows, l.dense_limit); // rows past it are the sparse pass's to write
++    if (dense_rows > 0) {
+         const stamp = prof.span(k.prof, stream, .mla);
+         var dc = c;
+         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: the visible ones, in order, into the slots
+-            dc = .{ .lc = try g.visible(k.ops, stream, c.lc, c.pt, t.page_rows, pos, rows, l.dense_limit + rows), .ik = c.ik, .ig = c.ig, .pk = c.pk, .pk_rows = c.pk_rows };
++            dc = .{ .lc = try g.visible(k.ops, stream, c.lc, c.pt, t.page_rows, pos, dense_rows, l.dense_limit + rows), .ik = c.ik, .ig = c.ig, .pk = c.pk, .pk_rows = c.pk_rows };
+         };
+-        try denseAttention(k, stream, l, dc, v, pos, rows, nch, part_rows, scale);
++        try denseAttention(k, stream, l, dc, v, pos, dense_rows, nch, part_rows, scale);
+         stamp.end();
+     }
+     if (sparseRows(l, host_pos, rows)) {
+@@ -167,6 +174,14 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
+     }
+ }
+ 
++test "dense rows: the select leaves exactly the rows below the dense limit" {
++    try std.testing.expectEqual(@as(usize, 2051), denseRows(0, 4096, 2051)); // a 4,096-row first chunk
++    try std.testing.expectEqual(@as(usize, 2048), denseRows(0, 2048, 2051)); // a chunk inside the limit
++    try std.testing.expectEqual(@as(usize, 0), denseRows(2051, 2048, 2051)); // a chunk wholly past it
++    try std.testing.expectEqual(@as(usize, 5), denseRows(2046, 100, 2051)); // a chunk crossing it
++    try std.testing.expectEqual(@as(usize, 0), denseRows(2048, 100, 2048)); // limit reached exactly
++}
++
+ /// A prompt MTP chunk's block: every row's caches, then the last row's attention and o_proj partial into `out` row 0.
+ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, x_stride: usize, rows: usize, pos: u64, host_pos: usize, nch: usize, out: u64) !void {
+     if (rows == 0) return error.BadWindow;
+@@ -208,7 +223,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
      const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
      if (host_pos < l.dense_limit) { // the same keys today's whole-chunk call read for this row
          var stamp = prof.span(k.prof, stream, .mla);
@@ -42,7 +99,7 @@ index 44cbc26a4..ea1e99970 100644
          stamp.end();
      }
      if (sparseRows(l, host_pos, rows)) {
-@@ -222,7 +222,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
+@@ -222,7 +237,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
  
  /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
  fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {

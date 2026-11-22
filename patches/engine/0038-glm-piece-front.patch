@@ -64,7 +64,7 @@ index bb5e5d91b..9ae2d75ba 100644
      _ = @import("cuda_ranks_test.zig");
      _ = @import("cuda_ranks_roce_test.zig");
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
-index ea1e99970..0d505ce48 100644
+index 97d923aab..d2e6b3a2f 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
 @@ -94,6 +94,11 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
@@ -79,7 +79,7 @@ index ea1e99970..0d505ce48 100644
      try attend(k, stream, l, c, s, 0, rows, pos, host_pos, nch, part_rows);
      const stamp = prof.span(k.prof, stream, .projections);
      defer stamp.end();
-@@ -112,19 +117,40 @@ pub fn prepare(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
+@@ -118,19 +123,40 @@ pub fn prepare(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
  
  pub fn prepareProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool, profile: ?*prof.Prof) !void {
      var stamp = prof.span(profile, stream, .replicated_qakva);

@@ -52,7 +52,7 @@ Patches, in file-name order:
 - `0001-glm-solo-between-starts.patch`
 - `0002-glm-solo-to-start.patch`
  This line was rewritten 2026-11-21 by the retirement lane: the package was applied again on the engine series
-after its dead switches came out (engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`). The package's own hunks
+after its dead switches came out (engine tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`). The package's own hunks
 are unchanged; only context lines that named removed engine fields moved (`Snap.win_from`, the dead `Marks.win_from`,
 the `dr.restart` call behind the kept-window resume, the dflash window fields), so its behaviour is the same.
 
@@ -61,19 +61,23 @@ learn-starts, solo-cuts, disk-any-position, restore-held) against the base of th
 `efd5bccea8b5`, stack tree `b7f4d6f53f78`; every step rc 0 on both sides; gate-names 0 failing names on each
 (base 7869/7912, stack 8073/8116); lean 7306 files 168 problems on the base against 7366 files 168 here, 0 new;
 test-cuda-host and compile-cuda-tests 0. The engine half alone passed `sg-20261121-230313` on tree `ad9faacc`.
-Re-seated 2026-11-22 on the engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930` after the five dead switches' rows left `0020`; the
-whole stack is `08fb5cddf232e0031b090084a2a2b176ebf90b32` and its gate run is `sg-20261122-064752`. Package behaviour unchanged.
+Re-seated 2026-11-22 on the engine tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450` after the five dead switches' rows left `0020`; the
+whole stack is `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f` and its gate run is `sg-20261122-090022`. Package behaviour unchanged.
 
 Withdrawn 2026-11-22 (second pass): SPARSE_ONEPASS's last comment, ROUTER16's dead field and its two unlaunched
 entry points, and INDEX_SCHED and POOLS32's rows, readers and doc rows left the series at their owning patches
-(`0020`, `0022`, `0012`). DECODE_INDEX and the whole index path stay. Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`
-(gate run sg-20261122-064752, PASS).
+(`0020`, `0022`, `0012`). DECODE_INDEX and the whole index path stay. Engine tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, whole stack `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f`
+(gate run sg-20261122-090022, PASS).
 
 2026-11-22: `tf_glm_hc_partial8_pdl` now instantiates `partial8<true>` (it launched `<false>`, so the PDL_EARLY arm's
-dependent wait never existed). Default path untouched. Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`, gate run sg-20261122-064752 PASS.
+dependent wait never existed). Default path untouched. Engine tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, whole stack `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f`, gate run sg-20261122-090022 PASS.
 
 2026-11-22 (second pass): `0023` had its identity tile block removed (byte-identical by construction) and `0024` now
-instantiates `partial8<true>`. Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`, gate run sg-20261122-064752 PASS.
+instantiates `partial8<true>`. Engine tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, whole stack `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f`, gate run sg-20261122-090022 PASS.
 
 2026-11-22 (third pass): patches 0019 and 0020 skip the speculative next-tile QK block on the last tile (low-value
-speed candidate, receipts in their headers). Engine tree `889b2a773d815f66eb472f20d1f8f4a4b151d930`, whole stack `08fb5cddf232e0031b090084a2a2b176ebf90b32`, gate run sg-20261122-064752 PASS.
+speed candidate, receipts in their headers). Engine tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, whole stack `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f`, gate run sg-20261122-090022 PASS.
+
+2026-11-22 (fourth pass): `0025` bounds the dense call to the rows the select leaves alone (a 4,096-row first
+chunk no longer runs dense attention over the 2,045 rows the sparse pass rewrites). Engine tree
+`59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, whole stack `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f`, gate run sg-20261122-090022 PASS.
