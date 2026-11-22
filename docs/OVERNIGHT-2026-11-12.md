@@ -2741,3 +2741,27 @@ only by its candidates section, which may be empty" instead of requiring one.
 (section 93); against today's recipe, the cold prompt is 6.9% faster at 8k and 7.4% at 32k from T with X another 2.8%
 (sections 94 and 95), and decode is level at all five levels per the table above. The eight-client cell remains a
 documented property of the oversubscribed configuration rather than a gate (sections 96 and 97).
+
+## 100. vec_x2 receipt, half taken: decode is neutral, the capture did not land
+
+The image built from the patched tree (`glm53-zig:vecx2`, id `ba99598`) boots in 131 s at `--parallel 1 --context 1048576`
+once the page cache is dropped, and it measures:
+
+| level | m130a (the shipped recipe) | vecx2 | change |
+|---|---|---|---|
+| 1 client | 81.7 | 81.3 | -0.50% |
+| 4 clients | 112.1 | 112.6 | +0.40% |
+
+Both inside half a percent, so the patch does not cost decode. What it has **not** shown is the gain the patch exists for:
+queue102 read the vector form 1.0 to 2.5% slower on short TTFT and per-stream decode, and this comparison is aggregate
+throughput, which is not the same measurement. So the honest statement is "no regression in aggregate decode" and not
+"the decode cost is gone".
+
+The prompt half of the receipt is missing. All three cold prompts qualified on the capture boot (8k, 32k, 120k), the
+boot log says `up in 131 s`, and no new `r0.nsys-rep` appeared: the only file in the output directory is the 54,102-byte
+one from the first attempt, written before that boot died on the memory preflight, and the directory is root-owned so the
+host cannot clear it. The capture-boot wrap therefore needs one more look before the absorb and expand shares can be read.
+
+Two faults of mine in the run itself, both already fixed in the queue: it booted twice without dropping the page cache,
+so both boots refused on the preflight, and its first attempt left a root-owned capture directory that the second could
+not use cleanly.
