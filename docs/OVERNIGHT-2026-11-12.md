@@ -2597,3 +2597,30 @@ patches plus an env, and why a patch that is not reached by a line is indistingu
 1.33 to 1.37 times slower on the cold prompt and level on decode. The stock rung was the missing reference: it says the
 work on this series is worth a third more throughput at every level than the same binary left alone, which is the number
 to quote for the series itself rather than for any single knob.
+
+## 94. queue113: T and X split, each held by one cell, and the cold gains are the largest of the campaign
+
+Sixteen boots, eight control against four of each arm, every boot measuring both client levels and the cold prompt.
+Digests one value per cell. The rule: ADOPT when no decode cell at either level is more than 1.0% slower and the cold
+mean is at least 1.0% faster, HOLD when a cell is over the limit, REJECT when the cold mean is not positive. (Sign:
+a negative change is the arm faster.)
+
+| | T | X |
+|---|---|---|
+| cold 8k first token | 4,117.1 -> **3,832.9**, -6.90% | 4,117.1 -> 3,993.9, -2.99% |
+| cold 32k first token | 15,348.1 -> 14,218.1, -7.36% | 15,348.1 -> 14,939.6, -2.66% |
+| cold mean | **-7.13%** | **-2.83%** |
+| decode at 4 clients, worst cell | +0.18% | +0.47% |
+| decode at 8 clients | sampled prose -2.83%, sampled code **+2.05%** | greedy code -2.30%, sampled code **+1.78%** |
+| cell over the limit | 8-client sampled code | 8-client sampled code |
+| verdict | **HOLD** | **HOLD** |
+
+So T is worth about 7% on the cold prompt at both lengths with decode level at four clients, and X about 3%, and each is
+blocked by the same single cell: sampled code at eight clients. That cell is also the noisiest in the run, a control
+spread of 11.57% there (160.6 to 180.1) against 4.7 to 9.6% in the other three, so the reading inside it cannot separate
+a 2% change from a boot.
+
+**What this changes.** The cold prompt's known wins were ABSORB_VEC at about 1% and the dense clip at 3.2% of the 8k
+token; T alone is 6.9% at 8k and 7.4% at 32k, which is the largest cold result of the campaign and more than both
+together. It stays in `dev.env` until the one cell is settled, and settling it is a targeted rerun of that cell rather
+than a reinterpretation of this run.
