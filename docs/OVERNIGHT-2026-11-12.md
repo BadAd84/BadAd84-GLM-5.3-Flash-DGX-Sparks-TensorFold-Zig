@@ -2712,3 +2712,32 @@ the exchange".
 That makes the next step a measurement rather than a patch: mark the idle intervals in the capture against the NCCL
 stream's activity, and only the overlap attributable to the wire is available to a transport or host-staging change. Until
 that is done, "close the residual exposure" has no size to close.
+
+## 99. The dev env ships: level or better at every level, 7% on the cold prompt
+
+queue116 compared the whole dev env, all 22 settings, against the recipe deployed today, at 1, 2, 4, 6 and 8 streams,
+two boots an arm, order `prod-a dev-a dev-b prod-b`.
+
+| streams | prod (2 boots) | dev (2 boots) | dev vs prod |
+|---|---|---|---|
+| 1 | 81.4 (81/81) | 81.6 (82/81) | +0.15% |
+| 2 | 84.5 (84/85) | 85.3 (85/85) | +0.99% |
+| 4 | 112.3 (112/113) | 112.1 (112/112) | -0.22% |
+| 6 | 149.3 (149/149) | 149.7 (149/150) | +0.28% |
+| 8 | 183.7 (184/183) | 184.1 (185/184) | +0.23% |
+
+The rule in the queue's header: ship when not slower at any level beyond the boot spread and faster in at least one. The
+worst reading is -0.22% at four streams, inside that arm's own 112/113 spread, and four levels are faster, so the rule is
+satisfied.
+
+**Promoted:** the eleven candidate settings are now recipe lines in `dev.env` and in `prod.env`, which makes `prod.env` the
+next production recipe: `ABSORB_VEC`, `MM_WIDE`, `SIDE_PRIO`, `LATENT_ROWS=2`, `NCCL_NCHANNELS_PER_NET_PEER=4`,
+`OVERLAP_PIECES=4`, `PIECE_FRONT`, `PIECE_FFN`, `PIECE_MLA`, `SOLO_TO_START`, `RESTORE_HELD`. Both files carry 46 settings
+and their setting lines are byte-identical; `dev.env`'s candidates section is empty with a note saying why. The launcher
+test's ADDED allowlist holds the same eleven names, and its dev-versus-prod assertion now reads "dev differs from prod
+only by its candidates section, which may be empty" instead of requiring one.
+
+**What this env is worth, taken together.** Against the same binary with its switches off, the recipe is +33% to +56%
+(section 93); against today's recipe, the cold prompt is 6.9% faster at 8k and 7.4% at 32k from T with X another 2.8%
+(sections 94 and 95), and decode is level at all five levels per the table above. The eight-client cell remains a
+documented property of the oversubscribed configuration rather than a gate (sections 96 and 97).

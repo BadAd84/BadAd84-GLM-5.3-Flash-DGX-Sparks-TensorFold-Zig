@@ -24,7 +24,7 @@ OLD_REV = "4c02515"
 REMOVED = {"TF_GLM_COPY_MAX", "TF_GLM_COPY_REPLY_MATCH", "TF_GLM_OVN_EXL3_ITEMS"}
 # Added on purpose: a knob the pre-split launcher had no line for, promoted into prod.env with its cells. One name a promotion;
 # the comparison drops it from both sides so every other name stays held to the old launcher exactly.
-ADDED = {"TF_GLM_OVN_ABSORB_VEC"}
+ADDED = {"TF_GLM_OVN_ABSORB_VEC", "TF_GLM_OVN_MM_WIDE", "TF_GLM_OVN_SIDE_PRIO", "TF_GLM_OVERLAP_PIECES", "TF_GLM_OVN_LATENT_ROWS", "TF_GLM_OVN_PIECE_FRONT", "TF_GLM_OVN_PIECE_FFN", "TF_GLM_OVN_PIECE_MLA", "NCCL_NCHANNELS_PER_NET_PEER", "TF_GLM_OVN_SOLO_TO_START", "TF_GLM_OVN_RESTORE_HELD"}
 
 
 def wsl(path):
@@ -155,7 +155,8 @@ class ServeEnv(unittest.TestCase):
             self.assertEqual(v, dev.get(k), f"dev lost or changed {k}")
         extra = {k for k in dev if k not in prod}
         self.assertEqual({n for n, _ in env_words("dev")} - {n for n, _ in env_words("prod")}, extra)
-        self.assertTrue(extra, "dev.env adds no candidate")
+        cand = {n for n, _ in env_words("dev", "candidates")}
+        self.assertEqual(cand, extra, "dev.env differs from prod beyond its candidates section")
 
     def test_the_check_launcher_takes_its_runtime_settings_from_prod_env(self):
         text = (ROOT / "scripts/gpu-check-tp3.sh").read_text(encoding="utf-8")
