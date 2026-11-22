@@ -22,6 +22,9 @@ OLD_REV = "4c02515"
 # Dropped on purpose: two names nothing in zig/src reads at the v1.2.9 pin or at main (the inventory of the move to main checked both), and the switch main's
 # unconditional item plan retired (upstream 4e6cdeed9 and 51a6fe02a).
 REMOVED = {"TF_GLM_COPY_MAX", "TF_GLM_COPY_REPLY_MATCH", "TF_GLM_OVN_EXL3_ITEMS"}
+# Added on purpose: a knob the pre-split launcher had no line for, promoted into prod.env with its cells. One name a promotion;
+# the comparison drops it from both sides so every other name stays held to the old launcher exactly.
+ADDED = {"TF_GLM_OVN_ABSORB_VEC"}
 
 
 def wsl(path):
@@ -112,8 +115,9 @@ class ServeEnv(unittest.TestCase):
 
     def same(self, knobs, p, world, xenv="", caller=None, fatbin=False):
         comm = "192.0.2.1:29561" if world > 1 else ""
-        want = [(n, v) for n, v in old_environment(self.old, knobs, p, world, comm, xenv, caller or {}, fatbin) if n not in REMOVED]
-        got = new_environment(knobs, p, world, comm, xenv, caller or {}, fatbin)
+        skip = REMOVED | ADDED
+        want = [(n, v) for n, v in old_environment(self.old, knobs, p, world, comm, xenv, caller or {}, fatbin) if n not in skip]
+        got = [(n, v) for n, v in new_environment(knobs, p, world, comm, xenv, caller or {}, fatbin) if n not in ADDED]
         why = f"KNOBS={knobs} P={p} WORLD={world} XENV={xenv!r} caller={caller} fatbin={fatbin}"
         # docker takes the last `-e` of a name, so the effective environment is the comparison; the old launcher passed a name twice when XENV
         # re-set a fixed one, the new one passes it once, and a name twice in the new command would be a defect

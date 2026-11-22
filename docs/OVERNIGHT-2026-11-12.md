@@ -2389,3 +2389,28 @@ with a JSON list of `{name, kind, prompt}` items whose prompts are thousands of 
 
 W0 did the job it was written for: a pre-written guard turned a table that would have read as "the controls do
 nothing" into a NOT DECIDED which names the missing condition. No rule was edited after the rows.
+
+## 87. queue109: ABSORB_VEC passes the five levels and is promoted
+
+queue109 ran eight boots in the mirrored order `av0a av1a av1b av0b av0c av1c av1d av0d`, each at 1, 2, 4, 6 and 8
+streams on the recipe with the switch unset against the same recipe with `TF_GLM_OVN_ABSORB_VEC=1`, the arm it earned
+in queue102. Means over four boots a group, and the generated token arrays hashed per level across all eight boots.
+
+| streams | control mean | arm mean | change |
+|---|---|---|---|
+| 1 | 81.9 (81-82) | 82.2 | +0.34% |
+| 2 | 85.6 (85-86) | 85.4 | -0.21% |
+| 4 | 112.9 | 112.9 | +0.07% |
+| 6 | 149.8 | 150.0 | +0.10% |
+| 8 | 185.9 | 185.6 | -0.13% |
+
+All five levels sit inside 0.35%, and the boot-to-boot spread at the two levels that read negative is 1 to 2 tokens a
+second, wider than the change itself. Replies are identical: the generated token arrays hash to one value at every
+level across all eight boots. So the lever costs nothing on decode, which is the property a prompt-side change must
+have, and its gain is where queue102 found it: cold first token +0.96, +1.04 and +0.84% at 8k, 32k and 120k with both
+arm boots under both control boots.
+
+**Promoted:** `TF_GLM_OVN_ABSORB_VEC=1` is a line of `scripts/env/prod.env`'s recipe section and of `dev.env`'s, in this
+commit, with its cells. It is the first switch this campaign has carried through the whole ladder. The launcher test's
+allowlist gains an `ADDED` set for exactly this case: a knob the pre-split launcher had no line for, dropped from both
+sides of the comparison so every other name stays held to the old launcher.
