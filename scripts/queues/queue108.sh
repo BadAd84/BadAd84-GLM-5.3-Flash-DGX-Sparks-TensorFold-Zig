@@ -35,9 +35,9 @@ unit() { # unit LABEL XENV: one fresh boot, the mixed probe at 4 and 8 streams, 
   IMAGE=$IMG KNOBS=prod XENV="$xenv" bash zig-tp3.sh 4 1048576 > "$OUT/f108-boots/$label.log" 2>&1 \
     || { flag "BOOT FAILED $label: $(tail -3 "$OUT/f108-boots/$label.log" | tr '\n' ' ' | cut -c1-300)"; return 1; }
   mkdir -p "$dir"
-  python3 tools/bench_concurrent.py http://127.0.0.1:8300 "$MODEL" --levels 4,8 --tokens 256 --reps 3 --mixed \
+  python3 "$G/tools-up/tools/bench_concurrent.py" http://127.0.0.1:8300 "$MODEL" --levels 4,8 --tokens 256 --reps 3 --mixed \
     --label "$label" --output "$dir/concurrent.json" > "$dir/concurrent.out" 2>&1; local r1=$?
-  python3 tools/bench_cache.py http://127.0.0.1:8300 "$MODEL" 8192 --require-cold \
+  python3 "$G/tools-up/tools/bench_cache.py" http://127.0.0.1:8300 "$MODEL" 8192 --require-cold \
     --output "$dir/cache-8192.json" > "$dir/cache-8192.out" 2>&1; local r2=$?
   echo "[q108] $(date -u +%T) $label: concurrent rc=$r1 $(grep -o '"aggregate_tps": [0-9.]*' "$dir/concurrent.out" 2>/dev/null | tr '\n' ' ') | cold 8k rc=$r2"
 }
