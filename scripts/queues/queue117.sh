@@ -21,9 +21,9 @@ cd "$HOME/work/glm53-zig" || exit 1
 G="$HOME/work/glm53-zig"
 OUT="$HOME/bench"; R="$OUT/f117-c"
 IMG=${IMG:-glm53-zig:vecx2}
+[ -f "$G/queue117.env" ] && . "$G/queue117.env"
 WORKERS=${WORKERS:?set WORKERS}
 WAIT_FOR=${WAIT_FOR:-}
-[ -f "$G/queue117.env" ] && . "$G/queue117.env"
 W1=${WORKERS%% *}; W2=${WORKERS##* }
 
 log() { echo "[q117] $(date -u +%T) $*"; }
