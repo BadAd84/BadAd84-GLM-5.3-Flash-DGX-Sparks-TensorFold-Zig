@@ -2543,3 +2543,30 @@ which is the opposite of what the control is for.
 So the recipe keeps its own prompt handling and takes none of upstream's three controls, on the configuration we actually
 run. That is the answer the sweep was opened for, and it is a negative that costs nothing to keep: the controls stay
 available, unset, and the row in `docs/KNOBS.md` records why.
+
+## 91b. The DRAM counters are not available on this device, so the L2 argument is the answer
+
+The receipt was taken: a rank-0 boot wrapped in `ncu --replay-mode kernel --launch-count 1 -k regex:tf_exl3_prompt_`
+(WRAP0/XRUN0 are the launcher's names; plain WRAP is silently ignored, which cost one attempt), `--cap-add SYS_ADMIN`,
+one cold 8,192-row request through upstream's `bench_cache.py --prompt-file`, qualified true on the first try.
+
+What came back for the profiled launch:
+
+    dram__bytes_read.sum     (!) n/a
+    dram__bytes_write.sum    (!) n/a
+    lts__t_bytes.sum         462,528 bytes
+    gpu__time_duration.sum   14,048 ns
+
+So the counters the question needed do not exist on this device: DRAM byte counters read n/a on the GB10 for these
+kernels, while the L2 counter works. The L2-versus-DRAM question therefore cannot be answered with a DRAM counter here,
+and the plan-kernel argument stands as the answer: `place_items` emits an expert's items consecutively, the two item
+blocks are six column blocks apart with 1.57 MB between them, and the second read is an L2 hit.
+
+Two instrument notes for the next person. `-k regex:tf_exl3_prompt_` profiles the first kernel whose name matches, which
+was `tf_exl3_prompt_rotate` at 14 us, not `gu`; a specific kernel needs `regex:tf_exl3_prompt_gu$`. And `--query-metrics`
+returns nothing from a container whether or not the GPU is attached, so metric availability is learned from a real
+profile rather than by querying.
+
+The item closes at its ceiling: `gu` at 191 GB/s against `down`'s 271 is at most about 90 ms a chunk, 5% of the main
+stream, it cannot be attributed with the counters this hardware exposes, and the structural read says the traffic it
+would explain is L2, not DRAM.
