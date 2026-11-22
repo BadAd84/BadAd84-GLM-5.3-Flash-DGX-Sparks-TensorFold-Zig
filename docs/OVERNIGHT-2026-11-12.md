@@ -2414,3 +2414,23 @@ arm boots under both control boots.
 commit, with its cells. It is the first switch this campaign has carried through the whole ladder. The launcher test's
 allowlist gains an `ADDED` set for exactly this case: a knob the pre-split launcher had no line for, dropped from both
 sides of the comparison so every other name stays held to the old launcher.
+
+## 88. queue106: DRAFT_NOISE stays, at +0.86% and not decided
+
+queue106 supplied the two cells `TF_GLM_OVN_DRAFT_NOISE` was adopted without: 6 and 8 clients, sampled prose and sampled
+code, eight mirrored boots alternating the switch on and off, four boots a side, digests equal across all eight.
+
+| cell | off (4 boots) | on (4 boots) | change with the knob |
+|---|---|---|---|
+| sampled prose, 6 clients | 104.78 | 107.89 | +2.96% |
+| sampled code, 6 clients | 165.61 | 166.49 | +0.54% |
+| sampled prose, 8 clients | 116.10 | 116.80 | +0.60% |
+| sampled code, 8 clients | 167.86 | 166.77 | -0.65% |
+
+Mean +0.86%. The rule written before the rows keeps a knob at a 1.0% average with no cell more than 1.0% slower, removes
+it at an average of zero or less, and decides nothing in between; +0.86% with one cell at -0.65% is that middle band, so
+the verdict is NOT DECIDED and the knob stays where it is. It is the honest outcome: the knob is mildly positive on
+average and mildly negative in one cell, and neither reading is outside the boot spreads this queue recorded.
+
+What would decide it: the 8-client sampled code cell is the only negative one and its boots are the widest of the four
+(158.7 to 178.2 on the knob side), so a rerun at that cell alone, eight boots a side, is the measurement that moves it.

@@ -1,0 +1,10 @@
+== score106: q106 work\pp106\f106-c
+== D1 boots: 4 on and 4 off expected; missing: none
+== D2 digests: 0 cell(s) whose eight boots are not one value
+== D3 sampled cells: change is on over off minus one, so positive means keeping the knob is faster
+sampled prose at 6 clients: off 104.78 (boots 105.9 106.6 105.1 101.5) | on 107.89 (boots 110.3 103.5 107.1 110.7) | +2.96% faster with the knob
+sampled code at 6 clients: off 165.61 (boots 171.9 166.7 168.6 155.2) | on 166.49 (boots 167.0 164.4 167.3 167.2) | +0.54% faster with the knob
+sampled prose at 8 clients: off 116.10 (boots 116.3 112.6 117.2 118.3) | on 116.80 (boots 117.4 113.9 116.6 119.3) | +0.60% faster with the knob
+sampled code at 8 clients: off 167.86 (boots 171.1 167.7 163.4 169.2) | on 166.77 (boots 168.2 162.0 158.7 178.2) | -0.65% faster with the knob
+== D4 verdict
+D4 VERDICT: NOT DECIDED: mean +0.86% sits between no benefit and the 1% a keep needs
