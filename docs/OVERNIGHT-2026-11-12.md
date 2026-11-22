@@ -2437,3 +2437,34 @@ average and mildly negative in one cell, and neither reading is outside the boot
 
 What would decide it: the 8-client sampled code cell is the only negative one and its boots are the widest of the four
 (158.7 to 178.2 on the knob side), so a rerun at that cell alone, eight boots a side, is the measurement that moves it.
+
+## 89. Where the cold prompt's time actually goes, from a capture already in the repo
+
+The `pf-f85w` capture (`docs/audit-2026-11-12/queue-rows/queue85/pf-f85w/kern.txt`, 80 kernels, 28,992.7 ms of kernel
+time over 194,623 launches, an 8,183-row and a 32,756-row cold request) decomposes the prompt path. Share of the total:
+
+| kernel | total ms | share | launches | mean us |
+|---|---|---|---|---|
+| `ncclDevKernel_SendRecv` | 5,326.9 | 18.4% | 11,733 | 454 |
+| `tf_exl3_prompt_gu` | 3,840.5 | 13.2% | 840 | 4,572 |
+| `glm_mm4_w2x4` | 3,816.1 | 13.2% | 6,349 | 601 |
+| `tf_exl3_prompt_down` | 2,668.5 | 9.2% | 840 | 3,177 |
+| `tf_exl3_ovn_nc1` | 1,688.0 | 5.8% | 5,460 | 309 |
+| `glm_mm4_128` | 1,481.1 | 5.1% | 11,503 | 129 |
+| `tf_glm_combine` | 1,449.4 | 5.0% | 5,460 | 266 |
+| `tf_glm_kda_step` | 985.5 | 3.4% | 2,720 | 362 |
+| `tf_glm_onepass_pipe_exact` | 952.3 | 3.3% | 165 | 5,771 |
+| `tf_glm_expand_v_x2` | 841.4 | 2.9% | 935 | 900 |
+| `tf_glm_absorb_q_x2` | 765.5 | 2.6% | 1,419 | 539 |
+
+**Attention is 3.3% of the prompt path, so it is not where the 1.33 to 1.37x gap lives.** The two biggest families are
+the TP exchange (18.4%) and the EXL3 prompt expert GEMMs (`prompt_gu` plus `prompt_down`, 22.4%), with the int4 linears
+(`glm_mm4_w2x4` plus `glm_mm4_128`) another 18.3%.
+
+Two leads that follow directly. The exchange is 11,733 launches at a 454 us mean and a 348 us median, which is a launch
+shape question before it is a bandwidth question: the same bytes in fewer, larger exchanges is the first thing to price.
+And the EXL3 prompt pair costs 840 launches each at 4,572 and 3,177 us, so their per-launch size and tile shape are where
+the expert GEMM money is.
+
+The dense-window clip at `0025` (section 89 above this table's subject, commit `7d1286a`) is worth about 130 ms on the
+8k first token and remains worth taking, but attention cannot yield more than 3.3% of the path however it is shaped.
