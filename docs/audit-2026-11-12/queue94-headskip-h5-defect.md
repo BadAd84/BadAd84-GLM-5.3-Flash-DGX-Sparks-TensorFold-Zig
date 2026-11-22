@@ -56,3 +56,28 @@ creates none, so the divisor is zero by construction and no amount of rerunning 
 The measurement H5 needs is a conversation: several turns that grow a prompt, with the head-skip count and the kept
 states read on the same request, and the switch's cost divided by the states actually created. That is a new rule for a
 new instrument, written before its rows, not an edit to this one.
+
+## The instrument H5 needs, specified before it is built
+
+The lever is `TF_GLM_HEAD_SKIP=1`. Two runs have failed to measure it for the same reason: the probe creates no kept
+state, so the clause that divides the lever's cost by the states it saves reads zero on every arm.
+
+What the probe must be:
+
+1. One conversation per size, not one request. Turns 1 to 6 at about 3,000 rows a turn, the shape queue89 used, because
+   that is the shape in which `TF_GLM_REQUEST_STARTS=1` keeps a state at each request start.
+2. Per turn, four values recorded together: the engine's own first-token time, the head-skip count the rank 0 log
+   reports, `tensorfold:prompt_cache_states` before and after the turn, and the reply's digest. The four must come from
+   the same request; a count read on a different turn than the state is what makes a ratio meaningless.
+3. The arm carries `TF_GLM_REQUEST_STARTS=1` and `TF_GLM_CHUNK_SOLO=4096`, as queue107 did, so the states exist at all.
+
+The decision, written before its rows:
+
+- ADOPT when the turns that incremented `prompt_cache_states` average at least 1.0% faster first token on the arm, no
+  such turn is more than 1.0% slower, and every reply digest is equal across arms.
+- HOLD when the arm is faster on those turns but one is worse by more than 1.0%, or a digest differs.
+- NOT DECIDED when no turn on any arm incremented the gauge, or an arm has fewer than two boots. A third NOT DECIDED
+  from this shape means the lever has no reachable saving at these sizes and the row should be retired, not rerun.
+
+The probe is untested on the box, so its first boot runs a smoke pass that prints the four values for one turn before
+any arm is graded, and the scorer refuses to grade a run whose smoke pass did not print them.
