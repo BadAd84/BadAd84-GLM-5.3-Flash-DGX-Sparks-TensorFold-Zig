@@ -7,6 +7,9 @@
 # about 8,300 tokens, at levels 4 and 8, the same eight mirrored arms and the same scorer (score108.py's rules are the
 # rule; there is one implementation of it).
 #
+# The base is KNOBS=dev, the recipe plus every candidate this repo carries, because that is the configuration under
+development; prod.env is the frozen baseline the campaign compares against and is not what an arm here runs.
+#
 # Reading the verdict: score108.py --q108 <dir>. Its W0 refuses any run whose 8-stream cell never carried a request
 # above 8,000 prompt tokens, W2 needs decode within 1.0% at both levels, W3 needs the worst wait at least 10% lower at
 # both, and W4 adopts only when both levels win.
@@ -70,7 +73,7 @@ for arm in "c1|" "b512a|$B512" "b2048a|$B2048" "s50a|$S50" "s50b|$S50" "b2048b|$
   dir="$R/$label"
   if [ -f "$dir/concurrent.json" ]; then log "$label already complete; skip"; continue; fi
   stop
-  IMAGE=$IMG KNOBS=prod XENV="$env" bash zig-tp3.sh 4 1048576 > "$OUT/f111-boots/$label.log" 2>&1 \
+  IMAGE=$IMG KNOBS=dev XENV="$env" bash zig-tp3.sh 4 1048576 > "$OUT/f111-boots/$label.log" 2>&1 \
     || { flag "BOOT FAILED $label: $(tail -2 "$OUT/f111-boots/$label.log" | tr '\n' ' ' | cut -c1-200)"; exit 1; }
   mkdir -p "$dir"
   python3 "$T/bench_concurrent.py" http://127.0.0.1:8300 "$MODEL" --levels 4,8 --tokens 256 --reps 3 \
