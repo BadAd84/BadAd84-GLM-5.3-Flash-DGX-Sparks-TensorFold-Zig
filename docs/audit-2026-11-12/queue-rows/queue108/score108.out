@@ -1,0 +1,3 @@
+== score108: q108 work\pp108\f108-c
+== W0 boots: missing none; longest prompt in the 8-stream cell per boot: b2048a=25, b2048b=25, b512a=25, b512b=25, c1=25, c2=25, s50a=25, s50b=25
+W4 VERDICT: NOT DECIDED: no request above 8000 prompt tokens in ['c1', 'c2', 'b512a', 'b512b', 'b2048a', 'b2048b', 's50a', 's50b']

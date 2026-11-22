@@ -2374,3 +2374,18 @@ fourth and fifth switch this campaign has retired, and the third time a switch t
 boots, and decode across twelve cells a mean +0.62% with none negative (the 6- and 8-client cells, information only,
 read +2.63 and -2.20 for greedy prose and -4.38 for sampled prose at six). `TF_GLM_OVN_ABSORB_VEC` takes the next
 step the campaign requires: a five-level run, fresh boot a level, against the same image.
+
+## 86. queue108: NOT DECIDED, and the probe never made a long prompt
+
+queue108 (`scripts/queues/queue108.sh`) ran eight mirrored boots of `TENSORFOLD_PREFILL_BUDGET=512` and `=2048`, and
+`TENSORFOLD_PREFILL_SHARE=0.5` against the recipe, each calling upstream's `tools/bench_concurrent.py` at levels 4 and 8
+with `--mixed`. Its own W0 guard then refused the grade: the longest prompt in the 8-stream cell was 25 tokens on
+every boot (`b2048a`, `b2048b`, `b512a`, `b512b`, `c1`, `c2`, `s50a`, `s50b` all read 25), so no request ever held a
+prompt behind decoders and the lever was never exercised.
+
+The cause is in the tool, not the queue's intent: `bench_concurrent.py` treats `--prompts` and `--mixed` as mutually
+exclusive, and under `--mixed` it uses the built-in short prompt pool. The shape the lever needs is `--prompts FILE`
+with a JSON list of `{name, kind, prompt}` items whose prompts are thousands of tokens, at levels 4 and 8.
+
+W0 did the job it was written for: a pre-written guard turned a table that would have read as "the controls do
+nothing" into a NOT DECIDED which names the missing condition. No rule was edited after the rows.
