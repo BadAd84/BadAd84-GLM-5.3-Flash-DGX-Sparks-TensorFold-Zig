@@ -39,3 +39,20 @@ is unchanged; only its arms differ, and it must be written down before those arm
 H1 (checks clean, one digest a cell), H2 (the switch's own log line: 1 line in `hk-B1a` and `hk-B1b`, 0 in `hk-A1`, `hk-A2` and `hk-B0`, so the switch did take effect), H3 and H4
 all read normally on these rows. The solo-to-start half of queue94 is unaffected: its clauses read `concurrent.json`, `ours-rows.jsonl` and the check logs, none of which touch the
 states gauge.
+
+## queue107: the same clause fails with the states kept, and the premise is what is wrong
+
+queue107 re-ran the head-skip arms with `KNOBS=prod` plus `TF_GLM_CHUNK_SOLO=4096` and
+`TF_GLM_REQUEST_STARTS=1` on every arm, so a turn keeps the prompt state H5 wants to divide by. The verdict is the same
+`NOT DECIDED`, and the cause is now visible in the numbers: `prompt_cache_states` reads 0 on all five labels
+(`hk-A1`, `hk-A2`, `hk-B1a`, `hk-B1b`, `hk-B0`), while the same boots report `tensorfold:prompt_cache_bytes` lines and
+3 states lines in `metrics-after.txt`.
+
+So H5's premise is wrong rather than its threshold. The probe is one cold single-turn request per size, and a
+single-turn request is not what keeps a state: queue100's 34.51% warm-turn gain came from a conversation, where
+`TF_GLM_REQUEST_STARTS=1` keeps the state at each request start. A one-turn probe in a serve configured to keep states
+creates none, so the divisor is zero by construction and no amount of rerunning decides it.
+
+The measurement H5 needs is a conversation: several turns that grow a prompt, with the head-skip count and the kept
+states read on the same request, and the switch's cost divided by the states actually created. That is a new rule for a
+new instrument, written before its rows, not an edit to this one.

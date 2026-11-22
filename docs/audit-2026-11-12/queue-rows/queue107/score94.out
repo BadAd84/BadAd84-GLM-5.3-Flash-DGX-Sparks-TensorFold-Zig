@@ -1,0 +1,57 @@
+== head skip: A ('hk-A1', 'hk-A2'), B1 ('hk-B1a', 'hk-B1b'), B0 ('hk-B0',), at --parallel 4 --context 1048576 with KNOBS=off
+H1: 0 boot cell(s) unclean, 0 cell(s) with more than one reply digest
+H2: switch lines hk-A1 0, hk-A2 0, hk-B0 0, hk-B1a 1, hk-B1b 1
+H3 chat at 0 with 1 stream(s): B1 +0.35% against A (A 58.4 57.0 | B1 58.3 57.5), B0 +0.69%
+H3 chat at 0 with 2 stream(s): B1 -0.11% against A (A 94.6 94.1 | B1 95.2 93.3), B0 +0.69%
+H3 chat at 0 with 4 stream(s): B1 -0.11% against A (A 131.4 130.3 | B1 132.6 128.8), B0 +1.03%  <- B0 off the default path
+H3 chat at 1 with 1 stream(s): B1 +0.37% against A (A 54.6 53.6 | B1 54.7 53.9), B0 +1.29%  <- B0 off the default path
+H3 chat at 1 with 2 stream(s): B1 +0.80% against A (A 69.0 68.6 | B1 69.9 68.8), B0 +0.58%
+H3 chat at 1 with 4 stream(s): B1 +1.02% against A (A 83.5 82.6 | B1 84.8 83.0), B0 +0.78%
+H3 code at 0 with 1 stream(s): B1 +0.26% against A (A 76.5 74.8 | B1 76.3 75.4), B0 +0.99%
+H3 code at 0 with 2 stream(s): B1 +0.26% against A (A 114.1 112.9 | B1 115.0 112.6), B0 +0.88%
+H3 code at 0 with 4 stream(s): B1 +0.49% against A (A 155.9 152.4 | B1 156.0 153.8), B0 +0.81%
+H3 code at 1 with 1 stream(s): B1 +0.06% against A (A 77.6 76.5 | B1 77.8 76.4), B0 +1.10%  <- B0 off the default path
+H3 code at 1 with 2 stream(s): B1 +0.18% against A (A 85.1 83.4 | B1 84.9 83.9), B0 +1.25%  <- B0 off the default path
+H3 code at 1 with 4 stream(s): B1 -0.16% against A (A 94.5 92.9 | B1 94.4 92.7), B0 +1.07%  <- B0 off the default path
+H4 cold 2048: A 1173.2 1185.5 ms | B1 1163.9 1172.7 ms, -0.94% | B0 1172.2 ms, -0.61%
+H4 cold 8192: A 5083.2 5141.5 ms | B1 5040.3 5105.7 ms, -0.77% | B0 5110.8 ms, -0.03%
+H4 cold 32768: A 19892.0 20012.8 ms | B1 19607.7 19863.7 ms, -1.09% | B0 19844.8 ms, -0.54%
+H4 cold 65536: A 39655.5 39992.5 ms | B1 39230.1 39873.6 ms, -0.68% | B0 40238.8 ms, +1.04%
+H6: not run (profile pair absent)
+HEAD SKIP: NOT DECIDED: H5: hk-A1 (prompt_cache_states is 0); hk-A2 (prompt_cache_states is 0); hk-B1a (prompt_cache_states is 0); hk-B1b (prompt_cache_states is 0); hk-B0 (prompt_cache_states is 0)
+
+SOLO TO START: NOT DECIDED: no concurrent.json for st-A1, st-A2, st-B1a, st-B1b, st-B0, st-B1x
+== warm turns: upstream's tools/bench_warm_turns.py --phase cold, one chat turn a size (REPORT ONLY: no verdict and no exit code depends on this block; the solo lever's verdict is S1-S5's)
+st-A1: no warm-8k.json
+st-A2: no warm-8k.json
+st-B1a: no warm-8k.json
+st-B1b: no warm-8k.json
+st-B0: no warm-8k.json
+st-B1x: no warm-8k.json
+== warm 8k (target 8192) engine TTFT: A no numbers; B1 no numbers; B0 no numbers; B1x no numbers
+   A prefill_widths: none
+   B1 prefill_widths: none
+   B0 prefill_widths: none
+   B1x prefill_widths: none
+st-A1: no warm-32k.json
+st-A2: no warm-32k.json
+st-B1a: no warm-32k.json
+st-B1b: no warm-32k.json
+st-B0: no warm-32k.json
+st-B1x: no warm-32k.json
+== warm 32k (target 32768) engine TTFT: A no numbers; B1 no numbers; B0 no numbers; B1x no numbers
+   A prefill_widths: none
+   B1 prefill_widths: none
+   B0 prefill_widths: none
+   B1x prefill_widths: none
+st-A1: no warm-120k.json
+st-A2: no warm-120k.json
+st-B1a: no warm-120k.json
+st-B1b: no warm-120k.json
+st-B0: no warm-120k.json
+st-B1x: no warm-120k.json
+== warm 120k (target 122880) engine TTFT: A no numbers; B1 no numbers; B0 no numbers; B1x no numbers
+   A prefill_widths: none
+   B1 prefill_widths: none
+   B0 prefill_widths: none
+   B1x prefill_widths: none

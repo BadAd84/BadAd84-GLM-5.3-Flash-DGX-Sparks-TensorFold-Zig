@@ -1,0 +1,6 @@
+# HELP tensorfold:prompt_cache_states All retained prompt states, including long-message interior cuts.
+# TYPE tensorfold:prompt_cache_states gauge
+tensorfold:prompt_cache_states 0
+# HELP tensorfold:prompt_cache_bytes Storage held by retained prompt states and spare buffers, inside their budget.
+# TYPE tensorfold:prompt_cache_bytes gauge
+tensorfold:prompt_cache_bytes 5857345536

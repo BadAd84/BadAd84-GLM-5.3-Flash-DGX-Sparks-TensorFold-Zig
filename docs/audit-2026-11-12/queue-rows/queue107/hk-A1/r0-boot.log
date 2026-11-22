@@ -1,0 +1,34 @@
+info: rank 0: liveness lines from 2 ranks on port 29562
+info: glm kv selection: window per stream; TF_KV_PAGES=auto (default); rank 0 of 3; cache fp8
+info: p2p: rank 0 of 3: NCCL's init log is at /tmp/tf-p2p-9Rnavb/nccl.log until startup diagnostics finish; if this rank stops before then, that file holds NCCL's last lines
+info: rank 0 startup: entering NCCL init
+info: rank 0: NCCL id c3ea5d91 sent
+info: rank 0 startup: entering NCCL init (3 ranks, id c3ea5d91, NCCL 2.30.7, CUDA device 0 000F:01:00.0)
+info: rank 0 startup: NCCL init done in 368 ms
+info: p2p: rank 0 of 3: GPU 0 NVIDIA GB10 (0000000F:01:00.0); driver 580.178.04, CUDA driver API 13.3, NCCL 2.30.7
+info: p2p: peer access: TensorFold enables none itself (no cuCtxEnablePeerAccess); NCCL sets up its own peers
+info: p2p: set: NCCL_P2P_DISABLE=1, NCCL_SHM_DISABLE=1
+info: p2p: NCCL transport (this rank's connections): rank 2 NET/IB (8 connections); rank 1 NET/IB (4 connections)
+info: rank 0 startup: entering peer warm-up
+info: rank 0 startup: entering weights
+info: checkpoint digest: 163.6 GiB read in 36.0 s, 0/83 cached files
+info: weights: 16 readers read 156.4 GiB ahead of the loader
+info: glm: 290 linears packed (4/8 bits), 3.96 GiB freed
+info: TF_GLM_L2PF: 176 rows, 942 MiB a decode window, 2 CTAs a site, the gathers' sites at 150 GB/s (0: unpaced)
+info: glm: prompt passes of 4096 rows, 2048 while another stream decodes
+info: glm: a prompt chunk's exchanges in 8 row pieces
+info: checkpoint digest: 2.2 GiB read in 3.7 s, 0/1 cached files
+info: dflash2: drafter from /root/.cache/huggingface/hub/models--incoai--GLM-5.3-Flash-DFlash2/snapshots/bf582e4eacc1810f76656d1811693ff6c6737d2a (Apache-2.0), linears at 4 bits, 0.93 GiB on the device
+info: [tensorfold] tp roce: this kernel has no transparent hugepages; skipping the NOHUGEPAGE advice, the pages are 4 KiB already
+info: [tensorfold] tp roce: rocep1s0f1 GID 3 (10.0.23.1), MTU enum 5, 2 queue pairs
+info: [tensorfold] tp roce: rocep1s0f0 GID 3 (10.0.22.1), MTU enum 5, 2 queue pairs
+info: [tensorfold] tp roce: rank 0 -> rank 1: HCA pairs { 0 } from ours { 0 }
+info: [tensorfold] tp roce: rank 0 -> rank 2: HCA pairs { 0 } from ours { 1 }
+info: [tensorfold] tp roce: rank 0 registered region 0xef106ec10000 len 2105344; HCA 0 lkey 0x1beeeb rkey 0x1beeeb; HCA 1 lkey 0x180fcc rkey 0x180fcc; rank 1 region 0xe79e686c0000 rkey 0x1815d3/0x0; rank 2 region 0xf360dd3c0000 rkey 0x1af3ef/0x0
+info: rank 0: TF_GLM_ROCE_MULTI: gathers up to 256 KiB a rank on the wire, its probe equal to NCCL's: HCA 0 QP RTS; posted 1, completed 1; HCA 1 QP RTS; posted 1, completed 1; reaped 0 (flushed 0), still posted 0
+info: [tensorfold] glm: rank 0 of 3 sums through the group collective (RoCE gathers on)
+info: rank 0: TF_GLM_ROCE_MULTI: the first gather is on the wire (320 bytes a rank)
+info: glm: expert form (timed): classic, factored at 6 rows; DFlash2 keeps its seed window and step prices
+info: rank 0 startup: entering calibration
+info: rank 0 startup: entering ready
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar

@@ -1,0 +1,102 @@
+[
+ {
+  "label": "smoke",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 8,
+  "thinking": "not applicable",
+  "thinking_off_requested": false,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 69.44051369880178,
+  "decode_tps_all": [
+   69.44
+  ],
+  "ttft_s_median": 0.09536172868683934,
+  "prompt_ttft_tps_median": 146.809,
+  "prefill_tps_median": 146.809,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 14.401,
+  "round_gap_p50_ms_median": 32.757,
+  "round_gap_p95_ms_median": 35.399,
+  "tokens_per_chunk_median": 2.0,
+  "headers_s_median": 0.001,
+  "first_payload_s_median": 0.095,
+  "first_content_s_median": 0.095,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.095,
+  "last_output_s_median": 0.196,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 8,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "daf60947b4d3",
+    "output_sha256": "c6ded44c906492e879a5f09f945cb12a703102b7b6cd66cc78220b635399dccd",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": " Fibonacci sequence: 0, 1",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ },
+ {
+  "label": "smoke",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 8,
+  "thinking": "off",
+  "thinking_off_requested": true,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 56.18247432214324,
+  "decode_tps_all": [
+   56.18
+  ],
+  "ttft_s_median": 0.13906698999926448,
+  "prompt_ttft_tps_median": 230.105,
+  "prefill_tps_median": 230.105,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 17.799,
+  "round_gap_p50_ms_median": 42.835,
+  "round_gap_p95_ms_median": 45.842,
+  "tokens_per_chunk_median": 2.0,
+  "headers_s_median": 0.001,
+  "first_payload_s_median": 0.001,
+  "first_content_s_median": 0.139,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.139,
+  "last_output_s_median": 0.264,
+  "evidence": [
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 8,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "2b16b3054327",
+    "output_sha256": "44b23c7ef43ac9463df46ff18200a52bc6de0383ad429593e800cb83011abfb9",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": "# How GPUs Handle Matrix Multiplication\n\n",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ }
+]
