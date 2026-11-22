@@ -43,8 +43,8 @@ fi
 for u in av0a av1a av1b av0b av0c av1c av1d av0d; do
   [ -f "$OUT/$u/P1.jsonl" ] && { log "$u already complete; skip"; continue; }
   case "$u" in
-    av0*) KNOBS=prod XENV="TF_GLM_OVN_ABSORB_VEC=0" ;;
-    av1*) KNOBS=prod XENV="TF_GLM_OVN_ABSORB_VEC=1" ;;
+    av0*) KNOBS=prod XENV="-e TF_GLM_OVN_ABSORB_VEC=0" ;;
+    av1*) KNOBS=prod XENV="-e TF_GLM_OVN_ABSORB_VEC=1" ;;
   esac
   log "$u start"
   IMAGE="$IMG" KNOBS="$KNOBS" XENV="$XENV" LEVELS="1 2 4 6 8" \
