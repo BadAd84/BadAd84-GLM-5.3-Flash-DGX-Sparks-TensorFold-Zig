@@ -2350,3 +2350,27 @@ rows: T and X stay in `scripts/env/dev.env`'s candidates section and nothing mov
 `_LATENT_ROWS=2` and `NCCL_NCHANNELS_PER_NET_PEER=4`, both of which act on decode rows rather than on prompt work;
 splitting T from X across sixteen boots at levels 4 and 8 is the measurement that separates them, and neither bundle
 carries a five-level cell of its own yet.
+
+## 85. queue102: S retires, V earns five levels
+
+queue102 (`scripts/queues/queue102.sh`, scorer `score102.py`, rows in
+`docs/audit-2026-11-12/queue-rows/queue102`) measured two 120k candidates against one control, mirrored
+`lc1 ls1 lv1 lv2 ls2 lc2`: S is `TF_GLM_OVN_INDEX_SCHED=1` with `TF_GLM_OVN_POOLS32=1` together, V is
+`TF_GLM_OVN_ABSORB_VEC=1`. Digests were equal on every boot and both arms read the same control.
+
+| cold first token, 120k | control `lc` | S | V |
+|---|---|---|---|
+| 8k | 4,017.5 / 4,027.0 | 4,025.0 / 4,035.5 | 3,987.0 / 3,981.0 |
+| 32k | 15,032.0 / 15,081.5 | 15,020.5 / 15,101.0 | 14,895.0 / 14,909.0 |
+| 120k | 56,153.5 / 56,537.5 | 56,280.5 / 56,529.5 | **55,961.0 / 55,792.5** |
+| change at 120k | | -0.11% | **+0.84%** |
+| boots in order | | arm's slower boot above control's faster | **both arm boots beat both controls** |
+
+**S retires.** Its 120k change is -0.11% against a rule needing +0.5%, and its two boots do not separate from the
+control's, so `TF_GLM_OVN_INDEX_SCHED` and `TF_GLM_OVN_POOLS32` are rows to remove at their owning patch. It is the
+fourth and fifth switch this campaign has retired, and the third time a switch that looked plausible read level.
+
+**V is a promotion candidate.** Cold 8k +0.96%, 32k +1.04%, 120k +0.84% with both arm boots under both control
+boots, and decode across twelve cells a mean +0.62% with none negative (the 6- and 8-client cells, information only,
+read +2.63 and -2.20 for greedy prose and -4.38 for sampled prose at six). `TF_GLM_OVN_ABSORB_VEC` takes the next
+step the campaign requires: a five-level run, fresh boot a level, against the same image.

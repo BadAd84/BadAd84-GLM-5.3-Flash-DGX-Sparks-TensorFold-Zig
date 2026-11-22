@@ -1,0 +1,66 @@
+== score102: q102 <queue-rows>/queue102/f102-c, q91 <queue-rows>/queue102/f91-c, q95 <queue-rows>/queue102/f95-c, q99 <queue-rows>/queue102/f99-c
+== L0 qualified: each unit's readback proof, its one image id, and the three variables its arm's XENV names
+lc1: proof present, ranks 0, 1 and 2 on image sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527; TF_GLM_OVN_INDEX_SCHED=unset, TF_GLM_OVN_POOLS32=unset, TF_GLM_OVN_ABSORB_VEC=unset
+ls1: proof present, ranks 0, 1 and 2 on image sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527; TF_GLM_OVN_INDEX_SCHED=1, TF_GLM_OVN_POOLS32=1, TF_GLM_OVN_ABSORB_VEC=unset
+lv1: proof present, ranks 0, 1 and 2 on image sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527; TF_GLM_OVN_INDEX_SCHED=unset, TF_GLM_OVN_POOLS32=unset, TF_GLM_OVN_ABSORB_VEC=1
+lv2: proof present, ranks 0, 1 and 2 on image sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527; TF_GLM_OVN_INDEX_SCHED=unset, TF_GLM_OVN_POOLS32=unset, TF_GLM_OVN_ABSORB_VEC=1
+ls2: proof present, ranks 0, 1 and 2 on image sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527; TF_GLM_OVN_INDEX_SCHED=1, TF_GLM_OVN_POOLS32=1, TF_GLM_OVN_ABSORB_VEC=unset
+lc2: proof present, ranks 0, 1 and 2 on image sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527; TF_GLM_OVN_INDEX_SCHED=unset, TF_GLM_OVN_POOLS32=unset, TF_GLM_OVN_ABSORB_VEC=unset
+L0 QUALIFIED: six proofs, one image id (sha256:b4c691473a9ea0374541e389ace47af1e701d2a0aad127c50a3dfe4d4d1cc527), and each unit's three variables exactly as its XENV names them
+== L1 digests: every reply digest of S and V against the control's (cold requests, every conversation turn, every decode cell and the 24 prompts)
+S (ls1 ls2, TF_GLM_OVN_INDEX_SCHED=1 and TF_GLM_OVN_POOLS32=1): 58 digest key(s) over 4 boots, 0 missing a boot's report, 0 on one side only, 0 differing
+S: EQUAL to the control at every key
+V (lv1 lv2, TF_GLM_OVN_ABSORB_VEC=1): 58 digest key(s) over 4 boots, 0 missing a boot's report, 0 on one side only, 0 differing
+V: EQUAL to the control at every key
+== L2 long-prompt gain, S (ls1 ls2, TF_GLM_OVN_INDEX_SCHED=1 and TF_GLM_OVN_POOLS32=1) against the control (lc1 lc2); change is the control's mean over the arm's mean minus one, so positive is the arm faster
+cold 8k first token: control 4017.5 4027.0 | S 4025.0 4035.5 | -0.20% faster
+cold 32k first token: control 15032.0 15081.5 | S 15020.5 15101.0 | -0.03% faster
+cold 120k first token: control 56153.5 56537.5 | S 56280.5 56529.5 | -0.11% faster
+conversation turns 2+ first token: control 1319.9 1325.0 | S 1321.4 1318.6 | +0.18% faster
+cold 120k first token: change -0.11% (the gain needs at least +0.5%); the arm's slower boot 56529.5 ms against the control's faster 56153.5 ms: NOT both of the arm's boots beat both control boots
+S: NO GAIN (the 8k, 32k and warm cells above are information; the rule reads the 120k change and the four boots' order)
+== L2 long-prompt gain, V (lv1 lv2, TF_GLM_OVN_ABSORB_VEC=1) against the control (lc1 lc2); change is the control's mean over the arm's mean minus one, so positive is the arm faster
+cold 8k first token: control 4017.5 4027.0 | V 3987.0 3981.0 | +0.96% faster
+cold 32k first token: control 15032.0 15081.5 | V 14895.0 14909.0 | +1.04% faster
+cold 120k first token: control 56153.5 56537.5 | V 55961.0 55792.5 | +0.84% faster
+conversation turns 2+ first token: control 1319.9 1325.0 | V 1316.1 1318.1 | +0.40% faster
+cold 120k first token: change +0.84% (the gain needs at least +0.5%); the arm's slower boot 55961.0 ms against the control's faster 56153.5 ms: both of the arm's boots beat both control boots
+V: GAINS (the 8k, 32k and warm cells above are information; the rule reads the 120k change and the four boots' order)
+== L3 decode cost, S (ls1 ls2, TF_GLM_OVN_INDEX_SCHED=1 and TF_GLM_OVN_POOLS32=1) against the control (lc1 lc2); change is the arm's mean over the control's mean minus one, so negative is slower
+greedy prose at 1 clients: control 81.5 81.4 | S 82.1 81.7 | +0.56%
+greedy prose at 2 clients: control 85.4 84.7 | S 85.7 85.3 | +0.57%
+greedy prose at 4 clients: control 112.4 112.1 | S 113.6 112.3 | +0.65%
+greedy code at 1 clients: control 114.2 113.9 | S 114.7 114.0 | +0.28%
+greedy code at 2 clients: control 137.4 136.1 | S 137.1 136.5 | +0.02%
+greedy code at 4 clients: control 165.3 165.1 | S 166.8 165.9 | +0.66%
+sampled prose at 1 clients: control 78.1 77.9 | S 78.9 78.0 | +0.62%
+sampled prose at 2 clients: control 82.4 82.0 | S 83.2 82.7 | +0.90%
+sampled prose at 4 clients: control 107.7 107.5 | S 109.0 107.9 | +0.77%
+sampled code at 1 clients: control 112.2 112.3 | S 113.1 112.3 | +0.44%
+sampled code at 2 clients: control 141.4 140.8 | S 142.6 141.8 | +0.78%
+sampled code at 4 clients: control 158.2 157.7 | S 158.6 157.6 | +0.09%
+S: mean +0.53% of 12 cells, 0 negative: CLEAN
+== L3 decode cost, V (lv1 lv2, TF_GLM_OVN_ABSORB_VEC=1) against the control (lc1 lc2); change is the arm's mean over the control's mean minus one, so negative is slower
+greedy prose at 1 clients: control 81.5 81.4 | V 82.0 81.8 | +0.52%
+greedy prose at 2 clients: control 85.4 84.7 | V 85.5 85.6 | +0.58%
+greedy prose at 4 clients: control 112.4 112.1 | V 113.3 113.4 | +0.96%
+greedy code at 1 clients: control 114.2 113.9 | V 114.4 114.2 | +0.23%
+greedy code at 2 clients: control 137.4 136.1 | V 137.0 136.9 | +0.14%
+greedy code at 4 clients: control 165.3 165.1 | V 166.5 166.4 | +0.76%
+sampled prose at 1 clients: control 78.1 77.9 | V 78.7 78.4 | +0.70%
+sampled prose at 2 clients: control 82.4 82.0 | V 83.1 82.8 | +0.92%
+sampled prose at 4 clients: control 107.7 107.5 | V 108.8 108.7 | +1.06%
+sampled code at 1 clients: control 112.2 112.3 | V 112.9 113.0 | +0.60%
+sampled code at 2 clients: control 141.4 140.8 | V 142.1 142.2 | +0.74%
+sampled code at 4 clients: control 158.2 157.7 | V 158.2 158.3 | +0.18%
+V: mean +0.62% of 12 cells, 0 negative: CLEAN
+== information only (it never changes a verdict): the 6 and 8 client cells, and the image's other boots at 120k
+6 and 8 clients, S (ls1 ls2): greedy prose at 6 clients +5.62%; greedy prose at 8 clients -4.35%; greedy code at 6 clients +0.30%; greedy code at 8 clients +2.71%; sampled prose at 6 clients +1.47%; sampled prose at 8 clients +1.04%; sampled code at 6 clients -8.97%; sampled code at 8 clients +3.25%
+6 and 8 clients, V (lv1 lv2): greedy prose at 6 clients +2.63%; greedy prose at 8 clients -2.20%; greedy code at 6 clients +0.91%; greedy code at 8 clients -1.35%; sampled prose at 6 clients -4.38%; sampled prose at 8 clients -0.04%; sampled code at 6 clients -6.84%; sampled code at 8 clients -0.97%
+the image's other boots at 120k in <queue-rows>/queue102/f91-c: mn1 55608.0 ms; mn2 55698.5 ms
+the image's other boots at 120k in <queue-rows>/queue102/f95-c: mn3 56758.0 ms
+the image's other boots at 120k in <queue-rows>/queue102/f99-c: ca1 56026.5 ms; ca2 55930.5 ms
+== L4 verdicts
+S: RETIRE (L2 NO GAIN)
+V: PROMOTION CANDIDATE, FIVE LEVELS NEXT (L2 GAINS, L3 CLEAN)
+L4 VERDICT: S RETIRE; V PROMOTION CANDIDATE, FIVE LEVELS NEXT
