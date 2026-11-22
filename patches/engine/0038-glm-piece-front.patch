@@ -602,44 +602,18 @@ index 000000000..80912a16a
 +    try std.testing.expectEqual(@as(usize, 768), try pieces.frontRows());
 +}
 diff --git a/zig/src/families/glm/cuda_sparse.zig b/zig/src/families/glm/cuda_sparse.zig
-index 94b62d940..8c48fe6da 100644
+index c029d8ab6..8c48fe6da 100644
 --- a/zig/src/families/glm/cuda_sparse.zig
 +++ b/zig/src/families/glm/cuda_sparse.zig
-@@ -113,8 +113,8 @@ pub const Scratch = struct {
+@@ -113,7 +113,7 @@ pub const Scratch = struct {
      bits_rows: usize = 0,
  };
  
 -/// The bytes the TF_GLM_OVN_ knobs need at Scratch.ls (0 with them off): seg the most selectTokens rows, np_max pools.
--pub fn ovnListBytes(rows: usize, seg: usize, prefill: bool, world: usize, np_max: usize) !usize {
 +/// The bytes a split indexer needs at Scratch.ls (0 with it off): seg the most selectTokens rows, np_max pools.
-+pub fn ovnListBytes(seg: usize, np_max: usize) !usize {
+ pub fn ovnListBytes(seg: usize, np_max: usize) !usize {
      const index = @import("cuda_index.zig");
      const sr = try index.splitRows();
-     const tables = if (sr > 0) index.splitBytes(@min(seg, sr - 1), np_max) else 0;
-@@ -193,8 +193,8 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
-     }
-     const stamp = prof.span(profile, stream, .index_select);
-     defer stamp.end();
--    var picks = s.pools; // the pools the tokens are read from
--    var assemble = try ops.function("tf_glm_dsa_tokens");
-+    const picks = s.pools; // the pools the tokens are read from
-+    const assemble = try ops.function("tf_glm_dsa_tokens");
-     if (split) |x| { // in place: each rank's equal block (the prefill buffers' pools hold world rows more), rank order
-         const bytes = per * topk_pools * 8;
-         try x.lib.check(x.lib.api.ncclAllGather(s.pools + x.rank * bytes, s.pools, bytes, .u8, x.comm, stream.handle), "ncclAllGather");
-diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
-index 5dc84646c..d42bb987d 100644
---- a/zig/src/families/glm/cuda_state.zig
-+++ b/zig/src/families/glm/cuda_state.zig
-@@ -272,7 +272,7 @@ pub const Buffers = struct {
-             partial_rows * HL * 4,
-             4, // dummy
-             @min(seg, sparse.select_rows) * np_max * 4,
--            @max(sel.bytes, try sparse.ovnListBytes(rows, seg, prefill, s.world, np_max)), // ls: the list rows, the select's bit words, and a split's picked tokens
-+            @max(sel.bytes, try sparse.ovnListBytes(seg, np_max)), // ls: the list rows, the select's bit words, and a split's picked tokens
-             rows * sparse.select_list * 4,
-             (if (prefill) rows + s.world else rows) * sparse.topk_pools * 8, // pools; a split's equal blocks end at most world - 1 rows past them
-             4,
 diff --git a/zig/src/families/glm/dflash.zig b/zig/src/families/glm/dflash.zig
 index c3ceb3d79..6b994c8e1 100644
 --- a/zig/src/families/glm/dflash.zig

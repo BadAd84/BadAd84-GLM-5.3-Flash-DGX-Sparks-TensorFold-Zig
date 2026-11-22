@@ -42,6 +42,13 @@ bounded entry's parameters to its default form's (nvcc fails on the old lists), 
 bounded and fused launches against today's chunk programs and merge, byte for byte, on BF16 and FP8 caches.
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: one include each in glm_glue.cu, and the glue.Set literal keeps dsel, pdl_early and mla beside our onepass pair; the glue.Set literal gains .mla here, where Modules.mla arrives
 
+
+Correctness fix 2026-11-22: glm_glue_attn_ovn.cuh ran, for the tiles past the last live key, a block whose own comment
+states o and l are unchanged (o times 1.0, an mma on a zero tile, l times 1.0 plus 0.0). It is the identity on every
+value, finite and not, so it is deleted; no arithmetic that touches a reply remains, and the removal is byte-identical
+by construction. Receipt it still needs (GPU): the FP8-cache chunk path at 8k, 32k and 120k, every reply digest equal
+to the pre-removal image's, plus tf-cuda-test glm-mla-skip-check and the prompt cells of a fresh boot at 1 and 4 streams
+(equal digests, decode inside the boot spread).
 diff --git a/zig/kernels/cuda/glm_glue.cu b/zig/kernels/cuda/glm_glue.cu
 index 27ec32eb9..a9ad6e65c 100644
 --- a/zig/kernels/cuda/glm_glue.cu
@@ -54,10 +61,10 @@ index 27ec32eb9..a9ad6e65c 100644
 +#include "glm_glue_latent_ovn.cuh"
 diff --git a/zig/kernels/cuda/glm_glue_attn_ovn.cuh b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
 new file mode 100644
-index 000000000..29d4b8e0e
+index 000000000..3e67a6d85
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_glue_attn_ovn.cuh
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,333 @@
 +// TF_GLM_OVN_MLA_FUSEMERGE: the chunk pass stops at a chunk's last live key tile; merge walks the row's chunks.
 +#pragma once
 +
@@ -271,23 +278,6 @@ index 000000000..29d4b8e0e
 +        if (tile + 2 < tiles) load_kv(tile + 2);
 +        commit();
 +      }
-+    }
-+    // The tiles past the last live key: each is tile max -inf, alpha 1, p and keys +0, so o and l are unchanged.
-+    if (live && tiles < CH / KT) {
-+      const uint32_t z[4] = {0u, 0u, 0u, 0u};
-+      for (int i = 0; i < MT; ++i)
-+        for (int j = 0; j < 8; ++j)
-+          for (int e = 0; e < 4; ++e) o[i][j][e] = __fmul_rn(o[i][j][e], 1.0f);
-+#pragma unroll
-+      for (int k16 = 0; k16 < KT; k16 += 16)
-+#pragma unroll
-+        for (int j = 0; j < 8; j += 2)
-+          for (int i = 0; i < MT; ++i) {
-+            glm_router::mma16816(o[i][j], z, z);
-+            glm_router::mma16816(o[i][j + 1], z, z + 2);
-+          }
-+      for (int i = 0; i < MT; ++i)
-+        for (int hf = 0; hf < 2; ++hf) l[i][hf] = __fmaf_rn(l[i][hf], 1.0f, 0.0f);
 +    }
 +    if constexpr (FUSED) {  // tf_glm_merge's step on chunk ci's (m, l, o), the values it would read back from po/pm/pl
 +      float a[FT][2], b[FT][2];
@@ -1001,7 +991,7 @@ index 1c669938d..3058bcd45 100644
          },
      }
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
-index 3f03b5c9d..be531f626 100644
+index 6c2e0b27f..d398c686e 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -241,7 +241,10 @@ pub const Buffers = struct {

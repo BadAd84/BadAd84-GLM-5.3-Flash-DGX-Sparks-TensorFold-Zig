@@ -32,6 +32,14 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0026-glue-fuse.patch
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9's boundary resolve carries the TP collective our gather routed to (absorbed), so the loop keeps resolve; fused next-site glue, pdl_early threshold and onepass_pipe's exact kernel kept
 
+
+Correctness fix 2026-11-22: tf_glm_hc_partial8_pdl launched glm_hc::partial8<false>, so the PDL_EARLY arm's
+dependent-launch wait and its weight pre-reads never existed (partial8<true> was instantiated nowhere). The entry
+now instantiates <true>. The default path is untouched: no entry but this one reads the parameter, and this kernel
+is launched only while TF_GLM_OVN_PDL_EARLY asks for it, which prod.env does not set, so no reply digest moves by
+construction. Receipt it still needs (GPU): the PDL_EARLY screen, TF_GLM_OVN_PDL_EARLY=0 against =1 and =2, at 1,
+2, 4, 6 and 8 streams, every reply digest equal to the PDL_EARLY=0 arm's, decode cells within the boot spread, and
+a cold 8k first token from both arms (the dependent launch must still start early, not merely be correct).
 diff --git a/docs/environment.md b/docs/environment.md
 index fa474a293..ca2e5faaf 100644
 --- a/docs/environment.md
@@ -108,7 +116,7 @@ index 8705303eb..5a3803219 100644
    extern "C" __global__ void __launch_bounds__(128)                                                                \
        name(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m, int64_t x_stride,  \
 diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
-index f15fe6849..c3a04a82e 100644
+index f15fe6849..a694861e0 100644
 --- a/zig/kernels/cuda/glm_glue_hc.cuh
 +++ b/zig/kernels/cuda/glm_glue_hc.cuh
 @@ -2,7 +2,8 @@
@@ -372,7 +380,7 @@ index f15fe6849..c3a04a82e 100644
 +extern "C" __global__ void __launch_bounds__(1024)
 +    tf_glm_hc_partial8_pdl(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
 +  glm_pdl::enter();
-+  glm_hc::partial8<false>(x, fn, part, wide, nb);
++  glm_hc::partial8<true>(x, fn, part, wide, nb);
 +}
 +
  extern "C" __global__ void __launch_bounds__(256)
@@ -925,7 +933,7 @@ index 3058bcd45..e030bac5f 100644
                  const st = g.st;
                  const cur = st.cur[li];
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
-index be531f626..5dc84646c 100644
+index d398c686e..d42bb987d 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -196,6 +196,10 @@ pub const Buffers = struct {
