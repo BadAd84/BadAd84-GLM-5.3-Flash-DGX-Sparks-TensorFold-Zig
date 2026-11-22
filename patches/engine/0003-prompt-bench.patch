@@ -54,7 +54,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/build.zig b/build.zig
-index 54d7e47382df24dd51b6fe41037d688fd9af8d4d..619b140cbb887f68e7e1bc5677deea62a920fb57 100644
+index 54d7e4738..619b140cb 100644
 --- a/build.zig
 +++ b/build.zig
 @@ -265,6 +265,7 @@ pub fn build(b: *std.Build) void {
@@ -66,7 +66,7 @@ index 54d7e47382df24dd51b6fe41037d688fd9af8d4d..619b140cbb887f68e7e1bc5677deea62
      @import("zig/build/cache_index_timing.zig").step(b);
      // the chat template's nesting, step, stack and memory limits (zig/src/core/template/limits_test.zig), on every host
 diff --git a/zig/build/server.zig b/zig/build/server.zig
-index a157e0143b74177c83fa3f8ee41c9cd396bfbe83..565acac98271cd10be121645c25952c2df9d4bb5 100644
+index a157e0143..565acac98 100644
 --- a/zig/build/server.zig
 +++ b/zig/build/server.zig
 @@ -220,3 +220,19 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
@@ -90,7 +90,7 @@ index a157e0143b74177c83fa3f8ee41c9cd396bfbe83..565acac98271cd10be121645c25952c2
 +    b.step("prompt-bench", "The server's request preparation on the parity probe's r2, ms per site (no GPU)").dependOn(&b.addInstallArtifact(exe, .{}).step);
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index 9807c7574731db61dc4d27a2fae7754bdc45c99c..33d85911408002d3b7638205faf231d28e28b5e7 100644
+index 9807c7574..33d859114 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
 @@ -15,6 +15,10 @@ pub const hub = @import("hub.zig");
@@ -106,7 +106,7 @@ index 9807c7574731db61dc4d27a2fae7754bdc45c99c..33d85911408002d3b7638205faf231d2
      _ = @import("drafter_test.zig");
 diff --git a/zig/tests/server/prompt_bench.zig b/zig/tests/server/prompt_bench.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..26db37dc96062a5040ca384a7a6c354f11bdaf24
+index 000000000..26db37dc9
 --- /dev/null
 +++ b/zig/tests/server/prompt_bench.zig
 @@ -0,0 +1,256 @@

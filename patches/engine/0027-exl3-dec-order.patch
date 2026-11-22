@@ -100,7 +100,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 9e0533dad98d3d59a7e8ac13beff33ef2b688ad6..130bdf0624f76f2abe738844c6f2ca4190b02c8f 100644
+index e05a4e75a..0b4ddbb48 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
 @@ -52,6 +52,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
@@ -112,7 +112,7 @@ index 9e0533dad98d3d59a7e8ac13beff33ef2b688ad6..130bdf0624f76f2abe738844c6f2ca41
  | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
  | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
 diff --git a/zig/kernels/cuda/exl3_experts.cu b/zig/kernels/cuda/exl3_experts.cu
-index 52ddf77dbf94a127cbe1cb29abfeaa8b5f324435..3731013acabd69c21bb988e44f013f8a26cfd955 100644
+index 52ddf77db..3731013ac 100644
 --- a/zig/kernels/cuda/exl3_experts.cu
 +++ b/zig/kernels/cuda/exl3_experts.cu
 @@ -17,16 +17,17 @@ constexpr int GROUPED_LOAD = tf_exl3::AHEAD;
@@ -137,7 +137,7 @@ index 52ddf77dbf94a127cbe1cb29abfeaa8b5f324435..3731013acabd69c21bb988e44f013f8a
  
  namespace tf_exl3 {
 diff --git a/zig/kernels/cuda/exl3_grouped.cuh b/zig/kernels/cuda/exl3_grouped.cuh
-index 930700d964cf526217803619983a7a86136550ed..a4059131e1226b7775c104e909df912f954ad364 100644
+index 930700d96..a4059131e 100644
 --- a/zig/kernels/cuda/exl3_grouped.cuh
 +++ b/zig/kernels/cuda/exl3_grouped.cuh
 @@ -20,7 +20,7 @@ struct GroupedArgs {
@@ -150,7 +150,7 @@ index 930700d964cf526217803619983a7a86136550ed..a4059131e1226b7775c104e909df912f
  
  // How a warp reads its k tiles: main's loop, or a tile ahead (sm_120 up); SKIP and STALE are the contract's faults.
 diff --git a/zig/src/cuda/exl3_experts.zig b/zig/src/cuda/exl3_experts.zig
-index b907b3a3044a400ff9447895e0dc5efb796bcff3..95bb251bb5ab9a8b4056c619ac7aeffe93ef351a 100644
+index b907b3a30..95bb251bb 100644
 --- a/zig/src/cuda/exl3_experts.zig
 +++ b/zig/src/cuda/exl3_experts.zig
 @@ -57,6 +57,17 @@ pub fn plan(k: usize, n: usize, gateup: bool) !u32 {
@@ -198,7 +198,7 @@ index b907b3a3044a400ff9447895e0dc5efb796bcff3..95bb251bb5ab9a8b4056c619ac7aeffe
          var cb: launch_.Args = .{};
          cb.add(sc.z);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 1cc2372b9c90960f114480c3c8d718b6356083ea..d563790609e6c9dab0440494b33574ebdb1cf8cd 100644
+index 4f344bc5a..06ecb8f56 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
 @@ -83,6 +83,7 @@ pub const rules = [_]Rule{
@@ -210,7 +210,7 @@ index 1cc2372b9c90960f114480c3c8d718b6356083ea..d563790609e6c9dab0440494b33574eb
      .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
      .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
 diff --git a/zig/src/platform/environment_test.zig b/zig/src/platform/environment_test.zig
-index fffcfad7973dd679b3f3f0eee9a3eff651462feb..dd78fee4b1ca7d9453dd44c6679f0d8cc2d5b07f 100644
+index fffcfad79..dd78fee4b 100644
 --- a/zig/src/platform/environment_test.zig
 +++ b/zig/src/platform/environment_test.zig
 @@ -109,6 +109,8 @@ const valid = [_]Case{
@@ -223,7 +223,7 @@ index fffcfad7973dd679b3f3f0eee9a3eff651462feb..dd78fee4b1ca7d9453dd44c6679f0d8c
      .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
      .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
 diff --git a/zig/tests/cuda/contract_exl3_grouped.zig b/zig/tests/cuda/contract_exl3_grouped.zig
-index d1dd8a49fcd842f6867c04c6d0cb17943cc376f7..0f250e2ebfb2cddb4f2295ac867eefaa5dffeb2e 100644
+index d1dd8a49f..0f250e2eb 100644
 --- a/zig/tests/cuda/contract_exl3_grouped.zig
 +++ b/zig/tests/cuda/contract_exl3_grouped.zig
 @@ -75,7 +75,7 @@ pub const Grouped = struct {

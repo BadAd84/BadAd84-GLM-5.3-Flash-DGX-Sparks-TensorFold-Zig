@@ -17,7 +17,7 @@ per-commit package on pristine v1.2.9 (work/V129B/package/patches/pr1411); settl
 ---
 
 diff --git a/docs/api.md b/docs/api.md
-index 8461ee5a65f3d4d2c5230f07531c9b0a65c55672..1032304a71e44cd6a2dd93f30073499de7f329d1 100644
+index 8461ee5a6..1032304a7 100644
 --- a/docs/api.md
 +++ b/docs/api.md
 @@ -1385,7 +1385,9 @@ store for each model and build. That store takes the place of `--learn`'s store
@@ -32,10 +32,10 @@ index 8461ee5a65f3d4d2c5230f07531c9b0a65c55672..1032304a71e44cd6a2dd93f30073499d
  The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
  and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on
 diff --git a/docs/environment.md b/docs/environment.md
-index 8d40040fe397b128d872ec2c60a7b250262dd60d..514689484e493c98ce3448368de675515a34ef13 100644
+index 00e0ea900..771e1b5d6 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -125,6 +125,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -113,6 +113,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
  | `TF_GLM_OVN_KEEP_SEQS` | Exactly `0` or `1`; default off (a released stream's sequence stays allocated for the next request on its slot, as slot 0's always does, so a request starts with no allocation, fill or free) |
@@ -44,7 +44,7 @@ index 8d40040fe397b128d872ec2c60a7b250262dd60d..514689484e493c98ce3448368de67551
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/src/core/lane_cache_queue.zig b/zig/src/core/lane_cache_queue.zig
-index 002134ad2eb08f7ae7d9179b898d064f28aa87ca..81a99c33261f257761fe2806fb17ecf8756f5ea8 100644
+index 002134ad2..81a99c332 100644
 --- a/zig/src/core/lane_cache_queue.zig
 +++ b/zig/src/core/lane_cache_queue.zig
 @@ -5,11 +5,12 @@ const LaneHost = @import("lane_host.zig").LaneHost;
@@ -72,7 +72,7 @@ index 002134ad2eb08f7ae7d9179b898d064f28aa87ca..81a99c33261f257761fe2806fb17ecf8
      }
  };
 diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
-index 1811a856251d4b9f0e2e9fc7e38d5c1d92f9aa76..b6338b40166a7c962ed0842b31b7334832ad4669 100644
+index 1811a8562..b6338b401 100644
 --- a/zig/src/core/lane_host.zig
 +++ b/zig/src/core/lane_host.zig
 @@ -526,6 +526,7 @@ pub const LaneHost = struct {
@@ -92,7 +92,7 @@ index 1811a856251d4b9f0e2e9fc7e38d5c1d92f9aa76..b6338b40166a7c962ed0842b31b73348
      _ = @import("lane_trace.zig");
      _ = @import("lane_host_decode_share_test.zig");
 diff --git a/zig/src/core/lane_host_fetch.zig b/zig/src/core/lane_host_fetch.zig
-index a1f7007bfd20be6713a36bfb1f024bf86d94a7f2..827790587353c8e82ff970858892f5f7a37db6d0 100644
+index a1f7007bf..827790587 100644
 --- a/zig/src/core/lane_host_fetch.zig
 +++ b/zig/src/core/lane_host_fetch.zig
 @@ -4,11 +4,12 @@ const api = @import("engine_api.zig");
@@ -192,7 +192,7 @@ index a1f7007bfd20be6713a36bfb1f024bf86d94a7f2..827790587353c8e82ff970858892f5f7
 +    _ = @import("lane_host_slices_test.zig");
  }
 diff --git a/zig/src/core/lane_host_fetch_test.zig b/zig/src/core/lane_host_fetch_test.zig
-index 3ab5119a4f98d3293d55493dfc9ab6189c8125e1..0d1fb1eb7569276fa04d88a10cafd93ad926599d 100644
+index 3ab5119a4..0d1fb1eb7 100644
 --- a/zig/src/core/lane_host_fetch_test.zig
 +++ b/zig/src/core/lane_host_fetch_test.zig
 @@ -5,6 +5,7 @@ const lanes = @import("lanes");
@@ -307,7 +307,7 @@ index 3ab5119a4f98d3293d55493dfc9ab6189c8125e1..0d1fb1eb7569276fa04d88a10cafd93a
 +}
 diff --git a/zig/src/core/lane_host_slices_test.zig b/zig/src/core/lane_host_slices_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..da644b6de43b4873ab0ef5b43cb0fe80bbf9dc07
+index 000000000..da644b6de
 --- /dev/null
 +++ b/zig/src/core/lane_host_slices_test.zig
 @@ -0,0 +1,205 @@
@@ -517,7 +517,7 @@ index 0000000000000000000000000000000000000000..da644b6de43b4873ab0ef5b43cb0fe80
 +    try t.expectEqual(@as(usize, 0), g.x.f.blanks);
 +}
 diff --git a/zig/src/core/rows_all_test.zig b/zig/src/core/rows_all_test.zig
-index 916b32fa871022aa5c4330547151deb224cac92c..04c61c24a0f12a1d871a179410fc2f881c4d2c0b 100644
+index 916b32fa8..04c61c24a 100644
 --- a/zig/src/core/rows_all_test.zig
 +++ b/zig/src/core/rows_all_test.zig
 @@ -17,6 +17,7 @@ test {
@@ -529,7 +529,7 @@ index 916b32fa871022aa5c4330547151deb224cac92c..04c61c24a0f12a1d871a179410fc2f88
      _ = @import("rows_refusal_test.zig");
      _ = @import("rows_startup_fault_test.zig");
 diff --git a/zig/src/core/rows_ask.zig b/zig/src/core/rows_ask.zig
-index 4e42bb26d5ce5a99b1230cf8bf80024526014ccf..9f011048d31f3040ad442da1a9eb0387d5e34927 100644
+index 4e42bb26d..9f011048d 100644
 --- a/zig/src/core/rows_ask.zig
 +++ b/zig/src/core/rows_ask.zig
 @@ -62,6 +62,7 @@ pub const Disk = struct {
@@ -541,7 +541,7 @@ index 4e42bb26d5ce5a99b1230cf8bf80024526014ccf..9f011048d31f3040ad442da1a9eb0387
      /// The quiet after the last admission before the first write: a client's next turn often comes sooner.
      pub const quiet_ns: i96 = 150 * std.time.ns_per_ms;
 diff --git a/zig/src/core/rows_pool_select_test.zig b/zig/src/core/rows_pool_select_test.zig
-index b15e756c8a0d54a2e80c7f09b47a3dd4a5c1aae7..beab09be119b9963e0f9024c8a872e4c79b440b6 100644
+index b15e756c8..beab09be1 100644
 --- a/zig/src/core/rows_pool_select_test.zig
 +++ b/zig/src/core/rows_pool_select_test.zig
 @@ -86,3 +86,115 @@ test "restore selection: pooled buffers trim only when supported and never steal
@@ -661,7 +661,7 @@ index b15e756c8a0d54a2e80c7f09b47a3dd4a5c1aae7..beab09be119b9963e0f9024c8a872e4c
 +    s.release(borrowed);
 +}
 diff --git a/zig/src/core/rows_prefetch.zig b/zig/src/core/rows_prefetch.zig
-index 85aac5da5212b7afa5921fceba6f2e3caf91e228..7f4340197d8495941808ad042b906cfb7833f0d2 100644
+index 85aac5da5..7f4340197 100644
 --- a/zig/src/core/rows_prefetch.zig
 +++ b/zig/src/core/rows_prefetch.zig
 @@ -254,6 +254,33 @@ pub const Prefetch = struct {
@@ -699,7 +699,7 @@ index 85aac5da5212b7afa5921fceba6f2e3caf91e228..7f4340197d8495941808ad042b906cfb
      pub fn sweep(f: *Prefetch, ctx: anytype, comptime named: fn (@TypeOf(ctx), Name) bool) void {
          f.lock();
 diff --git a/zig/src/core/rows_read.zig b/zig/src/core/rows_read.zig
-index 244367d3af22a241abdc27c5de9fa76a978ce8b4..4a4227ebaa9ab72680ce5514d3fb7c96e7c2bc61 100644
+index 244367d3a..4a4227eba 100644
 --- a/zig/src/core/rows_read.zig
 +++ b/zig/src/core/rows_read.zig
 @@ -27,14 +27,18 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
@@ -846,7 +846,7 @@ index 244367d3af22a241abdc27c5de9fa76a978ce8b4..4a4227ebaa9ab72680ce5514d3fb7c96
      const spare = s.spare();
      return spare <= room and bytes <= room - spare;
 diff --git a/zig/src/core/rows_refusal_test.zig b/zig/src/core/rows_refusal_test.zig
-index 5b298996e9be4f591141a9e5002334da358cec32..668a9884ceeacb5133b848d0a634284c3bd63674 100644
+index 5b298996e..668a9884c 100644
 --- a/zig/src/core/rows_refusal_test.zig
 +++ b/zig/src/core/rows_refusal_test.zig
 @@ -84,6 +84,8 @@ const cases = [_]Case{
@@ -859,7 +859,7 @@ index 5b298996e9be4f591141a9e5002334da358cec32..668a9884ceeacb5133b848d0a634284c
      .{ .piece = .shared, .err = error.OutOfMemory, .mine = true, .other = true },
  };
 diff --git a/zig/src/core/rows_select.zig b/zig/src/core/rows_select.zig
-index 55bf71960c10b2f42f6d688212f4c61901aa7688..9cbc538d1b600c60c9ab5dd1878087d1ee2387b4 100644
+index 55bf71960..9cbc538d1 100644
 --- a/zig/src/core/rows_select.zig
 +++ b/zig/src/core/rows_select.zig
 @@ -62,12 +62,15 @@ fn capacity(s: *const pc.Store, have: ?*pc.Entry) ?u64 {
@@ -882,7 +882,7 @@ index 55bf71960c10b2f42f6d688212f4c61901aa7688..9cbc538d1b600c60c9ab5dd1878087d1
  
 diff --git a/zig/src/core/rows_slices.zig b/zig/src/core/rows_slices.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..2779afb8014f9e41dfed0c5242cd00e97671f813
+index 000000000..2779afb80
 --- /dev/null
 +++ b/zig/src/core/rows_slices.zig
 @@ -0,0 +1,173 @@
@@ -1061,7 +1061,7 @@ index 0000000000000000000000000000000000000000..2779afb8014f9e41dfed0c5242cd00e9
 +}
 diff --git a/zig/src/core/rows_slices_test.zig b/zig/src/core/rows_slices_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..b8f2b76fdcf4f6b1d8b3ab7f578de7e417e5c326
+index 000000000..b8f2b76fd
 --- /dev/null
 +++ b/zig/src/core/rows_slices_test.zig
 @@ -0,0 +1,215 @@
@@ -1281,10 +1281,10 @@ index 0000000000000000000000000000000000000000..b8f2b76fdcf4f6b1d8b3ab7f578de7e4
 +    try t.expectError(error.InvalidEnvironment, platform.environment.parse("TF_GLM_OVN_DISK_SLICE_MIB", "32M"));
 +}
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
-index 3e914e86fc0289744ab5b9f25f6c3eed0ca4651e..aff9f2f7c4730b87ae06a0d79729259b117cb4bb 100644
+index 9ae2d75ba..4fbd08f9e 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
-@@ -46,6 +46,8 @@ pub const native = @import("cuda_native.zig");
+@@ -45,6 +45,8 @@ pub const native = @import("cuda_native.zig");
  pub const snapshots = @import("cuda_snapshots.zig");
  pub const kv_host = @import("cuda_kv_host.zig");
  pub const pdl = @import("cuda_pdl.zig");
@@ -1293,7 +1293,7 @@ index 3e914e86fc0289744ab5b9f25f6c3eed0ca4651e..aff9f2f7c4730b87ae06a0d79729259b
  
  test {
      _ = lane_costs;
-@@ -81,6 +83,8 @@ test {
+@@ -78,6 +80,8 @@ test {
      _ = prompt_solo;
      _ = @import("cuda_l2pf.zig");
      _ = prompt_pair;
@@ -1304,7 +1304,7 @@ index 3e914e86fc0289744ab5b9f25f6c3eed0ca4651e..aff9f2f7c4730b87ae06a0d79729259b
      _ = vision;
 diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..9e27aebdde0c7f1f77e80ae3de0f8956979abf9e
+index 000000000..9e27aebdd
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_disk_image.zig
 @@ -0,0 +1,297 @@
@@ -1607,7 +1607,7 @@ index 0000000000000000000000000000000000000000..9e27aebdde0c7f1f77e80ae3de0f8956
 +}
 diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..e45bc4030e043d31ce9c4f1d6a3fb3038ab1a320
+index 000000000..e45bc4030
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_disk_image_test.zig
 @@ -0,0 +1,412 @@
@@ -2025,7 +2025,7 @@ index 0000000000000000000000000000000000000000..e45bc4030e043d31ce9c4f1d6a3fb303
 +}
 diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cuda_disk_ranks.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..43698e35fc9a8eef498fd7b9c7225be9025d7a9f
+index 000000000..43698e35f
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_disk_ranks.zig
 @@ -0,0 +1,176 @@
@@ -2207,7 +2207,7 @@ index 0000000000000000000000000000000000000000..43698e35fc9a8eef498fd7b9c7225be9
 +}
 diff --git a/zig/src/families/glm/cuda_disk_ranks_test.zig b/zig/src/families/glm/cuda_disk_ranks_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..80919aec3e8f331884c76d3a8a4fcbb50a544247
+index 000000000..80919aec3
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_disk_ranks_test.zig
 @@ -0,0 +1,234 @@
@@ -2446,7 +2446,7 @@ index 0000000000000000000000000000000000000000..80919aec3e8f331884c76d3a8a4fcbb5
 +    try t.expectError(error.RanksDiffer, ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs));
 +}
 diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
-index 1e8724243b57348cb2600886fab06d042e5ae854..3561a154bb5e1b905e8fe8983bdf6acf2d69f1f9 100644
+index 1e8724243..3561a154b 100644
 --- a/zig/src/families/glm/cuda_follow.zig
 +++ b/zig/src/families/glm/cuda_follow.zig
 @@ -16,7 +16,7 @@ const sparse = @import("cuda_sparse.zig");
@@ -2521,7 +2521,7 @@ index 1e8724243b57348cb2600886fab06d042e5ae854..3561a154bb5e1b905e8fe8983bdf6acf
              .release => e.release(h.slot),
              .idle => cuda.tp_watch.sleep(e.io),
 diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
-index e933c6b4c8121ee3c66beba11f55a9584727fc31..01408692cb0b2d8c5297945d8268f68e7c9c0346 100644
+index e933c6b4c..01408692c 100644
 --- a/zig/src/families/glm/cuda_native.zig
 +++ b/zig/src/families/glm/cuda_native.zig
 @@ -368,7 +368,7 @@ fn finishRank(a: OpenArgs) !Loaded {
@@ -2534,11 +2534,11 @@ index e933c6b4c8121ee3c66beba11f55a9584727fc31..01408692cb0b2d8c5297945d8268f68e
      const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
      own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
 diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
-index 51e146ea86238ff6ded340bb1d468f345e1ea93c..30005efb465732234e82088d953ab2cd0e872d51 100644
+index fda2c67eb..375430a06 100644
 --- a/zig/src/families/glm/cuda_snapshots.zig
 +++ b/zig/src/families/glm/cuda_snapshots.zig
-@@ -120,8 +120,42 @@ pub fn keepAs(e: anytype, id: u64) !void {
-     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .win_from = if (win) |w| w.from else null });
+@@ -64,8 +64,42 @@ pub fn keepAs(e: anytype, id: u64) !void {
+     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
  }
  
 +/// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
@@ -2581,7 +2581,7 @@ index 51e146ea86238ff6ded340bb1d468f345e1ea93c..30005efb465732234e82088d953ab2cd
      // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
      const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
 diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
-index 9fbf97acbd1071bc0db8cc43363713ec2559cc98..59ce70619b8f7ec26e86e686f96fc8a358ca6da5 100644
+index 9fbf97acb..59ce70619 100644
 --- a/zig/src/native/cuda.zig
 +++ b/zig/src/native/cuda.zig
 @@ -401,7 +401,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
@@ -2612,7 +2612,7 @@ index 9fbf97acbd1071bc0db8cc43363713ec2559cc98..59ce70619b8f7ec26e86e686f96fc8a3
  test "Learner ownership: actual native close drains Nemotron before any source, trainer or parent free" {
 diff --git a/zig/src/native/cuda_glm_disk.zig b/zig/src/native/cuda_glm_disk.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..65c2e0f51cc5ceca7c82ef4b53a22c263aa18cfa
+index 000000000..65c2e0f51
 --- /dev/null
 +++ b/zig/src/native/cuda_glm_disk.zig
 @@ -0,0 +1,262 @@
@@ -2879,7 +2879,7 @@ index 0000000000000000000000000000000000000000..65c2e0f51cc5ceca7c82ef4b53a22c26
 +    std.testing.refAllDecls(@This());
 +}
 diff --git a/zig/src/native/cuda_refusal.zig b/zig/src/native/cuda_refusal.zig
-index bf2d0c6761779270debdbb1785d72d5e12d8aeaf..d9005419aeb1f0832b52411b2ab21b3f96846ab4 100644
+index bf2d0c676..d9005419a 100644
 --- a/zig/src/native/cuda_refusal.zig
 +++ b/zig/src/native/cuda_refusal.zig
 @@ -55,7 +55,7 @@ pub fn place(comptime F: type, a: std.mem.Allocator, o: api.Open) !?[]const u8 {
@@ -2969,10 +2969,10 @@ index bf2d0c6761779270debdbb1785d72d5e12d8aeaf..d9005419aeb1f0832b52411b2ab21b3f
  
  /// The scopes this open's startup check covers, from its flags and model type.
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index dc0d5fab56406ceedac87673eb681e500c26dc42..0fd48959584bfbea615063a6ef0897e947081379 100644
+index bbf3480ed..386e2881c 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -193,6 +193,7 @@ pub const rules = [_]Rule{
+@@ -181,6 +181,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KEEP_SEQS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

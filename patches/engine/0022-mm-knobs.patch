@@ -25,24 +25,56 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 - source: work/fold/0024-mm-knobs.patch
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_MM_CLUSTER (-1.2 / -1.4 / -0.4% against the controls' means, s45) and TF_GLM_OVN_ROUTER16 (between its two controls at every level, s45) are gone: their rows, their loaders, their launch branches and the cluster kernel instantiations. MM_WIDE, MM_DECTILE and SWIGLU_REDUCE stay.
+
 diff --git a/docs/environment.md b/docs/environment.md
-index 6bb6a4c61dbdff06521b8e72a996aebfb6f9f2a6..be80876bbcabc93c9f5e917788557770be73f10f 100644
+index 4a9393859..8abfbdeed 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -102,6 +102,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -93,6 +93,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
- | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
 +| `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
-+| `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
 +| `TF_GLM_OVN_MM_DECTILE` | Whole block count; a decode launch of fewer blocks takes 16-row windows on 32-column tiles; default 0 (off) |
-+| `TF_GLM_OVN_ROUTER16` | Whole number; set, router launches of 16 rows or fewer take the 16-row tile (4: four pipeline stages, any other: three); default 0 (off) |
 +| `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
  | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.cuh
-index 8932166b78753936f6245b46d26702e010097b2e..4f8b15da37f590c6f2872c46f135621e7cfb9209 100644
+index 8932166b7..4f8b15da3 100644
 --- a/zig/kernels/cuda/glm_glue_bmm.cuh
 +++ b/zig/kernels/cuda/glm_glue_bmm.cuh
 @@ -309,6 +309,78 @@ extern "C" __global__ void __launch_bounds__(128)
@@ -125,7 +157,7 @@ index 8932166b78753936f6245b46d26702e010097b2e..4f8b15da37f590c6f2872c46f135621e
  extern "C" __global__ void __launch_bounds__(128)
      tf_glm_bmm_decode(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m,
 diff --git a/zig/kernels/cuda/glm_glue_moe.cuh b/zig/kernels/cuda/glm_glue_moe.cuh
-index 3926c03f52f8111eda9b7e70c831da43a3b6291c..c8e0751e078dac9156ee87629685ff329c92c789 100644
+index 3926c03f5..c8e0751e0 100644
 --- a/zig/kernels/cuda/glm_glue_moe.cuh
 +++ b/zig/kernels/cuda/glm_glue_moe.cuh
 @@ -2,11 +2,10 @@
@@ -142,7 +174,7 @@ index 3926c03f52f8111eda9b7e70c831da43a3b6291c..c8e0751e078dac9156ee87629685ff32
  TF_GLM_SWIGLU_512(tf_glm_swiglu_512, false)
  TF_GLM_SWIGLU_64(tf_glm_swiglu_64, false)
 diff --git a/zig/kernels/cuda/glm_mm.cu b/zig/kernels/cuda/glm_mm.cu
-index e0824852a87eaa7d7dd882b83b8b896e15c2df6f..40c452748d51da17eb53d027893760e1e456a962 100644
+index e0824852a..c99081b8a 100644
 --- a/zig/kernels/cuda/glm_mm.cu
 +++ b/zig/kernels/cuda/glm_mm.cu
 @@ -1,12 +1,13 @@
@@ -304,7 +336,7 @@ index e0824852a87eaa7d7dd882b83b8b896e15c2df6f..40c452748d51da17eb53d027893760e1
  // one instance a (bits, row bucket): (16, 1 warp row), (32, 1), (64, 2), (128, 2); three stages
  #define GLM_MM_ALL(B)                                                                                                  \
      extern "C" __global__ void __launch_bounds__(128) glm_mm##B##_16(const __nv_bfloat16* __restrict__ x, long long ldx, \
-@@ -247,12 +313,46 @@ extern "C" __global__ void glm_mm_reduce(const float* __restrict__ part, void* _
+@@ -247,12 +313,35 @@ extern "C" __global__ void glm_mm_reduce(const float* __restrict__ part, void* _
  // prompts: 128-row blocks, row blocks fastest (one slice: a prompt's rows fill the GPU)
  extern "C" __global__ void __launch_bounds__(256) glm_mm16_rows(const __nv_bfloat16* __restrict__ x, long long ldx,
      const uint32_t* __restrict__ w, const __half* __restrict__ s, void* __restrict__ out, float* __restrict__ part,
@@ -332,18 +364,7 @@ index e0824852a87eaa7d7dd882b83b8b896e15c2df6f..40c452748d51da17eb53d027893760e1
 +    extern "C" __global__ void __launch_bounds__(128) glm_mm##B##_16n32(GLM_MM_ARGS) {                                \
 +        mm_kernel<B, 16, 1, 4, COLS, 32, 4>(GLM_MM_PASS);                                                              \
 +    }
-+// TF_GLM_OVN_MM_CLUSTER: the decode buckets 16, 32, 64 with a tile's K slices summed in a cluster (qmm.cu:329-342)
-+#define GLM_MM_CLUSTER(B)                                                                                              \
-+    extern "C" __global__ void __launch_bounds__(128) glm_mm##B##_16c(GLM_MM_ARGS) {                                  \
-+        mm_kernel<B, 16, 1, 3, COLS, 64, 4, true>(GLM_MM_PASS);                                                        \
-+    }                                                                                                                  \
-+    extern "C" __global__ void __launch_bounds__(128) glm_mm##B##_32c(GLM_MM_ARGS) {                                  \
-+        mm_kernel<B, 32, 1, 3, COLS, 64, 4, true>(GLM_MM_PASS);                                                        \
-+    }                                                                                                                  \
-+    extern "C" __global__ void __launch_bounds__(256) glm_mm##B##_64c(GLM_MM_ARGS) {                                  \
-+        mm_kernel<B, 64, 2, 3, COLS, 64, 4, true>(GLM_MM_PASS);                                                        \
-+    }
-+#define GLM_MM_OVN(B) GLM_MM_WIDE(B) GLM_MM_DEC(B) GLM_MM_CLUSTER(B)
++#define GLM_MM_OVN(B) GLM_MM_WIDE(B) GLM_MM_DEC(B)
 +GLM_MM_OVN(4)
 +GLM_MM_OVN(6)
 +GLM_MM_OVN(8)
@@ -353,7 +374,7 @@ index e0824852a87eaa7d7dd882b83b8b896e15c2df6f..40c452748d51da17eb53d027893760e1
  template <int BITS>
  __device__ __forceinline__ void tile_packed(const uint32_t* __restrict__ src, const __half* __restrict__ ss,
 diff --git a/zig/src/families/glm/cuda_b16.zig b/zig/src/families/glm/cuda_b16.zig
-index 9662db17283cbf10c5907871b82a844dfafe7f6d..99c1363cd7e0730dfa1ab352017a44aa731e0e68 100644
+index 9662db172..99c1363cd 100644
 --- a/zig/src/families/glm/cuda_b16.zig
 +++ b/zig/src/families/glm/cuda_b16.zig
 @@ -58,7 +58,7 @@ pub fn partBytes(m: usize, n: usize, k: usize) usize {
@@ -366,14 +387,10 @@ index 9662db17283cbf10c5907871b82a844dfafe7f6d..99c1363cd7e0730dfa1ab352017a44aa
      }
      const sk = splitK(n, k);
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 2f8f5e151c6743dae907f309a16f38175c66642d..5dfecd44754f12c4387289847cd70f99fde43a10 100644
+index 21ffc28f8..af560e83e 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -100,10 +100,15 @@ pub const Kernels = struct {
-     chunks_32_fp8: cuda.Function,
-     merge: cuda.Function,
-     scores: cuda.Function,
-+    router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
+@@ -101,7 +101,9 @@ pub const Kernels = struct {
  
      pub fn load(m: cuda.Module) !Kernels {
          var k: Kernels = undefined;
@@ -381,24 +398,11 @@ index 2f8f5e151c6743dae907f309a16f38175c66642d..5dfecd44754f12c4387289847cd70f99
 +        inline for (@typeInfo(Kernels).@"struct".field_names) |name| {
 +            if (@FieldType(Kernels, name) == cuda.Function) @field(k, name) = try m.function("tf_glm_" ++ name);
 +        }
-+        const router16 = try cuda.ovn.int("ROUTER16", 0);
-+        k.router16 = if (router16 == 0) null else try m.function(if (router16 == 4) "tf_glm_router16_s4" else "tf_glm_router16_s3");
          try k.bmm_tile.allowDynamicShared(bmm_tile_smem);
          try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
          try k.chunks_16.allowDynamicShared(chunksSmem(16));
-@@ -211,6 +216,10 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
-     if (x % 16 != 0 or x_stride % 8 != 0 or w % 16 != 0) return error.RowShape; // the tiles stage rows by cp.async
-     var a: cuda.Args = .{};
-     inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
-+    if (set.glue.router16) |f| if (m <= 16) { // TF_GLM_OVN_ROUTER16: 16-row tiles, each warp 8 experts
-+        try cuda_pdl.launch(f, .{ .grid = .{ .x = 1, .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
-+        return sliceSum(set, stream, part, out, m * ne, router_ks, true);
-+    };
-     try cuda_pdl.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .shared = router_tile_smem }, stream, &a);
-     try sliceSum(set, stream, part, out, m * ne, router_ks, true);
- }
 diff --git a/zig/src/families/glm/cuda_mlp.zig b/zig/src/families/glm/cuda_mlp.zig
-index 7b04c02a8476ac864858ad7d35045cee043fdb16..2815a61a751ff1f3d3a67d86f8a7d6d0e2914805 100644
+index 7b04c02a8..2815a61a7 100644
 --- a/zig/src/families/glm/cuda_mlp.zig
 +++ b/zig/src/families/glm/cuda_mlp.zig
 @@ -6,6 +6,7 @@ const cuda_pdl = @import("cuda_pdl.zig");
@@ -419,7 +423,7 @@ index 7b04c02a8476ac864858ad7d35045cee043fdb16..2815a61a751ff1f3d3a67d86f8a7d6d0
              return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
          },
 diff --git a/zig/src/families/glm/cuda_mm.zig b/zig/src/families/glm/cuda_mm.zig
-index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24c743ae7e 100644
+index d1f8dfe11..49e6d3a95 100644
 --- a/zig/src/families/glm/cuda_mm.zig
 +++ b/zig/src/families/glm/cuda_mm.zig
 @@ -47,6 +47,7 @@ pub const Kernels = struct {
@@ -430,7 +434,7 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
  
      pub fn load(m: cuda.Module) !Kernels {
          var k: Kernels = .{ .by_rows = undefined, .packed_rows = undefined, .tile_packed = undefined, .prompt = try m.function("glm_mm16_rows"), .reduce = try m.function("glm_mm_reduce"), .tile = try m.function("glm_mm_tile16"), .pdl = true };
-@@ -63,10 +64,94 @@ pub const Kernels = struct {
+@@ -63,10 +64,76 @@ pub const Kernels = struct {
          }
          try k.prompt.allowDynamicShared(smem(128));
          k.pdl = cuda_pdl.on();
@@ -443,21 +447,17 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
 +pub const Ovn = struct {
 +    wide: ?[4]cuda.Function = null, // TF_GLM_OVN_MM_WIDE: 128 x 128 prompt blocks in L2 row bands, by width
 +    wide_threads: u32 = 256, // 256: 64 x 32 warps (any value but 2), 512: 32 x 32 warps (2)
-+    cluster: ?[4][3]cuda.Function = null, // TF_GLM_OVN_MM_CLUSTER=<Mi>: buckets 16, 32, 64 summing slices in a cluster
-+    cluster_from: usize = 0, // ... for weights of at least this many values (32 Mi: production's CLUSTER_VALUES)
 +    dectile: ?[4]cuda.Function = null, // TF_GLM_OVN_MM_DECTILE=<blocks>: 16-row windows on 32-column tiles
 +    dectile_below: usize = 0, // ... where today's launch has fewer blocks than this
 +    swiglu: ?cuda.Function = null, // TF_GLM_OVN_SWIGLU_REDUCE: [gate | up]'s slices summed and SwiGLU'd in one kernel
 +
-+    /// What to load: the knobs' values (`cluster_from` null: no clusters; 0 would cluster every sliced window).
-+    pub const Choice = struct { wide: u64 = 0, cluster_from: ?usize = null, dectile_below: usize = 0, swiglu: bool = false };
++    /// What to load: the knobs' values.
++    pub const Choice = struct { wide: u64 = 0, dectile_below: usize = 0, swiglu: bool = false };
 +
 +    /// The knobs as the environment sets them; `probe` (any glm_mm function) tells whether the image has clusters.
 +    pub fn load(m: cuda.Module, probe: cuda.Function) !Ovn {
-+        const mi = try cuda.ovn.int("MM_CLUSTER", 0);
 +        return choose(m, probe, .{
 +            .wide = try cuda.ovn.int("MM_WIDE", 0),
-+            .cluster_from = if (mi == 0) null else @intCast(mi << 20),
 +            .dectile_below = @intCast(try cuda.ovn.int("MM_DECTILE", 0)),
 +            .swiglu = cuda.ovn.on("SWIGLU_REDUCE"),
 +        });
@@ -465,6 +465,7 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
 +
 +    /// The variants `c` names, loaded from glm_mm's module `m` (tf-cuda-test glm-mm-ovn drives every one directly).
 +    pub fn choose(m: cuda.Module, probe: cuda.Function, c: Choice) !Ovn {
++        _ = probe;
 +        var o: Ovn = .{};
 +        if (c.wide != 0) {
 +            var f: [4]cuda.Function = undefined;
@@ -475,17 +476,6 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
 +            }
 +            o.wide = f;
 +            o.wide_threads = if (c.wide == 2) 512 else 256;
-+        }
-+        if (c.cluster_from) |from| {
-+            // clusters need sm_90; every rank runs the same GPU and image, so every rank decides alike
-+            if (try probe.attribute(.binary_version) < 90) return error.OvnClustersNeedSm90;
-+            var f: [4][3]cuda.Function = undefined;
-+            inline for (widths, 0..) |b, wi| inline for (.{ 16, 32, 64 }, 0..) |bm, i| {
-+                f[wi][i] = try m.function(std.fmt.comptimePrint("glm_mm{d}_{d}c", .{ b, bm }));
-+                try f[wi][i].allowDynamicShared(sharedBytes(b, bm));
-+            };
-+            o.cluster = f;
-+            o.cluster_from = from;
 +        }
 +        if (c.dectile_below != 0) {
 +            var f: [4]cuda.Function = undefined;
@@ -500,10 +490,6 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
 +        return o;
 +    }
 +
-+    /// Whether a decode window of `w` with `sk` slices sums them in a cluster (glm_mmB_<bm>c) instead of glm_mm_reduce.
-+    fn clusters(o: *const Ovn, w: Tiled, sk: usize) bool {
-+        return o.cluster != null and sk > 1 and w.n * w.k >= o.cluster_from;
-+    }
 +};
 +
 +/// OTS 0083's prompt_tile rule (forward.py:465-475): 128 x 128 blocks where K is long and they fill the GPU twice over.
@@ -525,7 +511,7 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
  const split_target = 192; // column tiles times K slices a launch aims at (the GB10's SMs, a few blocks each)
  
  fn bucket(i: usize) usize {
-@@ -79,8 +164,13 @@ fn smem(bm: usize) u32 {
+@@ -79,8 +146,13 @@ fn smem(bm: usize) u32 {
  
  /// A block's shared memory: three stages of `bm` rows of x and a 64-column tile of weights (`bits / 2` words a lane).
  pub fn sharedBytes(bits: u8, bm: usize) u32 {
@@ -540,7 +526,7 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
  }
  
  /// K slices fixed by the shape: column tiles times slices reach the target, each slice at least 4 groups of 64.
-@@ -98,39 +188,24 @@ pub fn partBytes(m: usize, w: Tiled) usize {
+@@ -98,39 +170,24 @@ pub fn partBytes(m: usize, w: Tiled) usize {
      return if (sk > 1) sk * @min(m, 64) * w.n * 4 else 0;
  }
  
@@ -588,7 +574,7 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
              const total = rows * w.n;
              var r: cuda.Args = .{};
              r.add(part);
-@@ -144,6 +219,75 @@ pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, o
+@@ -144,6 +201,71 @@ pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, o
      }
  }
  
@@ -620,10 +606,6 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
 +            try cuda.launch.launch(k.prompt, .{ .grid = .{ .x = row_blocks, .y = cols }, .block = .{ .x = 256 }, .shared = smem(128), .pdl = k.pdl }, s, &a);
 +            return false;
 +        }
-+    } else if (k.ovn.clusters(w, sk)) { // a tile's slices are one cluster along z: slice 0 writes the sum
-+        const f = k.ovn.cluster.?[wi][i];
-+        try cuda.launch.launch(f, .{ .grid = .{ .x = cols, .y = row_blocks, .z = z }, .block = .{ .x = if (bm <= 32) 128 else 256 }, .shared = sharedBytes(w.bits, bm), .cluster = .{ .x = 1, .y = 1, .z = z }, .pdl = k.pdl }, s, &a);
-+        return true;
 +    } else if (k.ovn.dectile) |f| if (i == 0 and cols * z < k.ovn.dectile_below) { // twice the blocks, same slices
 +        const narrow: u32 = @intCast((w.n + 31) / 32);
 +        try cuda.launch.launch(f[wi], .{ .grid = .{ .x = narrow, .y = row_blocks, .z = z }, .block = .{ .x = 128 }, .shared = tileShared(w.bits, 16, 32, 4), .pdl = k.pdl }, s, &a);
@@ -639,7 +621,7 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
 +pub fn swigluReduce(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, act: u64, part: u64, m: usize, limit: f32, one: bool) !bool {
 +    const f = k.ovn.swiglu orelse return false;
 +    const sk = splitK(w.n, w.k);
-+    if (one or m >= 128 or sk == 1 or k.ovn.clusters(w, sk)) return false;
++    if (one or m >= 128 or sk == 1) return false;
 +    try checkShape(w, x, ldx);
 +    const wi = try widthIndex(w.bits);
 +    const width = w.n / 2;
@@ -665,7 +647,7 @@ index d1f8dfe117a6bdd193f35a8f5d608bba7e509319..8f1efded62b4a3160d90c3c9a50e8f24
  pub fn tilePacked(k: *const Kernels, s: cuda.Stream, bits: u8, src: u64, ss: u64, dst: u64, ds: u64, n: usize, kk: usize) !void {
      const wi = try widthIndex(bits);
 diff --git a/zig/src/families/glm/cuda_moe.zig b/zig/src/families/glm/cuda_moe.zig
-index b1ec249595200f7ee88fe7b62247a649a6b7fb91..9b3f539b824905ddbcf03aedc36da0fd48310d99 100644
+index b1ec24959..9b3f539b8 100644
 --- a/zig/src/families/glm/cuda_moe.zig
 +++ b/zig/src/families/glm/cuda_moe.zig
 @@ -8,6 +8,7 @@ const experts = @import("cuda_experts.zig");
@@ -692,17 +674,15 @@ index b1ec249595200f7ee88fe7b62247a649a6b7fb91..9b3f539b824905ddbcf03aedc36da0fd
      var a: cuda.Args = .{};
      a.add(s.sy + lo * d * 4);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 7f35c62122f798204daa33e23f1c90e5f6c6e1f6..df18a045bbd2351ec3edae4dbf2cf3e24ea44c4b 100644
+index fa173959f..a5345326c 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -170,6 +170,11 @@ pub const rules = [_]Rule{
+@@ -161,6 +161,9 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
-+    .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
 +    .{ .name = "TF_GLM_OVN_MM_DECTILE", .scope = .glm, .kind = .u64, .forms = "a whole block count, 0 (off) or the launch size below which decode windows take 16-row tiles" },
-+    .{ .name = "TF_GLM_OVN_ROUTER16", .scope = .glm, .kind = .u64, .forms = "0 (off), 4 (four stages) or any other value (three stages)" },
 +    .{ .name = "TF_GLM_OVN_SWIGLU_REDUCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
      .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },

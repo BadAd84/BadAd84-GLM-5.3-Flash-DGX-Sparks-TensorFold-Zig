@@ -38,19 +38,19 @@ switch's, so patches/pr1411's environment.zig and docs/environment.md hunks stil
 New here, not a re-seat: written on this series at v1.2.9.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index e1d2e1b4e8b8fdc01c246d8fc323a6689d96fddb..c552e368c55a69c91eb87179be7ad54e9df97c18 100644
+index 2c91bd9fd..22ea96a69 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -103,6 +103,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -95,6 +95,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
 +| `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
- | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
  | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
- | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
+ | `TF_GLM_OVN_MM_DECTILE` | Whole block count; a decode launch of fewer blocks takes 16-row windows on 32-column tiles; default 0 (off) |
+ | `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
 diff --git a/zig/kernels/cuda/glm_glue_latent.cuh b/zig/kernels/cuda/glm_glue_latent.cuh
-index 241b66add5ac772e9b054dbf89b98abbc3de2180..b091925a247ce6b8c0cf77826c137a364ff64d37 100644
+index 241b66add..b091925a2 100644
 --- a/zig/kernels/cuda/glm_glue_latent.cuh
 +++ b/zig/kernels/cuda/glm_glue_latent.cuh
 @@ -70,6 +70,147 @@ extern "C" __global__ void __launch_bounds__(128)
@@ -202,10 +202,10 @@ index 241b66add5ac772e9b054dbf89b98abbc3de2180..b091925a247ce6b8c0cf77826c137a36
  
  // Row r's first element in a cache of `width`-element rows: in order (pt null), or row r % P of page pt[r / P].
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 296a3193831c0a68279a6603e98628ee45ccd064..d682ab48ae9c8ba526b5e3d5ff6d02629694bcad 100644
+index b8482df3b..044a13db5 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -29,21 +29,27 @@ pub const Set = struct {
+@@ -27,21 +27,27 @@ pub const Set = struct {
      onepass_pipe: ?cuda.Function = null,
  };
  
@@ -237,7 +237,7 @@ index 296a3193831c0a68279a6603e98628ee45ccd064..d682ab48ae9c8ba526b5e3d5ff6d0262
      }
  };
  
-@@ -126,6 +132,11 @@ pub const Kernels = struct {
+@@ -124,6 +130,11 @@ pub const Kernels = struct {
      expand_v_vec: cuda.Function,
      absorb_q8: cuda.Function,
      expand_v8: cuda.Function,
@@ -249,7 +249,7 @@ index 296a3193831c0a68279a6603e98628ee45ccd064..d682ab48ae9c8ba526b5e3d5ff6d0262
      router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
  
      pub fn load(m: cuda.Module) !Kernels {
-@@ -405,3 +416,17 @@ test "the wrappers' shape rules as glue.py's" {
+@@ -397,3 +408,17 @@ test "the wrappers' shape rules as glue.py's" {
      try std.testing.expectEqual(@as(i64, 512), pow2(288 + 1)); // _topk's BLOCK for 288 experts
      try std.testing.expectEqual(@as(i64, 16), pow2(8 + 1)); // its SLOTP for top-8 and the shared slot
  }
@@ -268,7 +268,7 @@ index 296a3193831c0a68279a6603e98628ee45ccd064..d682ab48ae9c8ba526b5e3d5ff6d0262
 +    try std.testing.expectError(error.BadOvnKnob, Mla.read());
 +}
 diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
-index 0595fcf12c8726ae92adf94bdefdfe0f2c4e3cf7..4620b2d492844bf49e77fe402377f1c0fa9007b2 100644
+index 0595fcf12..4620b2d49 100644
 --- a/zig/src/families/glm/cuda_latent.zig
 +++ b/zig/src/families/glm/cuda_latent.zig
 @@ -33,6 +33,26 @@ fn cdiv(a: usize, b: usize) u32 {
@@ -370,20 +370,20 @@ index 0595fcf12c8726ae92adf94bdefdfe0f2c4e3cf7..4620b2d492844bf49e77fe402377f1c0
 +    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 8357ccef54c9582be9d652287f1e325687429bf2..b6b88d949805e7e04cafccb3cf0181ba8eaa0e32 100644
+index 81742ba44..cdb7157cf 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -171,6 +171,7 @@ pub const rules = [_]Rule{
+@@ -163,6 +163,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
-     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
-     .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
+     .{ .name = "TF_GLM_OVN_MM_DECTILE", .scope = .glm, .kind = .u64, .forms = "a whole block count, 0 (off) or the launch size below which decode windows take 16-row tiles" },
+     .{ .name = "TF_GLM_OVN_SWIGLU_REDUCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 diff --git a/zig/tests/cuda/glm_latent_rows_tests.zig b/zig/tests/cuda/glm_latent_rows_tests.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..9ecfc9a9d2ccd59f1d152c99337e2efc0727fce1
+index 000000000..9ecfc9a9d
 --- /dev/null
 +++ b/zig/tests/cuda/glm_latent_rows_tests.zig
 @@ -0,0 +1,164 @@
@@ -552,27 +552,27 @@ index 0000000000000000000000000000000000000000..9ecfc9a9d2ccd59f1d152c99337e2efc
 +    check.pass("glm-latent-rows: every case equals today's launches byte for byte", .{});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index ef53d74462dac9186d390f98d45d830d315e2195..e2411eb2f7c14072e09d0e9e3941bbb7d0e8b063 100644
+index 37762dc4c..a547b9363 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -5,6 +5,7 @@ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
+@@ -4,6 +4,7 @@ const check = @import("check.zig");
+ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
  const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
- const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
  const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
 +const glm_latent_rows = @import("glm_latent_rows_tests.zig");
  const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
  const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
  const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
-@@ -15,6 +16,7 @@ pub const usage =
+@@ -13,6 +14,7 @@ pub const usage =
+     \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
      \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
-     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
      \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
 +    \\  glm-latent-rows           TF_GLM_OVN_LATENT_ROWS: absorb_q and expand_v at 2 and 4 rows a loop step against today's, byte for byte
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
      \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
      \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
-@@ -31,6 +33,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
-         try glm_index_regroup_check.run(gpu);
+@@ -27,6 +29,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+         try glm_index_ovn_check.run(gpu);
      } else if (std.mem.eql(u8, cmd, "glm-keep-seqs-check")) {
          try glm_keep_seqs_check.run(gpu, rest);
 +    } else if (std.mem.eql(u8, cmd, "glm-latent-rows")) {

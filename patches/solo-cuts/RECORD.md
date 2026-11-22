@@ -4,7 +4,7 @@
 
 Source: the same package of the series on the tip `46c6ee229d2ea28bde8b273381c0f0443861cdd6` (`archive/reseat-tip-46c6ee2-patches.tar`, tree `1fd680b2b681e80d1e40492f881b444602a5bc89`), each patch's own delta played onto `fa13df5dd1fdd23ada775510a464c9aa03a39e09` by a chain of three-way merges (`work/reseat2/series.py`); a patch that merged clean keeps its header and every added and removed line, only offsets and context moved. Hand resolutions in this package: none. Every decision, with the upstream commits, is in `work/reseat2/DECISIONS.md`.
 
-This package applies to `fa13df5dd1fdd23ada775510a464c9aa03a39e09` with the packages before it in the order engine, pr1411, cache-salt, learn-starts, solo-cuts, disk-any-position, restore-held: it takes the tree `db2d479e80bd18f91dda77baf9223cc4e6548c2d` to `c80bf1cfe48715f2143ae91df0d7f054ee29fd10` (2 patches, 45 in all; ids are `git write-tree` on the tree built in that order). The base tree is `efd5bccea8b50fc9c98966f4a9f4161d2a6864d7`; the whole stack's tree is `19c545b35927ecbf59924852e6d5d07465c2bfe7`.
+This package applies to `fa13df5dd1fdd23ada775510a464c9aa03a39e09` with the packages before it in the order engine, pr1411, cache-salt, learn-starts, solo-cuts, disk-any-position, restore-held: it takes the tree `b55fa439e75c` to `6b1d2ff8633f` (2 patches, 39 in all; ids are `git write-tree` on the tree built in that order). The base tree is `efd5bccea8b5`; the whole stack's tree is `b7f4d6f53f78`.
 
 Gate: [stack gates] GATES-DONE sg-20261121-100241-stack bad=0
 SG gates stack rc=0
@@ -51,3 +51,15 @@ Patches, in file-name order:
 
 - `0001-glm-solo-between-starts.patch`
 - `0002-glm-solo-to-start.patch`
+ This line was rewritten 2026-11-21 by the retirement lane: the package was applied again on the engine series
+after its dead switches came out (engine tree `c9d60aaa35ae5f185f4cfbec5093febd541dd9da`). The package's own hunks
+are unchanged; only context lines that named removed engine fields moved (`Snap.win_from`, the dead `Marks.win_from`,
+the `dr.restart` call behind the kept-window resume, the dflash window fields), so its behaviour is the same.
+
+Gate: [stack gates] sg-20261121-233942 PASS on the whole stack (41 patches: engine 32, then pr1411, cache-salt,
+learn-starts, solo-cuts, disk-any-position, restore-held) against the base of the same run. base tree
+`efd5bccea8b5`, stack tree `b7f4d6f53f78`; every step rc 0 on both sides; gate-names 0 failing names on each
+(base 7869/7912, stack 8073/8116); lean 7306 files 168 problems on the base against 7366 files 168 here, 0 new;
+test-cuda-host and compile-cuda-tests 0. The engine half alone passed `sg-20261121-230313` on tree `ad9faacc`.
+Re-seated 2026-11-22 on the engine tree `c9d60aaa35ae5f185f4cfbec5093febd541dd9da` after the five dead switches' rows left `0020`; the
+whole stack is `6744cbf941c19ec3fc137499f141bb0db1949a8c` and its gate run is `sg-20261122-005321`. Package behaviour unchanged.

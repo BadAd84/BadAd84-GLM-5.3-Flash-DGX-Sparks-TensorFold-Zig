@@ -49,7 +49,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
-index 45af00968276d280a3d508b8c9da8c62e8772c3a..50d3fe40e3384f7c847747048c26cf096d3a9207 100644
+index 45af00968..50d3fe40e 100644
 --- a/zig/build/cuda.zig
 +++ b/zig/build/cuda.zig
 @@ -370,8 +370,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
@@ -64,7 +64,7 @@ index 45af00968276d280a3d508b8c9da8c62e8772c3a..50d3fe40e3384f7c847747048c26cf09
          if (host.result.os.tag == .windows and m == native) continue;
          step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
 diff --git a/zig/src/core/template/access.zig b/zig/src/core/template/access.zig
-index 0ad8edcdfa86b5cc9e2f35c06fbb53e8f7d609ca..aefe177dc78340899a5257d02e002897c574e58f 100644
+index 0ad8edcdf..aefe177dc 100644
 --- a/zig/src/core/template/access.zig
 +++ b/zig/src/core/template/access.zig
 @@ -103,6 +103,31 @@ fn index(i: i64, n: usize) ?usize {
@@ -109,7 +109,7 @@ index 0ad8edcdfa86b5cc9e2f35c06fbb53e8f7d609ca..aefe177dc78340899a5257d02e002897
                  var end = at;
                  _ = uni.next(s.s, &end);
 diff --git a/zig/src/core/template/template.zig b/zig/src/core/template/template.zig
-index e87cefae5d700314b59d1db82de5b60a74eed69a..f7d492dce882ed6fa8b3fc1a79bd565b4e907b98 100644
+index e87cefae5..f7d492dce 100644
 --- a/zig/src/core/template/template.zig
 +++ b/zig/src/core/template/template.zig
 @@ -263,4 +263,5 @@ test {
@@ -119,7 +119,7 @@ index e87cefae5d700314b59d1db82de5b60a74eed69a..f7d492dce882ed6fa8b3fc1a79bd565b
 +    _ = @import("access.zig");
  }
 diff --git a/zig/src/core/tokenizer/memo.zig b/zig/src/core/tokenizer/memo.zig
-index 7d499f98bcd9bb21957fba7311c792484ef4e1ae..d51a76863ffebe32787b331e69ab6145b2e48e38 100644
+index 7d499f98b..d51a76863 100644
 --- a/zig/src/core/tokenizer/memo.zig
 +++ b/zig/src/core/tokenizer/memo.zig
 @@ -5,6 +5,11 @@ const Allocator = std.mem.Allocator;

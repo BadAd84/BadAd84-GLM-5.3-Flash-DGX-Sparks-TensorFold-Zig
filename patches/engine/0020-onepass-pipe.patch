@@ -38,13 +38,13 @@ three-way merge settled it there with every added and removed line of the patch 
 line moved, no other file changed).
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 334354a05632fe4792f987892946ddeb26639071..8f91ab1792bfa29516b1b07ad580b32739f5e1f0 100644
+index 625a9710a..4a9393859 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -97,6 +97,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
- | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
- | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
- | `TF_GLM_OVN_SPARSE_ONEPASS` | Exactly `0` or `1`; default off (a prompt's rows take production's one-pass sparse attention) |
+@@ -89,6 +89,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_DECODE_INDEX` | Whole row count; a decode window of fewer rows scores with shared key tiles and selects with the split select; default 0 (off) |
+ | `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
+ | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
 +| `TF_GLM_OVN_ONEPASS_PIPE` | Exactly `0` or `1`; default off (the DSA block's prompt rows take the one-pass pipeline) |
 +| `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
 +| `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
@@ -53,7 +53,7 @@ index 334354a05632fe4792f987892946ddeb26639071..8f91ab1792bfa29516b1b07ad580b327
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
-index 16bcb2ca72a1071464a0d0232abde0212bdc8c7e..9467d396b19a77ffc6877b8eb9783687465098c1 100644
+index 16bcb2ca7..9467d396b 100644
 --- a/zig/build/cuda_kernels.zig
 +++ b/zig/build/cuda_kernels.zig
 @@ -146,6 +146,7 @@ pub const kernels = [_]Kernel{
@@ -65,7 +65,7 @@ index 16bcb2ca72a1071464a0d0232abde0212bdc8c7e..9467d396b19a77ffc6877b8eb9783687
      .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
      .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
 diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
-index e20d136ad4be72899360a426c8a328ba739b9125..4b83fea1fb2d7d1c5d2998fa3f368f1245796d05 100644
+index e20d136ad..4b83fea1f 100644
 --- a/zig/build/glm_family_host.zig
 +++ b/zig/build/glm_family_host.zig
 @@ -38,6 +38,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
@@ -81,7 +81,7 @@ index e20d136ad4be72899360a426c8a328ba739b9125..4b83fea1fb2d7d1c5d2998fa3f368f12
      const index_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM index:"} }));
 diff --git a/zig/kernels/cuda/glm_onepass_common.cuh b/zig/kernels/cuda/glm_onepass_common.cuh
 new file mode 100644
-index 0000000000000000000000000000000000000000..4bb24f641743b527d09a7fce2c161875ad7fe490
+index 000000000..4bb24f641
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass_common.cuh
 @@ -0,0 +1,159 @@
@@ -246,7 +246,7 @@ index 0000000000000000000000000000000000000000..4bb24f641743b527d09a7fce2c161875
 +#endif
 diff --git a/zig/kernels/cuda/glm_onepass_pipe.cu b/zig/kernels/cuda/glm_onepass_pipe.cu
 new file mode 100644
-index 0000000000000000000000000000000000000000..d08ab7facc5dce440c5e8949db42acf46176b95a
+index 000000000..d08ab7fac
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass_pipe.cu
 @@ -0,0 +1,24 @@
@@ -276,7 +276,7 @@ index 0000000000000000000000000000000000000000..d08ab7facc5dce440c5e8949db42acf4
 +PIPE_VARIANT(tf_glm_onepass_pipe_exact, true, true, true)
 diff --git a/zig/kernels/cuda/glm_onepass_pipe.cuh b/zig/kernels/cuda/glm_onepass_pipe.cuh
 new file mode 100644
-index 0000000000000000000000000000000000000000..70e3f637ea4c0f2b00ccaf879b150e856111e62a
+index 000000000..70e3f637e
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass_pipe.cuh
 @@ -0,0 +1,374 @@
@@ -655,7 +655,7 @@ index 0000000000000000000000000000000000000000..70e3f637ea4c0f2b00ccaf879b150e85
 +} // namespace glm_onepass_pipe
 +#endif
 diff --git a/zig/src/cuda/kernels.zig b/zig/src/cuda/kernels.zig
-index 22fb0530d4e63797bdf4578c1208c9846665a1ea..8be1d79b1e461d2fe373042e0f9da6b7fe93df5a 100644
+index 22fb0530d..8be1d79b1 100644
 --- a/zig/src/cuda/kernels.zig
 +++ b/zig/src/cuda/kernels.zig
 @@ -114,6 +114,7 @@ pub const inkling2_pattn: []const u8 = if (available) &Blob("fatbin_inkling2_pat
@@ -667,10 +667,18 @@ index 22fb0530d4e63797bdf4578c1208c9846665a1ea..8be1d79b1e461d2fe373042e0f9da6b7
  pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
  pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
 diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
-index 26707ab229185d8f9f69a9ee726436e85bb687b8..0d51711a7c005a0f0a678cf1b1e90db6b4d83fa0 100644
+index 61d9c15aa..22a372fe2 100644
 --- a/zig/src/families/glm/cuda_dsa_block.zig
 +++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -153,6 +153,14 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
+@@ -7,6 +7,7 @@ const glue = @import("cuda_glue.zig");
+ const projection = @import("cuda_proj.zig");
+ const latent = @import("cuda_latent.zig");
+ const sparse = @import("cuda_sparse.zig");
++const onepass = @import("cuda_onepass.zig");
+ const prof = @import("cuda_prof.zig");
+ const kv_host = @import("cuda_kv_host.zig");
+ 
+@@ -152,6 +153,10 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch,
          try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
          const stamp = prof.span(k.prof, stream, .mla);
          defer stamp.end();
@@ -678,47 +686,33 @@ index 26707ab229185d8f9f69a9ee726436e85bb687b8..0d51711a7c005a0f0a678cf1b1e90db6
 +        if (k.set.onepass_pipe) |fp| {
 +            if (onepass.takesExact(k.set.prompt, c.ls, l.heads, l.lw, rows)) return onepass.runPipe(fp, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, rows, l.heads, scale);
 +        }
-+        // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows in one pass a row (production's kernel and bits), no partials or merge
-+        if (k.set.onepass) |f| {
-+            if (onepass.takes(k.set.prompt, c.ls, l.heads, l.lw)) return onepass.run(f, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, rows, l.heads, scale);
-+        }
          if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
              const slots = try g.gather(k.ops, stream, ix.gate, c.lc, c.pt, t.page_rows, pos, v.tokens, v.counts, rows, sparse.width);
              return latent.sparseAttentionFormat(set, stream, v.qa, slots, 0, .{}, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
-@@ -210,12 +218,10 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
-         try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
-         var stamp = prof.span(k.prof, stream, .mla);
-         defer stamp.end();
--        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, 1, l.heads, l.lw, scale);
--        // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows in one pass a row (production's kernel and bits), no partials or merge
--        if (k.set.onepass) |f| {
--            if (onepass.takes(false, c.ls, l.heads, l.lw)) return onepass.run(f, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, rows, l.heads, scale);
-+        if (k.set.onepass) |f| { // TF_GLM_OVN_SPARSE_ONEPASS: the kernel the whole chunk's row would have taken
-+            if (onepass.takes(k.set.prompt, c.ls, l.heads, l.lw)) return onepass.run(f, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, 1, l.heads, scale);
-         }
--        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
-+        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, 1, l.heads, l.lw, scale);
-     }
- }
- 
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index c881ff1ebc1020622ce9f49614aa1bbc40dbf112..d15ef692202bcf65d45c6413bfab2337e197f4cb 100644
+index f7729588b..50797cbe0 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -50,7 +50,8 @@ pub const Modules = struct {
+@@ -27,6 +27,7 @@ const shared = @import("cuda_shared.zig");
+ const index_mod = @import("cuda_index.zig");
+ const l2pf_mod = @import("cuda_l2pf.zig");
+ const pieces_mod = @import("cuda_forward_pieces.zig");
++const onepass_mod = @import("cuda_onepass.zig");
+ 
+ pub const prefill_rows = state.prefill_rows;
+ pub const solo_rows = state.solo_rows;
+@@ -48,6 +49,7 @@ pub const Modules = struct {
+     dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
      dscore: ?index_mod.Kernels, // TF_GLM_DSCORES (default on): a decode window's index scores on glm_index_scores
      pools32: bool = false, // TF_GLM_OVN_POOLS32: a split prompt indexer gathers its picks as int32
-     onepass: ?onepass_mod.Kernels, // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows' sparse attention in one pass
--    tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
-+    onepass_pipe: ?onepass_mod.PipeKernels, // TF_GLM_OVN_ONEPASS_PIPE: the pipeline with bit-exact switches    tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
-+    tiled: bool = false, // eligible bf16 linears are tiled
++    onepass_pipe: ?onepass_mod.PipeKernels, // TF_GLM_OVN_ONEPASS_PIPE: the pipeline with bit-exact switches
+     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
      packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
      copy_rows: cuda.Function,
-     put_slot: cuda.Function,
-@@ -110,17 +111,16 @@ pub const Modules = struct {
-             std.log.warn("TF_GLM_OVN_SPARSE_ONEPASS: the onepass kernel is not used ({t}); prompt rows keep the chunk programs", .{err});
-             break :blk null;
-         };
+@@ -102,17 +104,16 @@ pub const Modules = struct {
+                 break :blk null;
+             };
+         } else std.log.warn("TF_GLM_DSCORES=0: a decode window's index scores keep tf_glm_scores", .{});
 -        m.tiled = false;
          m.pools32 = cuda.ovn.on("POOLS32");
          m.packs = null; // `m` starts undefined: the field default does not apply
@@ -735,28 +729,28 @@ index c881ff1ebc1020622ce9f49614aa1bbc40dbf112..d15ef692202bcf65d45c6413bfab2337
      pub fn ops(m: *const Modules) cuda.Module {
          return m.mods[1];
      }
-@@ -129,6 +129,7 @@ pub const Modules = struct {
+@@ -120,6 +121,7 @@ pub const Modules = struct {
+     pub fn deinit(m: *Modules) void {
          if (m.index) |*x| x.unload();
          if (m.dscore) |*x| x.unload();
-         if (m.onepass) |*x| x.unload();
 +        if (m.onepass_pipe) |*x| x.unload();
          m.exl3.unload();
          for (&m.mods) |*x| x.unload();
          m.lane.unload();
-@@ -187,7 +188,7 @@ pub const Forward = struct {
+@@ -178,7 +180,7 @@ pub const Forward = struct {
      }
  
      pub fn set(f: *const Forward) glue.Set {
--        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .onepass = if (f.m.onepass) |x| x.f else null };
-+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
+-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null };
++        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
      }
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 30c1ce6c5cddbe331983cb6d5b303f400cab4230..2f8f5e151c6743dae907f309a16f38175c66642d 100644
+index 631d570dc..21ffc28f8 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -19,8 +19,32 @@ pub const Set = struct {
+@@ -19,6 +19,30 @@ pub const Set = struct {
      dsel: bool = false,
      /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
      dscore: ?*const index_mod.Kernels = null,
@@ -764,8 +758,6 @@ index 30c1ce6c5cddbe331983cb6d5b303f400cab4230..2f8f5e151c6743dae907f309a16f3817
 +    pdl_early: bool = false,
 +    /// The MLA launch choices (TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC); the defaults launch today's.
 +    mla: Mla = .{},
-     /// TF_GLM_OVN_SPARSE_ONEPASS's kernel, or null with the switch off.
-     onepass: ?cuda.Function = null,
 +    /// TF_GLM_OVN_ONEPASS_PIPE's chunk kernel, or null with the switch off.
 +    onepass_pipe: ?cuda.Function = null,
 +};
@@ -790,7 +782,7 @@ index 30c1ce6c5cddbe331983cb6d5b303f400cab4230..2f8f5e151c6743dae907f309a16f3817
  
  /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.
 diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
-index c89e2c55d41d08a34126b65a08440ffbccb35bd0..3edc57c0c18b3122c42bb7ea16230ae117bf1b88 100644
+index 109cc7ece..d0435d330 100644
 --- a/zig/src/families/glm/cuda_onepass.zig
 +++ b/zig/src/families/glm/cuda_onepass.zig
 @@ -8,6 +8,8 @@ const latent = @import("cuda_latent.zig");
@@ -802,22 +794,13 @@ index c89e2c55d41d08a34126b65a08440ffbccb35bd0..3edc57c0c18b3122c42bb7ea16230ae1
  /// The heads a rank carries for the kernel: production's 16 < H <= 24 (TP=3's 22 / 21).
  pub const min_heads = 17;
  pub const max_heads = 24;
-@@ -37,11 +39,68 @@ pub fn wanted() bool {
-     return cuda.ovn.on("SPARSE_ONEPASS");
- }
+@@ -32,11 +34,59 @@ pub const Kernels = struct {
+     }
+ };
  
 +/// TF_GLM_OVN_ONEPASS_PIPE, read at load: the one-pass pipeline whose exact variant equals the fused kernel.
 +pub fn wantedPipe() bool {
 +    return cuda.ovn.on("ONEPASS_PIPE");
-+}
-+
-+/// The kernels when the knob asks for them, else null; one that will not load is logged and left out.
-+pub fn open(d: *const cuda.Driver, image: []const u8, major: u32) ?Kernels {
-+    if (!wanted()) return null;
-+    return Kernels.load(d, image, major) catch |err| {
-+        std.log.warn("TF_GLM_OVN_SPARSE_ONEPASS: the onepass kernel is not used ({t}); prompt rows keep the chunk programs", .{err});
-+        return null;
-+    };
 +}
 +
 +/// TF_GLM_OVN_ONEPASS_PIPE (glm_onepass_pipe.cu): `exact` equals the fused kernel; the singles are bench arms.
@@ -871,7 +854,7 @@ index c89e2c55d41d08a34126b65a08440ffbccb35bd0..3edc57c0c18b3122c42bb7ea16230ae1
  /// latent.sparse_onepass: rows with counts > 0 over their `w`-wide token lists (as `t` maps them) into out bf16.
  pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: latent.Table, tokens: u64, counts: u64, w: usize, out: u64, rows: usize, heads: usize, scale: f32) !void {
      if (rows == 0) return;
-@@ -52,6 +111,16 @@ pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u
+@@ -47,6 +97,16 @@ pub fn run(f: cuda.Function, stream: cuda.Stream, qa: u64, cache: u64, scales: u
      try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads }, .shared = smem }, stream, &a);
  }
  
@@ -888,7 +871,7 @@ index c89e2c55d41d08a34126b65a08440ffbccb35bd0..3edc57c0c18b3122c42bb7ea16230ae1
  test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
      try std.testing.expect(takes(true, 0x1000, 22, 512));
      try std.testing.expect(takes(true, 0x1000, 21, 512));
-@@ -61,3 +130,26 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
+@@ -56,3 +116,26 @@ test "onepass: prompt rows on an FP8 cache at TP=3's head counts only" {
      try std.testing.expect(!takes(true, 0x1000, 16, 512));
      try std.testing.expectEqual(@as(u32, 100416), smem); // glm_onepass.cu's static_assert
  }
@@ -917,7 +900,7 @@ index c89e2c55d41d08a34126b65a08440ffbccb35bd0..3edc57c0c18b3122c42bb7ea16230ae1
 +}
 diff --git a/zig/src/families/glm/cuda_onepass_order_test.zig b/zig/src/families/glm/cuda_onepass_order_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..d04a79e1ff7b1ce70effa0bf4fe47fe018282044
+index 000000000..d04a79e1f
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_onepass_order_test.zig
 @@ -0,0 +1,254 @@
@@ -1176,13 +1159,13 @@ index 0000000000000000000000000000000000000000..d04a79e1ff7b1ce70effa0bf4fe47fe0
 +    }
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 39927ef7804b6c0ea631bb2e53409d40274cae51..9bbf5ea67acd30db4299effe694e69d3e8a6a5f0 100644
+index 9c3049d1f..fa173959f 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -165,6 +165,10 @@ pub const rules = [_]Rule{
-     .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
-     .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_GLM_OVN_SPARSE_ONEPASS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+@@ -157,6 +157,10 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_DECODE_INDEX", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows below which a decode window scores with shared key tiles and the split select" },
+     .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_ONEPASS_PIPE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
 +    .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

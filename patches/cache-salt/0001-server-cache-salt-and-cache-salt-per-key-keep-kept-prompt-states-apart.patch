@@ -32,7 +32,7 @@ patches/pr1411); it adds and removes exactly the lines of lane V129B's pristine-
 ---
 
 diff --git a/docs/api.md b/docs/api.md
-index 1032304a71e44cd6a2dd93f30073499de7f329d1..fba33fb83f091a0ba659996a19a97b06ddd38351 100644
+index 1032304a7..fba33fb83 100644
 --- a/docs/api.md
 +++ b/docs/api.md
 @@ -171,12 +171,12 @@ Unsupported image input, audio, video and non-text output requests receive HTTP
@@ -83,7 +83,7 @@ index 1032304a71e44cd6a2dd93f30073499de7f329d1..fba33fb83f091a0ba659996a19a97b06
  
  Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
 diff --git a/docs/environment.md b/docs/environment.md
-index 514689484e493c98ce3448368de675515a34ef13..08f13ca45deba70f35484732861b8035f9f4c812 100644
+index 771e1b5d6..2ae3fea2b 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
 @@ -16,7 +16,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
@@ -97,7 +97,7 @@ index 514689484e493c98ce3448368de675515a34ef13..08f13ca45deba70f35484732861b8035
  | `TF_SHARED_PRICE_LOG` | Exactly `0` or `1`; default off. `1` logs, at an engine's first priced shared round, the load-time shared forward costs and head steps, then one `shared price: round` line a priced shared round: its trial flag, rows, time, each stream's drafts and next depth, the plain and row prices and each stream's acceptance estimates |
 diff --git a/zig/src/core/cache_salt_disk_test.zig b/zig/src/core/cache_salt_disk_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..f74397f38b4511661cbefb1e2b015af3bf66aacb
+index 000000000..f74397f38
 --- /dev/null
 +++ b/zig/src/core/cache_salt_disk_test.zig
 @@ -0,0 +1,62 @@
@@ -165,7 +165,7 @@ index 0000000000000000000000000000000000000000..f74397f38b4511661cbefb1e2b015af3
 +}
 diff --git a/zig/src/core/cache_salt_key.zig b/zig/src/core/cache_salt_key.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..397588a9d1c2cf2dce0d8163c46b3c28c9001cfb
+index 000000000..397588a9d
 --- /dev/null
 +++ b/zig/src/core/cache_salt_key.zig
 @@ -0,0 +1,41 @@
@@ -211,7 +211,7 @@ index 0000000000000000000000000000000000000000..397588a9d1c2cf2dce0d8163c46b3c28
 +    _ = @import("cache_salt_disk_test.zig");
 +}
 diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
-index 53cab13e8091b9d1dbdb303eb7d8a4d0810d0ae4..9ce0618c827fb11ff20658e80a697ee9f39ae5b0 100644
+index 53cab13e8..9ce0618c8 100644
 --- a/zig/src/core/engine_api.zig
 +++ b/zig/src/core/engine_api.zig
 @@ -93,6 +93,8 @@ pub const Request = struct {
@@ -241,7 +241,7 @@ index 53cab13e8091b9d1dbdb303eb7d8a4d0810d0ae4..9ce0618c827fb11ff20658e80a697ee9
  pub const prompt_radix = @import("prompt_radix.zig");
  /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
 diff --git a/zig/src/core/engine_capabilities.zig b/zig/src/core/engine_capabilities.zig
-index e1a3c6f858bda6f4893036769b95a000ce3b1bb0..53a546a071d0ed512ffcd1f6ab44867087296f6d 100644
+index e1a3c6f85..53a546a07 100644
 --- a/zig/src/core/engine_capabilities.zig
 +++ b/zig/src/core/engine_capabilities.zig
 @@ -14,6 +14,7 @@ pub const Capability = enum {
@@ -253,7 +253,7 @@ index e1a3c6f858bda6f4893036769b95a000ce3b1bb0..53a546a071d0ed512ffcd1f6ab448670
      plain_only,
      decides,
 diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
-index b6338b40166a7c962ed0842b31b7334832ad4669..d2e3508b0aeb02232fb9c1260839bba2603f40d7 100644
+index b6338b401..d2e3508b0 100644
 --- a/zig/src/core/lane_host.zig
 +++ b/zig/src/core/lane_host.zig
 @@ -23,7 +23,6 @@ const Engine = api.Engine;
@@ -295,7 +295,7 @@ index b6338b40166a7c962ed0842b31b7334832ad4669..d2e3508b0aeb02232fb9c1260839bba2
                  store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
              }
 diff --git a/zig/src/core/lane_host_recall.zig b/zig/src/core/lane_host_recall.zig
-index 517d4bbc1d6b03a5fb86b682cca5719f1001ceb6..1bf99cf14f36e1f64b636d2425b94740cb2f76d7 100644
+index 517d4bbc1..1bf99cf14 100644
 --- a/zig/src/core/lane_host_recall.zig
 +++ b/zig/src/core/lane_host_recall.zig
 @@ -20,18 +20,18 @@ pub fn attach(ctx: *anyopaque, store: *Store) void {
@@ -322,7 +322,7 @@ index 517d4bbc1d6b03a5fb86b682cca5719f1001ceb6..1bf99cf14f36e1f64b636d2425b94740
  
  /// The prompt pass ended: what came before its resume point an earlier request read already.
 diff --git a/zig/src/core/lane_host_recall_test.zig b/zig/src/core/lane_host_recall_test.zig
-index baaed26045e1aad516735da9b346f28f4a10c37d..3baf0b5cbd3f13ef58d2c6038f56167d5657dc98 100644
+index baaed2604..3baf0b5cb 100644
 --- a/zig/src/core/lane_host_recall_test.zig
 +++ b/zig/src/core/lane_host_recall_test.zig
 @@ -378,3 +378,41 @@ test "restore scale: Recall survives a failed round and a queued cancellation wi
@@ -368,7 +368,7 @@ index baaed26045e1aad516735da9b346f28f4a10c37d..3baf0b5cbd3f13ef58d2c6038f56167d
 +    try std.testing.expect(plain.rounds < first.rounds); // the record serves an unsalted repeat, as before
 +}
 diff --git a/zig/src/core/rows_all_test.zig b/zig/src/core/rows_all_test.zig
-index 04c61c24a0f12a1d871a179410fc2f881c4d2c0b..4a4582f70ededde861e96320ba9436e3dbbde060 100644
+index 04c61c24a..4a4582f70 100644
 --- a/zig/src/core/rows_all_test.zig
 +++ b/zig/src/core/rows_all_test.zig
 @@ -22,6 +22,7 @@ test {
@@ -380,7 +380,7 @@ index 04c61c24a0f12a1d871a179410fc2f881c4d2c0b..4a4582f70ededde861e96320ba9436e3
      _ = @import("rows_image_note_test.zig");
  }
 diff --git a/zig/src/server/anthropic_translate.zig b/zig/src/server/anthropic_translate.zig
-index a4d16e0d18eccc2370a6b2bdea62dafdc4c9ef7b..85fef0eb8100d27ed168cb40c184db74c28331f7 100644
+index a4d16e0d1..85fef0eb8 100644
 --- a/zig/src/server/anthropic_translate.zig
 +++ b/zig/src/server/anthropic_translate.zig
 @@ -226,7 +226,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
@@ -394,7 +394,7 @@ index a4d16e0d18eccc2370a6b2bdea62dafdc4c9ef7b..85fef0eb8100d27ed168cb40c184db74
              if (s != .string or s.string.len == 0) break false;
 diff --git a/zig/src/server/cache_salt.zig b/zig/src/server/cache_salt.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..e534fe4a8dc56e76c2a605166192b514bb236dbc
+index 000000000..e534fe4a8
 --- /dev/null
 +++ b/zig/src/server/cache_salt.zig
 @@ -0,0 +1,106 @@
@@ -506,7 +506,7 @@ index 0000000000000000000000000000000000000000..e534fe4a8dc56e76c2a605166192b514
 +}
 diff --git a/zig/src/server/cache_salt_test.zig b/zig/src/server/cache_salt_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..e7d3c67acb41c3201365e700f110bb71f12e9e12
+index 000000000..e7d3c67ac
 --- /dev/null
 +++ b/zig/src/server/cache_salt_test.zig
 @@ -0,0 +1,331 @@
@@ -842,7 +842,7 @@ index 0000000000000000000000000000000000000000..e7d3c67acb41c3201365e700f110bb71
 +    try std.testing.expectEqualStrings("tenant-a", t.chat.strField("cache_salt").?);
 +}
 diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
-index fa84ccdc9dd7bb4ff04b727e164450840751365d..4492069e3fe5fbdb40b81b06c38f69d7885a9998 100644
+index fa84ccdc9..4492069e3 100644
 --- a/zig/src/server/chat.zig
 +++ b/zig/src/server/chat.zig
 @@ -46,6 +46,8 @@ pub const Input = struct {
@@ -865,7 +865,7 @@ index fa84ccdc9dd7bb4ff04b727e164450840751365d..4492069e3fe5fbdb40b81b06c38f69d7
      server_mod.nameStructure(input.format, &request);
      errdefer srv.release(false, request);
 diff --git a/zig/src/server/cli.zig b/zig/src/server/cli.zig
-index e025ad5ef5a59c519b46e8153a4bb00677a60613..151bbf09d6fa6d79199e1ff73a782bf6d7cae44c 100644
+index e025ad5ef..151bbf09d 100644
 --- a/zig/src/server/cli.zig
 +++ b/zig/src/server/cli.zig
 @@ -74,6 +74,7 @@ pub const flags = [_]Flag{
@@ -907,7 +907,7 @@ index e025ad5ef5a59c519b46e8153a4bb00677a60613..151bbf09d6fa6d79199e1ff73a782bf6
          out.compact_fraction = null;
          if (!out.compact_auto) {
 diff --git a/zig/src/server/compact.zig b/zig/src/server/compact.zig
-index 6461cfc0caa086f0eec27ac0f282e2bc5a7807ce..9fd7e30e6e51ed15138cf867dd0811afc5a6a8d9 100644
+index 6461cfc0c..9fd7e30e6 100644
 --- a/zig/src/server/compact.zig
 +++ b/zig/src/server/compact.zig
 @@ -102,6 +102,7 @@ pub fn run(srv: *Server, cx: *Cx, input: chat.Input, sink: ?chat.Sink, gone: any
@@ -937,7 +937,7 @@ index 6461cfc0caa086f0eec27ac0f282e2bc5a7807ce..9fd7e30e6e51ed15138cf867dd0811af
                  .prepared = prepared,
                  .stamp = .{
 diff --git a/zig/src/server/compact_mem.zig b/zig/src/server/compact_mem.zig
-index 943f9cc32f9af5e0493c0c71ff34db5a7c8af851..3161c29748d43f3daf218131d10c9120e5dcda2b 100644
+index 943f9cc32..3161c2974 100644
 --- a/zig/src/server/compact_mem.zig
 +++ b/zig/src/server/compact_mem.zig
 @@ -25,7 +25,9 @@ pub fn hashes(a: Allocator, msgs: []const Value, mem: Mem) bool {
@@ -963,7 +963,7 @@ index 943f9cc32f9af5e0493c0c71ff34db5a7c8af851..3161c29748d43f3daf218131d10c9120
      // a folder made here is the owner's alone; one that already exists keeps the mode its owner gave it
      const Permissions = std.Io.File.Permissions;
 diff --git a/zig/src/server/cortheon/cortheon.zig b/zig/src/server/cortheon/cortheon.zig
-index 28c7e7b2e569817a05fb31fc2be7d3790e704d23..c09eaec7c3c3191ecfe5f2fd6b4d713a0f9c8add 100644
+index 28c7e7b2e..c09eaec7c 100644
 --- a/zig/src/server/cortheon/cortheon.zig
 +++ b/zig/src/server/cortheon/cortheon.zig
 @@ -63,6 +63,7 @@ pub const Turn = struct {
@@ -1003,7 +1003,7 @@ index 28c7e7b2e569817a05fb31fc2be7d3790e704d23..c09eaec7c3c3191ecfe5f2fd6b4d713a
      };
      for (spliced) |m| if (!roleIs(m, "assistant")) try t.seen.addFrom(a, try memory.text(a, m));
 diff --git a/zig/src/server/cortheon/cortheon_test.zig b/zig/src/server/cortheon/cortheon_test.zig
-index b759c54d26cbc2fe1796a5578b5ee2d1520fda70..59bab9d2c90c86f5a333a2c4a7ab0ec91acef73d 100644
+index b759c54d2..59bab9d2c 100644
 --- a/zig/src/server/cortheon/cortheon_test.zig
 +++ b/zig/src/server/cortheon/cortheon_test.zig
 @@ -88,6 +88,7 @@ pub const Eng = struct {
@@ -1059,7 +1059,7 @@ index b759c54d26cbc2fe1796a5578b5ee2d1520fda70..59bab9d2c90c86f5a333a2c4a7ab0ec9
      for ([_]api.SubmitError{ error.Closed, error.Busy }) |reason| {
          var rig: Rig = .{ .eng = .{ .script = &.{"Zig latest release notes"}, .refuse_at = 1, .refusal = reason } };
 diff --git a/zig/src/server/cortheon/memory.zig b/zig/src/server/cortheon/memory.zig
-index 43c05e4bb7fd0a66e0e326dded922c794513cea1..8449c9c73cac0330ea1aba6287cf025f81296001 100644
+index 43c05e4bb..8449c9c73 100644
 --- a/zig/src/server/cortheon/memory.zig
 +++ b/zig/src/server/cortheon/memory.zig
 @@ -203,11 +203,11 @@ pub fn userKey(a: Allocator, messages: []const Value) Allocator.Error!u64 {
@@ -1093,7 +1093,7 @@ index 43c05e4bb7fd0a66e0e326dded922c794513cea1..8449c9c73cac0330ea1aba6287cf025f
      const call_b = (try json.parseText(a, "{\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"zz\", \"function\": {\"name\": \"bash\", \"arguments\": {\"a\": 2, \"b\": 1}}}]}")).ok;
      const u = try msg(a, "user", "run it");
 diff --git a/zig/src/server/cortheon/research.zig b/zig/src/server/cortheon/research.zig
-index bf460c6c22267016af3363fa29fde8ed19c8adb0..71472bfa9ce268ca65368aa70cee6b59f22fbe10 100644
+index bf460c6c2..71472bfa9 100644
 --- a/zig/src/server/cortheon/research.zig
 +++ b/zig/src/server/cortheon/research.zig
 @@ -70,7 +70,7 @@ fn plan(t: *Turn, srv: *Server, a: Allocator, gone: anytype) chat.Failure![]cons
@@ -1106,7 +1106,7 @@ index bf460c6c22267016af3363fa29fde8ed19c8adb0..71472bfa9ce268ca65368aa70cee6b59
          error.OutOfMemory => return error.OutOfMemory,
          else => return fallback(a, t.goal),
 diff --git a/zig/src/server/errors.zig b/zig/src/server/errors.zig
-index ff1a7ca2e9c6766226293ce786327e96770d57a8..39045b9bb36bcf1b463161217fc6685b02093d3b 100644
+index ff1a7ca2e..39045b9bb 100644
 --- a/zig/src/server/errors.zig
 +++ b/zig/src/server/errors.zig
 @@ -38,6 +38,8 @@ pub const Cx = struct {
@@ -1119,7 +1119,7 @@ index ff1a7ca2e9c6766226293ce786327e96770d57a8..39045b9bb36bcf1b463161217fc6685b
      pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
          cx.kind = kind;
 diff --git a/zig/src/server/imprint_routes.zig b/zig/src/server/imprint_routes.zig
-index ad08b0d5fc477305bb73478d84b73fa23d340627..d40419fdfd7fd192a132a9f6d17f4e14089bc31b 100644
+index ad08b0d5f..d40419fdf 100644
 --- a/zig/src/server/imprint_routes.zig
 +++ b/zig/src/server/imprint_routes.zig
 @@ -32,7 +32,8 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, op: api.ImprintOp) void {
@@ -1152,7 +1152,7 @@ index ad08b0d5fc477305bb73478d84b73fa23d340627..d40419fdfd7fd192a132a9f6d17f4e14
      srv.gpa.free(ask.prompt);
      srv.gpa.free(ask.starts);
 diff --git a/zig/src/server/main.zig b/zig/src/server/main.zig
-index 9a3ccc2703d3de17830f800fd0602eef0e386726..af3d594c10caf225db46deea448bed5511193fff 100644
+index 9a3ccc270..af3d594c1 100644
 --- a/zig/src/server/main.zig
 +++ b/zig/src/server/main.zig
 @@ -27,7 +27,7 @@ const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HO
@@ -1165,7 +1165,7 @@ index 9a3ccc2703d3de17830f800fd0602eef0e386726..af3d594c10caf225db46deea448bed55
      " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
      " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--prompt-seed]" ++
 diff --git a/zig/src/server/openai.zig b/zig/src/server/openai.zig
-index 5437dc939fbc540675acc712060a7eb45ad1a8ca..ac3ec0bb8e54ed2ee7d0ad06344368f55f0916bc 100644
+index 5437dc939..ac3ec0bb8 100644
 --- a/zig/src/server/openai.zig
 +++ b/zig/src/server/openai.zig
 @@ -143,6 +143,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
@@ -1185,7 +1185,7 @@ index 5437dc939fbc540675acc712060a7eb45ad1a8ca..ac3ec0bb8e54ed2ee7d0ad06344368f5
      var r: Run = .{ .srv = srv, .a = a, .out = observed, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
      if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 diff --git a/zig/src/server/private_files_test.zig b/zig/src/server/private_files_test.zig
-index 093303639b6bd11943663d432c84c5ba266279be..a5024078cb617338d329855c0bf9f98e11335d21 100644
+index 093303639..a5024078c 100644
 --- a/zig/src/server/private_files_test.zig
 +++ b/zig/src/server/private_files_test.zig
 @@ -44,7 +44,7 @@ test "security: a conversation note is owner-only and is not written through a p
@@ -1221,7 +1221,7 @@ index 093303639b6bd11943663d432c84c5ba266279be..a5024078cb617338d329855c0bf9f98e
      try testing.expectEqual(@as(u32, 0), @as(u32, @intCast(st.permissions.toMode() & 0o077)));
  }
 diff --git a/zig/src/server/request_log.zig b/zig/src/server/request_log.zig
-index 394dc63e83ce6b9fae8fec56312328a68b2b19c5..2abc037cc226e5695f588afc58a0ab0cd3bbd5cb 100644
+index 394dc63e8..2abc037cc 100644
 --- a/zig/src/server/request_log.zig
 +++ b/zig/src/server/request_log.zig
 @@ -1,4 +1,4 @@
@@ -1274,7 +1274,7 @@ index 394dc63e83ce6b9fae8fec56312328a68b2b19c5..2abc037cc226e5695f588afc58a0ab0c
  }
  
 diff --git a/zig/src/server/responses_translate.zig b/zig/src/server/responses_translate.zig
-index 911b68f0cf8cb258eb15f956c402b4c0b79e37e7..cc5d98f3c18e1c71b600b7faed9963e02bda4641 100644
+index 911b68f0c..cc5d98f3c 100644
 --- a/zig/src/server/responses_translate.zig
 +++ b/zig/src/server/responses_translate.zig
 @@ -10,7 +10,7 @@ const Cx = errors.Cx;
@@ -1287,7 +1287,7 @@ index 911b68f0cf8cb258eb15f956c402b4c0b79e37e7..cc5d98f3c18e1c71b600b7faed9963e0
      .{ "conversation", "conversations are not supported: send previous_response_id or the items" },
      .{ "prompt", "prompt templates are not supported: send input and instructions" },
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index 3d5508355658f37b48f9650713b7af5f6cce512c..749b8115afea97d2dec000eafd48d6875b88c8cd 100644
+index 3d5508355..749b8115a 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
 @@ -83,6 +83,8 @@ test {
@@ -1300,7 +1300,7 @@ index 3d5508355658f37b48f9650713b7af5f6cce512c..749b8115afea97d2dec000eafd48d687
      _ = @import("metrics.zig");
      _ = @import("load_metrics.zig");
 diff --git a/zig/src/server/serve.zig b/zig/src/server/serve.zig
-index b3e37c27ca6d9e6a244e9ce0bd5a3094282510e4..7b72c3c85f944d11aef5325d3dd99fabcfb0e896 100644
+index b3e37c27c..7b72c3c85 100644
 --- a/zig/src/server/serve.zig
 +++ b/zig/src/server/serve.zig
 @@ -216,6 +216,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
@@ -1324,7 +1324,7 @@ index b3e37c27ca6d9e6a244e9ce0bd5a3094282510e4..7b72c3c85f944d11aef5325d3dd99fab
      const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
      installSignals(store.enabled());
 diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
-index 41e0dbe7b9195c80a66a915a036cf7506d588d49..52c88a5682b35a1c0211cddd1b95a86f5d1d0749 100644
+index 41e0dbe7b..52c88a568 100644
 --- a/zig/src/server/server.zig
 +++ b/zig/src/server/server.zig
 @@ -77,6 +77,7 @@ pub const Config = struct {
@@ -1348,7 +1348,7 @@ index 41e0dbe7b9195c80a66a915a036cf7506d588d49..52c88a5682b35a1c0211cddd1b95a86f
      /// Connections open now; a stop waits for them before freeing what they read.
      open_connections: std.atomic.Value(u32) = .init(0),
 diff --git a/zig/src/server/warm.zig b/zig/src/server/warm.zig
-index 2885b63126ea59ca3a1349786b738bb38f1caed9..592f7e60d4882871d1d4c4ed89d43ff8a3a3891d 100644
+index 2885b6312..592f7e60d 100644
 --- a/zig/src/server/warm.zig
 +++ b/zig/src/server/warm.zig
 @@ -80,6 +80,9 @@ fn start(srv: *Server, input: chat.Input, sent: Value, reasoning: ?[]const u8, t

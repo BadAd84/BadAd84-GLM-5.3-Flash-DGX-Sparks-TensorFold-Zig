@@ -120,10 +120,10 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: the render-once pieces onto v1.2.9's template limits/steps/stack and tokenizer RegexBudget; eval.Ctx.enter's brace and the kept table's RegexBudget arm are in this patch, and the two probes call Once; eval.Ctx's watch field sits with the other fields; server.zig stays at 600 by moving needsUserAfterTool to prompt.zig
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 130bdf0624f76f2abe738844c6f2ca4190b02c8f..662ff927f9156b9cdbf370279e4414fc20b15a13 100644
+index 0b4ddbb48..e493d2ae9 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -111,6 +111,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -100,6 +100,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_FUSE` | Whole row count; a decode window of at most this many rows runs each hc_post with the next site's hc_pre in one kernel; default 0 (off) |
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
@@ -132,7 +132,7 @@ index 130bdf0624f76f2abe738844c6f2ca4190b02c8f..662ff927f9156b9cdbf370279e4414fc
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/cuda_server_host.zig b/zig/build/cuda_server_host.zig
-index 60376a37bc3c5d2cec5fcf81b5050ce42f1fd285..1aebb3b09d9800d0be6ee86f44da7d6cfc95135d 100644
+index 60376a37b..1aebb3b09 100644
 --- a/zig/build/cuda_server_host.zig
 +++ b/zig/build/cuda_server_host.zig
 @@ -79,6 +79,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
@@ -146,7 +146,7 @@ index 60376a37bc3c5d2cec5fcf81b5050ce42f1fd285..1aebb3b09d9800d0be6ee86f44da7d6c
      // the 512 KiB grammar limit: a sent grammar by its text, tools by the grammar for one call (#3038)
      b.step("test-grammar-size-host", "Grammar and tool size limits before compiling, with the fake grammar library").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "a grammar over the size limit", "tools count once" } })).step);
 diff --git a/zig/src/core/template/eval.zig b/zig/src/core/template/eval.zig
-index f4161f61e29c44ad527507a4712523fd0a5b6b24..84f004d5bf962d6fdb770d7265ae04cfdb21f258 100644
+index f4161f61e..84f004d5b 100644
 --- a/zig/src/core/template/eval.zig
 +++ b/zig/src/core/template/eval.zig
 @@ -32,6 +32,8 @@ pub const Ctx = struct {
@@ -216,7 +216,7 @@ index f4161f61e29c44ad527507a4712523fd0a5b6b24..84f004d5bf962d6fdb770d7265ae04cf
 +}
 diff --git a/zig/src/core/template/generation.zig b/zig/src/core/template/generation.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..d374941731a583d9ec8d8439010b1919739b45d7
+index 000000000..d37494173
 --- /dev/null
 +++ b/zig/src/core/template/generation.zig
 @@ -0,0 +1,87 @@
@@ -309,7 +309,7 @@ index 0000000000000000000000000000000000000000..d374941731a583d9ec8d8439010b1919
 +}
 diff --git a/zig/src/core/template/generation_test.zig b/zig/src/core/template/generation_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..32c21124b3168a58983579f4e3704b1fd34ca29b
+index 000000000..32c21124b
 --- /dev/null
 +++ b/zig/src/core/template/generation_test.zig
 @@ -0,0 +1,120 @@
@@ -434,7 +434,7 @@ index 0000000000000000000000000000000000000000..32c21124b3168a58983579f4e3704b1f
 +    try t.expect(stopped > 100);
 +}
 diff --git a/zig/src/core/template/template.zig b/zig/src/core/template/template.zig
-index f7d492dce882ed6fa8b3fc1a79bd565b4e907b98..d5f97cf23ea7e45dd59430ec768e8aa2dd4e5813 100644
+index f7d492dce..d5f97cf23 100644
 --- a/zig/src/core/template/template.zig
 +++ b/zig/src/core/template/template.zig
 @@ -26,6 +26,8 @@ pub const Compiled = struct {
@@ -547,7 +547,7 @@ index f7d492dce882ed6fa8b3fc1a79bd565b4e907b98..d5f97cf23ea7e45dd59430ec768e8aa2
  }
 diff --git a/zig/src/core/template/watch.zig b/zig/src/core/template/watch.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6c9084f6c5851dda3147e11b05550b8c8b8bbdd
+index 000000000..c6c9084f6
 --- /dev/null
 +++ b/zig/src/core/template/watch.zig
 @@ -0,0 +1,29 @@
@@ -582,7 +582,7 @@ index 0000000000000000000000000000000000000000..c6c9084f6c5851dda3147e11b05550b8
 +};
 diff --git a/zig/src/core/tokenizer/kept.zig b/zig/src/core/tokenizer/kept.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ecac15be9e77639381add3ba2078da93c7ae1a0
+index 000000000..5ecac15be
 --- /dev/null
 +++ b/zig/src/core/tokenizer/kept.zig
 @@ -0,0 +1,160 @@
@@ -748,7 +748,7 @@ index 0000000000000000000000000000000000000000..5ecac15be9e77639381add3ba2078da9
 +}
 diff --git a/zig/src/core/tokenizer/kept_test.zig b/zig/src/core/tokenizer/kept_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..8f05525c0851e379070bf9540b049948251d65d2
+index 000000000..8f05525c0
 --- /dev/null
 +++ b/zig/src/core/tokenizer/kept_test.zig
 @@ -0,0 +1,169 @@
@@ -922,7 +922,7 @@ index 0000000000000000000000000000000000000000..8f05525c0851e379070bf9540b049948
 +    try t.expectError(error.UnsafeAddedTokenMask, kept.pieces(&tokenizer, a, &held, refused, &quoted));
 +}
 diff --git a/zig/src/core/tokenizer/tokenizer.zig b/zig/src/core/tokenizer/tokenizer.zig
-index c0b4de1583e96481576d9ff6d052678e0bab30c5..e33f956d8c03c0e6598b30cc41037eebb6f5b023 100644
+index c0b4de158..e33f956d8 100644
 --- a/zig/src/core/tokenizer/tokenizer.zig
 +++ b/zig/src/core/tokenizer/tokenizer.zig
 @@ -9,6 +9,7 @@ const qwen2_slow = @import("qwen2_slow.zig");
@@ -1050,10 +1050,10 @@ index c0b4de1583e96481576d9ff6d052678e0bab30c5..e33f956d8c03c0e6598b30cc41037eeb
  }
  
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index d563790609e6c9dab0440494b33574ebdb1cf8cd..99098027a5ef33d71d2a62a92ed53ccb3a1b9af7 100644
+index 06ecb8f56..62b6e67a2 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -179,6 +179,7 @@ pub const rules = [_]Rule{
+@@ -168,6 +168,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_FUSE", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the most rows a decode window glues in one fused kernel" },
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
@@ -1063,7 +1063,7 @@ index d563790609e6c9dab0440494b33574ebdb1cf8cd..99098027a5ef33d71d2a62a92ed53ccb
      .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
 diff --git a/zig/src/server/fixtures/glm53/chat_template.jinja b/zig/src/server/fixtures/glm53/chat_template.jinja
 new file mode 100644
-index 0000000000000000000000000000000000000000..15bf200ee8fb7ca3c5bdd362429aa801f4f033f6
+index 000000000..15bf200ee
 --- /dev/null
 +++ b/zig/src/server/fixtures/glm53/chat_template.jinja
 @@ -0,0 +1,210 @@
@@ -1278,7 +1278,7 @@ index 0000000000000000000000000000000000000000..15bf200ee8fb7ca3c5bdd362429aa801
 +    <|assistant|>{{- '<think>' -}}
 +{%- endif -%}
 diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
-index 204046b33ca9149f56b915718e72f55c22f6d6c7..d1c4f11d76cc794969f7f04e23251ed9db4ed4f7 100644
+index 204046b33..d1c4f11d7 100644
 --- a/zig/src/server/hf_text.zig
 +++ b/zig/src/server/hf_text.zig
 @@ -4,6 +4,7 @@ const tokenizer = @import("tokenizer");
@@ -1336,7 +1336,7 @@ index 204046b33ca9149f56b915718e72f55c22f6d6c7..d1c4f11d76cc794969f7f04e23251ed9
  
 diff --git a/zig/src/server/hf_text_kept.zig b/zig/src/server/hf_text_kept.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd45d3c5e84fd7a9485e2f555a1a59b55903e85d
+index 000000000..cd45d3c5e
 --- /dev/null
 +++ b/zig/src/server/hf_text_kept.zig
 @@ -0,0 +1,43 @@
@@ -1384,7 +1384,7 @@ index 0000000000000000000000000000000000000000..cd45d3c5e84fd7a9485e2f555a1a59b5
 +    return error.Template;
 +}
 diff --git a/zig/src/server/messages.zig b/zig/src/server/messages.zig
-index 7489ee123de21c7bdf2aa05cbb98b3cdf26d31e4..6f417507d7583b37426742ed2c6688aad2a5534f 100644
+index 7489ee123..6f417507d 100644
 --- a/zig/src/server/messages.zig
 +++ b/zig/src/server/messages.zig
 @@ -245,15 +245,26 @@ fn orderResultRun(a: std.mem.Allocator, calls: []const Value, results: []Value)
@@ -1423,7 +1423,7 @@ index 7489ee123de21c7bdf2aa05cbb98b3cdf26d31e4..6f417507d7583b37426742ed2c6688aa
      return .{ .array = out };
  }
 diff --git a/zig/src/server/model_text.zig b/zig/src/server/model_text.zig
-index cc5a61552b788d725c0a16f666a5ab99ec49ebfb..b80580713dde8514592cd11731190172848e9ddf 100644
+index cc5a61552..b80580713 100644
 --- a/zig/src/server/model_text.zig
 +++ b/zig/src/server/model_text.zig
 @@ -18,18 +18,30 @@ pub const RenderOptions = struct {
@@ -1499,7 +1499,7 @@ index cc5a61552b788d725c0a16f666a5ab99ec49ebfb..b80580713dde8514592cd11731190172
  
      pub fn encode(t: Text, a: Allocator, text: []const u8, add_special: bool) Error![]u32 {
 diff --git a/zig/src/server/prompt.zig b/zig/src/server/prompt.zig
-index a4c224a59d76e1ea6f9776abe9aa6a665be6ff5f..5181a89e86f854acb4dfab888672fe863b5c03d7 100644
+index a4c224a59..5181a89e8 100644
 --- a/zig/src/server/prompt.zig
 +++ b/zig/src/server/prompt.zig
 @@ -10,6 +10,8 @@ const images = @import("images.zig");
@@ -1800,7 +1800,7 @@ index a4c224a59d76e1ea6f9776abe9aa6a665be6ff5f..5181a89e86f854acb4dfab888672fe86
 +}
 diff --git a/zig/src/server/prompt_once_test.zig b/zig/src/server/prompt_once_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..eccc45aba0a9bcc290fd9b8da3a0d4ea324773b8
+index 000000000..eccc45aba
 --- /dev/null
 +++ b/zig/src/server/prompt_once_test.zig
 @@ -0,0 +1,185 @@
@@ -1990,7 +1990,7 @@ index 0000000000000000000000000000000000000000..eccc45aba0a9bcc290fd9b8da3a0d4ea
 +    try std.testing.expect(try check(@embedFile("fixtures/glm53/chat_template.jinja"), true, true, 400, 0x637574) > 300);
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index 33d85911408002d3b7638205faf231d28e28b5e7..b81e8ca88f4517d9507e43b9863541c2c8ca5e33 100644
+index 33d859114..b81e8ca88 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
 @@ -337,6 +337,7 @@ test {
@@ -2002,7 +2002,7 @@ index 33d85911408002d3b7638205faf231d28e28b5e7..b81e8ca88f4517d9507e43b9863541c2
  
  test {
 diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
-index 2a3009396f0b556ade74dc274a850eaa11d66579..41e0dbe7b9195c80a66a915a036cf7506d588d49 100644
+index 2a3009396..41e0dbe7b 100644
 --- a/zig/src/server/server.zig
 +++ b/zig/src/server/server.zig
 @@ -142,6 +142,8 @@ pub const Server = struct {
@@ -2037,7 +2037,7 @@ index 2a3009396f0b556ade74dc274a850eaa11d66579..41e0dbe7b9195c80a66a915a036cf750
      const defaults: Config = .{ .served_name = "test", .model_ids = &.{"test"} };
      try std.testing.expect(!defaults.phase_metrics);
 diff --git a/zig/tests/server/prompt_bench.zig b/zig/tests/server/prompt_bench.zig
-index 26db37dc96062a5040ca384a7a6c354f11bdaf24..aa48df61280fa16012506ed4c30659bca08e858a 100644
+index 26db37dc9..aa48df612 100644
 --- a/zig/tests/server/prompt_bench.zig
 +++ b/zig/tests/server/prompt_bench.zig
 @@ -78,8 +78,10 @@ fn agent(a: Allocator, corpus: []const u8, bytes: usize) !struct { prior: []cons

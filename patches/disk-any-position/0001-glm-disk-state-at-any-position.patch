@@ -31,7 +31,7 @@ and solo-cuts).
 ---
 
 diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
-index f448c0b745766695cb7ced4de12b1ee0d5a3ec96..7896807835e4eba2345fa8f6325eed3f275d7071 100644
+index f448c0b74..789680783 100644
 --- a/zig/src/families/glm/cuda_disk_image.zig
 +++ b/zig/src/families/glm/cuda_disk_image.zig
 @@ -107,14 +107,14 @@ fn cache(sh: Shape, n: u64) [5]u64 {
@@ -54,7 +54,7 @@ index f448c0b745766695cb7ced4de12b1ee0d5a3ec96..7896807835e4eba2345fa8f6325eed3f
      const pooled: u64 = at / sparse.pool;
      for (0..sh.layers) |_| {
 diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
-index d68fc56312d95e89780e1c9fe25a14bb5b0fdb80..dd62060d1fcfb0395d7a386bb720563266e5a494 100644
+index d68fc5631..dd62060d1 100644
 --- a/zig/src/families/glm/cuda_disk_image_test.zig
 +++ b/zig/src/families/glm/cuda_disk_image_test.zig
 @@ -102,7 +102,7 @@ test "GLM disk image: the lease bytes the image counts are the snapshot plan's,

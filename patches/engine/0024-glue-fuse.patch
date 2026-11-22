@@ -33,12 +33,12 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: v1.2.9's boundary resolve carries the TP collective our gather routed to (absorbed), so the loop keeps resolve; fused next-site glue, pdl_early threshold and onepass_pipe's exact kernel kept
 
 diff --git a/docs/environment.md b/docs/environment.md
-index be80876bbcabc93c9f5e917788557770be73f10f..9e0533dad98d3d59a7e8ac13beff33ef2b688ad6 100644
+index 8abfbdeed..e05a4e75a 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -107,6 +107,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -96,6 +96,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
  | `TF_GLM_OVN_MM_DECTILE` | Whole block count; a decode launch of fewer blocks takes 16-row windows on 32-column tiles; default 0 (off) |
- | `TF_GLM_OVN_ROUTER16` | Whole number; set, router launches of 16 rows or fewer take the 16-row tile (4: four pipeline stages, any other: three); default 0 (off) |
  | `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
 +| `TF_GLM_OVN_GLUE_FUSE` | Whole row count; a decode window of at most this many rows runs each hc_post with the next site's hc_pre in one kernel; default 0 (off) |
 +| `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
@@ -47,7 +47,7 @@ index be80876bbcabc93c9f5e917788557770be73f10f..9e0533dad98d3d59a7e8ac13beff33ef
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/kernels/cuda/glm_glue_bmm.cuh b/zig/kernels/cuda/glm_glue_bmm.cuh
-index 4f8b15da37f590c6f2872c46f135621e7cfb9209..49e2b9981c371caf354b99d7f20a4fde8765613f 100644
+index 4f8b15da3..49e2b9981 100644
 --- a/zig/kernels/cuda/glm_glue_bmm.cuh
 +++ b/zig/kernels/cuda/glm_glue_bmm.cuh
 @@ -100,16 +100,25 @@ __device__ void bmm(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, f
@@ -135,7 +135,7 @@ index 4f8b15da37f590c6f2872c46f135621e7cfb9209..49e2b9981c371caf354b99d7f20a4fde
    extern "C" __global__ void __launch_bounds__(128)                                                                \
        name(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m, int64_t x_stride,  \
 diff --git a/zig/kernels/cuda/glm_glue_hc.cuh b/zig/kernels/cuda/glm_glue_hc.cuh
-index f15fe6849f36b79fde43d0fd835fa37a3648501e..c3a04a82e094323a2c42ed35757f1e4a7034a11d 100644
+index f15fe6849..c3a04a82e 100644
 --- a/zig/kernels/cuda/glm_glue_hc.cuh
 +++ b/zig/kernels/cuda/glm_glue_hc.cuh
 @@ -2,7 +2,8 @@
@@ -462,7 +462,7 @@ index f15fe6849f36b79fde43d0fd835fa37a3648501e..c3a04a82e094323a2c42ed35757f1e4a
 +TF_GLM_HC_ROW(tf_glm_hc_row_f32w, float)
 +#undef TF_GLM_HC_ROW
 diff --git a/zig/kernels/cuda/glm_glue_norm.cuh b/zig/kernels/cuda/glm_glue_norm.cuh
-index 4c2fad9cd2d9f8c320e8c0afa32ff438e1c64bc2..b036fe83c3b3d113ed218f566ec9e85ce8848874 100644
+index 4c2fad9cd..b036fe83c 100644
 --- a/zig/kernels/cuda/glm_glue_norm.cuh
 +++ b/zig/kernels/cuda/glm_glue_norm.cuh
 @@ -2,7 +2,7 @@
@@ -493,7 +493,7 @@ index 4c2fad9cd2d9f8c320e8c0afa32ff438e1c64bc2..b036fe83c3b3d113ed218f566ec9e85c
 +RMSNORM_PDL(tf_glm_rmsnorm_4096_f32w_pdl, 4096, 4096, 8, 8, float)
 +#undef RMSNORM_PDL
 diff --git a/zig/kernels/cuda/glm_glue_rows.cuh b/zig/kernels/cuda/glm_glue_rows.cuh
-index d141895f54041f81c8a470b080662671ff6b29fa..b9e238d8583631f02eb916e8784a066d6c9ad3a9 100644
+index d141895f5..b9e238d85 100644
 --- a/zig/kernels/cuda/glm_glue_rows.cuh
 +++ b/zig/kernels/cuda/glm_glue_rows.cuh
 @@ -2,7 +2,7 @@
@@ -576,18 +576,18 @@ index d141895f54041f81c8a470b080662671ff6b29fa..b9e238d8583631f02eb916e8784a066d
  
  // glue._combine: fp32 sum over slots in order of y[r][k] wts[r][k] (fma from 0), y fp32 or bf16, 8 columns a thread.
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214e14aeae7 100644
+index 2347eb43e..1a3680720 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
 @@ -29,6 +29,7 @@ const l2pf_mod = @import("cuda_l2pf.zig");
  const pieces_mod = @import("cuda_forward_pieces.zig");
  const onepass_mod = @import("cuda_onepass.zig");
- const kda_chunk = @import("cuda_kda_chunk.zig");
+ 
 +const hc_glue = @import("cuda_forward_glue.zig");
  pub const prefill_rows = state.prefill_rows;
  pub const solo_rows = state.solo_rows;
  pub const window_rows = state.window_rows;
-@@ -60,6 +61,8 @@ pub const Modules = struct {
+@@ -58,6 +59,8 @@ pub const Modules = struct {
      quant: quant.Kernels,
      q4: q4.Kernels,
      mla: glue.Mla, // TF_GLM_OVN_MLA_FUSEMERGE, TF_GLM_OVN_ABSORB_VEC: the MLA launch choices, read at load
@@ -596,7 +596,7 @@ index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214
  
      /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
      pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
-@@ -120,6 +123,8 @@ pub const Modules = struct {
+@@ -110,6 +113,8 @@ pub const Modules = struct {
          m.packs = null; // `m` starts undefined: the field default does not apply
          m.tiled = false;
          m.onepass_pipe = onepass_mod.openPipe(d, k.glm_onepass_pipe, @intCast(try ctx.attribute(.compute_capability_major)));
@@ -605,7 +605,7 @@ index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214
          return m;
      }
  
-@@ -189,12 +194,13 @@ pub const Forward = struct {
+@@ -177,12 +182,13 @@ pub const Forward = struct {
      l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
  
      /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
@@ -615,17 +615,17 @@ index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214
      }
  
      pub fn set(f: *const Forward) glue.Set {
--        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = f.m.mla, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
+-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = f.m.mla, .onepass_pipe = if (f.m.onepass_pipe) |x| x.chunk else null };
 +        const pdl = f.m.pdl_early >= @as(u64, if (f.ranks[0].b.prefill) 2 else 1);
-+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .pdl_early = pdl, .mla = f.m.mla, .onepass = if (f.m.onepass) |x| x.f else null, .onepass_pipe = if (f.m.onepass_pipe) |x| x.exact else null };
++        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .pdl_early = pdl, .mla = f.m.mla, .onepass_pipe = if (f.m.onepass_pipe) |x| x.exact else null };
      }
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
-@@ -215,11 +221,12 @@ pub const Forward = struct {
+@@ -203,11 +209,12 @@ pub const Forward = struct {
          try glue.hcPre(f.set(), f.stream, b.x, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc);
      }
  
--    pub fn post(f: *const Forward, r: Rank, rows: usize) !void {
+-    fn post(f: *const Forward, r: Rank, rows: usize) !void {
 +    /// forward._post: hc_post of every row's gathered partials into residual `x` (b.x, or b.x_alt under GLUE_FUSE).
 +    pub fn post(f: *const Forward, r: Rank, x: u64, rows: usize) !void {
          const stamp = prof_mod.span(f.prof, f.stream, .glue);
@@ -636,17 +636,17 @@ index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214
      }
  
      /// forward._mixer: the layer's KDA or DSA block on b.normed; `li`/`di`: its index among loaded KDA / DSA layers.
-@@ -241,7 +248,8 @@ pub const Forward = struct {
+@@ -229,7 +236,8 @@ pub const Forward = struct {
                      s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                  }
                  const conv = st.conv + li * 3 * st.conv_c * 2;
--                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (b.prefill) kda_chunk.prompt(&f.m.chunked, st.pos) else null, if (f.prefetch()) |p| .{ .l2 = p, .layer = l.index } else null);
-+                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (b.prefill) kda_chunk.prompt(&f.m.chunked, st.pos) else null, if (f.l2pfFor()) |p| .{ .l2 = p, .layer = l.index } else null);
+-                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (f.prefetch()) |p| .{ .l2 = p, .layer = l.index } else null);
++                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (f.l2pfFor()) |p| .{ .l2 = p, .layer = l.index } else null);
 +                if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
                  if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
              },
              .mla => |a| {
-@@ -327,36 +335,7 @@ pub const Forward = struct {
+@@ -315,36 +323,7 @@ pub const Forward = struct {
  
      const exchangePieces = @import("cuda_forward_pieces.zig").exchangePieces;
  
@@ -684,7 +684,7 @@ index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214
  
      const gluePieces = @import("cuda_forward_pieces.zig").gluePieces;
      const tapPieces = @import("cuda_forward_pieces.zig").tapPieces;
-@@ -417,14 +396,16 @@ pub const Forward = struct {
+@@ -405,14 +384,16 @@ pub const Forward = struct {
      /// The unpieced loop over the layers (and the stream mean): each site's partials whole, then the glue.
      fn whole(f: *const Forward, R: usize) !void {
          const c = &f.ranks[0].w.config;
@@ -703,7 +703,7 @@ index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214
                  if (r.segs.len > 0) try shared.mixer(f, r, l, li, di, R, slot(r, R)) else try f.mixer(r, l, li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), slot(r, R));
              }
              if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
-@@ -434,22 +415,29 @@ pub const Forward = struct {
+@@ -422,22 +403,29 @@ pub const Forward = struct {
              prof_mod.context(f.prof, j, null, .ffn);
              for (f.ranks) |r| {
                  const l = r.w.layers[j];
@@ -740,7 +740,7 @@ index 785f7171a3dc4d396d8955c87aad5295ca48dc1b..ffb04e14e838e8ff286d7b0c2a287214
  
 diff --git a/zig/src/families/glm/cuda_forward_glue.zig b/zig/src/families/glm/cuda_forward_glue.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..4c5d661fd49bf758bd82651b383e00c10cb2966e
+index 000000000..4c5d661fd
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_forward_glue.zig
 @@ -0,0 +1,72 @@
@@ -817,10 +817,10 @@ index 0000000000000000000000000000000000000000..4c5d661fd49bf758bd82651b383e00c1
 +    try glue.hcPre(f.set(), f.stream, b.x + lo * S * D * 2, hc.fn_w, hc.base, hc.scale, norm, b.normed + lo * D * 2, b.xs + lo * (D / 64) * 4, b.post + lo * S * 4, b.comb + lo * S * S * 4, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, hi - lo, D, S);
 +}
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 0e9fd3904e2033e5f82b157c47e59925fa17b39f..296a3193831c0a68279a6603e98628ee45ccd064 100644
+index 8d028d204..b8482df3b 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
-@@ -41,9 +41,9 @@ pub const Mla = struct {
+@@ -39,9 +39,9 @@ pub const Mla = struct {
          return .{ .fuse_rows = if (fuse == 1) @import("cuda_latent.zig").prompt_rows else fuse, .skip = fuse != 0, .vec = cuda.ovn.on("ABSORB_VEC") };
      }
  
@@ -832,7 +832,7 @@ index 0e9fd3904e2033e5f82b157c47e59925fa17b39f..296a3193831c0a68279a6603e98628ee
      }
  };
  
-@@ -100,6 +100,21 @@ pub const Kernels = struct {
+@@ -98,6 +98,21 @@ pub const Kernels = struct {
      chunks_32_fp8: cuda.Function,
      merge: cuda.Function,
      scores: cuda.Function,
@@ -854,7 +854,7 @@ index 0e9fd3904e2033e5f82b157c47e59925fa17b39f..296a3193831c0a68279a6603e98628ee
      // TF_GLM_OVN_* forms (glm_glue_attn_ovn.cuh, glm_glue_latent_ovn.cuh), launched only with their knob on
      chunks_16_skip: cuda.Function,
      chunks_32_skip: cuda.Function,
-@@ -169,10 +184,12 @@ fn pow2(d: usize) i64 {
+@@ -165,10 +180,12 @@ fn pow2(d: usize) i64 {
  
  /// glue.rmsnorm: bf16(w * bf16(x / sqrt(mean(x^2) + eps))) into `out`, with `xs` each 64 outputs' fp32 sum.
  pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, o_stride: usize, xs: ?u64, eps: f32, rows: usize, d: usize) !void {
@@ -870,7 +870,7 @@ index 0e9fd3904e2033e5f82b157c47e59925fa17b39f..296a3193831c0a68279a6603e98628ee
          else => return error.NoRmsnormWidth,
      };
      var a: cuda.Args = .{};
-@@ -196,7 +213,8 @@ pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm
+@@ -192,7 +209,8 @@ pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm
      if (d != 4096) return error.NoRmsnormWidth;
      var a: cuda.Args = .{};
      inline for (.{ x, i64of(x_stride), g, out, i64of(o_stride), xs orelse @as(u64, 0), eps, @as(c_int, @intFromBool(xs != null)) }) |v| a.add(v);
@@ -880,7 +880,7 @@ index 0e9fd3904e2033e5f82b157c47e59925fa17b39f..296a3193831c0a68279a6603e98628ee
  }
  
  fn cdiv(a: usize, b: usize) u32 {
-@@ -278,14 +296,16 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
+@@ -270,14 +288,16 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
      inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
      // Decode windows (16 blocks a row) take each block's 8 steps at once; prompt rows 4 rows a 128-thread block.
      if (rows < 64) {
@@ -900,7 +900,7 @@ index 0e9fd3904e2033e5f82b157c47e59925fa17b39f..296a3193831c0a68279a6603e98628ee
      };
      var b: cuda.Args = .{};
      inline for (.{ x, part, base, scale, w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
-@@ -297,7 +317,36 @@ pub fn hcPost(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u6
+@@ -289,7 +309,36 @@ pub fn hcPost(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u6
      if (s != 4) return error.StreamsNotFour;
      var a: cuda.Args = .{};
      inline for (.{ x, xout, g, post, comb, i64of(rows * d), i64of(d), cint(world) }) |v| a.add(v);
@@ -938,24 +938,11 @@ index 0e9fd3904e2033e5f82b157c47e59925fa17b39f..296a3193831c0a68279a6603e98628ee
  }
  
  /// glue.rank_sum: out bf16 = partials summed rank 0 first, `me`'s from `own`, others' from `peers` in rank order.
-diff --git a/zig/src/families/glm/cuda_router_warm.zig b/zig/src/families/glm/cuda_router_warm.zig
-index c407544dab44546e6ca6be921238cd058900c6ec..2fac4122e1b0d27340390dcaaee4beb8bbf6915c 100644
---- a/zig/src/families/glm/cuda_router_warm.zig
-+++ b/zig/src/families/glm/cuda_router_warm.zig
-@@ -113,7 +113,7 @@ fn mixerWarm(e: *Engine, f: *fw.Forward, tst: *fw.State, p: Picked, hidden: usiz
-             try f.mixer(r, l, 0, 0, R, nch, out);
-             n += 2;
-         }
--        try f.post(r, R);
-+        try f.post(r, r.b.x, R);
-         n += 1;
-     }
-     return n;
 diff --git a/zig/src/families/glm/cuda_shared.zig b/zig/src/families/glm/cuda_shared.zig
-index 0af98e9b66e3ade73befb2e6be1b4ea6ba7e3e98..f1c42edb2bac8fd484181aa2155d194b2946e6a7 100644
+index 3058bcd45..e030bac5f 100644
 --- a/zig/src/families/glm/cuda_shared.zig
 +++ b/zig/src/families/glm/cuda_shared.zig
-@@ -48,7 +48,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di:
+@@ -47,7 +47,7 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di:
              var s = b.kda;
              s.p = b.kproj;
              try kda_block.project(f.set(), f.stream, k, s, b.normed, c.hidden, rows);
@@ -965,7 +952,7 @@ index 0af98e9b66e3ade73befb2e6be1b4ea6ba7e3e98..f1c42edb2bac8fd484181aa2155d194b
                  const st = g.st;
                  const cur = st.cur[li];
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
-index be531f6263ae023df4ff054a173d7af0393b2045..5dc84646c4af4b83b889a73de27170f282ad8139 100644
+index be531f626..5dc84646c 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -196,6 +196,10 @@ pub const Buffers = struct {
@@ -1016,12 +1003,12 @@ index be531f6263ae023df4ff054a173d7af0393b2045..5dc84646c4af4b83b889a73de27170f2
      }
  };
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index df18a045bbd2351ec3edae4dbf2cf3e24ea44c4b..1cc2372b9c90960f114480c3c8d718b6356083ea 100644
+index a5345326c..4f344bc5a 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -175,6 +175,9 @@ pub const rules = [_]Rule{
+@@ -164,6 +164,9 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
      .{ .name = "TF_GLM_OVN_MM_DECTILE", .scope = .glm, .kind = .u64, .forms = "a whole block count, 0 (off) or the launch size below which decode windows take 16-row tiles" },
-     .{ .name = "TF_GLM_OVN_ROUTER16", .scope = .glm, .kind = .u64, .forms = "0 (off), 4 (four stages) or any other value (three stages)" },
      .{ .name = "TF_GLM_OVN_SWIGLU_REDUCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_GLUE_FUSE", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the most rows a decode window glues in one fused kernel" },
 +    .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },

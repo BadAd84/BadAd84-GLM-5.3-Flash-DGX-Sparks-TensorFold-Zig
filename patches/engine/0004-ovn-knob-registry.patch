@@ -22,7 +22,7 @@ Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9 (ovn.zig registr
 
 diff --git a/zig/src/cuda/ovn.zig b/zig/src/cuda/ovn.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..562d69f3a75e858fb0e973ab556658d95b2cc25e
+index 000000000..562d69f3a
 --- /dev/null
 +++ b/zig/src/cuda/ovn.zig
 @@ -0,0 +1,77 @@
@@ -104,7 +104,7 @@ index 0000000000000000000000000000000000000000..562d69f3a75e858fb0e973ab556658d9
 +    set("TF_GLM_PROF", null);
 +}
 diff --git a/zig/src/cuda/root.zig b/zig/src/cuda/root.zig
-index 263fce038dd78e0a301513288c639b968dfeb98f..750fdba86fdfb7eb4631a816f9092c062df06be9 100644
+index 263fce038..750fdba86 100644
 --- a/zig/src/cuda/root.zig
 +++ b/zig/src/cuda/root.zig
 @@ -44,6 +44,7 @@ pub const nvfp4 = @import("nvfp4.zig");
@@ -116,7 +116,7 @@ index 263fce038dd78e0a301513288c639b968dfeb98f..750fdba86fdfb7eb4631a816f9092c06
  pub const norms = @import("norms.zig");
  pub const embed_rows = @import("embed_rows.zig");
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
-index 9b70cb128c71d935485c612e65c0a1e5ec75ee1d..cecc33b81061aabfdb90b905a1f35010e705c709 100644
+index 9b70cb128..cecc33b81 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
 @@ -69,7 +69,7 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho

@@ -22,22 +22,22 @@ New here, not a re-seat: written on this series at v1.2.9.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index c552e368c55a69c91eb87179be7ad54e9df97c18..542305097e1bcd17a972986da8febcf88df9f591 100644
+index 22ea96a69..8d18096fe 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -104,6 +104,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -96,6 +96,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
 +| `TF_GLM_OVN_SIDE_PRIO` | Exactly `0` or `1`; default off (the prompt chunk's exchanges run on a side stream at the highest priority, ahead of the main stream's grids, as they do with `TF_GLM_PROMPT_PAIR`; the bits are the same) |
- | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
  | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
- | `TF_GLM_OVN_MM_CLUSTER` | Whole count of Mi values; weights at least this large sum a decode tile's K slices in a cluster; default 0 (off) |
+ | `TF_GLM_OVN_MM_DECTILE` | Whole block count; a decode launch of fewer blocks takes 16-row windows on 32-column tiles; default 0 (off) |
+ | `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
-index 46c44320bba14aabd55ba10fb4575855b585eb25..4dede439235a280b500a6d1f9e2740d2b0a22fbc 100644
+index be3c0579b..bb5e5d91b 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
-@@ -61,6 +61,7 @@ test {
+@@ -60,6 +60,7 @@ test {
      _ = @import("cuda_images_interleave_test.zig");
      _ = @import("cuda_pages_test.zig");
      _ = @import("cuda_keep_seqs_test.zig");
@@ -46,7 +46,7 @@ index 46c44320bba14aabd55ba10fb4575855b585eb25..4dede439235a280b500a6d1f9e2740d2
      _ = @import("cuda_ranks_test.zig");
      _ = @import("cuda_ranks_roce_test.zig");
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index 3c5b43b578c4632ab901003e4ec608c794abd823..10a9d9fe7aba93271875b07462e916889b5e40f0 100644
+index 0a8c68924..f7e49a5b8 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
 @@ -161,7 +161,8 @@ pub const Engine = struct {
@@ -68,7 +68,7 @@ index 3c5b43b578c4632ab901003e4ec608c794abd823..10a9d9fe7aba93271875b07462e91688
          errdefer if (e.pair) |*p| p.deinit();
          e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
 diff --git a/zig/src/families/glm/cuda_forward_pieces.zig b/zig/src/families/glm/cuda_forward_pieces.zig
-index c713c513fb2b8feed0699a40a01ddf0a7e67b994..353b1a27f4a01263b660d1be08f2d11317c1eb49 100644
+index c713c513f..353b1a27f 100644
 --- a/zig/src/families/glm/cuda_forward_pieces.zig
 +++ b/zig/src/families/glm/cuda_forward_pieces.zig
 @@ -36,10 +36,15 @@ pub const Pieces = struct {
@@ -92,7 +92,7 @@ index c713c513fb2b8feed0699a40a01ddf0a7e67b994..353b1a27f4a01263b660d1be08f2d113
      /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
 diff --git a/zig/src/families/glm/cuda_side_prio_test.zig b/zig/src/families/glm/cuda_side_prio_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..219a71612e3a7398bf7835f726c55442d29c94d0
+index 000000000..219a71612
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_side_prio_test.zig
 @@ -0,0 +1,16 @@
@@ -113,14 +113,14 @@ index 0000000000000000000000000000000000000000..219a71612e3a7398bf7835f726c55442
 +    try std.testing.expect(Pieces.high(true));
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index b6b88d949805e7e04cafccb3cf0181ba8eaa0e32..98cc884a1af7681c034b8bb7883787221dbb8c20 100644
+index cdb7157cf..1a39ec8da 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -172,6 +172,7 @@ pub const rules = [_]Rule{
+@@ -164,6 +164,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
 +    .{ .name = "TF_GLM_OVN_SIDE_PRIO", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
-     .{ .name = "TF_GLM_OVN_MM_CLUSTER", .scope = .glm, .kind = .u64, .forms = "a whole Mi count, 0 (off) or the weight size from which decode tiles sum K slices in a cluster" },
+     .{ .name = "TF_GLM_OVN_MM_DECTILE", .scope = .glm, .kind = .u64, .forms = "a whole block count, 0 (off) or the launch size below which decode windows take 16-row tiles" },
+     .{ .name = "TF_GLM_OVN_SWIGLU_REDUCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

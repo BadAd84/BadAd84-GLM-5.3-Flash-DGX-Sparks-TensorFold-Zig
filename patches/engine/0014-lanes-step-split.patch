@@ -12,7 +12,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
-index b3f3cf8cd2bd80c421048692ef1bbf91290212f1..46340b0351cfc1b60ec0cdac063cc90532b31ba9 100644
+index b3f3cf8cd..46340b035 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
 @@ -86,7 +86,7 @@ pub const Lanes = struct {
@@ -115,7 +115,7 @@ index b3f3cf8cd2bd80c421048692ef1bbf91290212f1..46340b0351cfc1b60ec0cdac063cc905
              return share_mod.marks(self.x.e, l.slot, s, l.marks, keeps);
 diff --git a/zig/src/families/glm/cuda_lanes_step.zig b/zig/src/families/glm/cuda_lanes_step.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..6754a8f3facc0f81993e485ace6838cf1a841df7
+index 000000000..6754a8f3f
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_lanes_step.zig
 @@ -0,0 +1,36 @@

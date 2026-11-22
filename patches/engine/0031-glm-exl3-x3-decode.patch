@@ -75,10 +75,10 @@ Receipts (lane VerifyGap, 2026-11-14; base = v1.2.7 + 0001..0033, head = base + 
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: 0029's whole-chunk test dropped with 0029 (absorbed); compact() takes the prompt flag v1.2.9's call no longer passes (always false: prompts go to the whole-pass plan), and the X3 kernels are kept; one newline at the end of cuda_exl3.zig
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 662ff927f9156b9cdbf370279e4414fc20b15a13..b9a43de5cddffa5b685fc3d31b9916ff322238df 100644
+index e493d2ae9..688612dfe 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -112,6 +112,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -101,6 +101,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
  | `TF_GLM_OVN_HOST_ONCE` | Exactly `0` or `1`; default off (the rewind probe's render stops a few KiB past where it leaves the prompt) |
@@ -89,7 +89,7 @@ index 662ff927f9156b9cdbf370279e4414fc20b15a13..b9a43de5cddffa5b685fc3d31b9916ff
  | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
  | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
-index 4b83fea1fb2d7d1c5d2998fa3f368f1245796d05..dcc1284e80d51eec9024de4593266322e9cce578 100644
+index 4b83fea1f..dcc1284e8 100644
 --- a/zig/build/glm_family_host.zig
 +++ b/zig/build/glm_family_host.zig
 @@ -103,6 +103,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
@@ -102,7 +102,7 @@ index 4b83fea1fb2d7d1c5d2998fa3f368f1245796d05..dcc1284e80d51eec9024de4593266322
  
  pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
 diff --git a/zig/kernels/cuda/exl3_experts.cu b/zig/kernels/cuda/exl3_experts.cu
-index 3731013acabd69c21bb988e44f013f8a26cfd955..bf7c0186fbb56d9d8d5ed627b51c7026628a88c0 100644
+index 3731013ac..bf7c0186f 100644
 --- a/zig/kernels/cuda/exl3_experts.cu
 +++ b/zig/kernels/cuda/exl3_experts.cu
 @@ -7,6 +7,7 @@
@@ -130,7 +130,7 @@ index 3731013acabd69c21bb988e44f013f8a26cfd955..bf7c0186fbb56d9d8d5ed627b51c7026
  
  // Grouping in one block: distinct experts (< E) in id order, members row * 32 + slot in row order, -1 after the last.
 diff --git a/zig/kernels/cuda/exl3_grouped.cuh b/zig/kernels/cuda/exl3_grouped.cuh
-index a4059131e1226b7775c104e909df912f954ad364..55bcc9d1f09b5827cf0ce81ac3b43191585885bd 100644
+index a4059131e..55bcc9d1f 100644
 --- a/zig/kernels/cuda/exl3_grouped.cuh
 +++ b/zig/kernels/cuda/exl3_grouped.cuh
 @@ -1,4 +1,4 @@
@@ -219,7 +219,7 @@ index a4059131e1226b7775c104e909df912f954ad364..55bcc9d1f09b5827cf0ce81ac3b43191
          const int r = rows_sh[row];
 diff --git a/zig/kernels/cuda/exl3_ovn.cuh b/zig/kernels/cuda/exl3_ovn.cuh
 new file mode 100644
-index 0000000000000000000000000000000000000000..72b2ee3f6fcf6ee36eb4fcf4e0a41e2dcc5f9b37
+index 000000000..72b2ee3f6
 --- /dev/null
 +++ b/zig/kernels/cuda/exl3_ovn.cuh
 @@ -0,0 +1,143 @@
@@ -367,7 +367,7 @@ index 0000000000000000000000000000000000000000..72b2ee3f6fcf6ee36eb4fcf4e0a41e2d
 +
 +}  // namespace tf_exl3
 diff --git a/zig/src/cuda/exl3_experts.zig b/zig/src/cuda/exl3_experts.zig
-index 95bb251bb5ab9a8b4056c619ac7aeffe93ef351a..2a676b7179caeedf0eeea80e45a5297810bd0c8e 100644
+index 95bb251bb..2a676b717 100644
 --- a/zig/src/cuda/exl3_experts.zig
 +++ b/zig/src/cuda/exl3_experts.zig
 @@ -40,12 +40,60 @@ pub const Layer = struct {
@@ -638,7 +638,7 @@ index 95bb251bb5ab9a8b4056c619ac7aeffe93ef351a..2a676b7179caeedf0eeea80e45a52978
 +    try std.testing.expectEqual(@as(usize, 176), a.used); // sizeof(OvnArgs)
 +}
 diff --git a/zig/src/families/glm/cuda_exl3.zig b/zig/src/families/glm/cuda_exl3.zig
-index 9c30d9129799d71e5b238019c56ee075586c1aef..bade7ff10d746e6a5d9726539f86ca2e06293283 100644
+index 9c30d9129..bade7ff10 100644
 --- a/zig/src/families/glm/cuda_exl3.zig
 +++ b/zig/src/families/glm/cuda_exl3.zig
 @@ -56,8 +56,17 @@ pub const Experts = struct {
@@ -703,10 +703,10 @@ index 9c30d9129799d71e5b238019c56ee075586c1aef..bade7ff10d746e6a5d9726539f86ca2e
          return;
      }
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 99098027a5ef33d71d2a62a92ed53ccb3a1b9af7..d6cacde8b0b601e50dbbe7c6205721bf2dbf19ad 100644
+index 62b6e67a2..bf751d69b 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -180,6 +180,9 @@ pub const rules = [_]Rule{
+@@ -169,6 +169,9 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
      .{ .name = "TF_GLM_OVN_HOST_ONCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -717,7 +717,7 @@ index 99098027a5ef33d71d2a62a92ed53ccb3a1b9af7..d6cacde8b0b601e50dbbe7c6205721bf
      .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
      .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
 diff --git a/zig/tests/cuda/glm_exl3_items_tests.zig b/zig/tests/cuda/glm_exl3_items_tests.zig
-index b5ed16e903a2813a7fe024010914b80f025adf95..7922114d50175c4a5cac21172d07001e1392ce27 100644
+index b5ed16e90..7922114d5 100644
 --- a/zig/tests/cuda/glm_exl3_items_tests.zig
 +++ b/zig/tests/cuda/glm_exl3_items_tests.zig
 @@ -1,4 +1,4 @@

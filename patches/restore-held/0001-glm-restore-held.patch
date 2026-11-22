@@ -51,31 +51,31 @@ New here, not a re-seat: written on this stack at v1.2.9.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 13745d5003b3fc98cad1ef988d82a741cf2b74f7..d6e1c3d0517e97dd0e9a8ead9f1746608a3a9e61 100644
+index 56734d39e..1f4f758f8 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -110,6 +110,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -101,6 +101,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_PIECE_FFN` | Exactly `0` or `1`; default off (a prompt chunk's mixer site, before a MoE ffn, runs the router and top-k pick piece by piece as each piece's rows land, with the glue on the main stream as before; the bits are the same) |
  | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
- | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
- | `TF_GLM_OVN_PIECE_KDA` | Exactly `0` or `1`; default off (a prompt chunk's KDA mixer site runs its chain piece by piece, each range of rows ahead of its pieces' o_proj and exchange, instead of the whole chain before the first piece; the bits are the same) |
-+| `TF_GLM_OVN_RESTORE_HELD` | Exactly `0` or `1`; default off (a kept prompt state restored into the sequence that kept it, or last restored it, and has only added rows since copies what a sequence rewrites alone: the arena head, the index rings and each layer's pool in progress, not the latent rows, their scales and the whole pools already there; a stream that resumes a kept state takes the free slot that still holds it; the tokens are the same) |
  | `TF_GLM_OVN_SOLO_TO_START` | Exactly `0` or `1`; default off (with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_REQUEST_STARTS=1`, a solo prompt step whose second chunk holds a request start ends at that start instead of being refused, so the stretch before a message start runs as one pass and not two; the tokens are the same) |
- | `TF_GLM_OVN_KDA_CHUNKED` | Exactly `0` or `1`; default off (prompt chunks' KDA chain on production's chunked (WY) kernel; replies are not the serial chain's bit for bit) |
++| `TF_GLM_OVN_RESTORE_HELD` | Exactly `0` or `1`; default off (a kept prompt state restored into the sequence that kept it, or last restored it, and has only added rows since copies what a sequence rewrites alone: the arena head, the index rings and each layer's pool in progress, not the latent rows, their scales and the whole pools already there; a stream that resumes a kept state takes the free slot that still holds it; the tokens are the same) |
+ | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
+ | `TF_GLM_OVN_SOLO_TO_START` | Exactly `0` or `1`; default off (with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_REQUEST_STARTS=1`, a solo prompt step whose second chunk holds a request start ends at that start instead of being refused, so the stretch before a message start runs as one pass and not two; the tokens are the same) |
  | `TF_GLM_OVN_MM_WIDE` | Whole number; set, prompt linears take glm_mm's 128 x 128 blocks in L2 row bands (2: 32 x 32 warps, any other: 64 x 32); default 0 (off) |
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
-index aff9f2f7c4730b87ae06a0d79729259b117cb4bb..a2a714b38a4c356e747abc177d07cc1cb4c6a6ce 100644
+index 4fbd08f9e..fd97f935e 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
-@@ -67,6 +67,7 @@ test {
+@@ -64,6 +64,7 @@ test {
+     _ = @import("cuda_keep_seqs_test.zig");
+     _ = @import("cuda_side_prio_test.zig");
      _ = @import("cuda_piece_front_test.zig");
-     _ = @import("cuda_piece_kda_test.zig");
-     _ = @import("cuda_snapshot_layout_test.zig");
 +    _ = @import("cuda_restore_held_test.zig");
+     _ = @import("cuda_snapshot_layout_test.zig");
      _ = @import("cuda_ranks_test.zig");
      _ = @import("cuda_ranks_roce_test.zig");
-     _ = @import("cuda_env.zig");
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
-index 815682bf631ad5bb5e38dd96e5ed3811c5378572..324fbd189262d73c4534beefeab12defd324919f 100644
+index 4506334d0..24e222f68 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
 @@ -7,6 +7,7 @@ const fw = @import("cuda_forward.zig");
@@ -86,7 +86,7 @@ index 815682bf631ad5bb5e38dd96e5ed3811c5378572..324fbd189262d73c4534beefeab12def
  const cuda = @import("cuda");
  const be = lanes.backend;
  /// First tokens a handle names.
-@@ -162,13 +163,33 @@ pub const Lanes = struct {
+@@ -160,13 +161,33 @@ pub const Lanes = struct {
          }
      }
  
@@ -122,7 +122,7 @@ index 815682bf631ad5bb5e38dd96e5ed3811c5378572..324fbd189262d73c4534beefeab12def
          gop.value_ptr.* = .{ .slot = slot };
          return gop.value_ptr;
 diff --git a/zig/src/families/glm/cuda_lanes_test.zig b/zig/src/families/glm/cuda_lanes_test.zig
-index 9af867eb4fb21b58632b192c04d60e2e1220be29..30afeb85154df14bd9cfb1dd60bf8d318f371d61 100644
+index 9af867eb4..30afeb851 100644
 --- a/zig/src/families/glm/cuda_lanes_test.zig
 +++ b/zig/src/families/glm/cuda_lanes_test.zig
 @@ -122,3 +122,44 @@ test "TF_GLM_OVN_NO_COPY: a drafter's facts drop copy drafts only while the swit
@@ -172,7 +172,7 @@ index 9af867eb4fb21b58632b192c04d60e2e1220be29..30afeb85154df14bd9cfb1dd60bf8d31
 +}
 diff --git a/zig/src/families/glm/cuda_restore_held_test.zig b/zig/src/families/glm/cuda_restore_held_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..35fc33b8f2582360674a0e1abe78b7ac1b236865
+index 000000000..35fc33b8f
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_restore_held_test.zig
 @@ -0,0 +1,281 @@
@@ -458,7 +458,7 @@ index 0000000000000000000000000000000000000000..35fc33b8f2582360674a0e1abe78b7ac
 +    try expectEqual(@as(?Held, .{ .id = 7, .at = 2048 }), e.cur.st.held);
 +}
 diff --git a/zig/src/families/glm/cuda_snapshot_layout.zig b/zig/src/families/glm/cuda_snapshot_layout.zig
-index c7f08765e97f47807c517f98228ab9b3d3d04cb9..f1523ae8d782dee5a2293dfa03b2f7db66171151 100644
+index c7f08765e..f1523ae8d 100644
 --- a/zig/src/families/glm/cuda_snapshot_layout.zig
 +++ b/zig/src/families/glm/cuda_snapshot_layout.zig
 @@ -21,6 +21,9 @@ pub fn halfOf(cur: []const u1, layers: usize, on: bool) ?u1 {
@@ -498,7 +498,7 @@ index c7f08765e97f47807c517f98228ab9b3d3d04cb9..f1523ae8d782dee5a2293dfa03b2f7db
      pub fn piece(p: *const Plan, part: Part, done: usize) Part {
          return walk.piece(p.ids, part, done);
 diff --git a/zig/src/families/glm/cuda_snapshot_pages.zig b/zig/src/families/glm/cuda_snapshot_pages.zig
-index 8055a587c3fe34322a149a4564062f4ba0550906..b923b18c14ebc5a78c568ed31b2cf7d775f64613 100644
+index 8055a587c..b923b18c1 100644
 --- a/zig/src/families/glm/cuda_snapshot_pages.zig
 +++ b/zig/src/families/glm/cuda_snapshot_pages.zig
 @@ -81,20 +81,47 @@ pub const Pool = struct {
@@ -553,10 +553,10 @@ index 8055a587c3fe34322a149a4564062f4ba0550906..b923b18c14ebc5a78c568ed31b2cf7d7
      }
  };
 diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
-index c96b6a0bdc350e3d115b5b149af042cbd5433b17..8b859350db22f2389db43f2ff747186c833f2d53 100644
+index 77fb18c47..1ec129ffd 100644
 --- a/zig/src/families/glm/cuda_snapshots.zig
 +++ b/zig/src/families/glm/cuda_snapshots.zig
-@@ -9,6 +9,11 @@ const prompt_cuts = @import("cuda_prompt_cuts.zig");
+@@ -8,6 +8,11 @@ const prompt_cuts = @import("cuda_prompt_cuts.zig");
  
  pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
  
@@ -568,15 +568,15 @@ index c96b6a0bdc350e3d115b5b149af042cbd5433b17..8b859350db22f2389db43f2ff747186c
  pub fn prepare(e: anytype, budget: u64) !void {
      if (e.snap_pages != null or e.snaps.count() != 0) return error.SnapshotCacheMade;
      const count = std.math.cast(u32, budget / pages.page) orelse return error.SnapshotBudget;
-@@ -119,6 +124,7 @@ pub fn keepAs(e: anytype, id: u64) !void {
+@@ -63,6 +68,7 @@ pub fn keepAs(e: anytype, id: u64) !void {
      try pool.move(e.stream, &lease, &plan, true);
      try e.stream.synchronize();
-     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .below = prompt_cuts.below(e.cur.cuts.items, @intCast(e.cur.st.pos)), .shared = plan.shared, .win_from = if (win) |w| w.from else null });
+     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .below = prompt_cuts.below(e.cur.cuts.items, @intCast(e.cur.st.pos)), .shared = plan.shared });
 +    e.cur.st.held = .{ .id = id, .at = e.cur.st.pos };
  }
  
  /// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
-@@ -163,10 +169,16 @@ pub fn restore(e: anytype, id: u64) !void {
+@@ -107,10 +113,16 @@ pub fn restore(e: anytype, id: u64) !void {
      const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
      if (plan.len != s.len) return error.SnapshotSize;
      errdefer cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot restore did not drain");
@@ -595,10 +595,10 @@ index c96b6a0bdc350e3d115b5b149af042cbd5433b17..8b859350db22f2389db43f2ff747186c
  
  /// The pages below `at` the shared prompt store holds (TF_KV_SHARE): a kept state's copy leaves them out.
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
-index d88ea117ba7af322d2c267b58d583e08bfd4dd32..0bbe849e717fed6a0aa2f76b54c4d4bd8779d14d 100644
+index c7d09d167..4609c9d03 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
-@@ -393,6 +393,9 @@ pub const Buffers = struct {
+@@ -391,6 +391,9 @@ pub const Buffers = struct {
      }
  };
  
@@ -608,7 +608,7 @@ index d88ea117ba7af322d2c267b58d583e08bfd4dd32..0bbe849e717fed6a0aa2f76b54c4d4bd
  /// A sequence's committed caches on a rank (the Python family's State): KDA conv and states, saved rows, DSA caches.
  pub const State = struct {
      arena: Arena,
-@@ -425,6 +428,7 @@ pub const State = struct {
+@@ -423,6 +426,7 @@ pub const State = struct {
      rings: []u64, // each DSA layer's ik ring then ig ring, the MTP layer's last: [layers + 1][2]
      base: usize = 0, // the first position the main rings hold (their pointers are ring - base rows)
      mtp_base: usize = 0,
@@ -616,7 +616,7 @@ index d88ea117ba7af322d2c267b58d583e08bfd4dd32..0bbe849e717fed6a0aa2f76b54c4d4bd
      prompt_hidden: u64, // first-draft row owned and charged by this sequence arena
      table: u64 = 0, // on pages: its page table (i32, `pages` entries), else 0
      pages: []const u32 = &.{}, // on pages: the page ids its table holds, in row order (none while no stream holds it)
-@@ -534,6 +538,9 @@ pub const State = struct {
+@@ -532,6 +536,9 @@ pub const State = struct {
  
      /// Before a pass of `rows` rows at pos: within capacity, and the index rings holding them (rebased if not).
      pub fn ready(st: *State, stream: cuda.Stream, rows: usize) !void {
@@ -627,22 +627,22 @@ index d88ea117ba7af322d2c267b58d583e08bfd4dd32..0bbe849e717fed6a0aa2f76b54c4d4bd
          if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
          if (st.pos + rows > st.base + st.ring_rows) return error.PastRing; // rows past the ring overwrite its neighbour
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 68e866e81e0663f265935e0643ea9bc23f7d400f..7fced792315379ecdedd2101b9f96e40b2639ae4 100644
+index 9e23b3e3e..710c3e587 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -178,6 +178,7 @@ pub const rules = [_]Rule{
+@@ -169,6 +169,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_PIECE_FFN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },
-     .{ .name = "TF_GLM_OVN_PIECE_KDA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-+    .{ .name = "TF_GLM_OVN_RESTORE_HELD", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_SOLO_TO_START", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_GLM_OVN_KDA_CHUNKED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_RESTORE_HELD", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },
+     .{ .name = "TF_GLM_OVN_SOLO_TO_START", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index 68617a1ef38d26a471a51c1a267a41a9fb91dccf..3c753e20cc03ac07f24fa3eba624273dd47c6db7 100644
+index a547b9363..388c4ee1e 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -10,6 +10,7 @@ const glm_latent_rows = @import("glm_latent_rows_tests.zig");
+@@ -8,6 +8,7 @@ const glm_latent_rows = @import("glm_latent_rows_tests.zig");
  const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
  const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
  const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
@@ -650,7 +650,7 @@ index 68617a1ef38d26a471a51c1a267a41a9fb91dccf..3c753e20cc03ac07f24fa3eba624273d
  
  /// The lines these commands add to `main.zig`'s usage, after its own.
  pub const usage =
-@@ -22,6 +23,7 @@ pub const usage =
+@@ -18,6 +19,7 @@ pub const usage =
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
      \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
      \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
@@ -658,7 +658,7 @@ index 68617a1ef38d26a471a51c1a267a41a9fb91dccf..3c753e20cc03ac07f24fa3eba624273d
      \\
  ;
  
-@@ -45,6 +47,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+@@ -37,6 +39,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
          try glm_mm_ovn.run(gpu);
      } else if (std.mem.eql(u8, cmd, "glm-onepass-exact-check")) {
          try glm_onepass_exact_check.run(gpu);
@@ -669,7 +669,7 @@ index 68617a1ef38d26a471a51c1a267a41a9fb91dccf..3c753e20cc03ac07f24fa3eba624273d
  }
 diff --git a/zig/tests/cuda/glm_restore_held_check.zig b/zig/tests/cuda/glm_restore_held_check.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..5d7d6f6ee08346e4f21d7a7460753610b60207be
+index 000000000..5d7d6f6ee
 --- /dev/null
 +++ b/zig/tests/cuda/glm_restore_held_check.zig
 @@ -0,0 +1,200 @@

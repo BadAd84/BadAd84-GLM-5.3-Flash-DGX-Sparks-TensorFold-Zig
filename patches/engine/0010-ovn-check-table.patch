@@ -14,7 +14,7 @@ Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9; main.zig at v1.
 
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..cae4c71d24044283f2eee14f13656fdd065abf43
+index 000000000..cae4c71d2
 --- /dev/null
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
 @@ -0,0 +1,26 @@
@@ -45,7 +45,7 @@ index 0000000000000000000000000000000000000000..cae4c71d24044283f2eee14f13656fdd
 +    return error.UnknownCommand;
 +}
 diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
-index e2334df2de5e85230b0469285644f83446d3dc9e..ebad02ab4f6c91f6bd773820a9311537c030475a 100644
+index e2334df2d..ebad02ab4 100644
 --- a/zig/tests/cuda/main.zig
 +++ b/zig/tests/cuda/main.zig
 @@ -32,7 +32,6 @@ const w4a8_tests = @import("w4a8_tests.zig");
@@ -84,7 +84,7 @@ index e2334df2de5e85230b0469285644f83446d3dc9e..ebad02ab4f6c91f6bd773820a9311537
  
  fn info(gpu: check.Gpu) !void {
 diff --git a/zig/tests/cuda/main_usage.zig b/zig/tests/cuda/main_usage.zig
-index ad3c48dbae727231c9b0b392a98a7be875204336..e588db109cb646e06ff15bd7be229f7688ebe0bc 100644
+index ad3c48dba..e588db109 100644
 --- a/zig/tests/cuda/main_usage.zig
 +++ b/zig/tests/cuda/main_usage.zig
 @@ -158,7 +158,6 @@ pub const usage =

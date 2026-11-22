@@ -33,20 +33,42 @@ inkling2_attn/inkling2_pattn fatbin rows at the line this patch adds glm_onepass
 registration hunk was settled by keeping upstream's two rows and putting glm_onepass after
 them. No other line moved.
 
-diff --git a/docs/environment.md b/docs/environment.md
-index 7b6f7e579cc6e06359ba800cbde1008b1ea40c81..334354a05632fe4792f987892946ddeb26639071 100644
---- a/docs/environment.md
-+++ b/docs/environment.md
-@@ -96,6 +96,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
- | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
- | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
- | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
-+| `TF_GLM_OVN_SPARSE_ONEPASS` | Exactly `0` or `1`; default off (a prompt's rows take production's one-pass sparse attention) |
- | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
- | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
- | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
+Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_SPARSE_ONEPASS (changes replies; s50 measured it against the pipe) is gone: its registry and doc rows, its reader and loader and the two launch hooks. The kernel, its image row and `takes` stay because the active ONEPASS_PIPE is built on them and glm-onepass-exact-check compares the pipe's off variant against the kernel.
+
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
-index 375dd9dd9f3492164de9dafffd25c33aa47a2e6d..16bcb2ca72a1071464a0d0232abde0212bdc8c7e 100644
+index 375dd9dd9..16bcb2ca7 100644
 --- a/zig/build/cuda_kernels.zig
 +++ b/zig/build/cuda_kernels.zig
 @@ -145,6 +145,7 @@ pub const kernels = [_]Kernel{
@@ -59,7 +81,7 @@ index 375dd9dd9f3492164de9dafffd25c33aa47a2e6d..16bcb2ca72a1071464a0d0232abde021
      .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
 diff --git a/zig/kernels/cuda/glm_onepass.cu b/zig/kernels/cuda/glm_onepass.cu
 new file mode 100644
-index 0000000000000000000000000000000000000000..f2c7882633607c6e33bb7193865faab5cedca323
+index 000000000..f2c788263
 --- /dev/null
 +++ b/zig/kernels/cuda/glm_onepass.cu
 @@ -0,0 +1,467 @@
@@ -531,7 +553,7 @@ index 0000000000000000000000000000000000000000..f2c7882633607c6e33bb7193865faab5
 +#endif
 +}
 diff --git a/zig/src/cuda/kernels.zig b/zig/src/cuda/kernels.zig
-index 2dd79a73f516e007d26c33ab4342dd616ac3e132..22fb0530d4e63797bdf4578c1208c9846665a1ea 100644
+index 2dd79a73f..22fb0530d 100644
 --- a/zig/src/cuda/kernels.zig
 +++ b/zig/src/cuda/kernels.zig
 @@ -113,6 +113,7 @@ pub const inkling2_attn: []const u8 = if (available) &Blob("fatbin_inkling2_attn
@@ -543,7 +565,7 @@ index 2dd79a73f516e007d26c33ab4342dd616ac3e132..22fb0530d4e63797bdf4578c1208c984
  pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
  pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
-index 399d5c7b05f9e02e3fdcc9a8740be67e2d25e12d..d4c2fba53f8184cdaf1809b1ba79c3ad2b865b22 100644
+index caaa814f5..29322bf82 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
 @@ -14,6 +14,7 @@ pub const b16 = @import("cuda_b16.zig");
@@ -554,7 +576,7 @@ index 399d5c7b05f9e02e3fdcc9a8740be67e2d25e12d..d4c2fba53f8184cdaf1809b1ba79c3ad
  pub const moe = @import("cuda_moe.zig");
  pub const kda_block = @import("cuda_kda_block.zig");
  pub const dsa_block = @import("cuda_dsa_block.zig");
-@@ -85,6 +86,7 @@ test {
+@@ -84,6 +85,7 @@ test {
      _ = latent;
      _ = sparse;
      _ = index;
@@ -562,100 +584,13 @@ index 399d5c7b05f9e02e3fdcc9a8740be67e2d25e12d..d4c2fba53f8184cdaf1809b1ba79c3ad
      _ = moe;
      _ = kda_block;
      _ = dsa_block;
-diff --git a/zig/src/families/glm/cuda_dsa_block.zig b/zig/src/families/glm/cuda_dsa_block.zig
-index 61d9c15aa6379cdc1f0c127d59f6553b02418ad0..26707ab229185d8f9f69a9ee726436e85bb687b8 100644
---- a/zig/src/families/glm/cuda_dsa_block.zig
-+++ b/zig/src/families/glm/cuda_dsa_block.zig
-@@ -7,6 +7,7 @@ const glue = @import("cuda_glue.zig");
- const projection = @import("cuda_proj.zig");
- const latent = @import("cuda_latent.zig");
- const sparse = @import("cuda_sparse.zig");
-+const onepass = @import("cuda_onepass.zig");
- const prof = @import("cuda_prof.zig");
- const kv_host = @import("cuda_kv_host.zig");
- 
-@@ -210,6 +211,11 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
-         var stamp = prof.span(k.prof, stream, .mla);
-         defer stamp.end();
-         try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, 1, l.heads, l.lw, scale);
-+        // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows in one pass a row (production's kernel and bits), no partials or merge
-+        if (k.set.onepass) |f| {
-+            if (onepass.takes(false, c.ls, l.heads, l.lw)) return onepass.run(f, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.ol, rows, l.heads, scale);
-+        }
-+        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
-     }
- }
- 
-diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index 482d5a6ad8bb08fcfa1996b29de8b43a0b361dce..c881ff1ebc1020622ce9f49614aa1bbc40dbf112 100644
---- a/zig/src/families/glm/cuda_forward.zig
-+++ b/zig/src/families/glm/cuda_forward.zig
-@@ -27,6 +27,7 @@ const shared = @import("cuda_shared.zig");
- const index_mod = @import("cuda_index.zig");
- const l2pf_mod = @import("cuda_l2pf.zig");
- const pieces_mod = @import("cuda_forward_pieces.zig");
-+const onepass_mod = @import("cuda_onepass.zig");
- 
- pub const prefill_rows = state.prefill_rows;
- pub const solo_rows = state.solo_rows;
-@@ -48,6 +49,7 @@ pub const Modules = struct {
-     dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
-     dscore: ?index_mod.Kernels, // TF_GLM_DSCORES (default on): a decode window's index scores on glm_index_scores
-     pools32: bool = false, // TF_GLM_OVN_POOLS32: a split prompt indexer gathers its picks as int32
-+    onepass: ?onepass_mod.Kernels, // TF_GLM_OVN_SPARSE_ONEPASS: prompt rows' sparse attention in one pass
-     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
-     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
-     copy_rows: cuda.Function,
-@@ -102,6 +104,12 @@ pub const Modules = struct {
-                 break :blk null;
-             };
-         } else std.log.warn("TF_GLM_DSCORES=0: a decode window's index scores keep tf_glm_scores", .{});
-+        m.onepass = null;
-+        errdefer if (m.onepass) |*x| x.unload();
-+        if (onepass_mod.wanted()) m.onepass = onepass_mod.Kernels.load(d, k.glm_onepass, @intCast(try ctx.attribute(.compute_capability_major))) catch |err| blk: {
-+            std.log.warn("TF_GLM_OVN_SPARSE_ONEPASS: the onepass kernel is not used ({t}); prompt rows keep the chunk programs", .{err});
-+            break :blk null;
-+        };
-         m.tiled = false;
-         m.pools32 = cuda.ovn.on("POOLS32");
-         m.packs = null; // `m` starts undefined: the field default does not apply
-@@ -120,6 +128,7 @@ pub const Modules = struct {
-     pub fn deinit(m: *Modules) void {
-         if (m.index) |*x| x.unload();
-         if (m.dscore) |*x| x.unload();
-+        if (m.onepass) |*x| x.unload();
-         m.exl3.unload();
-         for (&m.mods) |*x| x.unload();
-         m.lane.unload();
-@@ -178,7 +187,7 @@ pub const Forward = struct {
-     }
- 
-     pub fn set(f: *const Forward) glue.Set {
--        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null };
-+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .onepass = if (f.m.onepass) |x| x.f else null };
-     }
- 
-     /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
-diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 631d570dcd1125ee425b66721c9802a420e02d01..30c1ce6c5cddbe331983cb6d5b303f400cab4230 100644
---- a/zig/src/families/glm/cuda_glue.zig
-+++ b/zig/src/families/glm/cuda_glue.zig
-@@ -19,6 +19,8 @@ pub const Set = struct {
-     dsel: bool = false,
-     /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
-     dscore: ?*const index_mod.Kernels = null,
-+    /// TF_GLM_OVN_SPARSE_ONEPASS's kernel, or null with the switch off.
-+    onepass: ?cuda.Function = null,
- };
- 
- /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.
 diff --git a/zig/src/families/glm/cuda_onepass.zig b/zig/src/families/glm/cuda_onepass.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..c89e2c55d41d08a34126b65a08440ffbccb35bd0
+index 000000000..109cc7ece
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_onepass.zig
-@@ -0,0 +1,63 @@
-+//! TF_GLM_OVN_SPARSE_ONEPASS: prompt rows' sparse latent attention in one pass a row (glm_onepass.cu), production's.
+@@ -0,0 +1,58 @@
++//! The one-pass sparse attention kernels: glm_onepass.cu (the reference) and glm_onepass_pipe.cu (the pipe).
 +
 +const std = @import("std");
 +const cuda = @import("cuda");
@@ -689,11 +624,6 @@ index 0000000000000000000000000000000000000000..c89e2c55d41d08a34126b65a08440ffb
 +    }
 +};
 +
-+/// The knob, read at load: unset, empty or 0 keeps today's chunk programs and merge for every row.
-+pub fn wanted() bool {
-+    return cuda.ovn.on("SPARSE_ONEPASS");
-+}
-+
 +/// Whether a sparse call takes the kernel: prompt buffers (production's b.prefill), an FP8 cache, 17-24 heads.
 +pub fn takes(prompt: bool, scales: u64, heads: usize, lw: usize) bool {
 +    return prompt and scales != 0 and lw == 512 and heads >= min_heads and heads <= max_heads;
@@ -718,15 +648,3 @@ index 0000000000000000000000000000000000000000..c89e2c55d41d08a34126b65a08440ffb
 +    try std.testing.expect(!takes(true, 0x1000, 16, 512));
 +    try std.testing.expectEqual(@as(u32, 100416), smem); // glm_onepass.cu's static_assert
 +}
-diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index c6bab4c9b55e296b3eec123116f10903cb48424e..39927ef7804b6c0ea631bb2e53409d40274cae51 100644
---- a/zig/src/platform/environment.zig
-+++ b/zig/src/platform/environment.zig
-@@ -164,6 +164,7 @@ pub const rules = [_]Rule{
-     .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
-     .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
-     .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-+    .{ .name = "TF_GLM_OVN_SPARSE_ONEPASS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
-     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
-     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },

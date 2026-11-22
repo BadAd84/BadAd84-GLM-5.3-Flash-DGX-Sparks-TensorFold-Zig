@@ -25,32 +25,32 @@ base's own cli_config_test, lean 0 new; series and series+pr1411+cache-salt PASS
 pristine base in the three-tree run.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index d43f3a6c65baa7093498418503d88f4c98c676a7..e1d2e1b4e8b8fdc01c246d8fc323a6689d96fddb 100644
+index a3483d1a1..2c91bd9fd 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -97,6 +97,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
- | `TF_GLM_OVN_EXCHANGE_KB` | Whole KiB count; a direct exchange's send and receive go in pieces of at most this many KiB; default 0 (off, the whole buffer) |
- | `TF_GLM_OVN_ROUTER_WARM` | Whole level 0, 1 or 2: at boot, warm the router kernels (2: also the prompt-path mixer); default 0 (off) |
- | `TF_GLM_OVN_WIN_FREE` | Exactly `0` or `1`; default off (a DFlash2 drafter's shared rounds fill their windows with no cost table) |
+@@ -90,6 +90,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_GLM_OVN_DECODE_INDEX` | Whole row count; a decode window of fewer rows scores with shared key tiles and selects with the split select; default 0 (off) |
+ | `TF_GLM_OVN_INDEX_SCHED` | Exactly `0` or `1`; default off (the prompt scorer takes production's schedule) |
+ | `TF_GLM_OVN_POOLS32` | Exactly `0` or `1`; default off (pool gathers in int32) |
 +| `TF_GLM_OVN_NO_COPY` | Exactly `0` or `1`; default off (a DFlash2 drafter's streams propose no copied continuations; their windows carry the block's drafts) |
- | `TF_GLM_OVN_SPARSE_ONEPASS` | Exactly `0` or `1`; default off (a prompt's rows take production's one-pass sparse attention) |
  | `TF_GLM_OVN_ONEPASS_PIPE` | Exactly `0` or `1`; default off (the DSA block's prompt rows take the one-pass pipeline) |
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
+ | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
 diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
-index dc2126983bfc6d52a3957cf6c4103fa8f492b1f2..4192be87b979095fa091620f23818eb2e7072774 100644
+index 5dd92e910..0cffc172b 100644
 --- a/zig/src/core/lanes/lanes.zig
 +++ b/zig/src/core/lanes/lanes.zig
-@@ -96,6 +96,7 @@ test {
+@@ -95,6 +95,7 @@ test {
+     _ = @import("copied_rate_test.zig");
      _ = @import("granted_reservation_test.zig");
      _ = @import("rollback_test.zig");
-     _ = @import("free_shared_test.zig");
 +    _ = @import("no_copy_test.zig");
  }
  
  pub const learned_disk = @import("learned_disk.zig");
 diff --git a/zig/src/core/lanes/no_copy_test.zig b/zig/src/core/lanes/no_copy_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..709d89489bfb1e40e62899c3ec0c83757ab13a80
+index 000000000..709d89489
 --- /dev/null
 +++ b/zig/src/core/lanes/no_copy_test.zig
 @@ -0,0 +1,94 @@
@@ -149,19 +149,19 @@ index 0000000000000000000000000000000000000000..709d89489bfb1e40e62899c3ec0c8375
 +    try std.testing.expectEqual(@as(usize, 0), got.n); // nothing copied: the backend holds every row
 +}
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
-index a6634caacf670cd4e54842be2004c8ee30ad19ab..815682bf631ad5bb5e38dd96e5ed3811c5378572 100644
+index 46340b035..4506334d0 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
-@@ -119,6 +119,7 @@ pub const Lanes = struct {
+@@ -117,6 +117,7 @@ pub const Lanes = struct {
+             .window_costs_lone = costs != null, // timed windows are one stream's: shared rounds keep the rule they had
+             .shared_drafts = if (block) 0 else shared_head_drafts,
              .floor_rates = !block, // a chain's step costs a forward: --mtp-confidence cuts the rates' depth, not max_drafts
-             .plain_margin = @as(f64, @floatFromInt(cuda.ovn.int("PLAIN_MARGIN", 0) catch 0)) / 100.0, // TF_GLM_OVN_PLAIN_MARGIN, in hundredths
-             .free_shared = block and cuda.ovn.on("WIN_FREE"), // TF_GLM_OVN_WIN_FREE: shared windows fill by chance alone
 +            .copy_drafts = !(block and cuda.ovn.on("NO_COPY")), // TF_GLM_OVN_NO_COPY: keep the block's drafts
              .hidden_rows = sharing,
              .batch_rows = if (sharing) engine.shared_rows else 0,
              .max_streams = if (sharing) engine.max_shared else 1,
 diff --git a/zig/src/families/glm/cuda_lanes_test.zig b/zig/src/families/glm/cuda_lanes_test.zig
-index 328f16113239eee4ee4923dc9f9a9ec2e7dc0202..9af867eb4fb21b58632b192c04d60e2e1220be29 100644
+index 328f16113..9af867eb4 100644
 --- a/zig/src/families/glm/cuda_lanes_test.zig
 +++ b/zig/src/families/glm/cuda_lanes_test.zig
 @@ -6,6 +6,8 @@ const Lanes = @import("cuda_lanes.zig").Lanes;
@@ -200,14 +200,14 @@ index 328f16113239eee4ee4923dc9f9a9ec2e7dc0202..9af867eb4fb21b58632b192c04d60e2e
 +    try std.testing.expect(self.facts().copy_drafts);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index ed2df88383d67610add993ebd400039e42b73e27..8357ccef54c9582be9d652287f1e325687429bf2 100644
+index 90635ceec..81742ba44 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -165,6 +165,7 @@ pub const rules = [_]Rule{
-     .{ .name = "TF_GLM_OVN_EXCHANGE_KB", .scope = .glm, .kind = .u64, .forms = "a whole KiB count, 0 (off) or the most a direct exchange posts at once" },
-     .{ .name = "TF_GLM_OVN_ROUTER_WARM", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 (the router kernels) or 2 (also the prompt-path mixer)" },
-     .{ .name = "TF_GLM_OVN_WIN_FREE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+@@ -158,6 +158,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_DECODE_INDEX", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows below which a decode window scores with shared key tiles and the split select" },
+     .{ .name = "TF_GLM_OVN_INDEX_SCHED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_POOLS32", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 +    .{ .name = "TF_GLM_OVN_NO_COPY", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-     .{ .name = "TF_GLM_OVN_SPARSE_ONEPASS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_ONEPASS_PIPE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
+     .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

@@ -8,7 +8,7 @@ patches/pr1411); it adds and removes exactly the lines of lane V129B's pristine-
 ---
 
 diff --git a/zig/tests/server/golden/framing/chunked-bytes.json b/zig/tests/server/golden/framing/chunked-bytes.json
-index b1a329f3a5cbea5bf9ea624faca3607de8099469..cee6b66e1be1a9a2c3a9e65adaa38ee68774797d 100644
+index b1a329f3a..cee6b66e1 100644
 --- a/zig/tests/server/golden/framing/chunked-bytes.json
 +++ b/zig/tests/server/golden/framing/chunked-bytes.json
 @@ -25,10 +25,10 @@
@@ -25,7 +25,7 @@ index b1a329f3a5cbea5bf9ea624faca3607de8099469..cee6b66e1be1a9a2c3a9e65adaa38ee6
    }
   ]
 diff --git a/zig/tests/server/golden/framing/connection-close.json b/zig/tests/server/golden/framing/connection-close.json
-index 69732154d1970124f36438e1d32eb3ce99fd7b17..eea0318fb3907645750df1cfebb58c69207ad686 100644
+index 69732154d..eea0318fb 100644
 --- a/zig/tests/server/golden/framing/connection-close.json
 +++ b/zig/tests/server/golden/framing/connection-close.json
 @@ -10,14 +10,14 @@
@@ -46,7 +46,7 @@ index 69732154d1970124f36438e1d32eb3ce99fd7b17..eea0318fb3907645750df1cfebb58c69
    }
   ]
 diff --git a/zig/tests/server/golden/framing/extensions-trailers.json b/zig/tests/server/golden/framing/extensions-trailers.json
-index b1a329f3a5cbea5bf9ea624faca3607de8099469..cee6b66e1be1a9a2c3a9e65adaa38ee68774797d 100644
+index b1a329f3a..cee6b66e1 100644
 --- a/zig/tests/server/golden/framing/extensions-trailers.json
 +++ b/zig/tests/server/golden/framing/extensions-trailers.json
 @@ -25,10 +25,10 @@
@@ -63,7 +63,7 @@ index b1a329f3a5cbea5bf9ea624faca3607de8099469..cee6b66e1be1a9a2c3a9e65adaa38ee6
    }
   ]
 diff --git a/zig/tests/server/golden/framing/keepalive-three.json b/zig/tests/server/golden/framing/keepalive-three.json
-index ba1a8e8aeac08df4630dd0bf05b9e1b5f8edbda4..22aa64f1006b313c066fb401957b3ee6bb567d5d 100644
+index ba1a8e8ae..22aa64f10 100644
 --- a/zig/tests/server/golden/framing/keepalive-three.json
 +++ b/zig/tests/server/golden/framing/keepalive-three.json
 @@ -40,10 +40,10 @@
@@ -80,7 +80,7 @@ index ba1a8e8aeac08df4630dd0bf05b9e1b5f8edbda4..22aa64f1006b313c066fb401957b3ee6
    }
   ]
 diff --git a/zig/tests/server/golden/framing/pipelined.json b/zig/tests/server/golden/framing/pipelined.json
-index 3fec9877fb23515b695ab810969dc880a6c693d1..adf6b69b6a8079b9e3ecc0263de332b1c6bf6710 100644
+index 3fec9877f..adf6b69b6 100644
 --- a/zig/tests/server/golden/framing/pipelined.json
 +++ b/zig/tests/server/golden/framing/pipelined.json
 @@ -25,10 +25,10 @@
@@ -97,7 +97,7 @@ index 3fec9877fb23515b695ab810969dc880a6c693d1..adf6b69b6a8079b9e3ecc0263de332b1
    }
   ]
 diff --git a/zig/tests/server/golden/keys/full-then-none.json b/zig/tests/server/golden/keys/full-then-none.json
-index 49f8cb0ddf60a25eb0214b75441bc5a13b0b6967..6105c878662e9b08e579411522012bc654150b54 100644
+index 49f8cb0dd..6105c8786 100644
 --- a/zig/tests/server/golden/keys/full-then-none.json
 +++ b/zig/tests/server/golden/keys/full-then-none.json
 @@ -10,10 +10,10 @@
@@ -114,7 +114,7 @@ index 49f8cb0ddf60a25eb0214b75441bc5a13b0b6967..6105c878662e9b08e579411522012bc6
    },
    {
 diff --git a/zig/tests/server/golden/keys/models-bare.json b/zig/tests/server/golden/keys/models-bare.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/keys/models-bare.json
 +++ b/zig/tests/server/golden/keys/models-bare.json
 @@ -10,10 +10,10 @@
@@ -131,7 +131,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/keys/models-cli.json b/zig/tests/server/golden/keys/models-cli.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/keys/models-cli.json
 +++ b/zig/tests/server/golden/keys/models-cli.json
 @@ -10,10 +10,10 @@
@@ -148,7 +148,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/keys/models-env.json b/zig/tests/server/golden/keys/models-env.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/keys/models-env.json
 +++ b/zig/tests/server/golden/keys/models-env.json
 @@ -10,10 +10,10 @@
@@ -165,7 +165,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/keys/models-file.json b/zig/tests/server/golden/keys/models-file.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/keys/models-file.json
 +++ b/zig/tests/server/golden/keys/models-file.json
 @@ -10,10 +10,10 @@
@@ -182,7 +182,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/keys/pooled-identity.json b/zig/tests/server/golden/keys/pooled-identity.json
-index 49f8cb0ddf60a25eb0214b75441bc5a13b0b6967..6105c878662e9b08e579411522012bc654150b54 100644
+index 49f8cb0dd..6105c8786 100644
 --- a/zig/tests/server/golden/keys/pooled-identity.json
 +++ b/zig/tests/server/golden/keys/pooled-identity.json
 @@ -10,10 +10,10 @@
@@ -199,7 +199,7 @@ index 49f8cb0ddf60a25eb0214b75441bc5a13b0b6967..6105c878662e9b08e579411522012bc6
    },
    {
 diff --git a/zig/tests/server/golden/keys/rotated-new.json b/zig/tests/server/golden/keys/rotated-new.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/keys/rotated-new.json
 +++ b/zig/tests/server/golden/keys/rotated-new.json
 @@ -10,10 +10,10 @@
@@ -216,7 +216,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/scopes/read-models.json b/zig/tests/server/golden/scopes/read-models.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/scopes/read-models.json
 +++ b/zig/tests/server/golden/scopes/read-models.json
 @@ -10,10 +10,10 @@
@@ -233,7 +233,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/status/get-models.json b/zig/tests/server/golden/status/get-models.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/status/get-models.json
 +++ b/zig/tests/server/golden/status/get-models.json
 @@ -10,10 +10,10 @@
@@ -250,7 +250,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/status/get-v1-models%3Fx=1.json b/zig/tests/server/golden/status/get-v1-models%3Fx=1.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/status/get-v1-models%3Fx=1.json
 +++ b/zig/tests/server/golden/status/get-v1-models%3Fx=1.json
 @@ -10,10 +10,10 @@
@@ -267,7 +267,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/status/get-v1-models.json b/zig/tests/server/golden/status/get-v1-models.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/status/get-v1-models.json
 +++ b/zig/tests/server/golden/status/get-v1-models.json
 @@ -10,10 +10,10 @@
@@ -284,7 +284,7 @@ index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c0957
    }
   ]
 diff --git a/zig/tests/server/golden/status/get-x-models.json b/zig/tests/server/golden/status/get-x-models.json
-index 29393acc2567f35e58ea8aa6ecb2405a8dc8fa57..698ef97f5170cd12bb7c0a9f1d4c09572e9c718d 100644
+index 29393acc2..698ef97f5 100644
 --- a/zig/tests/server/golden/status/get-x-models.json
 +++ b/zig/tests/server/golden/status/get-x-models.json
 @@ -10,10 +10,10 @@

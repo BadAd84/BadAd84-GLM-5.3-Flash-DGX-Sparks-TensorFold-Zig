@@ -15,7 +15,7 @@ added. zig/test_support/glm_mm_cuda.zig gains Config.cluster, the field the clus
 without which the host stub cannot compile cuda_mm.zig.
 
 diff --git a/zig/test_support/glm_mm_cuda.zig b/zig/test_support/glm_mm_cuda.zig
-index 87bb331d27632c6727c6693ec981c9f545ca528c..dde03323cb1cccf4072507953b301b8af7010d38 100644
+index 87bb331d2..dde03323c 100644
 --- a/zig/test_support/glm_mm_cuda.zig
 +++ b/zig/test_support/glm_mm_cuda.zig
 @@ -1,5 +1,5 @@
@@ -27,7 +27,7 @@ index 87bb331d27632c6727c6693ec981c9f545ca528c..dde03323cb1cccf4072507953b301b8a
      id: u32 = 0,
 diff --git a/zig/tests/cuda/glm_mm_ovn_tests.zig b/zig/tests/cuda/glm_mm_ovn_tests.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..e1766cee63d62fffa7bf1e964e20ccd3f56c4b35
+index 000000000..e1766cee6
 --- /dev/null
 +++ b/zig/tests/cuda/glm_mm_ovn_tests.zig
 @@ -0,0 +1,252 @@
@@ -284,26 +284,26 @@ index 0000000000000000000000000000000000000000..e1766cee63d62fffa7bf1e964e20ccd3
 +    check.pass("glm-mm-ovn: every variant's kernels equal today's byte for byte", .{});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index dde339b08e87015bb0c2c4a876b27e6d39399512..ef53d74462dac9186d390f98d45d830d315e2195 100644
+index 5299e8149..37762dc4c 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
-@@ -6,6 +6,7 @@ const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
- const glm_index_regroup_check = @import("glm_index_regroup_check.zig");
+@@ -5,6 +5,7 @@ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
+ const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
  const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
  const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
 +const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
  const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
  
  /// The lines these commands add to `main.zig`'s usage, after its own.
-@@ -15,6 +16,7 @@ pub const usage =
-     \\  glm-index-regroup-check   TF_GLM_OVN_INDEX_REGROUP's scores and pools against today's, byte for byte (one GPU)
+@@ -13,6 +14,7 @@ pub const usage =
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
      \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
 +    \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
      \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
      \\
  ;
-@@ -31,6 +33,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+@@ -27,6 +29,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
          try glm_keep_seqs_check.run(gpu, rest);
      } else if (std.mem.eql(u8, cmd, "glm-mla-skip-check")) {
          try glm_mla_skip_check.run(gpu);

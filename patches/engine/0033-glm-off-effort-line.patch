@@ -40,10 +40,10 @@ prompt as ids is 33 tokens with reply digest 9eb3186f9480; the same prompt as a 
 against the image without this patch, order A T T A, production's prompts as ids: -0.2, +0.1, -0.1, -0.4, +0.3%, inside
 the pairs' spread of 0.2 to 0.8%, replies equal.
 diff --git a/docs/environment.md b/docs/environment.md
-index fcc311478b1b7cf22ad7e8d835eae9fce7a0421d..d43f3a6c65baa7093498418503d88f4c98c676a7 100644
+index 39605bebd..a3483d1a1 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -112,6 +112,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -101,6 +101,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
  | `TF_GLM_OVN_HOST_ONCE` | Exactly `0` or `1`; default off (the rewind probe's render stops a few KiB past where it leaves the prompt) |
@@ -52,10 +52,10 @@ index fcc311478b1b7cf22ad7e8d835eae9fce7a0421d..d43f3a6c65baa7093498418503d88f4c
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index d43c2868094be1b49ba355677f1814947956ac50..ed2df88383d67610add993ebd400039e42b73e27 100644
+index e662fdf21..90635ceec 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -180,6 +180,7 @@ pub const rules = [_]Rule{
+@@ -169,6 +169,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
      .{ .name = "TF_GLM_OVN_HOST_ONCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -64,7 +64,7 @@ index d43c2868094be1b49ba355677f1814947956ac50..ed2df88383d67610add993ebd400039e
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
-index d1c4f11d76cc794969f7f04e23251ed9db4ed4f7..3dc4300183c1b30e73f7d6251b8f8c78493e2c13 100644
+index d1c4f11d7..3dc430018 100644
 --- a/zig/src/server/hf_text.zig
 +++ b/zig/src/server/hf_text.zig
 @@ -130,7 +130,8 @@ pub const HfText = struct {
@@ -79,7 +79,7 @@ index d1c4f11d76cc794969f7f04e23251ed9db4ed4f7..3dc4300183c1b30e73f7d6251b8f8c78
              };
 diff --git a/zig/src/server/hf_text_effort.zig b/zig/src/server/hf_text_effort.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..50ee3c60736307b0f129165bfc2a11e6c4ee7026
+index 000000000..50ee3c607
 --- /dev/null
 +++ b/zig/src/server/hf_text_effort.zig
 @@ -0,0 +1,24 @@
@@ -108,7 +108,7 @@ index 0000000000000000000000000000000000000000..50ee3c60736307b0f129165bfc2a11e6
 +    return offEffortLine(a, source);
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
-index b81e8ca88f4517d9507e43b9863541c2c8ca5e33..3d5508355658f37b48f9650713b7af5f6cce512c 100644
+index b81e8ca88..3d5508355 100644
 --- a/zig/src/server/root.zig
 +++ b/zig/src/server/root.zig
 @@ -355,6 +355,7 @@ test {
@@ -121,7 +121,7 @@ index b81e8ca88f4517d9507e43b9863541c2c8ca5e33..3d5508355658f37b48f9650713b7af5f
      _ = @import("ocr/markdown_test.zig");
 diff --git a/zig/src/server/thinking_off_effort_line_test.zig b/zig/src/server/thinking_off_effort_line_test.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..69b8b70d12f20447cfe073be3f6ad3245dfdc00e
+index 000000000..69b8b70d1
 --- /dev/null
 +++ b/zig/src/server/thinking_off_effort_line_test.zig
 @@ -0,0 +1,190 @@

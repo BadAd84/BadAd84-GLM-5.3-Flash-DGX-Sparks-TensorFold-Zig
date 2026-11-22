@@ -39,7 +39,7 @@ the first fused input stack. One conflict (the pad_to declarations, against #369
 tile_pad) kept both sides; nothing else moved.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 6f16c823f959a31461da27f3ec24cbc75a6873a7..d0c8699d929390f2c61d69cc844510a92d0afc8f 100644
+index 6f16c823f..d0c8699d9 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
 @@ -70,6 +70,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
@@ -51,7 +51,7 @@ index 6f16c823f959a31461da27f3ec24cbc75a6873a7..d0c8699d929390f2c61d69cc844510a9
  | `TF_GLM_WORLD` | GLM-5.3-Flash on CUDA: a whole rank count from 1 through 4294967295, set with `TF_GLM_RANK`; unset with it gives one rank |
  | `TF_NEMOTRON_RANK` | Nemotron 3.5 Super on CUDA: a whole rank index from 0 through 4294967295, set with `TF_NEMOTRON_WORLD`; unset with it gives one rank |
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
-index cecc33b81061aabfdb90b905a1f35010e705c709..59a6d5a8f279f27c7bdceb41cd5b846ccef52efa 100644
+index cecc33b81..59a6d5a8f 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
 @@ -26,6 +26,10 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
@@ -98,7 +98,7 @@ index cecc33b81061aabfdb90b905a1f35010e705c709..59a6d5a8f279f27c7bdceb41cd5b846c
      for (e.rules) |r| if (std.mem.startsWith(u8, r.name, "TF_GLM_OVN_")) {
          try t.expectEqual(e.Scope.glm, r.scope);
 diff --git a/zig/src/families/glm/cuda_kda_block.zig b/zig/src/families/glm/cuda_kda_block.zig
-index dcdd63d1caafe3cfe7807af4690540dfc04b99db..01ffd4dc9b70d654ac752d935e4d4a579202f53e 100644
+index dcdd63d1c..01ffd4dc9 100644
 --- a/zig/src/families/glm/cuda_kda_block.zig
 +++ b/zig/src/families/glm/cuda_kda_block.zig
 @@ -52,6 +52,10 @@ pub var pad_to: usize = 0;
@@ -137,7 +137,7 @@ index dcdd63d1caafe3cfe7807af4690540dfc04b99db..01ffd4dc9b70d654ac752d935e4d4a57
  
  /// `rows` rows of `cols` bf16 packed at `src` into `dst`, rows `stride` apart (tf_glm_copy_rows).
 diff --git a/zig/src/families/glm/cuda_tile.zig b/zig/src/families/glm/cuda_tile.zig
-index 3fef15dd2ad55d9183ff8130e28871930eacbc3e..425e7baf59a66e9e2426c65ea7296f61d8698fa6 100644
+index 3fef15dd2..425e7baf5 100644
 --- a/zig/src/families/glm/cuda_tile.zig
 +++ b/zig/src/families/glm/cuda_tile.zig
 @@ -63,6 +63,12 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
@@ -154,7 +154,7 @@ index 3fef15dd2ad55d9183ff8130e28871930eacbc3e..425e7baf59a66e9e2426c65ea7296f61
          .kda => |*x| try padOneKdaInput(w, d, s, x),
          else => {},
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index cb6c59570f0cb69b441a51f6ab5a622e4fce12ac..da491a18778c88caf7f48f3dbdf6ea95da82cfdb 100644
+index cb6c59570..da491a187 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
 @@ -144,6 +144,7 @@ pub const rules = [_]Rule{

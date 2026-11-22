@@ -57,7 +57,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: the Engine initialiser keeps v1.2.9's mesh/backend/collective beside our head flag
 
 diff --git a/zig/glm_prompt_host.zig b/zig/glm_prompt_host.zig
-index bb44e927d66394780176aec59e500b8bc23ee0b3..a48cbd02c5ea20bf9e34c2db755e9830030654d5 100644
+index bb44e927d..a48cbd02c 100644
 --- a/zig/glm_prompt_host.zig
 +++ b/zig/glm_prompt_host.zig
 @@ -64,7 +64,7 @@ const engine = struct {
@@ -79,7 +79,7 @@ index bb44e927d66394780176aec59e500b8bc23ee0b3..a48cbd02c5ea20bf9e34c2db755e9830
      try t.expectEqual(@as(u16, 32), held(&e, 4));
      try t.expectEqual(@as(u16, 63), held(&e, 9));
 diff --git a/zig/glm_snapshot_host.zig b/zig/glm_snapshot_host.zig
-index d042bdf4566818922ae861ca61acdf40a11887ee..6bd9b067d485c13878a578a4f43f964137b7ec7c 100644
+index d042bdf45..6bd9b067d 100644
 --- a/zig/glm_snapshot_host.zig
 +++ b/zig/glm_snapshot_host.zig
 @@ -42,7 +42,7 @@ test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configur
@@ -101,7 +101,7 @@ index d042bdf4566818922ae861ca61acdf40a11887ee..6bd9b067d485c13878a578a4f43f9641
      const minimum = glm.native.snap_min_bytes(&e);
      const budget: u64 = 322122547;
 diff --git a/zig/src/families/glm/cuda_engine.zig b/zig/src/families/glm/cuda_engine.zig
-index 0294441d84bd7aa25532743424ef5effa10b68eb..0b1a69b9365ae7c19557cec6ccde9e71ff146ef7 100644
+index adba5f703..da5a02ae4 100644
 --- a/zig/src/families/glm/cuda_engine.zig
 +++ b/zig/src/families/glm/cuda_engine.zig
 @@ -89,6 +89,7 @@ pub const Engine = struct {
@@ -121,7 +121,7 @@ index 0294441d84bd7aa25532743424ef5effa10b68eb..0b1a69b9365ae7c19557cec6ccde9e71
          const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
          if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
          const Tile = struct {
-@@ -430,7 +431,7 @@ pub const Engine = struct {
+@@ -428,7 +429,7 @@ pub const Engine = struct {
          if (f.prof) |p| p.mark(e.stream, .draw);
          if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
          stamp = prof_mod.span(f.prof, e.stream, .mtp);
@@ -131,7 +131,7 @@ index 0294441d84bd7aa25532743424ef5effa10b68eb..0b1a69b9365ae7c19557cec6ccde9e71
          if (f.prof) |p| p.mark(e.stream, .mtp);
          stamp = prof_mod.span(f.prof, e.stream, .commit);
 diff --git a/zig/src/families/glm/cuda_prompt_pair.zig b/zig/src/families/glm/cuda_prompt_pair.zig
-index bf895cd2891b5507751624c5a5eeceaa6e025530..a037fe038ac1406548b3e55cf4ccb08d0fc174dd 100644
+index bf895cd28..a037fe038 100644
 --- a/zig/src/families/glm/cuda_prompt_pair.zig
 +++ b/zig/src/families/glm/cuda_prompt_pair.zig
 @@ -122,7 +122,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel:
@@ -144,7 +144,7 @@ index bf895cd2891b5507751624c5a5eeceaa6e025530..a037fe038ac1406548b3e55cf4ccb08d
      try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
  }
 diff --git a/zig/src/families/glm/cuda_prompts.zig b/zig/src/families/glm/cuda_prompts.zig
-index b66392f44caf1781252de78253e4625246e0feab..54798fbc432cc4a94bec6b3ff354c34f9fb59b45 100644
+index b66392f44..54798fbc4 100644
 --- a/zig/src/families/glm/cuda_prompts.zig
 +++ b/zig/src/families/glm/cuda_prompts.zig
 @@ -53,7 +53,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
@@ -157,10 +157,10 @@ index b66392f44caf1781252de78253e4625246e0feab..54798fbc432cc4a94bec6b3ff354c34f
              try g.st.setMtpLen(e.stream, g.st.mtp_len + g.rows - 1);
          }
 diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
-index 878dee4b7e98a47234063ec6fa0af399077bc4a4..51e146ea86238ff6ded340bb1d468f345e1ea93c 100644
+index b30a8dec0..fda2c67eb 100644
 --- a/zig/src/families/glm/cuda_snapshots.zig
 +++ b/zig/src/families/glm/cuda_snapshots.zig
-@@ -31,7 +31,8 @@ pub fn bytes(e: anytype, at: usize) u64 {
+@@ -30,7 +30,8 @@ pub fn bytes(e: anytype, at: usize) u64 {
  }
  
  fn planBytes(e: anytype, at: usize) u64 {
@@ -171,10 +171,10 @@ index 878dee4b7e98a47234063ec6fa0af399077bc4a4..51e146ea86238ff6ded340bb1d468f34
      const n = layout.Plan.size(&e.cur.st, &e.c, e.capacity, at, head, heldPages(e, at)) catch return std.math.maxInt(u64);
      return pages.rounded(n) catch std.math.maxInt(u64);
 diff --git a/zig/test_support/glm_snap_fixture.zig b/zig/test_support/glm_snap_fixture.zig
-index 0a09c3a4b33e0986d73716e22ff8c7ab6510d916..b371f194fda5685089f171d7fcc5d6d29b6a6aa9 100644
+index 8490e04d8..99e0f233e 100644
 --- a/zig/test_support/glm_snap_fixture.zig
 +++ b/zig/test_support/glm_snap_fixture.zig
-@@ -31,6 +31,7 @@ pub const Fixture = struct {
+@@ -30,6 +30,7 @@ pub const Fixture = struct {
          f.e.share = w.share;
          f.e.capacity = f.seq.st.capacity;
          f.e.mtp = mtp;

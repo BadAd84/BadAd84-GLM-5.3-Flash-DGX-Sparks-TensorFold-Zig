@@ -74,3 +74,16 @@ the chunk kernel, and 0021 sits under every later `bodyProfile` edit (`work/rese
 append-only tables excluded) shows `0016` and `0039` stand alone, `0015` and `0018` break one or two later patches on adjacent lines, `0017` breaks four, and `0019`, `0021` and
 `0024` break 11, 9 and 3. So the A set comes out knob by knob, after the re-seat onto upstream main lands, each removal gated, and each retired patch stays recoverable from this
 repository's history. Class C and the `ABSORB_VEC` gate are decided by queue102 first.
+
+## F. Retired 2026-11-21
+
+Every class A switch whose patch was deleted whole, or whose switch was cut out of the patch that stays, left the series
+on this date: `INDEX_REGROUP` (0013), `PLAIN_MARGIN` (0015), `EXCHANGE_KB` (0016), `ROUTER_WARM` (0017), `WIN_FREE`
+(0018), `PIECE_KDA` (0039), `DRAFT_KEEPWIN` and `DFLASH2_WIN` (0006), `SPARSE_ONEPASS` (0019), `KDA_CHUNKED` (0021),
+`MM_CLUSTER` and `ROUTER16` (0022). The cells above are the reason each one went. Still inside the series, on purpose:
+`KVB8` (0023) and `FRONT_ROWS` (0038), whose removal is this dossier's next step, and the class B and C knobs.
+
+Withdrawn 2026-11-22: the registry rows and doc rows of WIN_FREE, PLAIN_MARGIN, EXCHANGE_KB,
+ROUTER_WARM and INDEX_REGROUP left `0020` (their code had already gone), so those five are no longer
+accepted names at boot and are not settings of this engine: docs/KNOB-PROVENANCE.md class A is
+their record. Engine tree `c9d60aaa35ae5f185f4cfbec5093febd541dd9da`, whole stack `6744cbf941c19ec3fc137499f141bb0db1949a8c` (gate run sg-20261122-005321).

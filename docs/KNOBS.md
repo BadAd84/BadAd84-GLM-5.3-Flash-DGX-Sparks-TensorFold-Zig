@@ -1,6 +1,6 @@
 # The recipe's knobs: what is set, what is not, and what is known about each (current state, 2026-11-20)
 
-The serve's environment is two files, `scripts/env/prod.env` (production: the runtime section and the adopted recipe) and `scripts/env/dev.env` (production, line for line, plus a candidates section). `KNOBS=measured` (or `prod`) in `scripts/serve.sh` applies `prod.env` and `KNOBS=dev` applies `dev.env`; `KNOBS=off` applies only the runtime section of `prod.env`. `scripts/check-env.py` keeps them consistent. The recipe section is the list below, on top of an image built from `patches/engine/` (upstream main `fa13df5dd`: 38 patches, 0011 retired because upstream has it) and the packages `patches/pr1411`, `patches/cache-salt`, `patches/learn-starts`, `patches/solo-cuts`, `patches/disk-any-position` and `patches/restore-held`; the series was re-seated onto the upstream tip on 2026-11-21 with every default path unchanged (full gate PASS, `docs/audit-2026-11-12/reseat-main-fa13df5/`). Every cell below was measured on the v1.2.9 stack (OVERNIGHT sections 41 to 69; the older ones, sections 17 to 36, on the v1.2.7 stack) and has not been measured on main yet: queue91 (`scripts/queues/queue91.sh`, scored by `scripts/queue-scores/score91.py`) is the first queue on the new base.
+The serve's environment is two files, `scripts/env/prod.env` (production: the runtime section and the adopted recipe) and `scripts/env/dev.env` (production, line for line, plus a candidates section). `KNOBS=measured` (or `prod`) in `scripts/serve.sh` applies `prod.env` and `KNOBS=dev` applies `dev.env`; `KNOBS=off` applies only the runtime section of `prod.env`. `scripts/check-env.py` keeps them consistent. The recipe section is the list below, on top of an image built from `patches/engine/` (upstream main `fa13df5dd`: 32 patches, 0011 retired because upstream has it) and the packages `patches/pr1411`, `patches/cache-salt`, `patches/learn-starts`, `patches/solo-cuts`, `patches/disk-any-position` and `patches/restore-held`; the series was re-seated onto the upstream tip on 2026-11-21 with every default path unchanged (full gate PASS, `docs/audit-2026-11-12/reseat-main-fa13df5/`). Every cell below was measured on the v1.2.9 stack (OVERNIGHT sections 41 to 69; the older ones, sections 17 to 36, on the v1.2.7 stack) and has not been measured on main yet: queue91 (`scripts/queues/queue91.sh`, scored by `scripts/queue-scores/score91.py`) is the first queue on the new base.
 Production on the Sparks is the Python stack and takes none of it. A knob is set only when its cells show no regression at 1, 2, 4, 6 and 8
 streams (the repo rule); cells are in `docs/OVERNIGHT-2026-11-12.md` (OVERNIGHT below). Three knobs in `prod.env` do not yet carry their own
 five-level cells, and their rows say so rather than hiding it: `TF_GLM_OVN_DRAFT_NOISE=1` (its 6 and 8 stream sampled cells are open),
@@ -118,3 +118,20 @@ Upstream's own defaults on v1.2.9 need no setting: `TF_GLM_DSEL`, and `TF_GLM_PR
 The table of every patch, its upstream equivalent and the state of its window is being built from `work/absorb/ABSORPTION.md` (a read-only audit of all 47 patches against the commits between the pin and `fa13df5dd`); until it is added here the rows above and this paragraph are the ledger.
 
 **Status of those six overlaps on 2026-11-21 (the standing rule: retire what upstream absorbed, after the test).** None has been retired and none has a window that settles it. The only off-switch arms on record are OVERNIGHT section 39's (`items0`, `mlp0`, `x3off`, `dsel0`), taken on a stale recipe (the section is marked WRONG) and on a short-prompt bench whose rows sit below the sparse limit and never run the DSA select, so its DSEL and decode-index arms could not move; and sections 18 and 19 for the drafter split (neutral inside the box's 3% spread). Upstream has since added more overlapping code (`TF_GLM_DSCORES` with its tile rules, `TF_GLM_DRAFT_SPLIT`; rows above), so the windows run on the re-seat onto the new main and not on the pin, and what holds without ours is retired and recorded as superseded by the upstream commit.
+
+## Retired 2026-11-21 (the class A set; `docs/KNOB-PROVENANCE.md` has each cell)
+
+Six patches left the series and four kept patches lost their dead switches, so the image is built from 32 patches
+(`patches/engine/RECORD.md`, tree `56e31ac8`). Retired whole: `0013` `TF_GLM_OVN_INDEX_REGROUP`, `0015`
+`TF_GLM_OVN_PLAIN_MARGIN`, `0016` `TF_GLM_OVN_EXCHANGE_KB`, `0017` `TF_GLM_OVN_ROUTER_WARM`, `0018`
+`TF_GLM_OVN_WIN_FREE`, `0039` `TF_GLM_OVN_PIECE_KDA`. Removed from patches that stay: `TF_GLM_OVN_DRAFT_KEEPWIN` and
+`TF_GLM_DFLASH2_WIN` (0006), `TF_GLM_OVN_SPARSE_ONEPASS` (0019; its kernel and `takes` stay as the reference
+`glm-onepass-exact-check` compares the pipe's off variant against), `TF_GLM_OVN_KDA_CHUNKED` (0021; the L2PF file stays),
+`TF_GLM_OVN_MM_CLUSTER` and `TF_GLM_OVN_ROUTER16` (0022; the router16 kernels stay in `glm_glue_bmm.cuh`, unlaunched).
+`TF_GLM_OVN_ABSORB_VEC` (class B) and `TF_GLM_OVN_LATENT_ROWS` (class C) stay. `prod.env` and `dev.env` set none of the
+retired names, so no recipe line changed.
+
+Withdrawn 2026-11-22: the registry rows and doc rows of WIN_FREE, PLAIN_MARGIN, EXCHANGE_KB,
+ROUTER_WARM and INDEX_REGROUP left `0020` (their code had already gone), so those five are no longer
+accepted names at boot and are not settings of this engine: docs/KNOB-PROVENANCE.md class A is
+their record. Engine tree `c9d60aaa35ae5f185f4cfbec5093febd541dd9da`, whole stack `6744cbf941c19ec3fc137499f141bb0db1949a8c` (gate run sg-20261122-005321).

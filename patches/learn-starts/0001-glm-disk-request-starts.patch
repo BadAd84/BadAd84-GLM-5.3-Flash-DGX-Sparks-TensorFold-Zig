@@ -28,7 +28,7 @@ with.
 ---
 
 diff --git a/docs/recipes/glm-5.3-flash-cuda.md b/docs/recipes/glm-5.3-flash-cuda.md
-index 19b14a6915ddfa7f287ebec53e9c4ddbd181b397..5336c8fba1ef95765ecb31dbacd5f1794e52e4c7 100644
+index 19b14a691..5336c8fba 100644
 --- a/docs/recipes/glm-5.3-flash-cuda.md
 +++ b/docs/recipes/glm-5.3-flash-cuda.md
 @@ -100,7 +100,8 @@ drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,5
@@ -42,7 +42,7 @@ index 19b14a6915ddfa7f287ebec53e9c4ddbd181b397..5336c8fba1ef95765ecb31dbacd5f179
  - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
    faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in
 diff --git a/zig/src/families/glm/cuda_disk_image.zig b/zig/src/families/glm/cuda_disk_image.zig
-index ce6bfc18760daaa7ea6db9066c8b9e1bb0fe9faf..f448c0b745766695cb7ced4de12b1ee0d5a3ec96 100644
+index ce6bfc187..f448c0b74 100644
 --- a/zig/src/families/glm/cuda_disk_image.zig
 +++ b/zig/src/families/glm/cuda_disk_image.zig
 @@ -8,7 +8,7 @@ const pages = @import("cuda_snapshot_pages.zig");
@@ -86,7 +86,7 @@ index ce6bfc18760daaa7ea6db9066c8b9e1bb0fe9faf..f448c0b745766695cb7ced4de12b1ee0
  };
  
 diff --git a/zig/src/families/glm/cuda_disk_image_test.zig b/zig/src/families/glm/cuda_disk_image_test.zig
-index e45bc4030e043d31ce9c4f1d6a3fb3038ab1a320..d68fc56312d95e89780e1c9fe25a14bb5b0fdb80 100644
+index e45bc4030..d68fc5631 100644
 --- a/zig/src/families/glm/cuda_disk_image_test.zig
 +++ b/zig/src/families/glm/cuda_disk_image_test.zig
 @@ -289,18 +289,19 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
@@ -187,7 +187,7 @@ index e45bc4030e043d31ce9c4f1d6a3fb3038ab1a320..d68fc56312d95e89780e1c9fe25a14bb
  fn storeImage(a: std.mem.Allocator, d: *const cuda.Driver, pool: *pages.Pool, st: *const State, c: *const @import("config.zig").Config, sh: image.Shape, at: u32, mtp: u64) ![]u8 {
      const plan = try Plan.init(st, c, at, mtp, 0);
 diff --git a/zig/src/families/glm/cuda_disk_ranks.zig b/zig/src/families/glm/cuda_disk_ranks.zig
-index 5d63d7d1f0f877b261b5170fe6802a8074b95bef..f4bfed179e95500f826fb825c4888b8490f0eb88 100644
+index 5d63d7d1f..f4bfed179 100644
 --- a/zig/src/families/glm/cuda_disk_ranks.zig
 +++ b/zig/src/families/glm/cuda_disk_ranks.zig
 @@ -5,6 +5,7 @@ const follow = @import("cuda_follow.zig");
@@ -243,7 +243,7 @@ index 5d63d7d1f0f877b261b5170fe6802a8074b95bef..f4bfed179e95500f826fb825c4888b84
          .rows => {
              try fits(ids, h.depth, l.buf.len - 64);
 diff --git a/zig/src/families/glm/cuda_disk_ranks_test.zig b/zig/src/families/glm/cuda_disk_ranks_test.zig
-index 97b399f09de63780ce3c21f7d0b93d312b6b223f..924534faee644ac996947294aa64a0e828d65cae 100644
+index 97b399f09..924534fae 100644
 --- a/zig/src/families/glm/cuda_disk_ranks_test.zig
 +++ b/zig/src/families/glm/cuda_disk_ranks_test.zig
 @@ -8,8 +8,10 @@ const snapshots = @import("cuda_snapshots.zig");
@@ -314,22 +314,20 @@ index 97b399f09de63780ce3c21f7d0b93d312b6b223f..924534faee644ac996947294aa64a0e8
      var x: Rig = undefined;
      try x.init();
 diff --git a/zig/src/families/glm/cuda_engine_types.zig b/zig/src/families/glm/cuda_engine_types.zig
-index 8835fe3c7f0750001d2c3b498c22522c642c7761..0be1cde9f0f88586dbf1db58e1aafbbc6fc12bd3 100644
+index 280f12aa2..d52e415f6 100644
 --- a/zig/src/families/glm/cuda_engine_types.zig
 +++ b/zig/src/families/glm/cuda_engine_types.zig
-@@ -22,8 +22,8 @@ pub const Seq = struct {
-     cuts: std.ArrayList(u32) = .empty, // the request's chunk starts after 0 (TF_GLM_REQUEST_STARTS), every rank's copy
+@@ -23,7 +23,7 @@ pub const Seq = struct {
  };
  
--/// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
--pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0, win_from: ?i64 = null };
-+/// One rank's copy of a kept prompt state: the state arena's bytes, its host fields, and its cuts digest.
-+pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, below: u64 = 0, shared: usize = 0, win_from: ?i64 = null };
+ /// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
+-pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0 };
++pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, below: u64 = 0, shared: usize = 0 };
  
  /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a cold pass's cut (cuda_prompt_cuts).
  pub const Resume = struct { id: u64, at: usize };
 diff --git a/zig/src/families/glm/cuda_env.zig b/zig/src/families/glm/cuda_env.zig
-index c5f37582c1129e1a21fcb1e066cb361493da4f00..5d63c15082faf114f3572280a8a7e1bb55fb6f22 100644
+index c5f37582c..5d63c1508 100644
 --- a/zig/src/families/glm/cuda_env.zig
 +++ b/zig/src/families/glm/cuda_env.zig
 @@ -8,10 +8,10 @@ pub fn startup() !void {
@@ -346,7 +344,7 @@ index c5f37582c1129e1a21fcb1e066cb361493da4f00..5d63c15082faf114f3572280a8a7e1bb
  }
  
 diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
-index 01408692cb0b2d8c5297945d8268f68e7c9c0346..e8224ccd07d6c26b95ba81a886d510454bb5e92a 100644
+index 01408692c..e8224ccd0 100644
 --- a/zig/src/families/glm/cuda_native.zig
 +++ b/zig/src/families/glm/cuda_native.zig
 @@ -52,7 +52,7 @@ pub const Options = struct {
@@ -367,7 +365,7 @@ index 01408692cb0b2d8c5297945d8268f68e7c9c0346..e8224ccd07d6c26b95ba81a886d51045
          error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
          error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
 diff --git a/zig/src/families/glm/cuda_request_starts_test.zig b/zig/src/families/glm/cuda_request_starts_test.zig
-index 4fedc39845cc6bd7c3f9755a52661f849b61eb0b..e00d3c600cad26aabb4c91e9d5b16c0e85cfb185 100644
+index 4fedc3984..e00d3c600 100644
 --- a/zig/src/families/glm/cuda_request_starts_test.zig
 +++ b/zig/src/families/glm/cuda_request_starts_test.zig
 @@ -43,17 +43,17 @@ test "glm request starts: shared KV refuses at startup before any rank opens, by
@@ -394,27 +392,27 @@ index 4fedc39845cc6bd7c3f9755a52661f849b61eb0b..e00d3c600cad26aabb4c91e9d5b16c0e
      try glm_env.requestStartsAlone(true); // the switch off: --learn-conversations starts as today
  }
 diff --git a/zig/src/families/glm/cuda_snapshots.zig b/zig/src/families/glm/cuda_snapshots.zig
-index 30005efb465732234e82088d953ab2cd0e872d51..c96b6a0bdc350e3d115b5b149af042cbd5433b17 100644
+index 375430a06..77fb18c47 100644
 --- a/zig/src/families/glm/cuda_snapshots.zig
 +++ b/zig/src/families/glm/cuda_snapshots.zig
-@@ -5,6 +5,7 @@ const types = @import("cuda_engine_types.zig");
+@@ -4,6 +4,7 @@ const cuda = @import("cuda");
+ const types = @import("cuda_engine_types.zig");
  pub const pages = @import("cuda_snapshot_pages.zig");
  pub const layout = @import("cuda_snapshot_layout.zig");
- const ring_bytes = @import("dflash.zig").ring_bytes;
 +const prompt_cuts = @import("cuda_prompt_cuts.zig");
  
  pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
  
-@@ -117,7 +118,7 @@ pub fn keepAs(e: anytype, id: u64) !void {
+@@ -61,7 +62,7 @@ pub fn keepAs(e: anytype, id: u64) !void {
      errdefer e.gpa.free(cur);
      try pool.move(e.stream, &lease, &plan, true);
      try e.stream.synchronize();
--    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .win_from = if (win) |w| w.from else null });
-+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .below = prompt_cuts.below(e.cur.cuts.items, @intCast(e.cur.st.pos)), .shared = plan.shared, .win_from = if (win) |w| w.from else null });
+-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
++    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .below = prompt_cuts.below(e.cur.cuts.items, @intCast(e.cur.st.pos)), .shared = plan.shared });
  }
  
  /// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
-@@ -136,8 +137,8 @@ pub fn blankAs(e: anytype, id: u64, at: usize) !void {
+@@ -80,8 +81,8 @@ pub fn blankAs(e: anytype, id: u64, at: usize) !void {
      e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 } });
  }
  
@@ -425,7 +423,7 @@ index 30005efb465732234e82088d953ab2cd0e872d51..c96b6a0bdc350e3d115b5b149af042cb
      const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
      if (s.len != 0) return error.StateKept;
      if (s.cur.len > 64 or (s.cur.len < 64 and cur >> @intCast(s.cur.len) != 0)) return error.DiskWords;
-@@ -151,6 +152,7 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
+@@ -95,6 +96,7 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
      s.len = n;
      s.mtp_len = mtp_len;
      s.bases = bases;
@@ -434,7 +432,7 @@ index 30005efb465732234e82088d953ab2cd0e872d51..c96b6a0bdc350e3d115b5b149af042cb
  
  pub fn restore(e: anytype, id: u64) !void {
 diff --git a/zig/src/native/cuda_glm_disk.zig b/zig/src/native/cuda_glm_disk.zig
-index bb9674fa4bd4abdffde80777648592cf14b5a4aa..d85397bfa1d59541ee967f5f364366a338a322c8 100644
+index bb9674fa4..d85397bfa 100644
 --- a/zig/src/native/cuda_glm_disk.zig
 +++ b/zig/src/native/cuda_glm_disk.zig
 @@ -76,7 +76,7 @@ fn blank(ptr: *anyopaque, at: u32) anyerror!api.prompt_cache.Saved {
