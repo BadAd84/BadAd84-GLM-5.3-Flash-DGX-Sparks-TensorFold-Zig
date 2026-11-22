@@ -14,6 +14,7 @@
 # level, and a trade goes to the owner). Records: docs/audit-2026-11-12/queue-rows/queue109.
 set -uo pipefail
 cd "$HOME/work/glm53-zig" || exit 1
+G="$HOME/work/glm53-zig"
 HERE="$HOME/bench"
 OUT="$HERE/f109-c"
 mkdir -p "$OUT"
@@ -21,9 +22,14 @@ Q="q109"
 IMG=${IMG:-glm53-zig:m130a}
 HOURS=${HOURS:-6}
 WAIT_FOR=${WAIT_FOR:-}
-[ -f "$HERE/queue109.env" ] && . "$HERE/queue109.env"
+[ -f "$G/queue109.env" ] && . "$G/queue109.env"
 
 log() { echo "[$Q] $(date -u +%H:%M:%S) $*" | tee -a "$HERE/queue109.log"; }
+
+if [ -z "$WAIT_FOR" ] && [ "${ALLOW_NOWAIT:-0}" != 1 ]; then
+  log "no WAIT_FOR in queue109.env; refusing to boot beside another queue (ALLOW_NOWAIT=1 overrides)"
+  exit 1
+fi
 
 if [ -n "$WAIT_FOR" ]; then
   log "start; waiting for $WAIT_FOR"
