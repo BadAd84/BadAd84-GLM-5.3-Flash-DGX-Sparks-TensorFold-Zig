@@ -35,38 +35,6 @@ Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
 
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
-Retired 2026-11-21 (docs/KNOB-PROVENANCE.md class A): TF_GLM_OVN_KDA_CHUNKED (a numerics change for about 1%, s61) is gone: the knob, its kernel and files, its registry and doc rows and the `chunked` argument; the bodyProfile call shape every later patch edits is kept. What stays of this patch is the L2PF file its fold brought in.
-
 diff --git a/zig/build/cuda_kernels.zig b/zig/build/cuda_kernels.zig
 index 9467d396b..13c207057 100644
 --- a/zig/build/cuda_kernels.zig
@@ -139,10 +107,10 @@ index 8be1d79b1..e21079838 100644
  pub const exl3_experts: []const u8 = if (available) &Blob("fatbin_exl3_experts").bytes else &.{};
  pub const exl3_candidate: []const u8 = if (available) &Blob("fatbin_exl3_candidate").bytes else &.{};
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index 50797cbe0..068451893 100644
+index 0073cb626..98913955e 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -228,7 +228,6 @@ pub const Forward = struct {
+@@ -226,7 +226,6 @@ pub const Forward = struct {
                  }
                  const conv = st.conv + li * 3 * st.conv_c * 2;
                  try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (f.prefetch()) |p| .{ .l2 = p, .layer = l.index } else null);

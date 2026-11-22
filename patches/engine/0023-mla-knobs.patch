@@ -614,10 +614,10 @@ index 22a372fe2..44cbc26a4 100644
  }
  
 diff --git a/zig/src/families/glm/cuda_forward.zig b/zig/src/families/glm/cuda_forward.zig
-index 068451893..2347eb43e 100644
+index 98913955e..1d60d2118 100644
 --- a/zig/src/families/glm/cuda_forward.zig
 +++ b/zig/src/families/glm/cuda_forward.zig
-@@ -57,6 +57,7 @@ pub const Modules = struct {
+@@ -56,6 +56,7 @@ pub const Modules = struct {
      pack_dense: cuda.Function,
      quant: quant.Kernels,
      q4: q4.Kernels,
@@ -625,7 +625,7 @@ index 068451893..2347eb43e 100644
  
      /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
      pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
-@@ -87,6 +88,7 @@ pub const Modules = struct {
+@@ -86,6 +87,7 @@ pub const Modules = struct {
          errdefer m.exl3.unload();
          m.mm = try mm_mod.Kernels.load(m.mods[7]);
          m.index = null;
@@ -633,7 +633,7 @@ index 068451893..2347eb43e 100644
          errdefer if (m.index) |*x| x.unload();
          const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
          _ = index_mod.splitRows() catch return error.BadIndexSetting; // TF_GLM_OVN_DECODE_INDEX: a typo is refused
-@@ -180,7 +182,7 @@ pub const Forward = struct {
+@@ -178,7 +180,7 @@ pub const Forward = struct {
      }
  
      pub fn set(f: *const Forward) glue.Set {
@@ -643,7 +643,7 @@ index 068451893..2347eb43e 100644
  
      /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index af560e83e..8d028d204 100644
+index af560e83e..304b9a20d 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
 @@ -39,9 +39,9 @@ pub const Mla = struct {
@@ -658,7 +658,7 @@ index af560e83e..8d028d204 100644
      }
  };
  
-@@ -98,11 +98,29 @@ pub const Kernels = struct {
+@@ -98,11 +98,28 @@ pub const Kernels = struct {
      chunks_32_fp8: cuda.Function,
      merge: cuda.Function,
      scores: cuda.Function,
@@ -673,7 +673,6 @@ index af560e83e..8d028d204 100644
 +    expand_v_vec: cuda.Function,
 +    absorb_q8: cuda.Function,
 +    expand_v8: cuda.Function,
-+    router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
  
      pub fn load(m: cuda.Module) !Kernels {
 +        return loadOvn(m, Mla.wanted());
@@ -690,7 +689,7 @@ index af560e83e..8d028d204 100644
          }
          try k.bmm_tile.allowDynamicShared(bmm_tile_smem);
          try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
-@@ -110,6 +128,13 @@ pub const Kernels = struct {
+@@ -110,6 +127,13 @@ pub const Kernels = struct {
          try k.chunks_32.allowDynamicShared(chunksSmem(32));
          try k.chunks_16_fp8.allowDynamicShared(chunksSmem(16));
          try k.chunks_32_fp8.allowDynamicShared(chunksSmem(32));
@@ -1287,7 +1286,7 @@ index 000000000..6958cd109
 +    check.pass("glm-onepass-exact-check: pipe exact == chunk programs + merge byte for byte on {d} shapes; pipe off == the one-pass; the one-pass differs", .{5});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index a9a303b21..0a2d37359 100644
+index 5cc18afaa..0564ff5da 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
 @@ -3,11 +3,15 @@ const std = @import("std");
@@ -1300,7 +1299,7 @@ index a9a303b21..0a2d37359 100644
  /// The lines these commands add to `main.zig`'s usage, after its own.
  pub const usage =
      \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
-     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX against today's kernels, byte for byte (one GPU)
 +    \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
 +    \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
      \\

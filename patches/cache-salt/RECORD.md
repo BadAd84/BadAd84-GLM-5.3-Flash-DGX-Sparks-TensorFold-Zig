@@ -52,7 +52,7 @@ Patches, in file-name order:
 - `0001-server-cache-salt-and-cache-salt-per-key-keep-kept-prompt-states-apart.patch`
 - `0002-tests-the-server-goldens-model-capabilities-carry-cache-salt.patch`
  This line was rewritten 2026-11-21 by the retirement lane: the package was applied again on the engine series
-after its dead switches came out (engine tree `c9d60aaa35ae5f185f4cfbec5093febd541dd9da`). The package's own hunks
+after its dead switches came out (engine tree `869f42e353f1a2334e015f9a696dc62b0d3748a7`). The package's own hunks
 are unchanged; only context lines that named removed engine fields moved (`Snap.win_from`, the dead `Marks.win_from`,
 the `dr.restart` call behind the kept-window resume, the dflash window fields), so its behaviour is the same.
 
@@ -61,5 +61,10 @@ learn-starts, solo-cuts, disk-any-position, restore-held) against the base of th
 `efd5bccea8b5`, stack tree `b7f4d6f53f78`; every step rc 0 on both sides; gate-names 0 failing names on each
 (base 7869/7912, stack 8073/8116); lean 7306 files 168 problems on the base against 7366 files 168 here, 0 new;
 test-cuda-host and compile-cuda-tests 0. The engine half alone passed `sg-20261121-230313` on tree `ad9faacc`.
-Re-seated 2026-11-22 on the engine tree `c9d60aaa35ae5f185f4cfbec5093febd541dd9da` after the five dead switches' rows left `0020`; the
-whole stack is `6744cbf941c19ec3fc137499f141bb0db1949a8c` and its gate run is `sg-20261122-005321`. Package behaviour unchanged.
+Re-seated 2026-11-22 on the engine tree `869f42e353f1a2334e015f9a696dc62b0d3748a7` after the five dead switches' rows left `0020`; the
+whole stack is `b55af74859677c243aee957d0e88d488885f6c9c` and its gate run is `sg-20261122-041555`. Package behaviour unchanged.
+
+Withdrawn 2026-11-22 (second pass): SPARSE_ONEPASS's last comment, ROUTER16's dead field and its two unlaunched
+entry points, and INDEX_SCHED and POOLS32's rows, readers and doc rows left the series at their owning patches
+(`0020`, `0022`, `0012`). DECODE_INDEX and the whole index path stay. Engine tree `869f42e353f1a2334e015f9a696dc62b0d3748a7`, whole stack `b55af74859677c243aee957d0e88d488885f6c9c`
+(gate run sg-20261122-041555, PASS).

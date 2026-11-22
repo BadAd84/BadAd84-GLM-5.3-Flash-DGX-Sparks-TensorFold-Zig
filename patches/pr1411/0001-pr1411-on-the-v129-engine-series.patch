@@ -32,10 +32,10 @@ index 8461ee5a6..1032304a7 100644
  The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
  and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on
 diff --git a/docs/environment.md b/docs/environment.md
-index 00e0ea900..771e1b5d6 100644
+index 5a2e55df9..a1585cf90 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -113,6 +113,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -111,6 +111,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
  | `TF_GLM_OVN_KEEP_SEQS` | Exactly `0` or `1`; default off (a released stream's sequence stays allocated for the next request on its slot, as slot 0's always does, so a request starts with no allocation, fill or free) |
@@ -2969,10 +2969,10 @@ index bf2d0c676..d9005419a 100644
  
  /// The scopes this open's startup check covers, from its flags and model type.
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index bbf3480ed..386e2881c 100644
+index 45b4debfd..a8379ef75 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -181,6 +181,7 @@ pub const rules = [_]Rule{
+@@ -179,6 +179,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KEEP_SEQS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

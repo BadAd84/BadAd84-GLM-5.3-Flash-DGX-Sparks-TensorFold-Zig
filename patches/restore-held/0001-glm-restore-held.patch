@@ -51,10 +51,10 @@ New here, not a re-seat: written on this stack at v1.2.9.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 56734d39e..1f4f758f8 100644
+index d19ab0aa0..9a6b52d6e 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -101,6 +101,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -99,6 +99,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_PIECE_FFN` | Exactly `0` or `1`; default off (a prompt chunk's mixer site, before a MoE ffn, runs the router and top-k pick piece by piece as each piece's rows land, with the glue on the main stream as before; the bits are the same) |
  | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
  | `TF_GLM_OVN_SOLO_TO_START` | Exactly `0` or `1`; default off (with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_REQUEST_STARTS=1`, a solo prompt step whose second chunk holds a request start ends at that start instead of being refused, so the stretch before a message start runs as one pass and not two; the tokens are the same) |
@@ -595,7 +595,7 @@ index 77fb18c47..1ec129ffd 100644
  
  /// The pages below `at` the shared prompt store holds (TF_KV_SHARE): a kept state's copy leaves them out.
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
-index c7d09d167..4609c9d03 100644
+index 6b6ef6b8d..f7219ed20 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -391,6 +391,9 @@ pub const Buffers = struct {
@@ -627,10 +627,10 @@ index c7d09d167..4609c9d03 100644
          if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
          if (st.pos + rows > st.base + st.ring_rows) return error.PastRing; // rows past the ring overwrite its neighbour
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 9e23b3e3e..710c3e587 100644
+index f4142ba4f..27ad4bbed 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -169,6 +169,7 @@ pub const rules = [_]Rule{
+@@ -167,6 +167,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_PIECE_FFN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_SOLO_TO_START", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -639,7 +639,7 @@ index 9e23b3e3e..710c3e587 100644
      .{ .name = "TF_GLM_OVN_SOLO_TO_START", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MM_WIDE", .scope = .glm, .kind = .u64, .forms = "0 (off), 2 (32 x 32 warps) or any other value (64 x 32 warps)" },
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index a547b9363..388c4ee1e 100644
+index d082aa460..88b4d2fbe 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
 @@ -8,6 +8,7 @@ const glm_latent_rows = @import("glm_latent_rows_tests.zig");

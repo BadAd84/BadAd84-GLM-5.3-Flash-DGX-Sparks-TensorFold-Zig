@@ -134,4 +134,9 @@ retired names, so no recipe line changed.
 Withdrawn 2026-11-22: the registry rows and doc rows of WIN_FREE, PLAIN_MARGIN, EXCHANGE_KB,
 ROUTER_WARM and INDEX_REGROUP left `0020` (their code had already gone), so those five are no longer
 accepted names at boot and are not settings of this engine: docs/KNOB-PROVENANCE.md class A is
-their record. Engine tree `c9d60aaa35ae5f185f4cfbec5093febd541dd9da`, whole stack `6744cbf941c19ec3fc137499f141bb0db1949a8c` (gate run sg-20261122-005321).
+their record. Engine tree `869f42e353f1a2334e015f9a696dc62b0d3748a7`, whole stack `b55af74859677c243aee957d0e88d488885f6c9c` (gate run sg-20261122-041555).
+
+Withdrawn 2026-11-22 (second pass): SPARSE_ONEPASS's last comment, ROUTER16's dead field and its two unlaunched
+entry points, and INDEX_SCHED and POOLS32's rows, readers and doc rows left the series at their owning patches
+(`0020`, `0022`, `0012`). DECODE_INDEX and the whole index path stay. Engine tree `869f42e353f1a2334e015f9a696dc62b0d3748a7`, whole stack `b55af74859677c243aee957d0e88d488885f6c9c`
+(gate run sg-20261122-041555, PASS).

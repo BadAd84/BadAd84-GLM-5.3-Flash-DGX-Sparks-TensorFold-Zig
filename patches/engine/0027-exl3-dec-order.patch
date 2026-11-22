@@ -100,7 +100,7 @@ Re-seated on v1.2.7 (93a2e93ecebff8aa52b88e58c5dd222516e69c5f, from pin 9c9bf542
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index e05a4e75a..0b4ddbb48 100644
+index ca2e5faaf..a1218e0dc 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
 @@ -52,6 +52,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
@@ -198,7 +198,7 @@ index b907b3a30..95bb251bb 100644
          var cb: launch_.Args = .{};
          cb.add(sc.z);
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 4f344bc5a..06ecb8f56 100644
+index 6888b3f81..7ea420c84 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
 @@ -83,6 +83,7 @@ pub const rules = [_]Rule{

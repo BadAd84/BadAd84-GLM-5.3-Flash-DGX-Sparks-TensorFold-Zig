@@ -55,10 +55,10 @@ Receipts (lane RequestStartCost, 2026-11-14; base = v1.2.7 + 0001..0034, tree f5
 Re-seated on v1.2.9 (6b9de69510) by lane V129A: clean on v1.2.9
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 688612dfe..39605bebd 100644
+index 5983b0db6..de9936359 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -104,6 +104,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -102,6 +102,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_X3_NC` | Whole level `0`, `1` or `2`: a decode window's routed-expert GEMMs load each warp's trellis in 16-byte reads that many k steps ahead (4-bit mcg layers with whole steps), the same bits; default 0 (off) |
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
@@ -322,10 +322,10 @@ index 000000000..6d847e67b
 +    try expect(f.e.seqs.items[1].?.st.capacity == 0 and p.pool.idle() and p.pool.census().free == 8);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index bf751d69b..e662fdf21 100644
+index 97ff75033..cd3fde1b7 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -172,6 +172,7 @@ pub const rules = [_]Rule{
+@@ -170,6 +170,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_X3_NC", .scope = .glm, .kind = .u64, .max = 2, .forms = "0 (off), 1 or 2 (the routed experts' decode trellis loads, 16 bytes, that many k steps ahead)" },
      .{ .name = "TF_GLM_OVN_X3_XROW", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_X3_FUSEDOWN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -486,7 +486,7 @@ index 000000000..eb25f32f4
 +    check.pass("kept sequences, as left and with every byte poisoned, equal fresh ones: {d} greedy steps' tokens, bf16 logits rows and MTP drafts after prompts of {any} tokens, fp8 and bf16 caches", .{ steps, prompts });
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index 0a2d37359..5299e8149 100644
+index 0564ff5da..54ad7fba2 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
 @@ -3,6 +3,7 @@ const std = @import("std");
@@ -500,7 +500,7 @@ index 0a2d37359..5299e8149 100644
 @@ -10,6 +11,7 @@ const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
  pub const usage =
      \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
-     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX against today's kernels, byte for byte (one GPU)
 +    \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
      \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass

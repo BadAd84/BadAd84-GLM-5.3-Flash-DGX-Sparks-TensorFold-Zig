@@ -4,7 +4,7 @@
 
 Source: the same package of the series on the tip `46c6ee229d2ea28bde8b273381c0f0443861cdd6` (`archive/reseat-tip-46c6ee2-patches.tar`, tree `1fd680b2b681e80d1e40492f881b444602a5bc89`), each patch's own delta played onto `fa13df5dd1fdd23ada775510a464c9aa03a39e09` by a chain of three-way merges (`work/reseat2/series.py`); a patch that merged clean keeps its header and every added and removed line, only offsets and context moved. Hand resolutions in this package: 0006 (OVERLAP 1: upstream's `draftWide()` line kept, our `Knobs.read` after it), 0007 (OVERLAP 2: `cuda_index.zig` rewritten from the base plus our `all`, `decode`, `decode_from`, `decodeFrom()`, doc lines and tests; `tileLoop` and the decode grid expectations dropped as duplicates of upstream's adopted decode path), 0012 (upstream's `takesDecode` and `dscore` kept, our split, sched and POOLS32 alongside), 0013 (our `scorer` on upstream's `scoresTiles` arguments), 0019, 0020, 0023, 0024 (both-sides-added rows; `Forward.set()` carries upstream's `.dscore` with ours). Every decision, with the upstream commits, is in `work/reseat2/DECISIONS.md`.
 
-This package applies to `fa13df5dd1fdd23ada775510a464c9aa03a39e09` with the packages before it in the order engine, pr1411, cache-salt, learn-starts, solo-cuts, disk-any-position, restore-held: it takes the tree `efd5bccea8b50fc9c98966f4a9f4161d2a6864d7` to `9d18692091aac67443466401195d4aae73fa79ca` (38 patches, 38 in all; ids are `git write-tree` on the tree built in that order). The base tree is `c9d60aaa35ae5f185f4cfbec5093febd541dd9da`; the whole stack's tree is `c9d60aaa35ae5f185f4cfbec5093febd541dd9da`.
+This package applies to `fa13df5dd1fdd23ada775510a464c9aa03a39e09` with the packages before it in the order engine, pr1411, cache-salt, learn-starts, solo-cuts, disk-any-position, restore-held: it takes the tree `efd5bccea8b50fc9c98966f4a9f4161d2a6864d7` to `9d18692091aac67443466401195d4aae73fa79ca` (38 patches, 38 in all; ids are `git write-tree` on the tree built in that order). The base tree is `869f42e353f1a2334e015f9a696dc62b0d3748a7`; the whole stack's tree is `869f42e353f1a2334e015f9a696dc62b0d3748a7`.
 
 Gate: [stack gates] GATES-DONE sg-20261121-100241-stack bad=0
 SG gates stack rc=0
@@ -85,7 +85,7 @@ Patches, in file-name order:
 ## Retired 2026-11-21 (lane retire; docs/KNOB-PROVENANCE.md class A)
 
 Six patches left the series and four kept patches lost their dead switches, so this package is 32 patches and its
-tree is `c9d60aaa35ae5f185f4cfbec5093febd541dd9da` (rebuilt patch by patch in `work/retire/chain`, branch `new`; every
+tree is `869f42e353f1a2334e015f9a696dc62b0d3748a7` (rebuilt patch by patch in `work/retire/chain`, branch `new`; every
 earlier tree id in the list above moved where a retirement precedes it). Retired whole, numbers never reused:
 `0013` INDEX_REGROUP, `0015` PLAIN_MARGIN, `0016` EXCHANGE_KB, `0017` ROUTER_WARM, `0018` WIN_FREE, `0039` PIECE_KDA.
 Switches removed from patches that stay: `0006` DRAFT_KEEPWIN and DFLASH2_WIN, `0019` SPARSE_ONEPASS (kernel, image row
@@ -100,10 +100,15 @@ lean 7306 files 168 problems on the base against 7352 files 168 problems here, 0
 compile-cuda-tests 0. Before the full run the same tree passed `iter ... check fmt test ctest` (rc 0 each).
 
 The same tree inside the whole stack (41 patches) was gated again as `sg-20261121-233942`: PASS, stack tree
-`6744cbf941c19ec3fc137499f141bb0db1949a8c`, every step rc 0, gate-names 0 failing names each side (base 7869/7912,
+`b55af74859677c243aee957d0e88d488885f6c9c`, every step rc 0, gate-names 0 failing names each side (base 7869/7912,
 stack 8073/8116), lean 7306 files 168 problems against 7366 files 168, 0 new.
 
 The five switches with no reader left - WIN_FREE, PLAIN_MARGIN, EXCHANGE_KB, ROUTER_WARM and INDEX_REGROUP - lost
 their registry rows and doc rows at `0020` on 2026-11-22, so a boot no longer accepts a name nothing reads; every
-prefix of the series builds (`iter check fmt test ctest`). The engine tree is now `c9d60aaa35ae5f185f4cfbec5093febd541dd9da` and the whole stack
-`6744cbf941c19ec3fc137499f141bb0db1949a8c`; gate run `sg-20261122-005321`.
+prefix of the series builds (`iter check fmt test ctest`). The engine tree is now `869f42e353f1a2334e015f9a696dc62b0d3748a7` and the whole stack
+`b55af74859677c243aee957d0e88d488885f6c9c`; gate run `sg-20261122-041555`.
+
+Withdrawn 2026-11-22 (second pass): SPARSE_ONEPASS's last comment, ROUTER16's dead field and its two unlaunched
+entry points, and INDEX_SCHED and POOLS32's rows, readers and doc rows left the series at their owning patches
+(`0020`, `0022`, `0012`). DECODE_INDEX and the whole index path stay. Engine tree `869f42e353f1a2334e015f9a696dc62b0d3748a7`, whole stack `b55af74859677c243aee957d0e88d488885f6c9c`
+(gate run sg-20261122-041555, PASS).

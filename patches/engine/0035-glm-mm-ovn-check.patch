@@ -284,7 +284,7 @@ index 000000000..e1766cee6
 +    check.pass("glm-mm-ovn: every variant's kernels equal today's byte for byte", .{});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index 5299e8149..37762dc4c 100644
+index 54ad7fba2..87bf2ff3b 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
 @@ -5,6 +5,7 @@ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
@@ -296,7 +296,7 @@ index 5299e8149..37762dc4c 100644
  
  /// The lines these commands add to `main.zig`'s usage, after its own.
 @@ -13,6 +14,7 @@ pub const usage =
-     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX against today's kernels, byte for byte (one GPU)
      \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
 +    \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte

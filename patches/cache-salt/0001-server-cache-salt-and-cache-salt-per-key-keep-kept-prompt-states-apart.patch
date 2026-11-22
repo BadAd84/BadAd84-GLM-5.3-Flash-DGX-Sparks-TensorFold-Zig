@@ -83,7 +83,7 @@ index 1032304a7..fba33fb83 100644
  
  Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
 diff --git a/docs/environment.md b/docs/environment.md
-index 771e1b5d6..2ae3fea2b 100644
+index a1585cf90..2c2e03e04 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
 @@ -16,7 +16,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi

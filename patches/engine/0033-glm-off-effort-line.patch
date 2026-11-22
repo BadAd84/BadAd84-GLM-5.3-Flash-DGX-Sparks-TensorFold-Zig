@@ -40,10 +40,10 @@ prompt as ids is 33 tokens with reply digest 9eb3186f9480; the same prompt as a 
 against the image without this patch, order A T T A, production's prompts as ids: -0.2, +0.1, -0.1, -0.4, +0.3%, inside
 the pairs' spread of 0.2 to 0.8%, replies equal.
 diff --git a/docs/environment.md b/docs/environment.md
-index 39605bebd..a3483d1a1 100644
+index de9936359..3150a64f7 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -101,6 +101,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -99,6 +99,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_GLUE_ROW` | Whole row count; a prompt piece of at least this many rows glues in one kernel; default 0 (off) |
  | `TF_GLM_OVN_PDL_EARLY` | Whole level: 1 launches decode windows' glue kernels dependent-ready, 2 prompt chunks' too; default 0 (off) |
  | `TF_GLM_OVN_HOST_ONCE` | Exactly `0` or `1`; default off (the rewind probe's render stops a few KiB past where it leaves the prompt) |
@@ -52,10 +52,10 @@ index 39605bebd..a3483d1a1 100644
  | `TF_GLM_OVN_X3_XROW` | Exactly `0` or `1`; default off (a decode window rotates each token's routed-expert input once instead of once a pick, where every expert's gate and up share one rotation) |
  | `TF_GLM_OVN_X3_FUSEDOWN` | Exactly `0` or `1`; default off (a decode window's routed-expert down launch writes the slot rows itself, with no separate epilogue, where the down runs in one K split) |
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index e662fdf21..90635ceec 100644
+index cd3fde1b7..1ecf90ecf 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -169,6 +169,7 @@ pub const rules = [_]Rule{
+@@ -167,6 +167,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_GLUE_ROW", .scope = .glm, .kind = .u64, .forms = "a whole row count, 0 (off) or the rows from which a prompt piece glues in one kernel" },
      .{ .name = "TF_GLM_OVN_PDL_EARLY", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (decode windows' glue launches dependent-ready) or 2 (prompt chunks too)" },
      .{ .name = "TF_GLM_OVN_HOST_ONCE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

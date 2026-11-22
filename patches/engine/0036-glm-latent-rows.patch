@@ -38,10 +38,10 @@ switch's, so patches/pr1411's environment.zig and docs/environment.md hunks stil
 New here, not a re-seat: written on this series at v1.2.9.
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 2c91bd9fd..22ea96a69 100644
+index 67aff2831..54eaf6823 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -95,6 +95,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -93,6 +93,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_MLA_FUSEMERGE` | Whole row count: 0 off, 1 fuses MLA chunks and merge from latent.prompt_rows rows, N > 1 from N rows; default 0 |
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
@@ -202,7 +202,7 @@ index 241b66add..b091925a2 100644
  
  // Row r's first element in a cache of `width`-element rows: in order (pt null), or row r % P of page pt[r / P].
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index b8482df3b..044a13db5 100644
+index ef66f469d..55f8cc082 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
 @@ -27,21 +27,27 @@ pub const Set = struct {
@@ -246,10 +246,10 @@ index b8482df3b..044a13db5 100644
 +    expand_v_x2: cuda.Function,
 +    absorb_q_x4: cuda.Function,
 +    expand_v_x4: cuda.Function,
-     router16: ?cuda.Function, // TF_GLM_OVN_ROUTER16=<stages, 3 or 4>: 16-row router tiles for up to 16 rows (else null)
  
      pub fn load(m: cuda.Module) !Kernels {
-@@ -397,3 +408,17 @@ test "the wrappers' shape rules as glue.py's" {
+         return loadOvn(m, Mla.wanted());
+@@ -396,3 +407,17 @@ test "the wrappers' shape rules as glue.py's" {
      try std.testing.expectEqual(@as(i64, 512), pow2(288 + 1)); // _topk's BLOCK for 288 experts
      try std.testing.expectEqual(@as(i64, 16), pow2(8 + 1)); // its SLOTP for top-8 and the shared slot
  }
@@ -370,10 +370,10 @@ index 0595fcf12..4620b2d49 100644
 +    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 81742ba44..cdb7157cf 100644
+index ca0acae8a..65375b9d2 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -163,6 +163,7 @@ pub const rules = [_]Rule{
+@@ -161,6 +161,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -552,7 +552,7 @@ index 000000000..9ecfc9a9d
 +    check.pass("glm-latent-rows: every case equals today's launches byte for byte", .{});
 +}
 diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
-index 37762dc4c..a547b9363 100644
+index 87bf2ff3b..d082aa460 100644
 --- a/zig/tests/cuda/glm_ovn_checks.zig
 +++ b/zig/tests/cuda/glm_ovn_checks.zig
 @@ -4,6 +4,7 @@ const check = @import("check.zig");
@@ -565,7 +565,7 @@ index 37762dc4c..a547b9363 100644
  const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
 @@ -13,6 +14,7 @@ pub const usage =
      \\  glm-draft-onepass         TF_GLM_OVN_DRAFT_ONEPASS: the drafter's 4-bit rows in one launch against 16-row launches, byte for byte
-     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED and _POOLS32 against today's kernels, byte for byte (one GPU)
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX against today's kernels, byte for byte (one GPU)
      \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
 +    \\  glm-latent-rows           TF_GLM_OVN_LATENT_ROWS: absorb_q and expand_v at 2 and 4 rows a loop step against today's, byte for byte
      \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte

@@ -49,10 +49,10 @@ New here, not a re-seat: written on this stack at v1.2.9, on top of this package
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 98e89ac50..56734d39e 100644
+index d1bae22dc..d19ab0aa0 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -102,6 +102,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -100,6 +100,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
  | `TF_GLM_OVN_SOLO_TO_START` | Exactly `0` or `1`; default off (with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_REQUEST_STARTS=1`, a solo prompt step whose second chunk holds a request start ends at that start instead of being refused, so the stretch before a message start runs as one pass and not two; the tokens are the same) |
  | `TF_GLM_OVN_FRONT_ROWS` | Whole number; with `TF_GLM_OVN_PIECE_FRONT`, `_MLA` or `_FFN` a front range joins pieces until it has at least this many rows (fewer weight reads on a small chunk, the bits the same); default 0 (a range a piece) |
@@ -61,10 +61,10 @@ index 98e89ac50..56734d39e 100644
  | `TF_GLM_OVN_MM_DECTILE` | Whole block count; a decode launch of fewer blocks takes 16-row windows on 32-column tiles; default 0 (off) |
  | `TF_GLM_OVN_SWIGLU_REDUCE` | Exactly `0` or `1`; default off (a tiled gate/up's K slices are summed and SwiGLU'd in one kernel) |
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index c8a276277..9e23b3e3e 100644
+index 65cf15d15..f4142ba4f 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -170,6 +170,7 @@ pub const rules = [_]Rule{
+@@ -168,6 +168,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_SOLO_TO_START", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_FRONT_ROWS", .scope = .glm, .kind = .u64, .forms = "a whole number: the rows a piece-by-piece front range takes at least, 0 (off) a range a piece" },

@@ -38,10 +38,10 @@ with starts takes a solo pass where no message start is inside it.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 2ae3fea2b..98e89ac50 100644
+index 2c2e03e04..d1bae22dc 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -100,6 +100,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -98,6 +98,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_PIECE_FRONT` | Exactly `0` or `1`; default off (a prompt chunk's ffn site, when a KDA layer follows, glues on the side stream and the KDA projections run piece by piece as each piece's rows land; the bits are the same) |
  | `TF_GLM_OVN_PIECE_FFN` | Exactly `0` or `1`; default off (a prompt chunk's mixer site, before a MoE ffn, runs the router and top-k pick piece by piece as each piece's rows land, with the glue on the main stream as before; the bits are the same) |
  | `TF_GLM_OVN_PIECE_MLA` | Exactly `0` or `1`; default off (as `TF_GLM_OVN_PIECE_FRONT`, for an ffn site that a DSA layer follows: the layer's projections, norms, indexer and absorbed query run piece by piece; the bits are the same) |
@@ -580,7 +580,7 @@ index 0c3395ea7..9c2ed1ab4 100644
 +    try std.testing.expect(!ringsAgree(0, seq.st.ring_rows, 301, fw.solo_rows));
 +}
 diff --git a/zig/src/families/glm/cuda_state.zig b/zig/src/families/glm/cuda_state.zig
-index 5dc84646c..c7d09d167 100644
+index d42bb987d..6b6ef6b8d 100644
 --- a/zig/src/families/glm/cuda_state.zig
 +++ b/zig/src/families/glm/cuda_state.zig
 @@ -23,10 +23,10 @@ pub const window_rows = 32;
@@ -599,10 +599,10 @@ index 5dc84646c..c7d09d167 100644
  /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
  const Arena = struct {
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 386e2881c..c8a276277 100644
+index a8379ef75..65cf15d15 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -168,6 +168,7 @@ pub const rules = [_]Rule{
+@@ -166,6 +166,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_PIECE_FRONT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_PIECE_FFN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_PIECE_MLA", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

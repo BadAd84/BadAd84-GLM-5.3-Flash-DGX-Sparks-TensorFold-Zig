@@ -22,10 +22,10 @@ New here, not a re-seat: written on this series at v1.2.9.
 ---
 
 diff --git a/docs/environment.md b/docs/environment.md
-index 22ea96a69..8d18096fe 100644
+index 54eaf6823..4ec33feb1 100644
 --- a/docs/environment.md
 +++ b/docs/environment.md
-@@ -96,6 +96,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+@@ -94,6 +94,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
  | `TF_GLM_OVN_ABSORB_VEC` | Exactly `0` or `1`; default off (absorb_q and expand_v read bf16 kv_b by 16-byte loads) |
  | `TF_GLM_OVN_KVB8` | Exactly `0` or `1`; default off (E4M3 kv_b read a 128-wide load times its scale) |
  | `TF_GLM_OVN_LATENT_ROWS` | `0`, `2` or `4`: the rows `absorb_q` and `expand_v` take in one loop step, with the same bits; default 0 (one row a step, today's kernels) |
@@ -113,10 +113,10 @@ index 000000000..219a71612
 +    try std.testing.expect(Pieces.high(true));
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index cdb7157cf..1a39ec8da 100644
+index 65375b9d2..b7fdaaa3e 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -164,6 +164,7 @@ pub const rules = [_]Rule{
+@@ -162,6 +162,7 @@ pub const rules = [_]Rule{
      .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
