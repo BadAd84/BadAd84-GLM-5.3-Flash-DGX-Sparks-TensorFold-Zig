@@ -35,6 +35,14 @@ while pgrep -f "bash $WAIT_FOR" > /dev/null; do sleep 30; done
 log "waited $WAIT_FOR out; starting"
 
 stop() { bash zig-tp3-stop.sh > /dev/null 2>&1; sleep 10; }
+# the page cache holds the previous boot's weights and the engine's preflight counts it as occupied
+# (docs/audit-2026-11-12/memory-preflight-fa13df5.md): drop it on all three boxes before EVERY boot
+drops() {
+  local c="docker run --rm --privileged --entrypoint sh $IMG -c 'sync; echo 3 > /proc/sys/vm/drop_caches; echo 1 > /proc/sys/vm/compact_memory'"
+  eval "$c" > /dev/null 2>&1
+  for h in "$W1" "$W2"; do ssh -n -o BatchMode=yes -o ConnectTimeout=15 "$h" "$c" > /dev/null 2>&1; done
+  log "caches dropped; spark1 MemAvailable $(awk '/^MemAvailable:/{printf "%.1f", $2/1048576}' /proc/meminfo) GiB"
+}
 finish() { stop; docker rm -f glm53-zig-r0 > /dev/null 2>&1; echo "QUEUE117-DONE $(date -u +%T)"; }
 trap finish EXIT
 mkdir -p "$R" "$OUT/f117-boots"
@@ -46,13 +54,13 @@ fi
 log "$IMG ids: $(echo $ids | cut -c1-60)"
 
 # ---- 1 and 2: decode at 1 and 4 clients, digests, on a plain boot
-stop
+stop; drops
 log "decode boot"
 IMAGE="$IMG" KNOBS=dev LEVELS="1 4" bash "$G/bench-arm.sh" "$IMG" "f117-c/dec" > "$OUT/f117-boots/dec.log" 2>&1
 log "decode boot rc=$? ($(ls "$R/dec"/P*.jsonl 2>/dev/null | wc -l) levels)"
 
 # ---- 3: an nsys capture of rank 0 over three cold prompts, then the three decode-free sizes
-stop
+stop; drops
 log "capture boot"
 WRAP0="nsys profile -o /out/r0 --trace=cuda --sample=none --cpuctxsw=none --force-overwrite true" \
 XRUN0="-v $R/nsys:/out" IMAGE="$IMG" KNOBS=dev bash zig-tp3.sh 4 1048576 > "$OUT/f117-boots/capture.log" 2>&1 \
@@ -72,8 +80,13 @@ PY
     --output "$R/cold-$PK.json" > "$R/cold-$PK.out" 2>&1
   log "cold $PK rc=$? $(grep -o '"qualified": [a-z]*' "$R/cold-$PK.json" 2>/dev/null | head -1)"
 done
-stop
-sleep 5
+# nsys writes its report when the profiled process EXITS: a graceful stop flushes it, docker rm -f loses it
+docker stop -t 30 glm53-zig-r0 > /dev/null 2>&1
+log "stopped gracefully; waiting for the capture to flush"
+sleep 30
 ls -la "$R/nsys" | head -4
+docker run --rm -v "$R/nsys:/out" --entrypoint nsys "$IMG" stats /out/r0.nsys-rep > "$R/nsys/stats.txt" 2>&1 || true
+docker run --rm -v "$R/nsys:/out" --entrypoint nsys "$IMG" export --type sqlite --force-overwrite true -o /out/r0.sqlite /out/r0.nsys-rep > "$R/nsys/export.log" 2>&1 || true
+ls -la "$R/nsys" | head -6
 
 log "done; read the shares with scripts/prefill_passes.py over $R/nsys/r0.nsys-rep, and the decode cells in $R/dec"
