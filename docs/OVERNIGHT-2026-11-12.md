@@ -2570,3 +2570,30 @@ profile rather than by querying.
 The item closes at its ceiling: `gu` at 191 GB/s against `down`'s 271 is at most about 90 ms a chunk, 5% of the main
 stream, it cannot be attributed with the counters this hardware exposes, and the structural read says the traffic it
 would explain is L2, not DRAM.
+
+## 93. What the recipe is worth: +33% to +56% over the same binary with its switches off
+
+queue112 ran the stock rung at the five levels, two boots a level, with the page cache dropped before every boot (the
+rung section 91's follow-up established). Same image `glm53-zig:m130a` as every other measurement, `KNOBS=off`, which
+applies `prod.env`'s runtime section and none of its recipe lines.
+
+| streams | stock (`KNOBS=off`) | recipe (`KNOBS=prod`, queue109's control) | gain |
+|---|---|---|---|
+| 1 | 52.5 | 81.9 | **+56.0%** |
+| 2 | 61.2 | 85.6 | **+39.9%** |
+| 4 | 83.5 | 112.9 | **+35.2%** |
+| 6 | 112.5 | 149.8 | **+33.2%** |
+| 8 | 138.5 | 185.9 | **+34.2%** |
+
+Two boots a level agree within 0.7% at every level and the generated tokens are identical between them, so the baseline
+is stable enough to quote.
+
+**What the number is, precisely.** Both arms run the same patched binary, so this is not "our patches against upstream
+source"; it is the value of the recipe's own switch lines, which are what make most of the patches' code paths active.
+The patched-but-default-off configuration is 33 to 56% slower than the recipe, which is why the series is developed as
+patches plus an env, and why a patch that is not reached by a line is indistinguishable from one that is absent.
+
+**Why it matters for the campaign.** Until now every comparison was ours against production's Python serve, where we read
+1.33 to 1.37 times slower on the cold prompt and level on decode. The stock rung was the missing reference: it says the
+work on this series is worth a third more throughput at every level than the same binary left alone, which is the number
+to quote for the series itself rather than for any single knob.
