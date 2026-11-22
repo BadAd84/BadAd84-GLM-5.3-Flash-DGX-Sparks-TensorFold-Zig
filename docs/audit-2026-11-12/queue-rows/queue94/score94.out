@@ -1,0 +1,77 @@
+== head skip: A ('hk-A1', 'hk-A2'), B1 ('hk-B1a', 'hk-B1b'), B0 ('hk-B0',), at --parallel 4 --context 1048576 with KNOBS=off
+H1: 0 boot cell(s) unclean, 0 cell(s) with more than one reply digest
+H2: switch lines hk-A1 0, hk-A2 0, hk-B0 0, hk-B1a 1, hk-B1b 1
+H3 chat at 0 with 1 stream(s): B1 -0.50% against A (A 49.8 49.7 | B1 49.6 49.4), B0 -0.70%
+H3 chat at 0 with 2 stream(s): B1 -0.06% against A (A 77.1 77.6 | B1 77.1 77.5), B0 -0.45%
+H3 chat at 0 with 4 stream(s): B1 -0.22% against A (A 112.7 113.7 | B1 112.4 113.5), B0 -0.71%
+H3 chat at 1 with 1 stream(s): B1 -0.11% against A (A 45.0 45.1 | B1 44.9 45.1), B0 -0.55%
+H3 chat at 1 with 2 stream(s): B1 -0.59% against A (A 59.4 59.2 | B1 58.7 59.2), B0 -1.01%  <- B0 off the default path
+H3 chat at 1 with 4 stream(s): B1 -0.93% against A (A 75.7 75.2 | B1 74.5 75.0), B0 -1.13%  <- B0 off the default path
+H3 code at 0 with 1 stream(s): B1 -0.17% against A (A 60.4 60.3 | B1 60.2 60.3), B0 -0.75%
+H3 code at 0 with 2 stream(s): B1 -0.74% against A (A 94.6 94.3 | B1 93.3 94.2), B0 -0.48%
+H3 code at 0 with 4 stream(s): B1 -0.26% against A (A 135.6 137.0 | B1 134.9 137.0), B0 -0.81%
+H3 code at 1 with 1 stream(s): B1 -0.30% against A (A 65.6 65.7 | B1 65.4 65.5), B0 -0.38%
+H3 code at 1 with 2 stream(s): B1 -0.54% against A (A 64.3 64.5 | B1 63.9 64.2), B0 -0.47%
+H3 code at 1 with 4 stream(s): B1 -0.84% against A (A 83.1 83.2 | B1 82.1 82.8), B0 -0.54%
+H4 cold 2048: A 1275.0 1246.3 ms | B1 1251.2 1259.3 ms, -0.43% | B0 1267.7 ms, +0.56%
+H4 cold 8192: A 5388.5 5391.9 ms | B1 5406.9 5431.9 ms, +0.54% | B0 5495.1 ms, +1.95%
+H4 cold 32768: A 21110.9 21069.1 ms | B1 21088.5 21241.8 ms, +0.36% | B0 21366.4 ms, +1.31%
+H4 cold 65536: A 42155.2 42067.2 ms | B1 42147.5 42442.4 ms, +0.44% | B0 42698.8 ms, +1.40%
+H6 mtp section: hk-P0 105.95 ms over 12 chunk line(s) | hk-P1 0.01 ms over 12 chunk line(s) (below half: the head ran no prompt pass)
+HEAD SKIP: NOT DECIDED: H5: hk-A1 (prompt_cache_states is 0); hk-A2 (prompt_cache_states is 0); hk-B1a (prompt_cache_states is 0); hk-B1b (prompt_cache_states is 0); hk-B0 (prompt_cache_states is 0)
+== solo to start: A ('st-A1', 'st-A2'), B1 ('st-B1a', 'st-B1b'), B0 ('st-B0',), B1x ('st-B1x',), at --parallel 4 --context 1048576 with KNOBS=off and CHUNK_SOLO=4096 (request starts on every arm but B1x)
+S1: 0 boot cell(s) unclean, 0 concurrent cell(s) and 0 ours-rows key(s) with more than one reply digest
+S2 chat at 0 with 1 stream(s): B1 -0.91%, B0 -1.31%, B1x -0.30% against A (A 49.5 49.6 | B1 48.7 49.5)  <- B0 off the default path
+S2 chat at 0 with 2 stream(s): B1 -1.10%, B0 -2.20%, B1x -0.78% against A (A 77.4 77.4 | B1 75.7 77.4)  <- B1 over the limit  <- B0 off the default path
+S2 chat at 0 with 4 stream(s): B1 +0.22%, B0 -1.65%, B1x -0.13% against A (A 112.2 112.3 | B1 111.6 113.4)  <- B0 off the default path
+S2 chat at 1 with 1 stream(s): B1 -1.00%, B0 -1.77%, B1x -0.44% against A (A 45.2 45.0 | B1 44.2 45.1)  <- B0 off the default path
+S2 chat at 1 with 2 stream(s): B1 -0.17%, B0 -1.02%, B1x +0.00% against A (A 58.9 58.9 | B1 58.5 59.1)  <- B0 off the default path
+S2 chat at 1 with 4 stream(s): B1 -0.13%, B0 -0.60%, B1x +0.74% against A (A 74.5 74.6 | B1 73.7 75.2)
+S2 code at 0 with 1 stream(s): B1 -1.41%, B0 -2.07%, B1x -0.41% against A (A 60.6 60.3 | B1 59.0 60.2)  <- B1 over the limit  <- B0 off the default path
+S2 code at 0 with 2 stream(s): B1 -0.74%, B0 -1.59%, B1x -0.63% against A (A 94.6 94.4 | B1 92.9 94.7)  <- B0 off the default path
+S2 code at 0 with 4 stream(s): B1 +0.18%, B0 -1.51%, B1x -0.18% against A (A 136.2 135.1 | B1 134.9 136.9)  <- B0 off the default path
+S2 code at 1 with 1 stream(s): B1 -1.07%, B0 -1.83%, B1x -0.91% against A (A 65.9 65.5 | B1 64.5 65.5)  <- B1 over the limit  <- B0 off the default path
+S2 code at 1 with 2 stream(s): B1 -0.78%, B0 -1.71%, B1x -0.31% against A (A 64.2 64.2 | B1 63.2 64.2)  <- B0 off the default path
+S2 code at 1 with 4 stream(s): B1 -0.18%, B0 -0.91%, B1x -0.18% against A (A 82.5 82.8 | B1 82.2 82.8)
+S3 cold chat 8000: A 5396 5418 ms | B1 5312 5252 ms, -2.32% | B0 5468 ms +1.13% | B1x 5361 ms -0.86%
+S3 cold chat 32000: A 21079 21102 ms | B1 20648 20390 ms, -2.71% | B0 20854 ms -1.12% | B1x 20535 ms -2.64%
+S3 cold chat 120000: A 78440 78627 ms | B1 77350 76376 ms, -2.13% | B0 77602 ms -1.19% | B1x 76615 ms -2.44%
+S4 c3k turns 3 to 10: A 2264 2246 ms | B1 2091 2070 ms, +7.74% faster
+S4 c3k turn 2: A 2315.0 2285.0 ms | B1 2334.0 2305.0 ms, +0.85%
+S4 c74 turns 2 to 8: A 1043.0 1051.6 ms | B1 1061.4 1048.6 ms, +0.74%
+S5 device checks: psts-solo-off\r0.log 1 PASS 0 FAIL, psts-solo-off\r1.log 1 PASS 0 FAIL, psts-solo-off\r2.log 1 PASS 0 FAIL, psts-solo-on\r0.log 1 PASS 0 FAIL, psts-solo-on\r1.log 1 PASS 0 FAIL, psts-solo-on\r2.log 1 PASS 0 FAIL, psts-solo-synth-off.log 1 PASS 0 FAIL, psts-solo-synth-on.log 1 PASS 0 FAIL
+SOLO TO START: FAILS: S2: chat at 0 with 1 stream(s): B0 differs from A by -1.31%; S2: chat at 0 with 2 stream(s) is 1.10% slower in B1; S2: chat at 0 with 2 stream(s): B0 differs from A by -2.20%; S2: chat at 0 with 4 stream(s): B0 differs from A by -1.65%; S2: chat at 1 with 1 stream(s): B0 differs from A by -1.77%; S2: chat at 1 with 2 stream(s): B0 differs from A by -1.02%; S2: code at 0 with 1 stream(s) is 1.41% slower in B1; S2: code at 0 with 1 stream(s): B0 differs from A by -2.07%; S2: code at 0 with 2 stream(s): B0 differs from A by -1.59%; S2: code at 0 with 4 stream(s): B0 differs from A by -1.51%; S2: code at 1 with 1 stream(s) is 1.07% slower in B1; S2: code at 1 with 1 stream(s): B0 differs from A by -1.83%; S2: code at 1 with 2 stream(s): B0 differs from A by -1.71%; S3: B1x's cold chat first token at 32000 differs from A by -2.64%; S3: B1x's cold chat first token at 120000 differs from A by -2.44%
+== warm turns: upstream's tools/bench_warm_turns.py --phase cold, one chat turn a size (REPORT ONLY: no verdict and no exit code depends on this block; the solo lever's verdict is S1-S5's)
+st-A1 warm-8k: client_ttft_s 5.386821, engine_ttft_s 5.386365944, prefill_widths [3], qualified True, prompt_tokens 8191 (target 8192)
+st-A2 warm-8k: client_ttft_s 5.356681, engine_ttft_s 5.356152501, prefill_widths [3], qualified True, prompt_tokens 8191 (target 8192)
+st-B1a warm-8k: client_ttft_s 5.444144, engine_ttft_s 5.443669514, prefill_widths [3], qualified True, prompt_tokens 8191 (target 8192)
+st-B1b warm-8k: client_ttft_s 5.400795, engine_ttft_s 5.399989407, prefill_widths [3], qualified True, prompt_tokens 8191 (target 8192)
+st-B0 warm-8k: client_ttft_s 5.445797, engine_ttft_s 5.445124612, prefill_widths [3], qualified True, prompt_tokens 8191 (target 8192)
+st-B1x warm-8k: client_ttft_s 5.396354, engine_ttft_s 5.395550977, prefill_widths [2047], qualified True, prompt_tokens 8191 (target 8192)
+== warm 8k (target 8192) engine TTFT: A mean 5.371 s, +0.00% against A (faster positive); B1 mean 5.422 s, -0.94% against A (faster positive); B0 mean 5.445 s, -1.38% against A (faster positive); B1x mean 5.396 s, -0.45% against A (faster positive)
+   A prefill_widths: [3]
+   B1 prefill_widths: [3]
+   B0 prefill_widths: [3]
+   B1x prefill_widths: [2047]
+st-A1 warm-32k: client_ttft_s 20.175116, engine_ttft_s 20.174273723, prefill_widths [3], qualified True, prompt_tokens 32766 (target 32768)
+st-A2 warm-32k: client_ttft_s 20.033773, engine_ttft_s 20.032837961, prefill_widths [3], qualified True, prompt_tokens 32766 (target 32768)
+st-B1a warm-32k: client_ttft_s 20.498554, engine_ttft_s 20.497801291, prefill_widths [3], qualified True, prompt_tokens 32766 (target 32768)
+st-B1b warm-32k: client_ttft_s 20.250302, engine_ttft_s 20.249542278, prefill_widths [3], qualified True, prompt_tokens 32766 (target 32768)
+st-B0 warm-32k: client_ttft_s 20.582878, engine_ttft_s 20.582202618, prefill_widths [3], qualified True, prompt_tokens 32766 (target 32768)
+st-B1x warm-32k: client_ttft_s 20.257279, engine_ttft_s 20.2564012, prefill_widths [2046], qualified True, prompt_tokens 32766 (target 32768)
+== warm 32k (target 32768) engine TTFT: A mean 20.104 s, +0.00% against A (faster positive); B1 mean 20.374 s, -1.34% against A (faster positive); B0 mean 20.582 s, -2.38% against A (faster positive); B1x mean 20.256 s, -0.76% against A (faster positive)
+   A prefill_widths: [3]
+   B1 prefill_widths: [3]
+   B0 prefill_widths: [3]
+   B1x prefill_widths: [2046]
+st-A1 warm-120k: client_ttft_s 75.134959, engine_ttft_s 75.133920608, prefill_widths [3], qualified True, prompt_tokens 122881 (target 122880)
+st-A2 warm-120k: client_ttft_s 74.297768, engine_ttft_s 74.295810737, prefill_widths [3], qualified True, prompt_tokens 122881 (target 122880)
+st-B1a warm-120k: client_ttft_s 75.942868, engine_ttft_s 75.941731876, prefill_widths [3], qualified True, prompt_tokens 122881 (target 122880)
+st-B1b warm-120k: client_ttft_s 75.167261, engine_ttft_s 75.165416917, prefill_widths [3], qualified True, prompt_tokens 122881 (target 122880)
+st-B0 warm-120k: client_ttft_s 76.30721, engine_ttft_s 76.305368497, prefill_widths [3], qualified True, prompt_tokens 122881 (target 122880)
+st-B1x warm-120k: client_ttft_s 75.44019, engine_ttft_s 75.438396953, prefill_widths [1], qualified True, prompt_tokens 122881 (target 122880)
+== warm 120k (target 122880) engine TTFT: A mean 74.715 s, +0.00% against A (faster positive); B1 mean 75.554 s, -1.12% against A (faster positive); B0 mean 76.305 s, -2.13% against A (faster positive); B1x mean 75.438 s, -0.97% against A (faster positive)
+   A prefill_widths: [3]
+   B1 prefill_widths: [3]
+   B0 prefill_widths: [3]
+   B1x prefill_widths: [1]
