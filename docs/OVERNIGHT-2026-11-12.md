@@ -2827,3 +2827,28 @@ a launch moves are the active experts' sliced weights at 4 bits, and this device
 the answer comes from reading `nc_body`'s grid, block and per-launch loop against the 273 GB/s the prompt-side pair reached,
 not from a counter. That reading is the next step, and it decides whether the decode work worth doing is a tile-shape
 change or a scheduling one.
+
+## 103. X3 prefetch depth does nothing: the decode kernel's cost is not the k-step lookahead
+
+Because `tf_exl3_ovn_nc1` is 46% of a four-client decode window and `TF_GLM_OVN_X3_NC=2` doubles its k-step prefetch, the
+one-knob arm was worth taking. Rule written to a file before the first boot: adopt `NC=2` at a mean at least 1% above
+`NC=1` with identical tokens, reject if more than 1% slower, hold in between. Six boots, three an arm, `--parallel 4`,
+sampled code, 256 tokens, three rounds.
+
+| arm | boots | mean |
+|---|---|---|
+| `TF_GLM_OVN_X3_NC=1` (the recipe) | 153.0, 152.4, 152.8 | **152.74** |
+| `TF_GLM_OVN_X3_NC=2` | 153.0, 153.8, 152.2 | 152.98 |
+
+**+0.15%, so HOLD**: the recipe keeps `NC=1`. Deeper prefetch is not what that kernel is short of.
+
+Two faults of mine in running it, both worth the line. The first version labelled boots by arm value, so the mirrored order
+`a:1 b:2 b:2 a:1` wrote `b-2` twice, found the first result and skipped, and reported `DONE` after two boots instead of
+four: a boot loop whose output path is derived from the arm cannot run the same arm twice, so a mirrored order needs a
+per-boot label. And the first pair read 153.27 against 152.36, which is exactly the kind of six-tenths-of-a-percent
+difference that a single boot makes look like a result.
+
+**What it leaves standing.** The decode path's dominant cost is a 16-row-tile kernel at 810 us a launch with 10,920
+launches in a window. Prefetch depth is ruled out; the remaining candidates inside that kernel are the tile size and the
+launch count, which is the same direction as the expert-skew item's "64-row EXL3 units" and is a kernel change with its
+own receipt rather than a knob.
