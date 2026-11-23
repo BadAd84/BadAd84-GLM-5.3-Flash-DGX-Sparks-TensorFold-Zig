@@ -1,0 +1,51 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm mla: FP8 KV pages, the paged read inside chunks_wide's FP8 fetch (dead with pt null)
+
+Part 1 of the FP8 KV pages port (archive/tensorfold-gb10's glm-fp8-pages,
+872b09a6f, with glm-fp8-pipe 1ccdb486e to follow). This series' chunks_wide
+already takes pt and pstep for the BF16 paged path; only the FP8 fetch refuses
+pages, reading every row at src * LW with its scale at scales[src]. On pages a
+page part is 512 rows of E4M3 codes then their 512 FP32 scales, so a row's
+codes are at page + off * LW and its scale at page + CH * LW + off, where off
+is ki - start for a dense chunk (a chunk is one page) and src % (pstep / LW)
+for a sparse key (its row in the token list, in pstep / LW rows a page).
+
+BF16 is untouched by construction: the change is inside the fetch lambda, and
+fetch is called only from `if constexpr (FP8)` blocks, so no BF16
+instantiation emits a different instruction, and with pt null the FP8 read is
+exactly today's (codes at src * LW, scales[src]).
+
+Instrument note for the RECORD: `check fmt ctest` cannot judge this file -
+`zig/kernels/cuda/*.cuh` compile only in the image build, so the proof is an
+nvcc compile of the translation units that include common/mla.cuh (mla.cu,
+hy4_flash/mla_attention.cu, glm_glue.cu) on a host with the toolkit.
+
+diff --git a/zig/kernels/cuda/common/mla.cuh b/zig/kernels/cuda/common/mla.cuh
+index d2ce1dd22..dffbe5bb5 100644
+--- a/zig/kernels/cuda/common/mla.cuh
++++ b/zig/kernels/cuda/common/mla.cuh
+@@ -90,10 +90,19 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
+       const int64_t ki = first + key;
+       const bool ok = sparse ? ki < n : ki <= limit;
+       const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
+-      // a slab row's codes at src and its scale at scales[src]; this tree refuses an FP8 cache on pages
++      // a slab row's codes at src and its scale at scales[src]; on pages a part's 512 rows of codes, then their scales
+       const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc) + src * LW;
++      const float* row_scales = scales + src;
++      if (pt && ok) {
++        static_assert(CH == 512, "a dense chunk is one page");
++        const int64_t off = sparse ? src % (pstep / LW) : ki - start;  // a sparse key is a row in pstep / LW rows a page
++        const unsigned char* page = reinterpret_cast<const unsigned char*>(lc) +
++                                    (sparse ? (src - off) * LW : (int64_t)pt[c] * pstep);
++        codes = page + off * LW;
++        row_scales = reinterpret_cast<const float*>(page + CH * LW) + off;
++      }
+       pre_c[p] = ok ? *reinterpret_cast<const uint2*>(codes + u * 8) : make_uint2(0u, 0u);
+-      pre_s[p] = ok ? scales[src] : 1.0f;
++      pre_s[p] = ok ? row_scales[0] : 1.0f;
+     }
+   };
+   auto store = [&](int tile) {
+-- 
+2.52.0.windows.1
+

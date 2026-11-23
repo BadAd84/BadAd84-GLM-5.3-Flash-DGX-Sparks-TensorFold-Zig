@@ -39,6 +39,28 @@ for step in check-native-cuda-host test-cuda-host compile-cuda-tests $STANDALONE
     grep -E "^[^ ].*: error: " "$log" | head -12 | cut -c1-240
   fi
 done
+# The kernel step no zig step can see: zig/kernels/cuda/*.cu and their .cuh compile only in the image build, so
+# check/test/compile-cuda-tests are blind to a patched header. -ptx compiles the source and both device instantiations;
+# it does NOT prove a kernel keeps its register budget (the SASS budget is the image build's business).
+# CUDA_NVCC: the gate host's relocated toolkit; a box without one skips the step by name, as a missing build step does.
+CUDA_NVCC=${CUDA_NVCC:-$HOME/tools/cuda-13.3/usr/local/cuda-13.3/bin/nvcc}
+CUDA_TUS="mla.cu glm_glue.cu hy4_flash/mla_attention.cu"
+if [ -x "$CUDA_NVCC" ]; then
+  echo "nvcc $("$CUDA_NVCC" --version | grep -oE 'release [0-9.]+' | head -1) at $CUDA_NVCC"
+  for tu in $CUDA_TUS; do
+    [ -f "zig/kernels/cuda/$tu" ] || { echo "nvcc $tu: not a translation unit of this tree"; continue; }
+    log="$HOME/gates/$NAME-nvcc-$(basename "$tu" .cu).log"
+    timeout -k 30 2400 "$CUDA_NVCC" -std=c++17 -arch=sm_121a -ptx -o /dev/null -Izig/kernels/cuda -I"zig/kernels/cuda/$(dirname "$tu")" "zig/kernels/cuda/$tu" > "$log" 2>&1 < /dev/null; rc=$?
+    [ "$rc" = 124 ] && echo "nvcc $tu: TIMED OUT after 40 minutes" | tee -a "$log"
+    echo "nvcc $tu rc=$rc"
+    if [ "$rc" -ne 0 ]; then
+      bad=1
+      grep -E 'error' "$log" | head -8 | cut -c1-240
+    fi
+  done
+else
+  echo "nvcc: no toolkit at $CUDA_NVCC (skipped; set CUDA_NVCC to run it)"
+fi
 "$Z" fmt --check zig/ > "$HOME/gates/$NAME-fmt.log" 2>&1; rc=$?
 echo "fmt rc=$rc $(head -5 "$HOME/gates/$NAME-fmt.log" | tr '\n' ' ' | cut -c1-300)"
 [ "$rc" -ne 0 ] && bad=1
