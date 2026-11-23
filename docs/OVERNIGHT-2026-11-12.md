@@ -3123,3 +3123,21 @@ commit conflicts on the file the first one rewrites, as expected.
 So this is not a re-cut, it is a hand re-seat of every hunk, and it is the worst candidate of the seven: the fork measured it
 **-14% and -8% at depth**, its RECORD is written to say it is expected to lose, and its conflicts sit in the files this
 series has changed most. It goes behind `HC_DEC`'s fix on the porting lane rather than ahead of it.
+
+## 117. Owner decision: spend on FP8's restructure and build PRX, rather than bank them
+
+The porting project found that three of the seven levers are not patch ports. Presented with their measured cost, the owner
+chose to spend on both subsystem ports rather than record them as closed:
+
+- **FP8 KV pages: restructure.** The change targets `chunks_wide`, which this series moved into `common/mla.cuh`, a header
+  shared by GLM, DeepSeek V4.1 and hy4_flash, so a page table there is a three-family change plus a signature that
+  propagates through two wrapper sets and a `same_params` static_assert. The fork measured **-14% and -8% at depth** and the
+  commit deletes a refusal rather than optimising, so this is spending to close a question with our own numbers. The
+  structural map is in `docs/audit-2026-11-12/fp8-pages-port.md`.
+- **PRX and ZC: build the subsystem**, in value order after everything else, because this series carries no proxy or plan
+  layer at all and its fork cells have never been re-run here.
+- **DRAW1 stays behind its premise**: three kernels, a rig and a branch in `Engine.draw` only if the top-k measurement now
+  running shows that a larger top_k costs decode time on the whole-row path.
+
+The lane declined to cut a half FP8 patch (paged writes with unpaged reads is not the lever and would screen green while
+measuring nothing), which is the same discipline that kept a guessed resolution out of the tree.
