@@ -30,10 +30,9 @@ Receipts: host tests of cut, plan (order, cap, marks, finished streams) and
 admits, of the wire packet, and glm-multifill-check (GPU) for the passes.
 
 diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
-index 965973b55..cb601c3ff 100644
 --- a/zig/build/glm_family_host.zig
 +++ b/zig/build/glm_family_host.zig
-@@ -106,6 +106,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
+@@ -106,6 +106,7 @@
      const x3 = b.step("test-glm-exl3-x3-host", "TF_GLM_OVN_X3_*: knobs, each grouped launch's kernel and its tail, without a GPU");
      for ([_]*std.Build.Module{ cuda, glm }) |m| x3.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"EXL3 X3:"} })).step);
      b.step("test-glm-keep-seqs-host", "TF_GLM_OVN_KEEP_SEQS: a released slot's sequence kept or freed, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM keep seqs:"} })).step);
@@ -42,10 +41,9 @@ index 965973b55..cb601c3ff 100644
  
  pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
 diff --git a/zig/src/core/lanes/backend.zig b/zig/src/core/lanes/backend.zig
-index 2806a0a65..099044f0d 100644
 --- a/zig/src/core/lanes/backend.zig
 +++ b/zig/src/core/lanes/backend.zig
-@@ -109,6 +109,8 @@ pub const Backend = struct {
+@@ -109,6 +109,8 @@
          prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
          /// Prompts of at most this many tokens prefill_many takes while prompts otherwise fill by chunks (0: none).
          many_rows: u32 = 0,
@@ -55,16 +53,14 @@ index 2806a0a65..099044f0d 100644
          first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
          /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
 diff --git a/zig/src/core/lanes/open.zig b/zig/src/core/lanes/open.zig
-index 684ab6b10..b9cafc6f7 100644
 --- a/zig/src/core/lanes/open.zig
 +++ b/zig/src/core/lanes/open.zig
-@@ -59,10 +59,12 @@ pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror, done: []bo
+@@ -59,10 +59,11 @@
      };
  }
  
 -/// Whether `s` may join a batched prompt pass beside chunked fills: short, text only, nothing kept to resume from.
-+/// Whether `s` may join a batched prompt pass beside chunked fills: short, text only, nothing kept to resume from
-+/// unless the backend takes resumed prompts there too (many_resumed: then the rows past the kept state count).
++/// Whether `s` may join a batched prompt pass: short, text only, past a kept state only with many_resumed.
  pub fn batchable(e: *const Engine, s: *const Stream) bool {
      const n = e.backend.vtable.many_rows;
 -    return n > 0 and s.prompt_len <= n and s.images.len == 0 and s.reuse.saved == null;
@@ -74,10 +70,9 @@ index 684ab6b10..b9cafc6f7 100644
  
  fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror, done: []bool) void {
 diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
-index 9ae2d75ba..586ba91e9 100644
 --- a/zig/src/families/glm/cuda.zig
 +++ b/zig/src/families/glm/cuda.zig
-@@ -32,6 +32,8 @@ pub const sampler = @import("cuda_sampler.zig");
+@@ -32,6 +32,8 @@
  pub const prompt_sink = @import("cuda_prompt_sink.zig");
  pub const prompt_solo = @import("cuda_prompt_solo.zig");
  pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
@@ -86,7 +81,7 @@ index 9ae2d75ba..586ba91e9 100644
  pub const engine = @import("cuda_engine.zig");
  pub const prompt_pair = @import("cuda_prompt_pair.zig");
  pub const pages = @import("cuda_pages.zig");
-@@ -104,6 +106,8 @@ test {
+@@ -109,6 +111,8 @@
      _ = ranks;
      _ = sampler;
      _ = prompt_logprobs;
@@ -96,10 +91,9 @@ index 9ae2d75ba..586ba91e9 100644
      _ = follow;
      _ = lanes;
 diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
-index 80cb2596f..050744fc6 100644
 --- a/zig/src/families/glm/cuda_env_test.zig
 +++ b/zig/src/families/glm/cuda_env_test.zig
-@@ -14,6 +14,7 @@ const switches = [_]Name{
+@@ -14,6 +14,7 @@
      .{ .name = "TF_GLM_LINK_WAIT" },
      .{ .name = "TF_GLM_PDL", .default = true },
      .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
@@ -108,10 +102,9 @@ index 80cb2596f..050744fc6 100644
      .{ .name = "TF_GLM_DSEL", .default = true },
      .{ .name = "TF_GLM_DSCORES", .default = true },
 diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
-index 1e8724243..8ad09645b 100644
 --- a/zig/src/families/glm/cuda_follow.zig
 +++ b/zig/src/families/glm/cuda_follow.zig
-@@ -293,6 +293,16 @@ pub const Leader = struct {
+@@ -308,6 +308,16 @@
          try x.e.prefillMany(parts, firsts);
      }
  
@@ -128,7 +121,7 @@ index 1e8724243..8ad09645b 100644
      pub fn keep(x: Leader, n: usize) !void {
          try x.flush();
          try x.send(.{ .kind = @backingInt(Kind.keep), .a = n }, &.{});
-@@ -414,10 +424,17 @@ pub fn follow(e: *Engine, link: *Link) !void {
+@@ -437,10 +447,17 @@
                  try e.verifyShared(parts[0..k]);
              },
              .many => {
@@ -151,10 +144,17 @@ index 1e8724243..8ad09645b 100644
              .keep => try e.keep(@intCast(h.a)),
              .form => e.m.experts.fact = h.a,
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
-index 4506334d0..0949829b5 100644
 --- a/zig/src/families/glm/cuda_lanes.zig
 +++ b/zig/src/families/glm/cuda_lanes.zig
-@@ -31,6 +31,8 @@ const Lane = struct {
+@@ -10,6 +10,7 @@
+ const snapshots = @import("cuda_snapshots.zig");
+ const cuda = @import("cuda");
+ const be = lanes.backend;
++const fill_mod = @import("cuda_lanes_fill.zig");
+ /// First tokens a handle names.
+ const ring = 1024;
+ /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
+@@ -32,6 +33,8 @@
  pub const Lanes = struct {
      x: follow.Leader,
      whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
@@ -163,42 +163,37 @@ index 4506334d0..0949829b5 100644
      alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
      mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
      copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
-@@ -65,7 +67,7 @@ pub const Lanes = struct {
+@@ -66,7 +69,7 @@
      }
  
      pub fn backend(self: *Lanes) be.Backend {
 -        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else &steps_vt };
-+        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else if (self.together) (if (self.multi) &steps_multi_vt else &steps_many_vt) else &steps_vt };
++        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else if (self.together) (if (self.multi) &fill_mod.steps_multi_vt else &fill_mod.steps_many_vt) else &steps_vt };
      }
  
      const whole_vt: be.Backend.VTable = .{
-@@ -92,6 +94,17 @@ pub const Lanes = struct {
-         v.many_rows = 0;
-         break :vt v;
+@@ -85,7 +88,7 @@
+         .held = heldFn,
+         .prompt_rows = true,
      };
-+    const steps_many_vt: be.Backend.VTable = vt: { // long, image and resumed prompts still fill by steps (open.batchable)
-+        var v = steps_vt;
-+        v.prefill_many = prefillManyFn;
-+        v.many_rows = @intCast(engine.prompt_rows);
-+        break :vt v;
-+    };
-+    const steps_multi_vt: be.Backend.VTable = vt: { // TF_GLM_OVN_MULTI_FILL: resumed prompts join batched passes too
-+        var v = steps_many_vt;
-+        v.many_resumed = true;
-+        break :vt v;
-+    };
+-    const steps_vt: be.Backend.VTable = vt: {
++    pub const steps_vt: be.Backend.VTable = vt: {
+         var v = whole_vt;
+         v.prefill_step = @import("cuda_lanes_step.zig").prefillStepFn;
+         v.cancel_prefill = cancelPrefillFn;
+@@ -221,9 +224,10 @@
+         self.lanes.getPtr(s).?.first = self.take(first);
+     }
  
-     /// Round loop facts: copies up to max_rows, head chains to max_drafts, shared windows unless TF_GLM_SHARED=0.
-     pub fn facts(self: *const Lanes) lanes.Model {
-@@ -203,6 +216,7 @@ pub const Lanes = struct {
-     fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
+-    fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
++    pub fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
          const self = of(ptr);
          if (!self.x.e.m.tiled or ss.len > engine.max_together or share_mod.of(self.x.e) != null) return false; // the store keeps a pass alone
 +        if (self.multi and try @import("cuda_lanes_fill.zig").multiFill(self, ss)) return true; // TF_GLM_OVN_MULTI_FILL
          for (ss) |s| if (!canBatch(s)) return false;
          var opened: usize = 0;
          errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
-@@ -555,7 +569,7 @@ pub const Lanes = struct {
+@@ -576,7 +580,7 @@
      }
  
      /// The stream left the rounds: its sequence is freed, or its pages given back, on every rank (slot 0 stays).
@@ -209,13 +204,10 @@ index 4506334d0..0949829b5 100644
          self.x.e.gpa.free(kv.value.marks);
 diff --git a/zig/src/families/glm/cuda_lanes_fill.zig b/zig/src/families/glm/cuda_lanes_fill.zig
 new file mode 100644
-index 000000000..475cf0a96
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_lanes_fill.zig
-@@ -0,0 +1,190 @@
-+//! The lane backend's batched fills. TF_GLM_OVN_MULTI_FILL: prefill_many over fresh, marked and resumed prompts; each
-+//! pass takes every unfinished prompt's next piece (from where it stands to its next mark or its end), shortest first,
-+//! up to a chunk's rows, until every prompt's first token is drawn: Engine.prefillChunk's cuts, several streams a pass.
+@@ -0,0 +1,201 @@
++//! TF_GLM_OVN_MULTI_FILL: batched prefill_many over fresh, marked and resumed prompts, a piece a pass.
 +const std = @import("std");
 +const lanes = @import("lanes");
 +const engine = @import("cuda_engine.zig");
@@ -226,8 +218,21 @@ index 000000000..475cf0a96
 +
 +const max = engine.max_together;
 +
-+/// A prompt a batched pass takes: text only (no prompt logprobs, images or request starts), one chunk past its kept
-+/// state at most (a stale or longer one fills by steps, as without the knob).
++/// The steps vtable with batched fresh prompts (open.batchable's many_rows); MULTI_FILL's adds many_resumed.
++pub const steps_many_vt: lanes.backend.VTable = vt: {
++    var v = Lanes.steps_vt;
++    v.prefill_many = Lanes.prefillManyFn;
++    v.many_rows = @intCast(engine.prompt_rows);
++    break :vt v;
++};
++/// TF_GLM_OVN_MULTI_FILL: resumed prompts join batched passes too.
++pub const steps_multi_vt: lanes.backend.VTable = vt: {
++    var v = steps_many_vt;
++    v.many_resumed = true;
++    break :vt v;
++};
++
++/// A prompt a batched pass takes: text only (no logprobs, images or request starts), one chunk past its kept state.
 +pub fn admits(s: anytype) bool {
 +    const rows = if (s.reuse.saved != null) s.prompt_len -| s.reuse.at else s.prompt_len;
 +    return s.prompt_logprobs == null and s.images.len == 0 and s.chunks.len == 0 and rows <= engine.prompt_rows;
@@ -404,16 +409,14 @@ index 000000000..475cf0a96
 +    try std.testing.expect(!admits(S{ .prompt_len = 2 * engine.prompt_rows, .reuse = .{ .saved = &keep, .at = 10 } }));
 +}
 diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
-index e933c6b4c..b12776657 100644
 --- a/zig/src/families/glm/cuda_native.zig
 +++ b/zig/src/families/glm/cuda_native.zig
-@@ -365,11 +365,14 @@ fn finishRank(a: OpenArgs) !Loaded {
+@@ -365,11 +365,13 @@
          cuda.memory_receipt.emit(@intCast(p.rank), .cleanup_end, false);
          std.process.exit(0);
      }
 -    // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_SHARED=0 runs windows alone.
-+    // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_PROMPT_MANY=1 admits short prompts
-+    // in one pass, TF_GLM_OVN_MULTI_FILL=1 lets resumed prompts join those passes, TF_GLM_SHARED=0 runs windows alone.
++    // Rank 0 reads: PROMPT_STEPS=0 whole, PROMPT_MANY=1 short one pass, MULTI_FILL=1 resumed too, SHARED=0 alone.
      const steps = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_STEPS", ranks.environment("TF_GLM_PROMPT_STEPS"), true);
 +    const together = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_MANY", ranks.environment("TF_GLM_PROMPT_MANY"), false);
 +    const multi = cuda.ovn.on("MULTI_FILL");
@@ -426,13 +429,10 @@ index e933c6b4c..b12776657 100644
      if (own.share > 0) if (own.layout) |*l| { // TF_KV_SHARE: the plan counts each kept state's slot
 diff --git a/zig/src/families/glm/cuda_prompt_pieces.zig b/zig/src/families/glm/cuda_prompt_pieces.zig
 new file mode 100644
-index 000000000..08934ed09
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_prompt_pieces.zig
-@@ -0,0 +1,148 @@
-+//! TF_GLM_OVN_MULTI_FILL: one prompt pass over several streams' pieces, each from where its prompt stands (0, a kept
-+//! state it resumes, or its last piece's end) to its next mark or its end: Engine.prefillChunk's steps, batched.
-+//! A piece starting at a mark fires it first (rank 0's hook keeps the state, the gate gives every rank its copy).
+@@ -0,0 +1,145 @@
++//! TF_GLM_OVN_MULTI_FILL: one pass over several streams' pieces, each from where it stands to its next mark or end.
 +const std = @import("std");
 +const fw = @import("cuda_forward.zig");
 +const engine = @import("cuda_engine.zig");
@@ -502,8 +502,7 @@ index 000000000..08934ed09
 +    return out[0..count];
 +}
 +
-+/// The pass on every rank: resumed pieces restored and marks fired (rank 0's `marks[k]`), the gate, the shared
-+/// prompt forward, then each piece's drafter rows, its first token at its prompt's end (`firsts[k]`), head, commit.
++/// The pass on every rank: restores, marks, the gate, the shared forward, then drafter rows and first tokens.
 +pub fn run(e: *Engine, pieces: []const Piece, marks: ?[]const ?engine.Marks, firsts: []?u32) !void {
 +    if (!fits(pieces, e.capacity) or firsts.len < pieces.len) return error.BadPrompts;
 +    for (pieces, 0..) |p, k| {
@@ -579,10 +578,9 @@ index 000000000..08934ed09
 +    try std.testing.expect(!fits(&bad, 1 << 16));
 +}
 diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
-index 45b4debfd..853b2a3e5 100644
 --- a/zig/src/platform/environment.zig
 +++ b/zig/src/platform/environment.zig
-@@ -137,6 +137,7 @@ pub const rules = [_]Rule{
+@@ -137,6 +137,7 @@
      .{ .name = "TF_GLM_LINK_WAIT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_PDL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -590,7 +588,7 @@ index 45b4debfd..853b2a3e5 100644
      .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_DSCORES", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
-@@ -159,6 +160,7 @@ pub const rules = [_]Rule{
+@@ -159,6 +160,7 @@
      .{ .name = "TF_GLM_OVN_NO_COPY", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_ONEPASS_PIPE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
      .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
@@ -600,7 +598,6 @@ index 45b4debfd..853b2a3e5 100644
      .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
 diff --git a/zig/tests/cuda/glm_multifill_check.zig b/zig/tests/cuda/glm_multifill_check.zig
 new file mode 100644
-index 000000000..654194bdb
 --- /dev/null
 +++ b/zig/tests/cuda/glm_multifill_check.zig
 @@ -0,0 +1,187 @@
@@ -792,10 +789,9 @@ index 000000000..654194bdb
 +    check.pass("multifill at TP={d}: {d} resumed prompts (four forks of one depth-{d} state, a dense depth-{d}, one longer) batched in one pass equal their solo chunk fills in first token, window tokens and logits, and their positions; the red control differed only on its own piece", .{ world, ps.len, 3 * C, C });
 +}
 diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
-index ebad02ab4..59608385b 100644
 --- a/zig/tests/cuda/main.zig
 +++ b/zig/tests/cuda/main.zig
-@@ -60,6 +60,7 @@ const glm_lanes_tests = @import("glm_lanes_tests.zig");
+@@ -60,6 +60,7 @@
  const glm_pair_tests = @import("glm_pair_tests.zig");
  const glm_split_tests = @import("glm_split_tests.zig");
  const glm_solo_tests = @import("glm_solo_tests.zig");
@@ -803,7 +799,7 @@ index ebad02ab4..59608385b 100644
  const glm_paged_tests = @import("glm_paged_tests.zig");
  const glm_kv_host_slots = @import("glm_kv_host_slots.zig");
  const glm_tap_tests = @import("glm_tap_tests.zig");
-@@ -365,6 +366,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+@@ -365,6 +366,7 @@
      if (std.mem.eql(u8, cmd, "glm-pair-check")) return glm_pair_tests.pairCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
      if (std.mem.eql(u8, cmd, "glm-split-check")) return glm_split_tests.splitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
      if (std.mem.eql(u8, cmd, "glm-solo-check")) return glm_solo_tests.soloCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
@@ -812,10 +808,9 @@ index ebad02ab4..59608385b 100644
      if (std.mem.eql(u8, cmd, "glm-synth")) {
          const kind = if (rest.len > 1) std.meta.stringToEnum(glm_synth.Kind, rest[1]) orelse return error.UnknownCommand else .nvfp4;
 diff --git a/zig/tests/cuda/main_usage.zig b/zig/tests/cuda/main_usage.zig
-index e588db109..ba2136942 100644
 --- a/zig/tests/cuda/main_usage.zig
 +++ b/zig/tests/cuda/main_usage.zig
-@@ -168,6 +168,7 @@ pub const usage =
+@@ -168,6 +168,7 @@
      \\  glm-pair-check <ckpt> <dc.json> <rank> <world> <idfile>  paired prompt steps against twins a chunk a step, logits and states byte for byte
      \\  glm-split-check <ckpt> <dc.json> <rank> <world> <idfile>  prompt chunks with their indexer rows split across ranks against whole twins, byte for byte
      \\  glm-solo-check <ckpt> <dc.json> <rank> <world> <idfile>  solo prompt passes against twins a chunk a step, logits and states byte for byte
@@ -823,6 +818,3 @@ index e588db109..ba2136942 100644
      \\  glm-tap-split-check <ckpt> <drafter> <rank> <world> <idfile>  DFlash2 prompt taps: split and ring retained taps against gather, byte for byte, every rank
      \\  glm-paged-check <ckpt> <rank> <world> <idfile>  a paged stream (pages out of order, NaN first) against a whole-window twin
      \\  dory MODEL LOOPS N TEXT     Dory (NVFP4): N greedy tokens from TEXT, then verify windows of 2 to 16 rows bit-equal
--- 
-2.52.0.windows.1
-

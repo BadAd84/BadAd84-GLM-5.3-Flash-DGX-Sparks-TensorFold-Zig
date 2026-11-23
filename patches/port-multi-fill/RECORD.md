@@ -7,7 +7,13 @@ package (41 patches) - and was gated on the engine series alone first (tree `59b
 `iter mf-final`: `check fmt test ctest`, `test-cuda-host` 7,995 of 8,038 with 43 skipped and no failures, `compile-cuda-tests`
 10 of 10, `ctest` rc 0). Two hunks were context-repaired for the full stack when it landed there: `cuda_native.zig`'s
 `release(own);` (added by `restore-held`) and the `own.link.lead(...)` line that had replaced `own.link.asleep`; the change
-itself is untouched, and `SHA256SUMS` was regenerated. It also carries the stepped many vtable (`TF_GLM_PROMPT_MANY`)
+itself is untouched, and `SHA256SUMS` was regenerated.
+
+2026-11-23, lean: the stack gate `sg-20261123-112522` read 9 new lean problems from this package (8 multi-line comments in
+four files, and `cuda_lanes.zig` at 605 lines). Fixed with the behaviour unchanged: each two- or three-line comment is now
+one line within 120 columns; the two new vtables moved from `cuda_lanes.zig` into `cuda_lanes_fill.zig` (built from
+`Lanes.steps_vt` and `Lanes.prefillManyFn`, which became `pub`), so `cuda_lanes.zig` is 595 lines. Base against head lean
+is 168 against 168, 0 new; the tree the patch makes is byte-identical to the fixed one, and `SHA256SUMS` was regenerated. It also carries the stepped many vtable (`TF_GLM_PROMPT_MANY`)
 because `prefill_many` is not admitted without it, so **this package and `patches/port-prompt-many` are alternatives, not a
 stack**: both add the same vtable block.
 
