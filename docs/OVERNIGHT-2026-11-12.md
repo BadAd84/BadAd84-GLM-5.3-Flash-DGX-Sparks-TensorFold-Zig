@@ -3108,3 +3108,18 @@ that needs three, and the DRAW1 question is unanswered rather than answered nega
 
 Both cells are re-queued to run after the screen finishes, with a fresh `top_k=40` control booted in the same conditions so
 the three-point comparison is internally consistent. Until then, no conclusion about DRAW1's premise, and no subsystem work.
+
+## 116. FP8 KV pages is a full hand re-seat: all twelve files conflict
+
+The refs are in `work/port/restore` under `refs/gb10/scratch/glmnight-tree/remotes/*/glm-fp8-pages` (`872b09a6f`) and
+`-pipe` (`1ccdb486e`), not under the `tf-mirror` path the port report named, which is why the bundle would not hand them
+over directly. Both commits format-patch cleanly (39,791 and 2,659 bytes) and touch twelve files.
+
+Against the applied series, `git apply --check` fails on **all twelve**: `glm_glue_attn.cuh`, `glm_glue_latent.cuh`,
+`cuda_dsa_block.zig`, `cuda_kv8_test.zig`, `cuda_latent.zig`, `cuda_native.zig`, `cuda_pages.zig`,
+`cuda_snapshot_layout.zig`, `cuda_start.zig`, `cuda_start_test.zig`, `cuda_state.zig`, `glm_paged_tests.zig`. The second
+commit conflicts on the file the first one rewrites, as expected.
+
+So this is not a re-cut, it is a hand re-seat of every hunk, and it is the worst candidate of the seven: the fork measured it
+**-14% and -8% at depth**, its RECORD is written to say it is expected to lose, and its conflicts sit in the files this
+series has changed most. It goes behind `HC_DEC`'s fix on the porting lane rather than ahead of it.
