@@ -2875,3 +2875,29 @@ What that means for a change: up to 8% of decode is available only if some of th
 stream. The `AllReduce` after the expert phases is a true dependency and cannot move; the 7,640-launch `AllGather` of
 weights is the part that could be prefetched on the side stream the way prefill's exchange already is. That is a real lead
 with a measured ceiling, and it is the first decode-side lever this campaign has found that is not a kernel shape.
+
+## 105. Most of what is left on the review's list is not in this series
+
+Checked against `patches/` before spending any window on them. Of the eight open items, five name levers the current
+series does not carry, so "measure that knob" is not available for them:
+
+| item | in `patches/` | where it actually lives |
+|---|---|---|
+| `PROMPT_MANY` at 4+ streams | no | retired fork (`archive/ai-engine`) |
+| FP8 KV pages at depth | no | retired fork |
+| `DRAW1` sampled top-k cells | no | retired fork |
+| `HC_DEC` fresh arm | no | retired fork |
+| PRX and ZC's P6 cells | no | retired fork |
+| `MULTI_FILL` with several cold prompts | mentioned only | `0026` says the file is not carried |
+| `LATENT_TILE`'s G=2 variant | no | `archive/tensorfold-gb10` |
+
+Two of the remaining items are real work in this series:
+
+- **The rank-0 expert skew**, about 51 ms a chunk of avoidable wall, which needs 64-row EXL3 units and the owner's call on
+  summation order. It is also the direction the decode profile points at, since `nc1` is a 16-row tile at 810 us a launch.
+- **The decode `AllGather` prefetch**, now scoped at 675.6 ms and 3.5% of a four-client window, movable to the side stream
+  the way prefill already moves its exchange.
+
+So the honest state of the list is: seven items need a port decision before they can be measured, and two are actionable.
+Measuring a knob that is not compiled into the image would have produced a NOT DECIDED and a wasted window, which is the
+third time this session that reading first was cheaper than booting.
