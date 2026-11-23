@@ -15,7 +15,8 @@
 #   DRAFTER   1 (default) loads the DFlash2 drafter at 4 bits; 0 runs the MTP head instead
 #   RES       memory reserve GiB (default: 12.5 at P1, 14.5 at P2, 13.0 at P4, 6.5 above)
 #   XSERVE    extra serve arguments; XENV extra -e arguments
-#   LEARN     0 (default) or 1: conversation states kept on disk, every rank's part (upstream PR #1411, patches/pr1411): adds
+#   LEARN     1 (default; promoted 2026-11-23, the tier production runs) or 0: conversation states kept on disk, every
+#             rank's part (upstream PR #1411, patches/pr1411): adds
 #             --learn-conversations --learn-dir /root/.cache/huggingface/glm53-zig-learn/$LEARN_NAME (a subdirectory of the mounted cache,
 #             so each rank writes its own host's disk) with --learn-gib $LEARN_GIB (128), --learn-daily-gib $LEARN_DAILY_GIB (512) and
 #             --learn-min-free-gib $LEARN_MIN_FREE_GIB (40); LEARN_NAME defaults to serve. Left alone when XSERVE already names
@@ -110,10 +111,10 @@ RUN=(--gpus all --ipc=host --network host --shm-size 16g --cap-add IPC_LOCK
 SERVE=(tensorfold-native serve "$MODEL" --context "$CTX" --parallel "$P" --max-tokens 32768
  --top-k 20 --backend cuda "${KVFLAG[@]}")
 [[ "${DRAFTER:-1}" = 1 && "$XSERVE" != *--drafter* ]] && SERVE+=(--drafter "$DFLASH" --drafter-bits 4)
-if [[ "${LEARN:-0}" = 1 && "${XSERVE:-}" != *--learn-conversations* ]]; then
+if [[ "${LEARN:-1}" = 1 && "${XSERVE:-}" != *--learn-conversations* ]]; then
   SERVE+=(--learn-conversations --learn-dir "/root/.cache/huggingface/glm53-zig-learn/${LEARN_NAME:-serve}"
     --learn-gib "${LEARN_GIB:-128}" --learn-daily-gib "${LEARN_DAILY_GIB:-512}" --learn-min-free-gib "${LEARN_MIN_FREE_GIB:-40}")
-elif [[ "${LEARN:-0}" != 0 && "${LEARN:-0}" != 1 ]]; then
+elif [[ "${LEARN:-1}" != 0 && "${LEARN:-1}" != 1 ]]; then
   echo "serve.sh: LEARN must be 0 or 1, got '${LEARN}'" >&2; exit 2
 fi
 read -r -a XS <<< "${XSERVE:-}"; SERVE+=("${XS[@]}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_serve_learn.sh - serve.sh's LEARN switch, without a GPU: serve.sh runs against a `docker` that records its argument list.
-# Expected: LEARN unset or 0 adds no --learn flag; LEARN=1 adds the five disk-tier flags with the defaults of scripts/queue-disk-tier.sh;
+# Expected: LEARN unset turns the tier on, the promoted default (the tier production runs); LEARN=0 turns it off; LEARN=1 adds the five disk-tier flags with the defaults of scripts/queue-disk-tier.sh;
 # Pass a serve.sh path as the first argument to test a mutated copy (config.sh beside it).
 # LEARN=1 with XSERVE already naming --learn-conversations adds nothing twice; LEARN=2 is refused. Run from anywhere with bash (WSL is fine).
 set -u
@@ -31,7 +31,7 @@ expect() { # expect NAME PATTERN LINE [want|none]
   if [[ "$want" = want && "$line" == *$pat* ]] || [[ "$want" = none && "$line" != *$pat* ]]; then echo "ok   $name"; else echo "FAIL $name: $want '$pat' in: ${line:0:300}"; fail=1; fi
 }
 l=$(run unset)
-expect "unset adds no learn flag" "--learn" "$l" none
+expect "unset turns the tier on, the promoted default" "--learn-conversations --learn-dir /root/.cache/huggingface/glm53-zig-learn/serve --learn-gib 128 --learn-daily-gib 512 --learn-min-free-gib 40" "$l"
 l=$(run zero LEARN=0)
 expect "LEARN=0 adds no learn flag" "--learn" "$l" none
 l=$(run one LEARN=1)
