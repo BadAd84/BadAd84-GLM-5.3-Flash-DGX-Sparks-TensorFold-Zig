@@ -3202,3 +3202,28 @@ today's, which is what "byte-exact" requires, and the launch count for a chunk f
 
 That is a kernel project with a host test that pins the per-row bytes against today's kernel at several row counts, and it is
 the one remaining decode-side item from the review list that is neither measured-negative nor blocked.
+
+## 121. DRAW1's premise is refuted: a larger top_k is not slower on the whole-row path
+
+Six boots at four clients on `m130a`, same seed, three rounds each, one boot a cell:
+
+| cell | tok/s | vs `top_k=40` | vs greedy |
+|---|---|---|---|
+| greedy | 156.17 | | |
+| `top_k=40` | 150.69 | | -3.51% |
+| `top_k=128` | 150.02 | -0.44% | -3.94% |
+| `top_k=1024` | 154.08 (154.63 / 153.67 / 153.93) | **+2.25%** | -1.34% |
+
+DRAW1 exists to exchange each rank's top-k candidates instead of whole rows, on the premise that a larger `top_k` costs
+decode time in the whole-row gather. **It does not: `top_k=1024` is 2.25% faster than `top_k=40` and 2.7% faster than 128.**
+What costs time is sampling at all, about 1.3 to 3.9% against greedy, and that is true at every `top_k` in the range,
+including the cap DRAW1 was designed around.
+
+So the premise is refuted at the level the fork measured it and the subsystem is not justified. Two caveats stated rather
+than buried: these are single boots at four clients, where the boot spread is 1 to 3%, so the 2.25% is near the resolution of
+the instrument and the honest claim is "not slower, if anything faster" rather than a 2% win; and the cells do not measure a
+long-context conversation, where a whole-row gather scales with rows and the candidate path would too.
+
+**DRAW1 therefore leaves the porting list** unless the owner wants it at long context for a different reason. It is the third
+of the seven to be closed by measurement rather than by porting, after `MULTI_FILL` (-4.59% at four clients) and
+`LATENT_TILE` (-4.24% at both lengths).
