@@ -218,12 +218,14 @@ class ServeEnv(unittest.TestCase):
         self.assertEqual("0", got["TF_GLM_OVN_KEEP_SEQS"])
         self.assertEqual("4", got["TF_GLM_HEAD_BITS"])
 
-    def test_a_candidate_overrides_a_prod_default_in_dev_only(self):
-        # D4/D5: prod carries the engine default (0); dev.env's candidates line is applied after the recipe, so a dev boot runs 1.
+    def test_dev_equals_prod_while_the_candidates_section_is_empty(self):
+        # With nothing under test, D3/D4 reduce to one statement: a dev boot and a prod boot resolve every
+        # setting to the same value. A candidate is added back by the promotion rule, not by this test.
+        cand = [n for n, _ in env_words("dev", "candidates")]
+        self.assertEqual([], cand, "a candidate exists: this test's premise no longer holds")
         prod = dict(new_environment("measured", 4, 3, "192.0.2.1:29561", "", {}, False))
         dev = dict(new_environment("dev", 4, 3, "192.0.2.1:29561", "", {}, False))
-        self.assertEqual("0", prod["TF_GLM_PROMPT_MANY"])
-        self.assertEqual("1", dev["TF_GLM_PROMPT_MANY"])
+        self.assertEqual(prod, dev)
 
     def test_caller_environment_wins_for_the_two_nccl_names(self):
         got = dict(self.same("measured", 4, 3, caller={"NCCL_IB_HCA": "mlx5_0", "NCCL_SOCKET_IFNAME": "eth9"}))
