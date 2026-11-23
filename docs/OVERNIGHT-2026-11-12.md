@@ -3446,3 +3446,17 @@ only arm positive at all three levels and is the one to reach for if a future ba
 The debt list's remaining rows are the ones this batch deliberately did not boot, because they change no chat path:
 the receipt and log switches, the vision, PDF and video limits, the device-profile check, the NCCL library and device
 ordinal, the carveout pair, and the rows of families this serve does not run (Qwen, LFM2, Hy4-flash).
+
+## The disk tier is off in every arm we have run, and production runs it
+
+`serve.sh` keeps pr1411's disk tier behind `LEARN` (default 0, `--learn-gib 128`). Only `queue-disk-tier.sh` and
+`queue53.sh` ever set it; `bench-arm.sh` and every screen and A/B queue (105, 109, 111, 116, 118, 122, 124, 128, 129)
+boot with `LEARN=0`. Production's Python serve has the NVMe KV tier on. So our cells and production's are the same only
+at short prompts where nothing is kept: at long context, a resume, or a restart they are two different serves, and a
+knob measured without the tier can be judged on a path production does not run. This is the comparability defect to fix
+first, before any further promotion is claimed.
+
+The promotion model itself holds and is gated: `dev.env` is `prod.env` plus candidates, and the coverage gate refuses a
+candidate that does not raise a row prod keeps at its engine default. Measured today, the two files carry the same 118
+settings with zero differences, so there is no candidate outstanding: every measured winner is already in both, and
+nothing is under test.
