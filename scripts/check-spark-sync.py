@@ -15,7 +15,7 @@ import sys
 RUNTIME = """serve.sh zig-tp3.sh zig-tp3-stop.sh build-image.sh dist-image.sh bench-client.sh bench-arm.sh arms-client.sh arms-file.sh abba.sh
 streams.py streams_ids.py prose33.json cells.py rounds.py nsys-rank0.sh nsys-rank.sh nsys-kern.py disk.py disk_table.py longctx.py queue-disk-tier.sh
 queue-longctx.sh queue-prod-compare.sh prod_accounting.py prod_table.py per_prompt.py prompts24.json code_ids.json forced-arm.sh teacher_forced.py prod-stop.sh
-streams_sampled.py longdec_ids.json nsys-prefill.sh prefill_stages.py prompt_trace.py gpu-check-tp3.sh check-env.py env/prod.env env/dev.env env/words.sh""".split()
+streams_sampled.py longdec_ids.json nsys-prefill.sh prefill_stages.py prompt_trace.py repeat-probe.py gpu-check-tp3.sh check-env.py env/prod.env env/dev.env env/words.sh""".split()
 
 
 def digest(data: bytes) -> str:
