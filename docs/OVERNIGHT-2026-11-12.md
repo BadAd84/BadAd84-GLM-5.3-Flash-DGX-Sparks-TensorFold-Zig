@@ -2969,3 +2969,19 @@ carry, so that one gets a note rather than a port.
 lever. It is screened when `iter check fmt ctest` returns rc 0 on its tree, and it is gated only when the full gate with
 host tests does. Nothing enters `patches/engine/` on the first, and the RECORDs now have to say `not compiled` until the
 second exists.
+
+## 109. First ported package screened green: LATENT_TILE G=2
+
+`iter --name lt-fixed` over `patches/engine` plus `patches/port-latent-tile`: `fmt` rc 0, `compile-cuda-tests` 10 of 10
+steps, `ctest` rc 0 in 224 s, `ITER-DONE rc=0`, tree `c0ad0c2a15529bf99a4de0d08050a7eddea57293`. The lane's own screen
+agreed at rc 0 in 328 s, which is the agreement I wanted from two independent runs.
+
+So the lever the fork only ever built as G=4 now has a **G=2** form (256 threads, two blocks an SM) that compiles and whose
+tests pass on this series, with reversed-butterfly controls for both forms. It has not been benched: the fork's G=4 was
+1.7x slower than ABSORB_VEC at one block an SM, and the whole reason G=2 exists is that occupancy 2 is the only form that
+could beat the vector path. That bench is the next thing this package needs, and it needs an image built with the package
+applied because the package is not in the engine series.
+
+The two faults the screen caught on the way, both fork-era: a qualified `Lanes.marksOf` call missing `self` for a
+three-argument method, and a check assigning `e.link` on `cuda_engine.Engine` where this series keeps the link on
+`follow.Leader`.
