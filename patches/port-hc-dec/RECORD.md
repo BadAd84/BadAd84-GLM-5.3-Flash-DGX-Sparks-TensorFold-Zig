@@ -51,3 +51,11 @@ regression at any level kills HC_DEC under the repo's rule regardless of the P8 
 Patches, in file-name order:
 
 - `0001-glm-hc-dec.patch`
+
+## Screen
+
+`screened: check fmt test ctest rc 0` on tree `e1f52b62b7a2e14bf00f3da08df06ae37cb34669`, run `iter --name hc-t3`:
+`fmt` rc 0, `test-cuda-host` 7,993 of 8,036 with 43 skipped and no failures, `compile-cuda-tests` 10 of 10, `ctest` rc 0,
+`ITER-DONE rc=0`. The three routing tests (`TF_GLM_OVN_HC_ROWS and _HC_DEC off`, `TF_GLM_OVN_HC_ROWS`, `TF_GLM_OVN_HC_DEC`)
+are the package's receipt for the routing, not a smoke check: they failed on the first two cuts and pass now that `hcRow` is
+back on `cuda.launch.launch` and the assertions follow this series' dependent-launch convention.
