@@ -1,0 +1,115 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm lanes: TF_GLM_PROMPT_MANY admits short prompts together beside stepped fills
+
+Ported from ai-engine fork-ssh/ovn-up's 71217588c (2026-10-29). The stepped
+vtable sets prefill_many = null and many_rows = 0, so the lane host never
+batches prompts while prompts fill by steps: four short prompts arriving
+together wait a round each. steps_many_vt keeps the stepped fills and adds
+prefillManyFn with many_rows = prompt_rows, so prompts of at most 2,048
+tokens, text only and with nothing kept to resume, go in one pass
+(open.batchable); long, image and resumed prompts still fill by steps.
+
+Edited from the fork: the switch is TF_GLM_PROMPT_MANY, a .glm flag row read
+as TF_GLM_PROMPT_STEPS is (the fork read it from getenv), and it defaults off
+so an arm turns it on. The fork's default was on, which is the recipe the
+review's cells were read on: +1.9% at 4 streams and +1.6% at 6 against -1.3%
+at one, so the deciding cells are 4 and 6 streams against 1.
+
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+index 965973b55..d58496e0f 100644
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -106,6 +106,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
+     const x3 = b.step("test-glm-exl3-x3-host", "TF_GLM_OVN_X3_*: knobs, each grouped launch's kernel and its tail, without a GPU");
+     for ([_]*std.Build.Module{ cuda, glm }) |m| x3.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"EXL3 X3:"} })).step);
+     b.step("test-glm-keep-seqs-host", "TF_GLM_OVN_KEEP_SEQS: a released slot's sequence kept or freed, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM keep seqs:"} })).step);
++    b.step("test-glm-prompt-many-host", "TF_GLM_PROMPT_MANY: the stepped many vtable admits short prompts, off keeps one a round").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"TF_GLM_PROMPT_MANY"} })).step);
+ }
+ 
+ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index 4506334d0..1f7a5d12a 100644
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -31,6 +31,7 @@ const Lane = struct {
+ pub const Lanes = struct {
+     x: follow.Leader,
+     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
++    together: bool = false, // stepped: short prompts admitted in one pass (TF_GLM_PROMPT_MANY=1): one a round otherwise
+     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
+     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
+     copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
+@@ -65,7 +66,7 @@ pub const Lanes = struct {
+     }
+ 
+     pub fn backend(self: *Lanes) be.Backend {
+-        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else &steps_vt };
++        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else if (self.together) &steps_many_vt else &steps_vt };
+     }
+ 
+     const whole_vt: be.Backend.VTable = .{
+@@ -92,6 +93,12 @@ pub const Lanes = struct {
+         v.many_rows = 0;
+         break :vt v;
+     };
++    const steps_many_vt: be.Backend.VTable = vt: { // TF_GLM_PROMPT_MANY: long, image and resumed prompts still fill by steps
++        var v = steps_vt;
++        v.prefill_many = prefillManyFn;
++        v.many_rows = @intCast(engine.prompt_rows);
++        break :vt v;
++    };
+ 
+     /// Round loop facts: copies up to max_rows, head chains to max_drafts, shared windows unless TF_GLM_SHARED=0.
+     pub fn facts(self: *const Lanes) lanes.Model {
+@@ -568,3 +575,16 @@ pub const Lanes = struct {
+ pub fn canBatch(s: anytype) bool {
+     return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows and s.chunks.len == 0; // a batched pass keeps nothing at a request start
+ }
++
++test "TF_GLM_PROMPT_MANY: the stepped many vtable admits short prompts; off keeps one a round" {
++    var l: Lanes = undefined;
++    l.whole = false;
++    l.together = true;
++    const on = l.backend();
++    try std.testing.expect(on.vtable.prefill_many != null);
++    try std.testing.expectEqual(@as(u32, @intCast(engine.prompt_rows)), on.vtable.many_rows);
++    l.together = false;
++    const off = l.backend();
++    try std.testing.expect(off.vtable.prefill_many == null);
++    try std.testing.expectEqual(@as(u32, 0), off.vtable.many_rows);
++}
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+index e933c6b4c..beb5ecf3b 100644
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -365,11 +365,13 @@ fn finishRank(a: OpenArgs) !Loaded {
+         cuda.memory_receipt.emit(@intCast(p.rank), .cleanup_end, false);
+         std.process.exit(0);
+     }
+-    // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_SHARED=0 runs windows alone.
++    // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_PROMPT_MANY=1 admits short prompts
++    // in one pass, TF_GLM_SHARED=0 runs windows alone.
+     const steps = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_STEPS", ranks.environment("TF_GLM_PROMPT_STEPS"), true);
++    const together = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_MANY", ranks.environment("TF_GLM_PROMPT_MANY"), false);
+     const shared = try @import("sys").environment.value(bool, "TF_GLM_SHARED", ranks.environment("TF_GLM_SHARED"), true);
+     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
+-    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared, .mtp_confidence = o.mtp_confidence };
++    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .together = together, .alone = !shared, .mtp_confidence = o.mtp_confidence };
+     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
+     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
+     if (own.share > 0) if (own.layout) |*l| { // TF_KV_SHARE: the plan counts each kept state's slot
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 45b4debfd..66be0b087 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -137,6 +137,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_LINK_WAIT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_PDL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_PROMPT_MANY", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_DSCORES", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+-- 
+2.52.0.windows.1
+

@@ -2941,3 +2941,31 @@ decode `AllGather` prefetch now under diagnosis on the other lane, which is 675.
 tile change at all.
 
 Stated plainly: the engine's decode tile is register-limited at 16 rows, and that is why 10,920 launches of 810 us exist.
+
+## 108. Porting the archive levers: three packages, none yet compiled green
+
+The owner's decision was to port all seven. Three are cut as packages against the current series and **none has a green
+build**: applying clean and compiling are different facts, and the first package proved it.
+
+| package | source | state |
+|---|---|---|
+| `patches/port-multi-fill/0001-glm-multifill.patch` | ai-engine `32060d706` + `23062bd9c`, merged by `93dfbf29a` | applies clean, tree `282674504f86`, screen in flight |
+| `patches/port-latent-tile/0001-glm-latent-tile.patch` | `ovn-latile` `b2d1754ab`, tip `1a44a1620` | **first cut was RED** (`cuda_latent.zig:110`, a hoisted launch grid losing `abi.Dim3` context); re-cut with the grid inline, tree `8ab4997131ab`, re-screen in flight |
+| `patches/port-prompt-many/0001-glm-prompt-many.patch` | `71217588c` | applies clean, tree `20be2ed88937`, screen queued |
+
+`MULTI_FILL` and `PROMPT_MANY` add the same stepped-many vtable, so they are alternatives and cannot be stacked; both
+RECORDs say so. `LATENT_TILE` is independent and adds the **G=2** form the fork never built, with reversed-butterfly
+controls for both.
+
+`HC_DEC` (`6c92d7ec2`) is mapped, not assembled: five conflicts in `cuda_glue.zig`, four mechanical (no `router16` at the
+site the patch hooks, and `cuda_pdl.launch` replaces `cuda.launch.launch`), and one real, the `hcPre` rows-under-64 branch
+which must be written against `cuda_pdl.launch`. Its build step also needs an anchor that exists in this series' build
+file. So it needs a hand resolution rather than a text replay, and no package exists for it yet.
+
+`DRAW1` and FP8 pages have sources located and no package; PRX and ZC need a proxy and plan subsystem this series does not
+carry, so that one gets a note rather than a port.
+
+**The rule this section exists for:** a package that applies clean and passes `check-patch-packages` is not a verified
+lever. It is screened when `iter check fmt ctest` returns rc 0 on its tree, and it is gated only when the full gate with
+host tests does. Nothing enters `patches/engine/` on the first, and the RECORDs now have to say `not compiled` until the
+second exists.

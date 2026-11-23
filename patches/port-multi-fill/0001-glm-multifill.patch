@@ -1,0 +1,817 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm lanes: TF_GLM_OVN_MULTI_FILL batched prompt passes take marked and resumed prompts
+
+Ported from ai-engine fork-ssh/ovn-up's ovn-batchresume (MULTI_FILL landed
+2026-10-29 in 32060d706; plan(), the host tests and glm-multifill-check in
+23062bd9c, merged 93dfbf29a). The current series keeps upstream's
+prefill_many (fresh whole prompts in one pass) but refuses a resumed prompt
+there, so several short suffixes off one kept state fill one at a time.
+
+TF_GLM_OVN_MULTI_FILL: each pass takes every unfinished prompt's next piece,
+from where it stands (0, a kept state it resumes, or its last piece's end) to
+its next kept-state mark or its end, shortest first, up to prompt_rows, until
+every prompt's first token is drawn. A piece starting at a mark fires it
+first, the gate carries the kept state to the other ranks, and one forward
+runs every piece's rows (cuda_prompt_pieces), then each piece's drafter rows,
+its first token at its prompt's end, the head pass and the commit.
+Admission needs the batched step vtable, so the package also carries the
+stepped many vtable (many_rows + prefill_many, TF_GLM_PROMPT_MANY) it extends
+with many_resumed: both knobs default off, and an arm sets PROMPT_MANY=1 for
+the fresh-only pass or MULTI_FILL=1 for pieces.
+
+Text edited from the fork: the series' chunk grid is prompt_cuts.nextCut rather
+than the fork's chunkEnd, admits() also refuses a request with cuts, and the
+mark context is the shared store's Keeps (the series' marksOf signature). The
+GPU check compares batched against solo on first token, window tokens, logits
+and position (the fork's held-state image needs the disk packages, which are
+not part of the engine series).
+
+Receipts: host tests of cut, plan (order, cap, marks, finished streams) and
+admits, of the wire packet, and glm-multifill-check (GPU) for the passes.
+
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+index 965973b55..cb601c3ff 100644
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -106,6 +106,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
+     const x3 = b.step("test-glm-exl3-x3-host", "TF_GLM_OVN_X3_*: knobs, each grouped launch's kernel and its tail, without a GPU");
+     for ([_]*std.Build.Module{ cuda, glm }) |m| x3.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"EXL3 X3:"} })).step);
+     b.step("test-glm-keep-seqs-host", "TF_GLM_OVN_KEEP_SEQS: a released slot's sequence kept or freed, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM keep seqs:"} })).step);
++    b.step("test-glm-multifill-host", "TF_GLM_OVN_MULTI_FILL: the piece plan, its admits and the pass's wire packet").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"multifill"} })).step);
+ }
+ 
+ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+diff --git a/zig/src/core/lanes/backend.zig b/zig/src/core/lanes/backend.zig
+index 2806a0a65..099044f0d 100644
+--- a/zig/src/core/lanes/backend.zig
++++ b/zig/src/core/lanes/backend.zig
+@@ -109,6 +109,8 @@ pub const Backend = struct {
+         prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
+         /// Prompts of at most this many tokens prefill_many takes while prompts otherwise fill by chunks (0: none).
+         many_rows: u32 = 0,
++        /// prefill_many also takes prompts resuming a kept state (TF_GLM_OVN_MULTI_FILL); false: they fill by chunks.
++        many_resumed: bool = false,
+         /// Draw the first token from the prompt's last row at `position`; a handle to it.
+         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
+         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
+diff --git a/zig/src/core/lanes/open.zig b/zig/src/core/lanes/open.zig
+index 684ab6b10..b9cafc6f7 100644
+--- a/zig/src/core/lanes/open.zig
++++ b/zig/src/core/lanes/open.zig
+@@ -59,10 +59,12 @@ pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror, done: []bo
+     };
+ }
+ 
+-/// Whether `s` may join a batched prompt pass beside chunked fills: short, text only, nothing kept to resume from.
++/// Whether `s` may join a batched prompt pass beside chunked fills: short, text only, nothing kept to resume from
++/// unless the backend takes resumed prompts there too (many_resumed: then the rows past the kept state count).
+ pub fn batchable(e: *const Engine, s: *const Stream) bool {
+     const n = e.backend.vtable.many_rows;
+-    return n > 0 and s.prompt_len <= n and s.images.len == 0 and s.reuse.saved == null;
++    const rows = if (s.reuse.saved != null) s.prompt_len -| s.reuse.at else s.prompt_len;
++    return n > 0 and rows <= n and s.images.len == 0 and (s.reuse.saved == null or e.backend.vtable.many_resumed);
+ }
+ 
+ fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror, done: []bool) void {
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index 9ae2d75ba..586ba91e9 100644
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -32,6 +32,8 @@ pub const sampler = @import("cuda_sampler.zig");
+ pub const prompt_sink = @import("cuda_prompt_sink.zig");
+ pub const prompt_solo = @import("cuda_prompt_solo.zig");
+ pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
++pub const prompt_pieces = @import("cuda_prompt_pieces.zig");
++pub const lanes_fill = @import("cuda_lanes_fill.zig");
+ pub const engine = @import("cuda_engine.zig");
+ pub const prompt_pair = @import("cuda_prompt_pair.zig");
+ pub const pages = @import("cuda_pages.zig");
+@@ -104,6 +106,8 @@ test {
+     _ = ranks;
+     _ = sampler;
+     _ = prompt_logprobs;
++    _ = prompt_pieces;
++    _ = lanes_fill;
+     _ = engine;
+     _ = follow;
+     _ = lanes;
+diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
+index 1e8724243..8ad09645b 100644
+--- a/zig/src/families/glm/cuda_follow.zig
++++ b/zig/src/families/glm/cuda_follow.zig
+@@ -293,6 +293,16 @@ pub const Leader = struct {
+         try x.e.prefillMany(parts, firsts);
+     }
+ 
++    /// TF_GLM_OVN_MULTI_FILL: a pass of prompt pieces on every rank (cuda_prompt_pieces), a `many` step with flag 1.
++    pub fn prefillPieces(x: Leader, pieces: []const @import("cuda_prompt_pieces.zig").Piece, marks: []const ?engine.Marks, firsts: []?u32) !void {
++        const pp = @import("cuda_prompt_pieces.zig");
++        var buf: [pp.words]u32 = undefined;
++        const ids = try pp.encode(pieces, x.e.capacity, &buf);
++        try x.flush();
++        try x.send(.{ .kind = @backingInt(Kind.many), .flags = 1, .depth = @intCast(pieces.len) }, ids);
++        try pp.run(x.e, pieces, marks, firsts);
++    }
++
+     pub fn keep(x: Leader, n: usize) !void {
+         try x.flush();
+         try x.send(.{ .kind = @backingInt(Kind.keep), .a = n }, &.{});
+@@ -414,10 +424,17 @@ pub fn follow(e: *Engine, link: *Link) !void {
+                 try e.verifyShared(parts[0..k]);
+             },
+             .many => {
+-                var parts: [engine.max_together]engine.Prompt = undefined;
+-                const decoded = try prompt_wire.decode(step.ids, h.depth, e.capacity, &parts);
+-                var firsts: [engine.max_together]u32 = undefined;
+-                try e.prefillMany(decoded, &firsts);
++                if (h.flags & 1 != 0) { // TF_GLM_OVN_MULTI_FILL's pieces (cuda_prompt_pieces)
++                    const pp = @import("cuda_prompt_pieces.zig");
++                    var pieces: [engine.max_together]pp.Piece = undefined;
++                    var firsts: [engine.max_together]?u32 = undefined;
++                    try pp.run(e, try pp.decode(step.ids, h.depth, e.capacity, &pieces), null, &firsts);
++                } else {
++                    var parts: [engine.max_together]engine.Prompt = undefined;
++                    const decoded = try prompt_wire.decode(step.ids, h.depth, e.capacity, &parts);
++                    var firsts: [engine.max_together]u32 = undefined;
++                    try e.prefillMany(decoded, &firsts);
++                }
+             },
+             .keep => try e.keep(@intCast(h.a)),
+             .form => e.m.experts.fact = h.a,
+diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
+index 4506334d0..0949829b5 100644
+--- a/zig/src/families/glm/cuda_lanes.zig
++++ b/zig/src/families/glm/cuda_lanes.zig
+@@ -31,6 +31,8 @@ const Lane = struct {
+ pub const Lanes = struct {
+     x: follow.Leader,
+     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
++    together: bool = false, // stepped: short prompts admitted in one pass (TF_GLM_PROMPT_MANY=1): one a round otherwise
++    multi: bool = false, // TF_GLM_OVN_MULTI_FILL: batched passes take marked and resumed prompts, a piece a pass
+     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
+     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
+     copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
+@@ -65,7 +67,7 @@ pub const Lanes = struct {
+     }
+ 
+     pub fn backend(self: *Lanes) be.Backend {
+-        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else &steps_vt };
++        return .{ .ptr = self, .vtable = if (self.whole) &whole_vt else if (self.together) (if (self.multi) &steps_multi_vt else &steps_many_vt) else &steps_vt };
+     }
+ 
+     const whole_vt: be.Backend.VTable = .{
+@@ -92,6 +94,17 @@ pub const Lanes = struct {
+         v.many_rows = 0;
+         break :vt v;
+     };
++    const steps_many_vt: be.Backend.VTable = vt: { // long, image and resumed prompts still fill by steps (open.batchable)
++        var v = steps_vt;
++        v.prefill_many = prefillManyFn;
++        v.many_rows = @intCast(engine.prompt_rows);
++        break :vt v;
++    };
++    const steps_multi_vt: be.Backend.VTable = vt: { // TF_GLM_OVN_MULTI_FILL: resumed prompts join batched passes too
++        var v = steps_many_vt;
++        v.many_resumed = true;
++        break :vt v;
++    };
+ 
+     /// Round loop facts: copies up to max_rows, head chains to max_drafts, shared windows unless TF_GLM_SHARED=0.
+     pub fn facts(self: *const Lanes) lanes.Model {
+@@ -203,6 +216,7 @@ pub const Lanes = struct {
+     fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
+         const self = of(ptr);
+         if (!self.x.e.m.tiled or ss.len > engine.max_together or share_mod.of(self.x.e) != null) return false; // the store keeps a pass alone
++        if (self.multi and try @import("cuda_lanes_fill.zig").multiFill(self, ss)) return true; // TF_GLM_OVN_MULTI_FILL
+         for (ss) |s| if (!canBatch(s)) return false;
+         var opened: usize = 0;
+         errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
+@@ -555,7 +569,7 @@ pub const Lanes = struct {
+     }
+ 
+     /// The stream left the rounds: its sequence is freed, or its pages given back, on every rank (slot 0 stays).
+-    fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
++    pub fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
+         const self = of(ptr);
+         const kv = self.lanes.fetchRemove(s) orelse return;
+         self.x.e.gpa.free(kv.value.marks);
+diff --git a/zig/src/families/glm/cuda_lanes_fill.zig b/zig/src/families/glm/cuda_lanes_fill.zig
+new file mode 100644
+index 000000000..f4904bf28
+--- /dev/null
++++ b/zig/src/families/glm/cuda_lanes_fill.zig
+@@ -0,0 +1,190 @@
++//! The lane backend's batched fills. TF_GLM_OVN_MULTI_FILL: prefill_many over fresh, marked and resumed prompts; each
++//! pass takes every unfinished prompt's next piece (from where it stands to its next mark or its end), shortest first,
++//! up to a chunk's rows, until every prompt's first token is drawn: Engine.prefillChunk's cuts, several streams a pass.
++const std = @import("std");
++const lanes = @import("lanes");
++const engine = @import("cuda_engine.zig");
++const pieces_mod = @import("cuda_prompt_pieces.zig");
++const prompt_cuts = @import("cuda_prompt_cuts.zig");
++const share_mod = @import("cuda_share.zig");
++const Lanes = @import("cuda_lanes.zig").Lanes;
++
++const max = engine.max_together;
++
++/// A prompt a batched pass takes: text only (no prompt logprobs, images or request starts), one chunk past its kept
++/// state at most (a stale or longer one fills by steps, as without the knob).
++pub fn admits(s: anytype) bool {
++    const rows = if (s.reuse.saved != null) s.prompt_len -| s.reuse.at else s.prompt_len;
++    return s.prompt_logprobs == null and s.images.len == 0 and s.chunks.len == 0 and rows <= engine.prompt_rows;
++}
++
++/// Where a piece from `start` ends: the chunk grid (or the prompt's end), sooner at the first kept-state mark past it.
++pub fn cut(start: usize, len: usize, marks: []const u32) usize {
++    var end = prompt_cuts.nextCut(len, &.{}, start);
++    for (marks) |m| {
++        if (m > start and m < end) end = m;
++    }
++    return end;
++}
++
++/// One pass's pieces: each unfinished stream by its next piece's rows, shortest first, ties by place, prompt_rows cap.
++pub const Pick = struct { who: usize, end: usize };
++pub fn plan(lens: []const usize, at: []const usize, marks: []const []const u32, out: *[max]Pick) usize {
++    var order: [max]usize = undefined; // the unfinished streams, by their next piece's rows then their place
++    var ends: [max]usize = undefined;
++    var n: usize = 0;
++    for (lens, at, marks, 0..) |len, a, mk, i| {
++        if (a >= len) continue;
++        ends[i] = cut(a, len, mk);
++        var j = n;
++        while (j > 0 and ends[order[j - 1]] - at[order[j - 1]] > ends[i] - a) : (j -= 1) order[j] = order[j - 1];
++        order[j] = i;
++        n += 1;
++    }
++    var rows: usize = 0;
++    var k: usize = 0;
++    for (order[0..n]) |i| {
++        const r = ends[i] - at[i];
++        if (k > 0 and rows + r > engine.prompt_rows) break; // shortest first: the rest are longer still
++        out[k] = .{ .who = i, .end = ends[i] };
++        rows += r;
++        k += 1;
++    }
++    return k;
++}
++
++/// The streams' prompts through passes of pieces; false: refused before any stream opened (each then goes alone).
++pub fn multiFill(self: *Lanes, ss: []const *lanes.Stream) !bool {
++    if (!self.x.e.m.tiled or ss.len > max) return false;
++    for (ss) |s| if (!admits(s)) return false;
++    var opened: usize = 0;
++    errdefer for (ss[0..opened]) |s| Lanes.releaseFn(self, s);
++    var at: [max]usize = undefined; // where each prompt stands
++    var from: [max]?engine.Resume = undefined; // its kept state, until its first piece restores it
++    var marks: [max]?engine.Marks = undefined;
++    var keeps: [max]share_mod.Keeps = undefined; // each mark's context: the shared store's, alive through the passes
++    for (ss, 0..) |s, i| {
++        from[i] = try self.opening(s);
++        opened += 1;
++        at[i] = if (from[i]) |r| r.at else 0;
++        marks[i] = Lanes.marksOf(s, &keeps[i]);
++    }
++    while (true) {
++        var lens: [max]usize = undefined;
++        var mts: [max][]const u32 = undefined; // each stream's mark positions (empty: none)
++        for (ss, 0..) |s, i| {
++            lens[i] = s.prompt_len;
++            mts[i] = if (marks[i]) |m| m.at else &.{};
++        }
++        var picks: [max]Pick = undefined;
++        const k = plan(lens[0..ss.len], at[0..ss.len], mts[0..ss.len], &picks);
++        if (k == 0) return true;
++        var pcs: [max]pieces_mod.Piece = undefined;
++        var mk: [max]?engine.Marks = undefined;
++        for (picks[0..k], 0..) |p, j| {
++            const i = p.who;
++            const ids = ss[i].prompt();
++            const m = marks[i];
++            const marked = at[i] > 0 and m != null and std.mem.indexOfScalar(u32, m.?.at, @intCast(at[i])) != null;
++            pcs[j] = .{ .slot = self.lanes.getPtr(ss[i]).?.slot, .start = at[i], .rows = p.end - at[i], .len = ids.len, .part = ids[at[i]..@min(ids.len, p.end + 1)], .from = from[i], .mark = marked };
++            mk[j] = m;
++        }
++        var firsts: [max]?u32 = undefined;
++        try self.x.prefillPieces(pcs[0..k], mk[0..k], firsts[0..k]);
++        for (picks[0..k], pcs[0..k], firsts[0..k]) |p, pc, f| {
++            at[p.who] = pc.start + pc.rows;
++            from[p.who] = null;
++            if (f) |t| self.lanes.getPtr(ss[p.who]).?.first = self.take(t);
++        }
++    }
++}
++
++test "a piece ends on the chunk grid, at the prompt's end, or sooner at the first mark past its start" {
++    const C = engine.prompt_rows;
++    try std.testing.expectEqual(@as(usize, 300), cut(0, 300, &.{}));
++    try std.testing.expectEqual(@as(usize, 120), cut(0, 300, &.{ 120, 200 }));
++    try std.testing.expectEqual(@as(usize, 200), cut(120, 300, &.{ 120, 200 })); // its own start does not cut
++    try std.testing.expectEqual(@as(usize, 300), cut(200, 300, &.{ 120, 200, 300 })); // a mark at the end is no cut
++    try std.testing.expectEqual(C, cut(0, 3 * C, &.{})); // the grid, as a solo chunk fill
++    try std.testing.expectEqual(C + 9, cut(C, 9 * C, &.{ C + 9, C + 40 })); // a mark inside the chunk cuts first
++}
++
++test "multifill plan: shortest next piece first, ties by place, finished streams skipped" {
++    var out: [max]Pick = undefined;
++    const e: []const u32 = &.{};
++    {
++        const lens = [_]usize{ 300, 100, 100, 200 };
++        const at = [_]usize{ 0, 0, 0, 0 };
++        const mk = [_][]const u32{ e, e, e, e };
++        try std.testing.expectEqual(@as(usize, 4), plan(&lens, &at, &mk, &out));
++        const got = [_]usize{ out[0].who, out[1].who, out[2].who, out[3].who };
++        try std.testing.expectEqual([_]usize{ 1, 2, 3, 0 }, got); // 100 (place 1), 100 (place 2), 200, 300
++    }
++    { // the first done, the second half filled (its remaining rows shortest), the third fresh
++        const lens = [_]usize{ 300, 300, 300 };
++        const at = [_]usize{ 300, 128, 0 };
++        const mk = [_][]const u32{ e, e, e };
++        try std.testing.expectEqual(@as(usize, 2), plan(&lens, &at, &mk, &out));
++        const got = [_]usize{ out[0].who, out[1].who };
++        try std.testing.expectEqual([_]usize{ 1, 2 }, got);
++    }
++    { // every stream is done
++        const lens = [_]usize{ 10, 20 };
++        const at = [_]usize{ 10, 20 };
++        const mk = [_][]const u32{ e, e };
++        try std.testing.expectEqual(@as(usize, 0), plan(&lens, &at, &mk, &out));
++    }
++}
++
++test "multifill plan: the pass is capped at prompt_rows, one piece always goes" {
++    const R = engine.prompt_rows;
++    var out: [max]Pick = undefined;
++    const e: []const u32 = &.{};
++    { // two halves of the budget fit together (the cap is a strict >, not >=)
++        const lens = [_]usize{ R / 2, R / 2 };
++        const at = [_]usize{ 0, 0 };
++        const mk = [_][]const u32{ e, e };
++        try std.testing.expectEqual(@as(usize, 2), plan(&lens, &at, &mk, &out));
++    }
++    { // just over the budget: only the first goes, the rest wait for the next pass
++        const lens = [_]usize{ R / 2 + 1, R / 2 + 1 };
++        const at = [_]usize{ 0, 0 };
++        const mk = [_][]const u32{ e, e };
++        try std.testing.expectEqual(@as(usize, 1), plan(&lens, &at, &mk, &out));
++    }
++    { // a lone full-width piece still goes (progress is never starved by the cap)
++        const lens = [_]usize{R};
++        const at = [_]usize{0};
++        const mk = [_][]const u32{e};
++        try std.testing.expectEqual(@as(usize, 1), plan(&lens, &at, &mk, &out));
++    }
++}
++
++test "multifill plan: a piece ends at the first mark past its start" {
++    var out: [max]Pick = undefined;
++    const lens = [_]usize{1000};
++    const at = [_]usize{0};
++    const mk = [_][]const u32{&[_]u32{ 120, 500 }};
++    try std.testing.expectEqual(@as(usize, 1), plan(&lens, &at, &mk, &out));
++    try std.testing.expectEqual(@as(usize, 120), out[0].end);
++}
++
++test "multifill admits: logprobs, images, request starts and over-long prompts fall back to solo fills" {
++    const S = struct {
++        prompt_len: usize,
++        reuse: struct { saved: ?*const u8 = null, at: usize = 0 } = .{},
++        prompt_logprobs: ?*const u8 = null,
++        images: []const u8 = &.{},
++        chunks: []const u32 = &.{},
++    };
++    const keep: u8 = 0;
++    try std.testing.expect(admits(S{ .prompt_len = 10 }));
++    try std.testing.expect(admits(S{ .prompt_len = engine.prompt_rows }));
++    try std.testing.expect(!admits(S{ .prompt_len = engine.prompt_rows + 1 }));
++    try std.testing.expect(!admits(S{ .prompt_len = 10, .prompt_logprobs = &keep }));
++    try std.testing.expect(!admits(S{ .prompt_len = 10, .images = &[_]u8{1} }));
++    try std.testing.expect(!admits(S{ .prompt_len = 10, .chunks = &[_]u32{5} }));
++    // a resumed prompt counts only the rows past its kept state
++    try std.testing.expect(admits(S{ .prompt_len = engine.prompt_rows + 5, .reuse = .{ .saved = &keep, .at = 10 } }));
++    try std.testing.expect(!admits(S{ .prompt_len = 2 * engine.prompt_rows, .reuse = .{ .saved = &keep, .at = 10 } }));
++}
+diff --git a/zig/src/families/glm/cuda_native.zig b/zig/src/families/glm/cuda_native.zig
+index e933c6b4c..b12776657 100644
+--- a/zig/src/families/glm/cuda_native.zig
++++ b/zig/src/families/glm/cuda_native.zig
+@@ -365,11 +365,14 @@ fn finishRank(a: OpenArgs) !Loaded {
+         cuda.memory_receipt.emit(@intCast(p.rank), .cleanup_end, false);
+         std.process.exit(0);
+     }
+-    // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_SHARED=0 runs windows alone.
++    // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_PROMPT_MANY=1 admits short prompts
++    // in one pass, TF_GLM_OVN_MULTI_FILL=1 lets resumed prompts join those passes, TF_GLM_SHARED=0 runs windows alone.
+     const steps = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_STEPS", ranks.environment("TF_GLM_PROMPT_STEPS"), true);
++    const together = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_MANY", ranks.environment("TF_GLM_PROMPT_MANY"), false);
++    const multi = cuda.ovn.on("MULTI_FILL");
+     const shared = try @import("sys").environment.value(bool, "TF_GLM_SHARED", ranks.environment("TF_GLM_SHARED"), true);
+     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
+-    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared, .mtp_confidence = o.mtp_confidence };
++    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .together = together or multi, .multi = multi, .alone = !shared, .mtp_confidence = o.mtp_confidence };
+     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
+     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
+     if (own.share > 0) if (own.layout) |*l| { // TF_KV_SHARE: the plan counts each kept state's slot
+diff --git a/zig/src/families/glm/cuda_prompt_pieces.zig b/zig/src/families/glm/cuda_prompt_pieces.zig
+new file mode 100644
+index 000000000..08934ed09
+--- /dev/null
++++ b/zig/src/families/glm/cuda_prompt_pieces.zig
+@@ -0,0 +1,148 @@
++//! TF_GLM_OVN_MULTI_FILL: one prompt pass over several streams' pieces, each from where its prompt stands (0, a kept
++//! state it resumes, or its last piece's end) to its next mark or its end: Engine.prefillChunk's steps, batched.
++//! A piece starting at a mark fires it first (rank 0's hook keeps the state, the gate gives every rank its copy).
++const std = @import("std");
++const fw = @import("cuda_forward.zig");
++const engine = @import("cuda_engine.zig");
++const Engine = engine.Engine;
++
++/// One stream's piece: rows from `start` of its `len`-id prompt; `part` those ids and the next one (if any).
++pub const Piece = struct {
++    slot: u32,
++    start: usize,
++    rows: usize,
++    len: usize,
++    part: []const u32,
++    from: ?engine.Resume = null, // its first piece: the kept state it resumes (from.at == start)
++    mark: bool = false, // start is one of its marks: the state there is kept before the pass
++};
++
++/// Header words a piece takes on the wire: slot, start, rows, len, the resumed id's two halves, its position, flags.
++const head_words = 8;
++/// The most words a pass's step carries: every header, a chunk's rows and each piece's next id.
++pub const words = engine.max_together * (head_words + 1) + engine.prompt_rows;
++
++/// Whether `pieces` go in one pass: 1 to max_together on distinct slots, prompt_rows in all, each a valid step.
++pub fn fits(pieces: []const Piece, capacity: usize) bool {
++    if (pieces.len == 0 or pieces.len > engine.max_together) return false;
++    var rows: usize = 0;
++    for (pieces, 0..) |p, i| {
++        if (p.rows == 0 or p.start + p.rows > p.len or p.len + fw.window_rows >= capacity) return false;
++        if (p.part.len != @min(p.len - p.start, p.rows + 1)) return false;
++        if (p.from) |r| if (r.at != p.start or r.at == 0) return false;
++        for (pieces[0..i]) |q| if (q.slot == p.slot) return false;
++        rows += p.rows;
++    }
++    return rows <= fw.prefill_rows;
++}
++
++pub fn encode(pieces: []const Piece, capacity: usize, buf: []u32) ![]u32 {
++    if (!fits(pieces, capacity)) return error.BadPrompts;
++    var n: usize = head_words * pieces.len;
++    for (pieces) |p| n += p.part.len;
++    if (buf.len < n) return error.BadStep;
++    var at: usize = head_words * pieces.len;
++    for (pieces, 0..) |p, i| {
++        const r = p.from orelse engine.Resume{ .id = 0, .at = 0 };
++        buf[head_words * i ..][0..head_words].* = .{ p.slot, @intCast(p.start), @intCast(p.rows), @intCast(p.len), @truncate(r.id), @intCast(r.id >> 32), @intCast(r.at), @as(u32, @intFromBool(p.mark)) | @as(u32, @intFromBool(p.from != null)) << 1 };
++        @memcpy(buf[at..][0..p.part.len], p.part);
++        at += p.part.len;
++    }
++    return buf[0..n];
++}
++
++pub fn decode(ids: []const u32, count: usize, capacity: usize, out: *[engine.max_together]Piece) ![]const Piece {
++    if (count == 0 or count > out.len or ids.len < head_words * count) return error.BadStep;
++    var at: usize = head_words * count;
++    for (out[0..count], 0..) |*p, i| {
++        const w = ids[head_words * i ..][0..head_words];
++        const start: usize = w[1];
++        const rows: usize = w[2];
++        const len: usize = w[3];
++        if (start >= len or rows > len - start) return error.BadStep;
++        const n = @min(len - start, rows + 1);
++        if (n > ids.len - at) return error.BadStep;
++        const from: ?engine.Resume = if (w[7] & 2 != 0) .{ .id = @as(u64, w[5]) << 32 | w[4], .at = w[6] } else null;
++        p.* = .{ .slot = w[0], .start = start, .rows = rows, .len = len, .part = ids[at..][0..n], .from = from, .mark = w[7] & 1 != 0 };
++        at += n;
++    }
++    if (at != ids.len or !fits(out[0..count], capacity)) return error.BadStep;
++    return out[0..count];
++}
++
++/// The pass on every rank: resumed pieces restored and marks fired (rank 0's `marks[k]`), the gate, the shared
++/// prompt forward, then each piece's drafter rows, its first token at its prompt's end (`firsts[k]`), head, commit.
++pub fn run(e: *Engine, pieces: []const Piece, marks: ?[]const ?engine.Marks, firsts: []?u32) !void {
++    if (!fits(pieces, e.capacity) or firsts.len < pieces.len) return error.BadPrompts;
++    for (pieces, 0..) |p, k| {
++        if (p.slot >= e.seqs.items.len or e.seqs.items[p.slot] == null) return error.BadPrompts;
++        try e.bind(p.slot);
++        if (p.from) |r| { // Engine.prefillStart's resume
++            try e.restoreState(r.id);
++            if (e.drafter) |dr| try dr.restart(p.slot, r.at);
++        }
++        if (e.cur.st.pos != p.start or e.cur.st.pending != 0) return error.BadPrompts;
++        if (!p.mark) continue;
++        if (marks) |m| if (m[k]) |x| x.call(x.ctx, @intCast(p.start)); // Engine.prefillChunk's mark at a chunk start
++        try e.gate(null); // the kept state's id to the other ranks, which copy their bound sequence now
++    }
++    var segs: [engine.max_together]fw.Seg = undefined;
++    var ids: [fw.prefill_rows]u32 = undefined;
++    var rows: usize = 0;
++    for (pieces, 0..) |p, k| {
++        try e.bind(p.slot);
++        segs[k] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.rows };
++        @memcpy(ids[rows..][0..p.rows], p.part[0..p.rows]);
++        rows += p.rows;
++    }
++    try e.gate(null);
++    var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = &e.bp, .segs = segs[0..pieces.len] }};
++    var f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = &e.pieces, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(true) else null };
++    try f.run(@ptrCast(ids[0..rows]));
++    if (e.drafter) |dr| for (pieces, segs[0..pieces.len]) |p, g|
++        try dr.promptSegment(e, p.slot, p.start, p.rows, p.len, g.row0);
++    const D = e.c.hidden;
++    for (pieces, segs[0..pieces.len], 0..) |p, g, k| {
++        firsts[k] = null;
++        if (p.start + p.rows != p.len) continue;
++        try e.bind(p.slot);
++        var t: [1]u32 = undefined;
++        try e.draw(e.bp.logits + k * e.share.vocab.len() * 2, 1, p.len, 0, &t);
++        firsts[k] = t[0];
++        try e.holdPrompt(e.bp.fnormed + (g.row0 + g.rows - 1) * D * 2);
++    }
++    f.pieces = null;
++    f.taps = null;
++    for (pieces, segs[0..pieces.len]) |p, g| {
++        one[0] = .{ .w = &e.w, .st = g.st, .b = &e.bp };
++        const nxt: []const u32 = p.part[1..]; // decode._absorb_rows: each row's next token, as prefillChunk's head pass
++        if (e.head and nxt.len > 0) {
++            try f.mtp(@ptrCast(nxt), &.{e.bp.fnormed + g.row0 * D * 2});
++            try g.st.setMtpLen(e.stream, g.st.mtp_len + nxt.len);
++        }
++        try f.commit(g.rows);
++    }
++}
++
++test "a pass's pieces cross the wire whole: resumed ids past 32 bits, marks, a piece ending inside its prompt" {
++    const ids = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
++    const pieces = [_]Piece{
++        .{ .slot = 3, .start = 0, .rows = 4, .len = 9, .part = ids[0..5], .mark = false },
++        .{ .slot = 5, .start = 4, .rows = 5, .len = 9, .part = ids[4..9], .from = .{ .id = (@as(u64, 7) << 32) | 11, .at = 4 }, .mark = true },
++    };
++    var buf: [words]u32 = undefined;
++    const wire = try encode(&pieces, 1 << 16, &buf);
++    var out: [engine.max_together]Piece = undefined;
++    const back = try decode(wire, pieces.len, 1 << 16, &out);
++    for (pieces, back) |a, b| {
++        try std.testing.expectEqual(a.slot, b.slot);
++        try std.testing.expectEqual(a.start, b.start);
++        try std.testing.expectEqual(a.rows, b.rows);
++        try std.testing.expectEqual(a.len, b.len);
++        try std.testing.expectEqual(a.from, b.from);
++        try std.testing.expectEqual(a.mark, b.mark);
++        try std.testing.expectEqualSlices(u32, a.part, b.part);
++    }
++    const bad = [_]Piece{.{ .slot = 1, .start = 2, .rows = 3, .len = 9, .part = ids[2..5] }}; // part one id short
++    try std.testing.expect(!fits(&bad, 1 << 16));
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 45b4debfd..853b2a3e5 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -137,6 +137,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_LINK_WAIT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_PDL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_PROMPT_MANY", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_DSCORES", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+@@ -159,6 +160,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_NO_COPY", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_ONEPASS_PIPE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
++    .{ .name = "TF_GLM_OVN_MULTI_FILL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
+diff --git a/zig/tests/cuda/glm_multifill_check.zig b/zig/tests/cuda/glm_multifill_check.zig
+new file mode 100644
+index 000000000..a7edc80b7
+--- /dev/null
++++ b/zig/tests/cuda/glm_multifill_check.zig
+@@ -0,0 +1,188 @@
++//! glm-multifill-check (GPU): TF_GLM_OVN_MULTI_FILL's batched resumed prefill against solo chunk fills, byte for byte.
++const std = @import("std");
++const cuda = @import("cuda");
++const check = @import("check.zig");
++const Gpu = check.Gpu;
++
++const max_prompts = 8;
++const scratch = max_prompts; // a slot clear of the prompts' (0..max_prompts) for the state-keeping pass
++
++/// One resumed prompt: its depth, the kept state it resumes there, and a distinct suffix past it.
++const Prompt = struct { depth: usize, id: u64, suffix: []const u32 };
++
++/// What one arm leaves per prompt: first token, position, next window's tokens and logits.
++const Rec = struct { first: u32, pos: usize, outs: [4]u32, logits: []const u16 };
++
++/// A fresh pass's marks keep one state at each grid depth, in order.
++const Keep = struct {
++    e: *@import("glm_cuda").engine.Engine,
++    ids: [max_prompts]u64 = @splat(0),
++    n: usize = 0,
++    fn call(ctx: *anyopaque, _: u32) void {
++        const k: *@This() = @ptrCast(@alignCast(ctx));
++        if (k.n == max_prompts) return;
++        k.ids[k.n] = k.e.keepState() catch 0;
++        k.n += 1;
++    }
++};
++
++fn ids(a: std.mem.Allocator, base: []const u32, p: Prompt) ![]const u32 {
++    return std.mem.concat(a, u32, &.{ base[0..p.depth], p.suffix });
++}
++
++/// The slot's prompt is filled (last row drawn as `first`): its position and a verify window over the next tokens.
++fn record(x: @import("glm_cuda").follow.Leader, a: std.mem.Allocator, slot: u32, first: u32, V: usize) !Rec {
++    const e = x.e;
++    try x.bind(slot);
++    const pos = e.cur.st.pos;
++    const win = [_]u32{ first, 101, 202, 303 };
++    var outs: [4]u32 = undefined;
++    try x.verify(&win, &outs, 0);
++    const logits = try a.alloc(u16, win.len * V);
++    try e.d.check(e.d.api.cuMemcpyDtoH_v2(logits.ptr, e.bd.logits, logits.len * 2), "cuMemcpyDtoH");
++    return .{ .first = first, .pos = pos, .outs = outs, .logits = logits };
++}
++
++/// The solo arm: each prompt restored on its own slot and filled a chunk a call, as the knob-off path does.
++fn solo(x: @import("glm_cuda").follow.Leader, a: std.mem.Allocator, base: []const u32, ps: []const Prompt, V: usize, out: []Rec) !void {
++    const Resume = @import("glm_cuda").engine.Resume;
++    for (ps, 0..) |p, i| {
++        try x.bind(@intCast(i));
++        try x.begin(null);
++        const full = try ids(a, base, p);
++        var start = p.depth;
++        const first = while (true) {
++            const c = try x.chunk(full, start, false, if (start == p.depth) Resume{ .id = p.id, .at = p.depth } else null, null, null);
++            if (c.first) |f| break f;
++            start += c.rows;
++        };
++        out[i] = try record(x, a, @intCast(i), first, V);
++    }
++    for (ps, 0..) |_, i| try x.release(@intCast(i));
++}
++
++/// The batched arm: every prompt's suffix in one pass (cuda_prompt_pieces), then each prompt's draw and window.
++fn batched(x: @import("glm_cuda").follow.Leader, a: std.mem.Allocator, base: []const u32, ps: []const Prompt, V: usize, out: []Rec) !void {
++    const pp = @import("glm_cuda").prompt_pieces;
++    var pieces: [max_prompts]pp.Piece = undefined;
++    var firsts: [max_prompts]?u32 = undefined;
++    const no_marks: [max_prompts]?@import("glm_cuda").engine.Marks = @splat(null);
++    for (ps, 0..) |p, i| {
++        try x.bind(@intCast(i));
++        try x.begin(null);
++        const full = try ids(a, base, p);
++        pieces[i] = .{ .slot = @intCast(i), .start = p.depth, .rows = p.suffix.len, .len = full.len, .part = full[p.depth..], .from = .{ .id = p.id, .at = p.depth }, .mark = false };
++    }
++    try x.prefillPieces(pieces[0..ps.len], no_marks[0..ps.len], firsts[0..ps.len]);
++    for (ps, 0..) |_, i| out[i] = try record(x, a, @intCast(i), firsts[i] orelse return error.NoFirst, V);
++    for (ps, 0..) |_, i| try x.release(@intCast(i));
++}
++
++/// Two records equal: same first token, position, window tokens and logits.
++fn same(x: Rec, y: Rec) bool {
++    return x.first == y.first and x.pos == y.pos and std.mem.eql(u32, &x.outs, &y.outs) and std.mem.eql(u16, x.logits, y.logits);
++}
++
++pub fn multifillCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, id_path: []const u8) !void {
++    const glm = @import("glm_cuda");
++    var arena = std.heap.ArenaAllocator.init(gpu.gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var lib = try cuda.nccl.Library.open();
++    defer lib.close();
++    const comm = try @import("glm_lanes_tests.zig").openComm(gpu, &lib, rank, world, id_path);
++    defer _ = lib.api.ncclCommDestroy(comm);
++    var problem: []const u8 = "";
++    const set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
++        std.debug.print("REFUSE {s}\n", .{problem});
++        return err;
++    };
++    const capacity = 1 << 16;
++    const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = capacity, .mtp = true, .settings = set });
++    defer e.deinit();
++    var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, capacity);
++    defer link.deinit();
++    if (rank != 0) {
++        try glm.follow.follow(e, &link);
++        check.pass("rank {d} followed rank 0's solo and batched resumed prompt passes", .{rank});
++        return;
++    }
++    e.link = &link;
++    const x: glm.follow.Leader = .{ .e = e, .link = &link };
++    defer x.end() catch {};
++    try x.snapshots(2 << 30);
++    const V = e.share.vocab.len();
++
++    // one shared prefix; keep states at the chunk grid's depths (a mark fires at a chunk start)
++    const C = glm.engine.prompt_rows;
++    const base = try a.alloc(u32, 3 * C + 352);
++    for (base, 0..) |*u, j| u.* = @intCast(100 + (j * 7919) % 5000);
++    const mark_at = [_]u32{ @intCast(C), @intCast(2 * C), @intCast(3 * C) };
++    var keep: Keep = .{ .e = e };
++    try x.bind(scratch);
++    try x.begin(null);
++    var start: usize = 0;
++    while (true) {
++        const c = try x.chunk(base, start, false, null, null, glm.engine.Marks{ .at = &mark_at, .ctx = &keep, .call = Keep.call });
++        if (c.first != null) break;
++        start += c.rows;
++    }
++    try x.release(scratch);
++    if (keep.n != mark_at.len or keep.ids[0] == 0 or keep.ids[1] == 0 or keep.ids[2] == 0) {
++        std.debug.print("FAIL multifill: kept {d} of {d} states (ids {d}/{d}/{d})\n", .{ keep.n, mark_at.len, keep.ids[0], keep.ids[1], keep.ids[2] });
++        return error.TestFailed;
++    }
++
++    // suffix seeds: distinct per prompt so the forks never share a first token or a window
++    const S = struct {
++        fn make(al: std.mem.Allocator, seed: usize, n: usize) ![]u32 {
++            const s = try al.alloc(u32, n);
++            for (s, 0..) |*u, j| u.* = @intCast(200 + (j * 6007 + seed * 101) % 4000);
++            return s;
++        }
++    };
++    const deep = keep.ids[2]; // the forks cell: several short suffixes off one long prefix
++    const ps = [_]Prompt{
++        .{ .depth = 3 * C, .id = deep, .suffix = try S.make(a, 1, 20) },
++        .{ .depth = 3 * C, .id = deep, .suffix = try S.make(a, 2, 20) },
++        .{ .depth = 3 * C, .id = deep, .suffix = try S.make(a, 3, 20) },
++        .{ .depth = 3 * C, .id = deep, .suffix = try S.make(a, 4, 20) },
++        .{ .depth = C, .id = keep.ids[0], .suffix = try S.make(a, 5, 20) }, // dense, a different depth
++        .{ .depth = 2 * C, .id = keep.ids[1], .suffix = try S.make(a, 6, 40) }, // longer
++    };
++
++    var rsolo: [ps.len]Rec = undefined;
++    var rbatch: [ps.len]Rec = undefined;
++    var rred: [ps.len]Rec = undefined;
++    try solo(x, a, base, &ps, V, &rsolo);
++    try batched(x, a, base, &ps, V, &rbatch);
++
++    // red control: one fork's last suffix token changed; its records must differ and no other piece may move
++    var red = ps;
++    const rs = try a.dupe(u32, ps[0].suffix);
++    rs[rs.len - 1] = if (rs[rs.len - 1] == 4321) 4322 else 4321;
++    red[0].suffix = rs;
++    try batched(x, a, base, &red, V, &rred);
++
++    var fails: usize = 0;
++    for (rsolo, rbatch, 0..) |s, b, i| {
++        if (!same(s, b)) {
++            std.debug.print("FAIL multifill: prompt {d} (depth {d}, suffix {d}) batched differs from solo (first {d}/{d}, pos {d}/{d})\n", .{ i, ps[i].depth, ps[i].suffix.len, s.first, b.first, s.pos, b.pos });
++            fails += 1;
++        }
++    }
++    for (rbatch, rred, 0..) |b, r, i| {
++        const eq = same(b, r);
++        if (i == 0 and eq) {
++            std.debug.print("FAIL multifill: the red control (prompt 0's suffix changed) left its first token, window and logits unchanged\n", .{});
++            fails += 1;
++        }
++        if (i != 0 and !eq) {
++            std.debug.print("FAIL multifill: prompt 0's change bled into prompt {d} (pieces are not independent)\n", .{i});
++            fails += 1;
++        }
++    }
++    for ([_]u64{ keep.ids[0], keep.ids[1], keep.ids[2] }) |id| e.dropState(id);
++    if (fails != 0) return error.TestFailed;
++    check.pass("multifill at TP={d}: {d} resumed prompts (four forks of one depth-{d} state, a dense depth-{d}, one longer) batched in one pass equal their solo chunk fills in first token, window tokens and logits, and their positions; the red control differed only on its own piece", .{ world, ps.len, 3 * C, C });
++}
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+index ebad02ab4..59608385b 100644
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -60,6 +60,7 @@ const glm_lanes_tests = @import("glm_lanes_tests.zig");
+ const glm_pair_tests = @import("glm_pair_tests.zig");
+ const glm_split_tests = @import("glm_split_tests.zig");
+ const glm_solo_tests = @import("glm_solo_tests.zig");
++const glm_multifill_check = @import("glm_multifill_check.zig");
+ const glm_paged_tests = @import("glm_paged_tests.zig");
+ const glm_kv_host_slots = @import("glm_kv_host_slots.zig");
+ const glm_tap_tests = @import("glm_tap_tests.zig");
+@@ -365,6 +366,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+     if (std.mem.eql(u8, cmd, "glm-pair-check")) return glm_pair_tests.pairCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+     if (std.mem.eql(u8, cmd, "glm-split-check")) return glm_split_tests.splitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+     if (std.mem.eql(u8, cmd, "glm-solo-check")) return glm_solo_tests.soloCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
++    if (std.mem.eql(u8, cmd, "glm-multifill-check")) return glm_multifill_check.multifillCheck(gpu, try arg(rest, 0), try std.fmt.parseInt(c_int, try arg(rest, 1), 10), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try arg(rest, 3));
+     if (std.mem.eql(u8, cmd, "glm-tap-split-check")) return glm_tap_tests.tapSplitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+     if (std.mem.eql(u8, cmd, "glm-synth")) {
+         const kind = if (rest.len > 1) std.meta.stringToEnum(glm_synth.Kind, rest[1]) orelse return error.UnknownCommand else .nvfp4;
+diff --git a/zig/tests/cuda/main_usage.zig b/zig/tests/cuda/main_usage.zig
+index e588db109..ba2136942 100644
+--- a/zig/tests/cuda/main_usage.zig
++++ b/zig/tests/cuda/main_usage.zig
+@@ -168,6 +168,7 @@ pub const usage =
+     \\  glm-pair-check <ckpt> <dc.json> <rank> <world> <idfile>  paired prompt steps against twins a chunk a step, logits and states byte for byte
+     \\  glm-split-check <ckpt> <dc.json> <rank> <world> <idfile>  prompt chunks with their indexer rows split across ranks against whole twins, byte for byte
+     \\  glm-solo-check <ckpt> <dc.json> <rank> <world> <idfile>  solo prompt passes against twins a chunk a step, logits and states byte for byte
++    \\  glm-multifill-check <ckpt> <rank> <world> <idfile>  TF_GLM_OVN_MULTI_FILL: batched resumed prompt pieces against solo chunk fills, logits byte for byte
+     \\  glm-tap-split-check <ckpt> <drafter> <rank> <world> <idfile>  DFlash2 prompt taps: split and ring retained taps against gather, byte for byte, every rank
+     \\  glm-paged-check <ckpt> <rank> <world> <idfile>  a paged stream (pages out of order, NaN first) against a whole-window twin
+     \\  dory MODEL LOOPS N TEXT     Dory (NVFP4): N greedy tokens from TEXT, then verify windows of 2 to 16 rows bit-equal
+-- 
+2.52.0.windows.1
+

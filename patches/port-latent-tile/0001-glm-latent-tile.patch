@@ -1,0 +1,625 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm latent: TF_GLM_OVN_LATENT_TILE register-tiled absorb/expand (byte identical), G=2 arm
+
+The prompt absorb_q / expand_v reload q / o grid.y times (16x at the serve
+shape, the dominant DRAM term) because each 32-column strip is its own block.
+The tile kernels put G strips in one block and stage q / o in shared once a
+row, so the big input tensor is read G times fewer. Each 128-thread strip is
+exactly one base block, so every output keeps its fma chain, lane butterfly
+and cross-warp tree: bit identical to tf_glm_absorb_q / tf_glm_expand_v.
+
+Ported from ai-engine fork-ssh/ovn-up's ovn-latile at b2d1754ab (the same
+change as e5fd9cdc5 on ovn-numx). Two edits: the kernel header now
+instantiates G=2 as well as G=4 (tf_glm_absorb_tile_g2 / tf_glm_expand_tile_g2
+and their reversed-butterfly controls), because G=2 with two blocks an SM is
+the one LATENT_TILE variant the fork never built; and the routing is expressed
+over this series' absorbFn / expandFn (LATENT_ROWS x2/x4), which the fork's
+branch did not have.
+
+TF_GLM_OVN_LATENT_TILE: unset or 0 off, 4 the fork's form (512 threads, one
+block a SM), 2 the new form (256 threads, two blocks an SM); prompt rows only,
+16-byte aligned q / o / kv_b; LATENT_ROWS, ABSORB_VEC and KVB8 keep their
+paths. Receipts: host tests of the knob row, of routing and precedence and of
+the launch shapes (kernel id and block x at both G), and glm-latent-tile-check
+/ -bench (GPU): both G against today's byte for byte at the serve shapes with
+reversed-butterfly controls that must differ, then base / vec / G=4 / G=2
+timed.
+
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+index 965973b55..b4537b359 100644
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -106,6 +106,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
+     const x3 = b.step("test-glm-exl3-x3-host", "TF_GLM_OVN_X3_*: knobs, each grouped launch's kernel and its tail, without a GPU");
+     for ([_]*std.Build.Module{ cuda, glm }) |m| x3.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"EXL3 X3:"} })).step);
+     b.step("test-glm-keep-seqs-host", "TF_GLM_OVN_KEEP_SEQS: a released slot's sequence kept or freed, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM keep seqs:"} })).step);
++    b.step("test-glm-latent-tile-host", "TF_GLM_OVN_LATENT_TILE: knob parsing, kernel routing and the G=2 / G=4 launch shapes").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"TF_GLM_OVN_LATENT_TILE"} })).step);
+ }
+ 
+ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+diff --git a/zig/kernels/cuda/glm_glue.cu b/zig/kernels/cuda/glm_glue.cu
+index a9ad6e65c..892f8c928 100644
+--- a/zig/kernels/cuda/glm_glue.cu
++++ b/zig/kernels/cuda/glm_glue.cu
+@@ -11,3 +11,4 @@
+ #include "glm_index_decode.cuh"
+ #include "glm_glue_attn_ovn.cuh"
+ #include "glm_glue_latent_ovn.cuh"
++#include "glm_glue_latent_tile.cuh"
+diff --git a/zig/kernels/cuda/glm_glue_latent_tile.cuh b/zig/kernels/cuda/glm_glue_latent_tile.cuh
+new file mode 100644
+index 000000000..7af032dc3
+--- /dev/null
++++ b/zig/kernels/cuda/glm_glue_latent_tile.cuh
+@@ -0,0 +1,142 @@
++// TF_GLM_OVN_LATENT_TILE: tf_glm_absorb_q / tf_glm_expand_v for prompt rows, byte identical, q / o reused per block.
++#pragma once
++
++#include "glm_glue_latent.cuh"
++#include "glm_glue_latent_ovn.cuh"
++
++namespace glm_latent_tile {
++
++constexpr int D = 256, LW = 512, DV = 256;  // head width (qk and v), latent width
++
++// tf_glm_absorb_q over G strips (128 G threads): q[r,:256] staged once a row, each thread one strip's 8 columns.
++template <int G, bool RED>
++__device__ void absorb(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows, int64_t heads,
++                       int64_t rb) {
++  __shared__ float qsmem[D];       // q[r,:256] as the bf() floats the scalar kernel reads
++  __shared__ float red[G * 128];   // each strip's 128 partials (one base block's smem)
++  const int tid = threadIdx.x, g = tid >> 7, t = tid & 127;  // strip in the block, thread in the strip
++  const int k0 = t >> 2, nq = t & 3, warp = t >> 5;
++  const int64_t h = blockIdx.x, strip = (int64_t)blockIdx.y * G + g, r0 = (int64_t)blockIdx.z * rb;
++  const int64_t n0 = strip * 32 + nq * 8;
++  float* rg = red + g * 128;
++  float w[8][8];
++#pragma unroll
++  for (int rep = 0; rep < 8; ++rep) glm_latent_ovn::bf8(w[rep], wk + (h * D + k0 + 32 * rep) * LW + n0);
++  for (int64_t r = r0; r < r0 + rb && r < rows; ++r) {
++    if (tid < 32) glm_latent_ovn::bf8(qsmem + tid * 8, q + (r * heads + h) * D + tid * 8);  // stage q[r,:256]
++    __syncthreads();
++    float qv[8];
++#pragma unroll
++    for (int rep = 0; rep < 8; ++rep) qv[rep] = qsmem[k0 + 32 * rep];
++#pragma unroll
++    for (int j = 0; j < 8; ++j) {
++      float a = fmul(w[1][j], qv[1]);  // tf_glm_absorb_q's chain: seed rep 1, then rep 0, then rep 2..7 (k = k0 + 32rep)
++      a = __fmaf_rn(w[0][j], qv[0], a);
++#pragma unroll
++      for (int rep = 2; rep < 8; ++rep) a = __fmaf_rn(w[rep][j], qv[rep], a);
++      // RED reverses the butterfly into a different, valid association: a wrong tree for glm-latent-tile-check only
++      if constexpr (RED) {
++        for (int o = 4; o <= 16; o <<= 1) a = a + __shfl_xor_sync(0xffffffffu, a, o);
++      } else {
++        for (int o = 16; o >= 4; o >>= 1) a = a + __shfl_xor_sync(0xffffffffu, a, o);  // butterfly over the 8 k0 a warp
++      }
++      if ((t & 28) == 0) rg[(nq * 8 + j) * 4 + warp] = a;  // one slot a (column, warp)
++    }
++    __syncthreads();
++    float v = rg[t];  // cross-warp tree: shfl.xor 2, 1 over the 4 warps, then round to nearest even bf16
++    v = v + __shfl_xor_sync(0xffffffffu, v, 2);
++    v = v + __shfl_xor_sync(0xffffffffu, v, 1);
++    if ((t & 3) == 0) qa[(r * heads + h) * LW + strip * 32 + t / 4] = __float2bfloat16_rn(v);
++  }
++}
++
++// tf_glm_expand_v over G output blocks (128 G threads): o_lat[r,:512] staged once a row, each thread one block's 8.
++template <int G, bool RED>
++__device__ void expand(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
++                       int64_t heads, int64_t rb) {
++  __shared__ float osmem[LW];     // o_lat[r,:512] as the bf() floats the scalar kernel reads
++  __shared__ float red[G * 32];   // each output block's 32 partials (one base block's smem)
++  const int tid = threadIdx.x, g = tid >> 7, t = tid & 127;
++  const int lane = t & 31, warp = t >> 5, kb = (warp & 1) * 256 + lane * 8, nb = warp >> 1;
++  const int64_t h = blockIdx.x, blk = (int64_t)blockIdx.y * G + g, r0 = (int64_t)blockIdx.z * rb;
++  const int64_t n0 = blk * 16;
++  float* rg = red + g * 32;
++  float w[8][8];
++#pragma unroll
++  for (int rep = 0; rep < 8; ++rep) glm_latent_ovn::bf8(w[rep], wv + (h * DV + n0 + nb + 2 * rep) * LW + kb);
++  for (int64_t r = r0; r < r0 + rb && r < rows; ++r) {
++    if (tid < 64) glm_latent_ovn::bf8(osmem + tid * 8, ol + (r * heads + h) * LW + tid * 8);  // stage o_lat[r,:512]
++    __syncthreads();
++    float o[8];
++#pragma unroll
++    for (int j = 0; j < 8; ++j) o[j] = osmem[kb + j];
++#pragma unroll
++    for (int rep = 0; rep < 8; ++rep) {
++      float a = fmul(w[rep][1], o[1]);  // tf_glm_expand_v's chain: seed j 1, then j 0, then j 2..7 (o contiguous)
++      a = __fmaf_rn(w[rep][0], o[0], a);
++#pragma unroll
++      for (int j = 2; j < 8; ++j) a = __fmaf_rn(w[rep][j], o[j], a);
++      // RED reverses the butterfly into a different, valid association: a wrong tree for glm-latent-tile-check only
++      if constexpr (RED) {
++        for (int s = 1; s <= 16; s <<= 1) a = a + __shfl_xor_sync(0xffffffffu, a, s);
++      } else {
++        for (int s = 16; s > 0; s >>= 1) a = a + __shfl_xor_sync(0xffffffffu, a, s);  // full butterfly, a warp's half
++      }
++      if (lane == 0) rg[(nb + 2 * rep) * 2 + (warp & 1)] = a;
++    }
++    __syncthreads();
++    if (t < 32) {
++      float v = rg[t];  // cross-half: shfl.xor 1 joins the two 256-latent halves, then round to nearest even bf16
++      v = v + __shfl_xor_sync(0xffffffffu, v, 1);
++      if ((t & 1) == 0) out[(r * heads + h) * DV + n0 + t / 2] = __float2bfloat16_rn(v);
++    }
++  }
++}
++
++}  // namespace glm_latent_tile
++
++// G=4 (512 threads, one block a SM): four strips a block, grid.y / 4 fewer q / o reads.
++extern "C" __global__ void __launch_bounds__(512)
++    tf_glm_absorb_tile(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows, int64_t heads,
++                       int64_t rb) {
++  glm_latent_tile::absorb<4, false>(q, wk, qa, rows, heads, rb);
++}
++extern "C" __global__ void __launch_bounds__(512)
++    tf_glm_expand_tile(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
++                       int64_t heads, int64_t rb) {
++  glm_latent_tile::expand<4, false>(ol, wv, out, rows, heads, rb);
++}
++
++// G=2 (256 threads, two blocks an SM): the untested variant's shape, same bytes by construction.
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_absorb_tile_g2(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
++                          int64_t heads, int64_t rb) {
++  glm_latent_tile::absorb<2, false>(q, wk, qa, rows, heads, rb);
++}
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_expand_tile_g2(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
++                          int64_t heads, int64_t rb) {
++  glm_latent_tile::expand<2, false>(ol, wv, out, rows, heads, rb);
++}
++
++// Controls for glm-latent-tile-check (never a serve path): a reversed butterfly, so the bytes MUST differ from base.
++extern "C" __global__ void __launch_bounds__(512)
++    tf_glm_absorb_tile_red(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
++                           int64_t heads, int64_t rb) {
++  glm_latent_tile::absorb<4, true>(q, wk, qa, rows, heads, rb);
++}
++extern "C" __global__ void __launch_bounds__(512)
++    tf_glm_expand_tile_red(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
++                           int64_t heads, int64_t rb) {
++  glm_latent_tile::expand<4, true>(ol, wv, out, rows, heads, rb);
++}
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_absorb_tile_g2_red(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
++                              int64_t heads, int64_t rb) {
++  glm_latent_tile::absorb<2, true>(q, wk, qa, rows, heads, rb);
++}
++extern "C" __global__ void __launch_bounds__(256)
++    tf_glm_expand_tile_g2_red(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
++                              int64_t heads, int64_t rb) {
++  glm_latent_tile::expand<2, true>(ol, wv, out, rows, heads, rb);
++}
+diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index 55f8cc082..3c0373676 100644
+--- a/zig/src/families/glm/cuda_glue.zig
++++ b/zig/src/families/glm/cuda_glue.zig
+@@ -27,12 +27,13 @@ pub const Set = struct {
+     onepass_pipe: ?cuda.Function = null,
+ };
+ 
+-/// The MLA launch choices (TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _LATENT_ROWS); the defaults launch today's.
++/// The MLA launch choices (MLA_FUSEMERGE, ABSORB_VEC, LATENT_ROWS, LATENT_TILE); the defaults launch today's.
+ pub const Mla = struct {
+     fuse_rows: usize = 0, // attention launches of this many rows or more, 32-head blocks: chunks and merge in one
+     skip: bool = false, // chunk launches stop at the chunk's last live key tile
+     vec: bool = false, // absorb_q and expand_v read bf16 kv_b by 16-byte loads
+     rows: usize = 0, // absorb_q and expand_v take this many rows a loop step (0, 2 or 4; 0 is today's one)
++    tile: usize = 0, // prompt absorb_q and expand_v register-tiled, this many strips a block (0, 2 or 4)
+ 
+     /// MLA_FUSEMERGE: unset or 0 off; 1 fuses from latent.prompt_rows rows (prompt chunks); N > 1 from N rows.
+     pub fn read() error{BadOvnKnob}!Mla {
+@@ -42,12 +43,14 @@ pub const Mla = struct {
+             .skip = fuse != 0,
+             .vec = cuda.ovn.on("ABSORB_VEC"),
+             .rows = @intCast(try cuda.ovn.int("LATENT_ROWS", 0)),
++            .tile = @intCast(try cuda.ovn.int("LATENT_TILE", 0)),
+         };
+     }
+ 
+-    /// Whether any knob whose kernels sit in glm_glue is set (MLA_FUSEMERGE, ABSORB_VEC, KVB8, LATENT_ROWS).
++    /// Whether any knob whose kernels sit in glm_glue is set (MLA_FUSEMERGE, ABSORB_VEC, KVB8, LATENT_ROWS, TILE).
+     pub fn wanted() bool {
+-        return cuda.ovn.on("MLA_FUSEMERGE") or cuda.ovn.on("ABSORB_VEC") or cuda.ovn.on("KVB8") or cuda.ovn.on("LATENT_ROWS");
++        return cuda.ovn.on("MLA_FUSEMERGE") or cuda.ovn.on("ABSORB_VEC") or cuda.ovn.on("KVB8") or
++            cuda.ovn.on("LATENT_ROWS") or cuda.ovn.on("LATENT_TILE");
+     }
+ };
+ 
+@@ -135,6 +138,15 @@ pub const Kernels = struct {
+     expand_v_x2: cuda.Function,
+     absorb_q_x4: cuda.Function,
+     expand_v_x4: cuda.Function,
++    // TF_GLM_OVN_LATENT_TILE (glm_glue_latent_tile.cuh): prompt absorb / expand, strips a block
++    absorb_tile: cuda.Function,
++    expand_tile: cuda.Function,
++    absorb_tile_g2: cuda.Function,
++    expand_tile_g2: cuda.Function,
++    absorb_tile_red: cuda.Function, // glm-latent-tile-check controls: a reversed butterfly, so the bytes must differ
++    expand_tile_red: cuda.Function,
++    absorb_tile_g2_red: cuda.Function,
++    expand_tile_g2_red: cuda.Function,
+ 
+     pub fn load(m: cuda.Module) !Kernels {
+         return loadOvn(m, Mla.wanted());
+diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
+index 4620b2d49..31826923b 100644
+--- a/zig/src/families/glm/cuda_latent.zig
++++ b/zig/src/families/glm/cuda_latent.zig
+@@ -13,6 +13,11 @@ pub const heads_tile_wide = 32;
+ pub const prompt_rows = 64;
+ pub const prompt_rb = 64;
+ 
++/// TF_GLM_OVN_LATENT_TILE: the tile kernel's strips a block (4, one block a SM), the G=2 form, and rows a block.
++pub const prompt_tile_g = 4;
++pub const prompt_tile_g2 = 2;
++pub const prompt_tile_rb = 128; // rows a tile block: bit-neutral, fewer weight reloads than prompt_rb
++
+ /// latent.head_block: a rank's 32 heads a program in prompt chunks (each key read once), 16 in decode windows.
+ pub fn headBlock(rows: usize) usize {
+     return if (rows >= 64) heads_tile_wide else heads_tile;
+@@ -53,14 +58,37 @@ fn expandFn(set: glue.Set, wv: u64, ol: u64) cuda.Function {
+     };
+ }
+ 
++/// Which kernel an absorb / expand launch picks, decided on the host so routing and precedence are unit-testable.
++pub const Latent = enum { kvb8, tile, tile2, vec, base };
++
++/// absorbQ's choice: KVB8 first (E4M3 kv_b, untouched), then LATENT_TILE (prompt, aligned), then VEC, then today's.
++fn absorbPick(set: glue.Set, sk: u64, q: u64, wk: u64) Latent {
++    if (sk != 0) return .kvb8;
++    if (set.prompt and set.mla.tile != 0 and q % 16 == 0 and wk % 16 == 0) return if (set.mla.tile == 2) .tile2 else .tile;
++    if (set.mla.vec and wk % 16 == 0) return .vec;
++    return .base;
++}
++
++/// expandV's choice, the same precedence; VEC and TILE both need o_lat and wv on 16 bytes.
++fn expandPick(set: glue.Set, sv: u64, ol: u64, wv: u64) Latent {
++    if (sv != 0) return .kvb8;
++    if (set.prompt and set.mla.tile != 0 and ol % 16 == 0 and wv % 16 == 0) return if (set.mla.tile == 2) .tile2 else .tile;
++    if (set.mla.vec and wv % 16 == 0 and ol % 16 == 0) return .vec;
++    return .base;
++}
++
+ /// latent.absorb_q: out [rows][heads][lw] bf16 = q [rows][heads][d] . wk [heads][d][lw], fp32 sums; sk: E4M3 kv_b's.
+ pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, sk: u64, out: u64, rows: usize, heads: usize, d: usize, lw: usize) !void {
+     if (d != 256 or lw != 512) return error.LatentShape;
+-    if (sk != 0) { // TF_GLM_OVN_KVB8: wk E4M3 [heads][d][lw], sk fp32 [heads][d][lw / 128]
+-        if (wk % 8 != 0) return error.LatentShape;
+-        return rowBlocks(set.glue.absorb_q8, stream, .{ q, wk, sk, out }, rows, heads, lw / 32);
++    switch (absorbPick(set, sk, q, wk)) {
++        .kvb8 => { // TF_GLM_OVN_KVB8: wk E4M3 [heads][d][lw], sk fp32 [heads][d][lw / 128]
++            if (wk % 8 != 0) return error.LatentShape;
++            return rowBlocks(set.glue.absorb_q8, stream, .{ q, wk, sk, out }, rows, heads, lw / 32);
++        },
++        .tile => return tileBlocks(set.glue.absorb_tile, stream, .{ q, wk, out }, rows, heads, lw / 32, prompt_tile_g),
++        .tile2 => return tileBlocks(set.glue.absorb_tile_g2, stream, .{ q, wk, out }, rows, heads, lw / 32, prompt_tile_g2),
++        .vec, .base => try rowBlocks(absorbFn(set, wk), stream, .{ q, wk, out }, rows, heads, lw / 32),
+     }
+-    try rowBlocks(absorbFn(set, wk), stream, .{ q, wk, out }, rows, heads, lw / 32);
+ }
+ 
+ /// The absorb and expand launches (pointers, then rows, heads, rb): rows in one block in decode, prompt_rb in prompts.
+@@ -72,14 +100,28 @@ fn rowBlocks(f: cuda.Function, stream: cuda.Stream, ptrs: anytype, rows: usize,
+     try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(heads), .y = @intCast(cols), .z = cdiv(rows, rb) }, .block = .{ .x = 128 } }, stream, &a);
+ }
+ 
++/// A tile launch (absorb_tile / expand_tile, a G=2 or G=4 block, or a check control): G strips a block.
++pub fn tileBlocks(f: cuda.Function, stream: cuda.Stream, ptrs: anytype, rows: usize, heads: usize, cols: usize, g: usize) !void {
++    const rb = if (rows >= prompt_rows) prompt_tile_rb else rows;
++    var a: cuda.Args = .{};
++    inline for (ptrs) |v| a.add(@as(u64, v));
++    inline for (.{ @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(rb)) }) |v| a.add(v);
++    const grid = .{ .x = @intCast(heads), .y = cdiv(cols, g), .z = cdiv(rows, rb) };
++    try cuda_pdl.launch(f, .{ .grid = grid, .block = .{ .x = @intCast(128 * g) } }, stream, &a);
++}
++
+ /// latent.expand_v: out [rows][heads][dv] bf16 = o_lat [rows][heads][lw] . wv [heads][dv][lw]; sv: E4M3 kv_b's.
+ pub fn expandV(set: glue.Set, stream: cuda.Stream, ol: u64, wv: u64, sv: u64, out: u64, rows: usize, heads: usize, dv: usize, lw: usize) !void {
+     if (dv != 256 or lw != 512) return error.LatentShape;
+-    if (sv != 0) { // TF_GLM_OVN_KVB8: wv E4M3 [heads][dv][lw], sv fp32 [heads][dv][lw / 128]
+-        if (wv % 8 != 0) return error.LatentShape;
+-        return rowBlocks(set.glue.expand_v8, stream, .{ ol, wv, sv, out }, rows, heads, dv / 16);
++    switch (expandPick(set, sv, ol, wv)) {
++        .kvb8 => { // TF_GLM_OVN_KVB8: wv E4M3 [heads][dv][lw], sv fp32 [heads][dv][lw / 128]
++            if (wv % 8 != 0) return error.LatentShape;
++            return rowBlocks(set.glue.expand_v8, stream, .{ ol, wv, sv, out }, rows, heads, dv / 16);
++        },
++        .tile => return tileBlocks(set.glue.expand_tile, stream, .{ ol, wv, out }, rows, heads, dv / 16, prompt_tile_g),
++        .tile2 => return tileBlocks(set.glue.expand_tile_g2, stream, .{ ol, wv, out }, rows, heads, dv / 16, prompt_tile_g2),
++        .vec, .base => try rowBlocks(expandFn(set, wv, ol), stream, .{ ol, wv, out }, rows, heads, dv / 16),
+     }
+-    try rowBlocks(expandFn(set, wv, ol), stream, .{ ol, wv, out }, rows, heads, dv / 16);
+ }
+ 
+ /// A latent cache holds BF16 rows, or E4M3 rows followed by one FP32 scale per row.
+@@ -203,8 +245,10 @@ test "latent.py's tiling rules" {
+ const Rec = struct {
+     var n: usize = 0;
+     var ids: [8]usize = undefined;
+-    fn run(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
++    var bx: [8]c_uint = undefined; // each launch's block x
++    fn run(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, b: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
+         ids[n] = @intFromPtr(f);
++        bx[n] = b;
+         n += 1;
+         return 0;
+     }
+@@ -245,3 +289,72 @@ test "TF_GLM_OVN_LATENT_ROWS: rows 2 and 4 take the x2 and x4 launches; vec and
+     try expandV(x4, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
+     try std.testing.expectEqualSlices(usize, &.{ id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
+ }
++
++test "TF_GLM_OVN_LATENT_TILE: 0, 2 and 4 read, unset is off, and other values are refused" {
++    const ovn = cuda.ovn;
++    defer ovn.fake("LATENT_TILE", null);
++    ovn.fake("LATENT_TILE", null);
++    try std.testing.expectEqual(@as(usize, 0), (try glue.Mla.read()).tile);
++    for ([_][]const u8{ "2", "4" }) |v| {
++        ovn.fake("LATENT_TILE", v);
++        try std.testing.expectEqual(@as(usize, if (v[0] == '2') 2 else 4), (try glue.Mla.read()).tile);
++    }
++    ovn.fake("LATENT_TILE", "0"); // "0" reads as off, like every knob
++    try std.testing.expectEqual(@as(usize, 0), (try glue.Mla.read()).tile);
++    ovn.fake("LATENT_TILE", "1"); // a strip count the kernels do not have: the row refuses it
++    try std.testing.expectError(error.BadOvnKnob, glue.Mla.read());
++}
++
++test "TF_GLM_OVN_LATENT_TILE routing and precedence" {
++    const Set = glue.Set;
++    const a16: u64 = 16; // a 16-byte-aligned pointer; absorbPick / expandPick never read set.glue
++    const a8: u64 = 8; // not 16-byte aligned
++    const tile: Set = .{ .glue = undefined, .prompt = true, .mla = .{ .tile = 4 } };
++    try std.testing.expectEqual(Latent.tile, absorbPick(tile, 0, a16, a16)); // prompt + aligned: the tile replaces base
++    try std.testing.expectEqual(Latent.tile, expandPick(tile, 0, a16, a16));
++    const tile2: Set = .{ .glue = undefined, .prompt = true, .mla = .{ .tile = 2 } };
++    try std.testing.expectEqual(Latent.tile2, absorbPick(tile2, 0, a16, a16)); // G=2 is its own kernel
++    try std.testing.expectEqual(Latent.tile2, expandPick(tile2, 0, a16, a16));
++    const tv: Set = .{ .glue = undefined, .prompt = true, .mla = .{ .tile = 4, .vec = true } };
++    try std.testing.expectEqual(Latent.tile, absorbPick(tv, 0, a16, a16)); // the tile replaces the vec path too
++    try std.testing.expectEqual(Latent.tile, expandPick(tv, 0, a16, a16));
++    const dec: Set = .{ .glue = undefined, .prompt = false, .mla = .{ .tile = 4 } };
++    try std.testing.expectEqual(Latent.base, absorbPick(dec, 0, a16, a16)); // decode: today's path stands
++    try std.testing.expectEqual(Latent.base, expandPick(dec, 0, a16, a16));
++    try std.testing.expectEqual(Latent.base, absorbPick(tile, 0, a8, a16)); // q not aligned: the tile declines
++    try std.testing.expectEqual(Latent.base, absorbPick(tile, 0, a16, a8)); // wk not aligned
++    try std.testing.expectEqual(Latent.base, expandPick(tile, 0, a8, a16)); // o_lat not aligned
++    try std.testing.expectEqual(Latent.base, expandPick(tile, 0, a16, a8)); // wv not aligned
++    try std.testing.expectEqual(Latent.vec, absorbPick(tv, 0, a8, a16)); // declined tile, vec still takes aligned wk
++    const ev: Set = .{ .glue = undefined, .prompt = true, .mla = .{ .vec = true } };
++    try std.testing.expectEqual(Latent.vec, absorbPick(ev, 0, a16, a16)); // vec alone: aligned wk
++    try std.testing.expectEqual(Latent.vec, expandPick(ev, 0, a16, a16)); // vec alone: aligned o_lat and wv
++    try std.testing.expectEqual(Latent.kvb8, absorbPick(tile, a16, a16, a16)); // E4M3 kv_b: the bf16 tile declines
++    try std.testing.expectEqual(Latent.kvb8, expandPick(tile, a16, a16, a16));
++    const off: Set = .{ .glue = undefined, .prompt = true };
++    try std.testing.expectEqual(Latent.base, absorbPick(off, 0, a16, a16)); // knob off: nothing changes
++    try std.testing.expectEqual(Latent.base, expandPick(off, 0, a16, a16));
++}
++
++test "TF_GLM_OVN_LATENT_TILE: G=4 launches 512 threads and G=2 256 at prompt rows, today's kernel otherwise" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.run;
++    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Rec.run);
++    const ks = kernels(&d);
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const g4: glue.Set = .{ .glue = &ks, .prompt = true, .mla = .{ .tile = 4 } };
++    const g2: glue.Set = .{ .glue = &ks, .prompt = true, .mla = .{ .tile = 2 } };
++    const dec: glue.Set = .{ .glue = &ks, .prompt = false, .mla = .{ .tile = 2 } };
++    Rec.n = 0;
++    try absorbQ(g4, s, 256, 4096, 0, 512, 4096, 22, 256, 512);
++    try expandV(g4, s, 256, 4096, 0, 512, 4096, 22, 256, 512);
++    try absorbQ(g2, s, 256, 4096, 0, 512, 4096, 22, 256, 512);
++    try expandV(g2, s, 256, 4096, 0, 512, 4096, 22, 256, 512);
++    try std.testing.expectEqualSlices(usize, &.{ id("absorb_tile"), id("expand_tile"), id("absorb_tile_g2"), id("expand_tile_g2") }, Rec.ids[0..Rec.n]);
++    try std.testing.expectEqualSlices(c_uint, &.{ 512, 512, 256, 256 }, Rec.bx[0..Rec.n]);
++    Rec.n = 0;
++    try absorbQ(dec, s, 256, 4096, 0, 512, 4096, 22, 256, 512); // decode rows: the tile is prompt-only
++    try expandV(dec, s, 256, 4096, 0, 512, 4096, 22, 256, 512);
++    try std.testing.expectEqualSlices(usize, &.{ id("absorb_q"), id("expand_v") }, Rec.ids[0..Rec.n]);
++    try std.testing.expectEqualSlices(c_uint, &.{ 128, 128 }, Rec.bx[0..Rec.n]);
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 45b4debfd..e5aed8f30 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -162,6 +162,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
++    .{ .name = "TF_GLM_OVN_LATENT_TILE", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 4 or 2: strips a block in the prompt absorb and expand (2: two blocks an SM)" },
+     .{ .name = "TF_GLM_OVN_SIDE_PRIO", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_PIECE_FRONT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_PIECE_FFN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+diff --git a/zig/tests/cuda/glm_latent_tile_check.zig b/zig/tests/cuda/glm_latent_tile_check.zig
+new file mode 100644
+index 000000000..8f797ad67
+--- /dev/null
++++ b/zig/tests/cuda/glm_latent_tile_check.zig
+@@ -0,0 +1,149 @@
++//! glm-latent-tile-check / -bench (GPU): tile absorb/expand vs today's at G=4 and G=2, byte for byte, then timed.
++const std = @import("std");
++const cuda = @import("cuda");
++const check = @import("check.zig");
++const qr = @import("quant_ref_tests.zig");
++const glm = @import("glm_cuda");
++const Rig = qr.RigT;
++const latent = glm.latent;
++const glue = glm.glue;
++
++const d = 256; // qk and v head widths
++const lw = 512; // latent width
++
++/// `got` and `base` are not equal: the reversed-butterfly control must move at least one output, or the check is blind.
++fn differs(what: []const u8, got: []const u8, base: []const u8) !void {
++    if (!std.mem.eql(u8, got, base)) return;
++    std.debug.print("FAIL {s}: control equals the base byte for byte (the check cannot see a wrong tree)\n", .{what});
++    return error.TestFailed;
++}
++
++/// One (rows, heads): absorb and expand tiles at both G equal the base, the controls differ.
++fn shape(r: *Rig, ks: *const glue.Kernels, rows: usize, heads: usize) !void {
++    const off: glue.Set = .{ .glue = ks };
++    const g4: glue.Set = .{ .glue = ks, .prompt = true, .mla = .{ .tile = 4 } };
++    const g2: glue.Set = .{ .glue = ks, .prompt = true, .mla = .{ .tile = 2 } };
++    var name: [96]u8 = undefined;
++    // absorb: qa [rows][heads][lw] = q [rows][heads][d] . wk [heads][d][lw]
++    const dq = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * heads * d, 1.0)));
++    const wk = try r.dev(std.mem.sliceAsBytes(try r.bfs(heads * d * lw, 0.05)));
++    const ab = try r.zeros(rows * heads * lw * 2);
++    const a4 = try r.zeros(rows * heads * lw * 2);
++    const a2 = try r.zeros(rows * heads * lw * 2);
++    const ar = try r.zeros(rows * heads * lw * 2);
++    try latent.absorbQ(off, r.s, dq, wk, 0, ab, rows, heads, d, lw);
++    try latent.absorbQ(g4, r.s, dq, wk, 0, a4, rows, heads, d, lw);
++    try latent.absorbQ(g2, r.s, dq, wk, 0, a2, rows, heads, d, lw);
++    try latent.tileBlocks(ks.absorb_tile_red, r.s, .{ dq, wk, ar }, rows, heads, lw / 32, 4);
++    const base_a = try r.back(ab, rows * heads * lw * 2);
++    try check.sameBytes(try std.fmt.bufPrint(&name, "absorb tile G=4 {d} rows x {d} heads", .{ rows, heads }), try r.back(a4, rows * heads * lw * 2), base_a);
++    try check.sameBytes(try std.fmt.bufPrint(&name, "absorb tile G=2 {d} rows x {d} heads", .{ rows, heads }), try r.back(a2, rows * heads * lw * 2), base_a);
++    try differs(try std.fmt.bufPrint(&name, "absorb red control {d}x{d}", .{ rows, heads }), try r.back(ar, rows * heads * lw * 2), base_a);
++    // expand: out [rows][heads][d] = o_lat [rows][heads][lw] . wv [heads][d][lw]
++    const dol = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * heads * lw, 1.0)));
++    const wv = try r.dev(std.mem.sliceAsBytes(try r.bfs(heads * d * lw, 0.05)));
++    const eb = try r.zeros(rows * heads * d * 2);
++    const e4 = try r.zeros(rows * heads * d * 2);
++    const e2 = try r.zeros(rows * heads * d * 2);
++    const er = try r.zeros(rows * heads * d * 2);
++    try latent.expandV(off, r.s, dol, wv, 0, eb, rows, heads, d, lw);
++    try latent.expandV(g4, r.s, dol, wv, 0, e4, rows, heads, d, lw);
++    try latent.expandV(g2, r.s, dol, wv, 0, e2, rows, heads, d, lw);
++    try latent.tileBlocks(ks.expand_tile_red, r.s, .{ dol, wv, er }, rows, heads, d / 16, 4);
++    const base_e = try r.back(eb, rows * heads * d * 2);
++    try check.sameBytes(try std.fmt.bufPrint(&name, "expand tile G=4 {d} rows x {d} heads", .{ rows, heads }), try r.back(e4, rows * heads * d * 2), base_e);
++    try check.sameBytes(try std.fmt.bufPrint(&name, "expand tile G=2 {d} rows x {d} heads", .{ rows, heads }), try r.back(e2, rows * heads * d * 2), base_e);
++    try differs(try std.fmt.bufPrint(&name, "expand red control {d}x{d}", .{ rows, heads }), try r.back(er, rows * heads * d * 2), base_e);
++}
++
++pub fn run(gpu: check.Gpu) !void {
++    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
++    defer arena.deinit();
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var prng = std.Random.DefaultPrng.init(0x11e);
++    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = s, .rng = prng.random() };
++    defer {
++        for (r.bufs.items) |*b| b.free();
++        r.bufs.deinit(gpu.gpa);
++    }
++    var mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer mod.unload();
++    const ks = try glue.Kernels.loadOvn(mod, true);
++    try check.expect(ks.absorb_tile_g2.handle != null, "glm-latent-tile: the glue image exports tf_glm_absorb_tile_g2", .{});
++    try check.expect(ks.expand_tile_g2.handle != null, "glm-latent-tile: the glue image exports tf_glm_expand_tile_g2", .{});
++    for ([_]usize{ 22, 21, 16 }) |heads| try shape(&r, &ks, 4096, heads); // the serve shape at the three head blocks
++    try shape(&r, &ks, 4000, 22); // a ragged last row block
++    try shape(&r, &ks, 37, 22); // a small prompt
++    check.pass("glm-latent-tile-check: G=4 and G=2 absorb/expand equal the base byte for byte at every shape, controls differ", .{});
++}
++
++const warm = 3;
++const reps = 20;
++const Op = enum { absorb, expand };
++
++fn one(set: glue.Set, s: cuda.Stream, op: Op, in0: u64, w: u64, out: u64, rows: usize, heads: usize) !void {
++    switch (op) {
++        .absorb => try latent.absorbQ(set, s, in0, w, 0, out, rows, heads, d, lw),
++        .expand => try latent.expandV(set, s, in0, w, 0, out, rows, heads, d, lw),
++    }
++}
++
++/// The median launch over `reps` after `warm` warm-ups, through CUDA events (ms a launch).
++fn timeMs(s: cuda.Stream, t0: *cuda.Event, t1: *cuda.Event, ms: []f64, set: glue.Set, op: Op, in0: u64, w: u64, out: u64, rows: usize, heads: usize) !f64 {
++    for (0..warm) |_| try one(set, s, op, in0, w, out, rows, heads);
++    try s.synchronize();
++    for (ms) |*m| {
++        try t0.record(s);
++        try one(set, s, op, in0, w, out, rows, heads);
++        try t1.record(s);
++        try t1.synchronize();
++        m.* = @as(f64, try t0.elapsedMs(t1));
++    }
++    return check.median(ms);
++}
++
++pub fn bench(gpu: check.Gpu) !void {
++    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
++    defer arena.deinit();
++    var s = try cuda.Stream.init(gpu.d, false);
++    defer s.deinit();
++    var prng = std.Random.DefaultPrng.init(0x7a);
++    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = s, .rng = prng.random() };
++    defer {
++        for (r.bufs.items) |*b| b.free();
++        r.bufs.deinit(gpu.gpa);
++    }
++    var mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
++    defer mod.unload();
++    const ks = try glue.Kernels.loadOvn(mod, true);
++    var t0 = try cuda.Event.init(gpu.d, true);
++    defer t0.deinit();
++    var t1 = try cuda.Event.init(gpu.d, true);
++    defer t1.deinit();
++    const ms = try r.a.alloc(f64, reps);
++    const base: glue.Set = .{ .glue = &ks, .prompt = true };
++    const vec: glue.Set = .{ .glue = &ks, .prompt = true, .mla = .{ .vec = true } };
++    const g4: glue.Set = .{ .glue = &ks, .prompt = true, .mla = .{ .tile = 4 } };
++    const g2: glue.Set = .{ .glue = &ks, .prompt = true, .mla = .{ .tile = 2 } };
++    const rows = 4096;
++    for ([_]usize{ 22, 21 }) |heads| {
++        const dq = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * heads * d, 1.0)));
++        const dol = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * heads * lw, 1.0)));
++        const wk = try r.dev(std.mem.sliceAsBytes(try r.bfs(heads * d * lw, 0.05)));
++        const wv = try r.dev(std.mem.sliceAsBytes(try r.bfs(heads * d * lw, 0.05)));
++        const qa = try r.zeros(rows * heads * lw * 2);
++        const ov = try r.zeros(rows * heads * d * 2);
++        const ab = try timeMs(s, &t0, &t1, ms, base, .absorb, dq, wk, qa, rows, heads);
++        const av = try timeMs(s, &t0, &t1, ms, vec, .absorb, dq, wk, qa, rows, heads);
++        const a4 = try timeMs(s, &t0, &t1, ms, g4, .absorb, dq, wk, qa, rows, heads);
++        const a2 = try timeMs(s, &t0, &t1, ms, g2, .absorb, dq, wk, qa, rows, heads);
++        std.debug.print("RESULT absorb {d} rows x {d} heads: base {d:.3} vec {d:.3} G=4 {d:.3} G=2 {d:.3} ms/launch\n", .{ rows, heads, ab, av, a4, a2 });
++        const eb = try timeMs(s, &t0, &t1, ms, base, .expand, dol, wv, ov, rows, heads);
++        const ev = try timeMs(s, &t0, &t1, ms, vec, .expand, dol, wv, ov, rows, heads);
++        const e4 = try timeMs(s, &t0, &t1, ms, g4, .expand, dol, wv, ov, rows, heads);
++        const e2 = try timeMs(s, &t0, &t1, ms, g2, .expand, dol, wv, ov, rows, heads);
++        std.debug.print("RESULT expand {d} rows x {d} heads: base {d:.3} vec {d:.3} G=4 {d:.3} G=2 {d:.3} ms/launch\n", .{ rows, heads, eb, ev, e4, e2 });
++    }
++    check.pass("glm-latent-tile-bench: base, vec, G=4 and G=2 timed for absorb and expand at 4096 rows x 22 and 21 heads", .{});
++}
+diff --git a/zig/tests/cuda/glm_ovn_checks.zig b/zig/tests/cuda/glm_ovn_checks.zig
+index d082aa460..bd28879e7 100644
+--- a/zig/tests/cuda/glm_ovn_checks.zig
++++ b/zig/tests/cuda/glm_ovn_checks.zig
+@@ -5,6 +5,7 @@ const glm_draft_onepass = @import("glm_draft_onepass_tests.zig");
+ const glm_index_ovn_check = @import("glm_index_ovn_check.zig");
+ const glm_keep_seqs_check = @import("glm_keep_seqs_check.zig");
+ const glm_latent_rows = @import("glm_latent_rows_tests.zig");
++const glm_latent_tile = @import("glm_latent_tile_check.zig");
+ const glm_mla_skip_check = @import("glm_mla_skip_check.zig");
+ const glm_mm_ovn = @import("glm_mm_ovn_tests.zig");
+ const glm_onepass_exact_check = @import("glm_onepass_exact_check.zig");
+@@ -15,6 +16,7 @@ pub const usage =
+     \\  glm-index-ovn-check       TF_GLM_OVN_DECODE_INDEX against today's kernels, byte for byte (one GPU)
+     \\  glm-keep-seqs-check       TF_GLM_OVN_KEEP_SEQS: kept sequences, as left and poisoned, against fresh ones, byte for byte
+     \\  glm-latent-rows           TF_GLM_OVN_LATENT_ROWS: absorb_q and expand_v at 2 and 4 rows a loop step against today's, byte for byte
++    \\  glm-latent-tile-check / -bench   TF_GLM_OVN_LATENT_TILE: absorb/expand at G=4 and G=2 against today's, byte for byte
+     \\  glm-mla-skip-check        TF_GLM_OVN_MLA_FUSEMERGE: the bounded and fused chunk launches against today's, byte for byte
+     \\  glm-mm-ovn                TF_GLM_OVN_MM_WIDE, _MM_CLUSTER, _MM_DECTILE and _SWIGLU_REDUCE against today's, byte for byte
+     \\  glm-onepass-exact-check   TF_GLM_OVN_ONEPASS_PIPE: pipe exact against the chunk programs plus merge, pipe off against the one-pass
+@@ -31,6 +33,10 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
+         try glm_keep_seqs_check.run(gpu, rest);
+     } else if (std.mem.eql(u8, cmd, "glm-latent-rows")) {
+         try glm_latent_rows.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-latent-tile-check")) {
++        try glm_latent_tile.run(gpu);
++    } else if (std.mem.eql(u8, cmd, "glm-latent-tile-bench")) {
++        try glm_latent_tile.bench(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-mla-skip-check")) {
+         try glm_mla_skip_check.run(gpu);
+     } else if (std.mem.eql(u8, cmd, "glm-mm-ovn")) {
+-- 
+2.52.0.windows.1
+
