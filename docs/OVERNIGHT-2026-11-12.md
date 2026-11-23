@@ -3018,3 +3018,24 @@ lever is rejected and `patches/port-latent-tile` stays a package rather than ent
 
 **That closes the first of the seven ports with a number rather than a theory:** the fork's G=4 was 1.7x slower than the
 vector path, the port's G=2 was the only form that could plausibly beat it, and it does not. The next port takes the boots.
+
+## 112. The clip is worth 4.1% at 8k, not 19%: my own alarm was a cross-instrument comparison
+
+I raised a 19% claim from comparing `lt2`'s cold 8k (3,338 ms) against queue113's control (4,117 ms) and it does not
+survive a like-for-like boot. Same image family, same box, same prompt-id files, same instrument, one boot on the pre-clip
+image `m130a`:
+
+| | cold 8k | cold 32k |
+|---|---|---|
+| `m130a`, no dense-window clip | 3.480 s | 13.237 s |
+| `lt2`, clip included, knob unset | **3.338 s** | **13.048 s** |
+| effect of the clip | **-4.1%** | -1.4% |
+
+So the clip is worth about **4% at 8k**, close to the 130 ms (3.2%) it was committed on, and the 19% was the difference
+between two instruments: queue113's 4,117 ms came from `streams_sampled` with `code_ids`, while today's readings come from
+`bench_cache` with ids built from `prose33`. Two different prompt sets and two different clients, compared as though they
+were one measurement.
+
+The rule that caught it is the one this campaign keeps needing: a comparison is only a comparison when the two arms differ
+by the thing under test. I applied that to patches for two days and then failed to apply it to images, and one boot on the
+old image was the whole cost of finding out.
