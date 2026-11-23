@@ -3318,3 +3318,25 @@ So index 3 is the IPv4 RoCEv2 entry on every cable subnet, which is what the rec
 description says. The flag is a real risk of a kind no gate can remove, an index tied to the order the stack enumerates GIDs,
 so the honest record is: correct as measured on 2026-11-23, and the check to repeat after any NIC or driver change is this
 same `show_gids` read, comparing the index the env names against the v2 row for the cable subnet.
+
+## 127. `PROMPT_STEPS=0` is a trade, not a verdict: -7.3% at six clients, +11.4% at eight
+
+The 6 and 8 client cells re-measured with both arms booted twice (`queue121`, phase B):
+
+| clients | control (two boots) | `PROMPT_STEPS=0` (two boots) | change |
+|---|---|---|---|
+| 6 | 120.37 (119.81 / 120.92, spread 0.9%) | 111.57 (111.46 / 111.69) | **-7.30%** |
+| 8 | 122.78 (127.29 / 118.26, spread 7.4%) | 136.76 (133.42 / 140.10) | **+11.39%** |
+
+Both cells are tight within each arm and both boots of each arm agree, so the shape is real rather than a boot: **the switch
+costs 7.3% at six clients and gains 11.4% at eight**, having also been 0.6 to 1.3% faster at one, two and four. That is
+non-monotonic in a way no story explains yet, and it is exactly the case the fleet rule sends to the owner rather than to a
+default: a change with a gain at some levels and a loss at another is a trade, and only the owner accepts a trade.
+
+What the rule says next, if it is to be pursued rather than dropped: confirm the losing cell (done, twice, tight), then find the
+mechanism from counters (tokens a round against ms a round at six clients), then rewrite the switch so the six-client cost goes
+while the eight-client gain stays - or gate it on the live stream count, which for six against eight is a gate narrow enough to
+be suspicious of.
+
+For now `TF_GLM_PROMPT_STEPS` stays at the engine default `1` in the env, and the measurement is recorded so the decision is the
+owner's with the numbers in front of them.
