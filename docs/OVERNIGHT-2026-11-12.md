@@ -3227,3 +3227,25 @@ long-context conversation, where a whole-row gather scales with rows and the can
 **DRAW1 therefore leaves the porting list** unless the owner wants it at long context for a different reason. It is the third
 of the seven to be closed by measurement rather than by porting, after `MULTI_FILL` (-4.59% at four clients) and
 `LATENT_TILE` (-4.24% at both lengths).
+
+## 122. PROMPT_STEPS=0 is a trade, and two of the three confirms now clear the band at low concurrency
+
+The five-level arm (`queue120`) for `TF_GLM_PROMPT_STEPS=0`, two boots a side at 1, 2, 4, 6 and 8 clients:
+
+| clients | control (two boots) | `PROMPT_STEPS=0` | change |
+|---|---|---|---|
+| 1 | 82.28 (83.1 / 81.5) | 83.04 | +0.92% |
+| 2 | 86.82 (87.2 / 86.5) | 87.32 | +0.58% |
+| 4 | 114.81 (115.0 / 114.6) | 116.33 | +1.33% |
+| 6 | 123.39 (127.0 / 119.8) | 118.96 (110.9 / 127.0) | **-3.59%** |
+| 8 | 122.66 (126.8 / 118.5) | 118.80 (118.7 / 118.9) | **-3.15%** |
+
+Mean of the five -0.78%, worst -3.59%, so the rule holds it: not at least 1% faster in the mean. **But the 6 and 8 client
+cells are the ones whose control boots disagree by 6%**, and the arm's own boots span 110.9 to 127.0 at six clients, so the
+apparent loss is inside that spread rather than established. What the table does say cleanly is that at 1 to 4 clients it is
+0.6 to 1.3% faster, and the trade, if real, is what the fleet rule sends to the owner rather than to a default.
+
+**The three confirm boots, against the screen's control (cross-boot, indicative):** `DRAFT_CONFIDENCE=0.6` +1.22 / +0.31 /
++1.06%, `DRAFT_NODES=8` **+2.89 / +2.35 / +1.63%**, `LINK_WAIT=1` **+3.90 / +2.12 / +1.30%**. So the first stays level, and
+the other two read above the 2% band at one and two clients in both rounds. They earn proper arms rather than a verdict from
+one boot each.
