@@ -3426,3 +3426,23 @@ PROMISING (over 2.0 percent faster with no level over 1.0 percent slower): six U
 five-level arm. The same six arms against the pre-sync control read 1.8 to 3.6 percent slower at every level, which is
 what comparing across the env change cost; the correct control moves the whole batch by about 2.5 points and turns
 apparent regressions into flat cells.
+
+## The third screen batch: four debt rows, all UNCLEAR
+
+queue129, the same shape and the same env for control and arms:
+
+| arm | 1 | 2 | 4 | percent against the control |
+|---|---|---|---|---|
+| ctl | 81.08 | 84.59 | 112.52 | - |
+| mtptrees | 81.87 | 84.63 | 111.60 | +0.97 +0.05 -0.82 |
+| mtpbatch | 81.49 | 84.78 | 112.78 | +0.51 +0.22 +0.23 |
+| prefixwait | 81.73 | 85.52 | 112.94 | +0.80 +1.10 +0.37 |
+| pressure | 81.30 | 84.26 | 113.27 | +0.27 -0.39 +0.67 |
+
+None is DEAD and none is PROMISING: `TF_MTP_TREES`, `TF_MTP_BATCH`, `TENSORFOLD_PREFIX_WAIT_MS` and
+`TENSORFOLD_PRESSURE_CACHE_PERCENT` are all inside 1.1 percent at every level. `TENSORFOLD_PREFIX_WAIT_MS=200` is the
+only arm positive at all three levels and is the one to reach for if a future batch needs a candidate.
+
+The debt list's remaining rows are the ones this batch deliberately did not boot, because they change no chat path:
+the receipt and log switches, the vision, PDF and video limits, the device-profile check, the NCCL library and device
+ordinal, the carveout pair, and the rows of families this serve does not run (Qwen, LFM2, Hy4-flash).
