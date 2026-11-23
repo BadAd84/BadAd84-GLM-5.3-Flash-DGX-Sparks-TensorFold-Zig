@@ -3340,3 +3340,16 @@ be suspicious of.
 
 For now `TF_GLM_PROMPT_STEPS` stays at the engine default `1` in the env, and the measurement is recorded so the decision is the
 owner's with the numbers in front of them.
+
+## HC_DEC arm on hc1 (queue122): a trade, kept for the ledger
+
+Four boots, `KNOBS=dev`, image `glm53-zig:hc1` (engine + six packages + port-hc-dec), XENV `TF_GLM_OVN_HC_DEC=1`:
+
+| boot | 1 | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| ctl1 | 83.87 | 87.25 | 115.57 | 110.62 | 138.57 |
+| ctl2 | 83.41 | 86.99 | 114.41 | 109.84 | 137.43 |
+| dec1 | 81.09 | 84.76 | 113.73 | 116.06 | 123.90 |
+| dec2 | 82.91 | 87.74 | 119.39 | 117.16 | 119.75 |
+
+Control mean 83.64 87.12 114.99 110.23 138.00 against decode mean 82.00 86.25 116.56 116.61 121.83: -1.96, -1.00, +1.37, +5.79, -11.72 percent. The 6-client gain is beyond the boots' spread and the 8-client loss is far beyond it, so this is a trade: it wins at 4 and 6 streams and loses at 8. It is not adopted; the rewrite path is to find what the decode change costs at 8 streams, or gate it on the live stream count with the off path byte-identical.
