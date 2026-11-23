@@ -3377,3 +3377,23 @@ when a stream's own context repeats the continuation (`windows.zig`: a copied co
 or Recall's record), and the bench's prose prompts never do, so no copy was ever proposed and the setting had nothing
 to act on. A receipt for this lever needs a prompt whose tail repeats a block of its own context; until then the A/B
 above says only that the lever is free when the copy path is idle.
+
+## TF_GLM_NO_COPY on a prompt built to repeat its own head: still nothing
+
+queue127 booted the branch at P=4 twice, the same image and launcher, only `TF_GLM_NO_COPY` differing, and ran
+`repeat-probe.py` (a block, a different line, then the block's first half) three times on each:
+
+| arm | acceptance | ms a round | rounds |
+|---|---|---|---|
+| off | 0.664 0.667 0.667 | 54.0 54.1 53.8 | 102 |
+| on | 0.664 0.664 0.667 | 55.0 54.2 54.4 | 102 |
+
+The switch is inert here too, and the reason is now clear from the code rather than guessed: `windows.zig` takes a
+`Copy` from the stream's own context or from Recall's record, and neither a bench prompt nor a prompt that merely
+repeats its head gives the server one. The host tests still show the lane's two paths differ (`round(true)` takes a
+copy window of three rows with no held draft, `round(false)` a head window of the seven held drafts), so the lever is
+wired; what it needs is a session where the server proposes a copied continuation, which no instrument we have
+produces.
+
+Upstream's rule is that a switch arrives with a measured benefit, so `TF_GLM_NO_COPY` stays on the fork branch
+(`no-copy`, `59719f09f`) and is not posted. Two workloads, both null, is the record.
