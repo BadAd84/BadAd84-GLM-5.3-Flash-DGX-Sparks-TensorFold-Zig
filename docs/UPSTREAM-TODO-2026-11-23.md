@@ -75,8 +75,10 @@ NO_COPY measured against it.
 
 ## 6. State of the two the maintainer asked for
 
-Both are cut from upstream `main` at `281d81b8be7514145e2c72bc93db481dd72f45ee`, one lever a branch, and neither is
-pushed yet: the owner approves the text before anything is posted.
+**`TF_GLM_KEEP_SEQS` is open as https://github.com/ashhart/TensorFold/pull/4809** at `46a681fdc`, against
+`0b39f4d64`, with the Unreleased line naming it (`pr_check --pr 4809`: 0 errors, 0 warnings). CI has created no run for
+its head while fresh runs appear for other pull requests at the same minute, which is GitHub's first-time-contributor
+gate: a maintainer approves the workflows on the pull request before they start. Nothing on our side can start them.
 
 **`TF_GLM_KEEP_SEQS`** (branch `keep-seqs`, head `ed007da20`, 8 commits, 10 files, +367/-4). The lever is a row of
 `platform/environment.zig`, a field of `ranks.Settings` read once and passed in the engine's options, a field of
