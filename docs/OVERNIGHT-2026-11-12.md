@@ -3303,3 +3303,18 @@ launch count or warp count, all three of which this session has now ruled out wi
 **The honest limit:** one rank's capture cannot show ranks 1 and 2 idle. It shows rank 0 saturated and names the kernel that
 owns its wall. Proving the other half needs their captures from the same window, which is a two-boot job rather than an
 argument, and it is queued.
+
+## 126. `TF_ROCE_GID_INDEX=3` is correct today, checked against the live table
+
+The doc audit flagged this as pinned to a table that could change. Read on spark1 with `show_gids`:
+
+| device | index 2 | index 3 |
+|---|---|---|
+| `roceP2p1s0f0` | 10.0.122.1 (RoCEv1) | 10.0.122.1 (**RoCEv2**) |
+| `roceP2p1s0f1` | 10.0.123.1 (v1) | 10.0.123.1 (**v2**) |
+| `rocep1s0f0` | 10.0.22.1 (v1) | 10.0.22.1 (**v2**) |
+
+So index 3 is the IPv4 RoCEv2 entry on every cable subnet, which is what the recipe wants and what the AGENTS.md fabric
+description says. The flag is a real risk of a kind no gate can remove, an index tied to the order the stack enumerates GIDs,
+so the honest record is: correct as measured on 2026-11-23, and the check to repeat after any NIC or driver change is this
+same `show_gids` read, comparing the index the env names against the v2 row for the cable subnet.
