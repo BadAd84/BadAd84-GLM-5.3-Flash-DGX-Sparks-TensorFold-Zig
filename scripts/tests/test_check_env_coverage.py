@@ -139,6 +139,33 @@ class Coverage(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertIn("STALE TF_GONE", out)
 
+    def test_a_launcher_row_stays_blank_and_is_clean(self):
+        # launcher: serve.sh computes the value per boot, so the env line is blank by rule
+        rc, out = self.check(prod=PROD.replace("TF_B=4\n", "TF_B=\n"),
+                             dev=DEV.replace("TF_B=4\n", "TF_B=\n"),
+                             reg=REG.replace("# debt TF_B=4:", "# launcher TF_B=:"))
+        self.assertEqual(0, rc, out)
+
+    def test_a_launcher_row_with_a_value_is_a_finding(self):
+        # a value here would override the launcher, which is how a rank gets the wrong identity
+        rc, out = self.check(prod=PROD.replace("TF_B=4\n", "TF_B=9\n"),
+                             reg=REG.replace("# debt TF_B=4:", "# launcher TF_B=:"))
+        self.assertEqual(1, rc)
+        self.assertIn("VALUE TF_B: launcher", out)
+
+    def test_an_absent_row_stays_blank_and_is_clean(self):
+        # absent: no value is the decision, so a blank line is the correct record
+        rc, out = self.check(prod=PROD.replace("TF_B=4\n", "TF_B=\n"),
+                             dev=DEV.replace("TF_B=4\n", "TF_B=\n"),
+                             reg=REG.replace("# debt TF_B=4:", "# absent TF_B=:"))
+        self.assertEqual(0, rc, out)
+
+    def test_an_absent_row_with_a_value_is_a_finding(self):
+        # setting a value here would switch on a feature the record says is deliberately off
+        rc, out = self.check(prod=PROD.replace("TF_B=4\n", "TF_B=9\n"),
+                             reg=REG.replace("# debt TF_B=4:", "# absent TF_B=:"))
+        self.assertEqual(1, rc)
+        self.assertIn("VALUE TF_B: absent", out)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
