@@ -3265,3 +3265,22 @@ the skew is elsewhere.
 
 So the expert-skew item stays open with its design corrected rather than with a design that would not pay. The lane has been
 told to stop at the reading.
+
+## 124. The nc1 launch is a whole layer's grouped projection: 810 us is real work, not overhead
+
+Reading the launch site settles what `nc1`'s 46% of the decode window actually is, and it retires my launch-overhead
+hypothesis along with the tile-size design.
+
+`zig/src/cuda/exl3_experts.zig`: `gx = w / 128` and `gy = nx` (or swapped by `o.g.ord`), `grid.z = 2 * g_sk * mtu`, block
+128 threads. Inside `nc_body`, `blockIdx.z` decomposes into the row tile (`mtile = zz % MT`), the split (`(zz / MT) % a.sk`) and
+the projection (`zz / MT / a.sk`), and `TF_EXL3_OVN_BLOCKS` supplies the expert-group and key-tile indices. So **one launch
+covers `gx * gy * 2 * g_sk * mtu` tiles** - the layer's entire grouped gate/up (or down) projection, split by experts, K tiles
+and row tiles.
+
+Therefore 810 us per launch is not a small tile paying launch cost; it is a full grouped projection, and 10,920 launches over
+a four-client window are layer-projection launches (two a layer plus replays), not tile launches. `tf_exl3_ovn_nc1`'s 45.97%
+of the window is the decode MoE compute itself.
+
+That closes the two designs I proposed for this item and points the remaining one where the review put it: **the rank-0 expert
+skew is a balance problem** - how many experts and rows each rank draws - not a tile size or a launch count. The measurement
+that would size it is per-rank work in the same capture, which the existing trace's per-stream kernel times can give.
