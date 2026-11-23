@@ -2418,6 +2418,12 @@ carried through the whole ladder, and promoting it into the baseline is the firs
 allowlist gains an `ADDED` set for exactly this case: a knob the pre-split launcher had no line for, dropped from both
 sides of the comparison so every other name stays held to the old launcher.
 
+**Superseded 2026-11-23 (owner rule, D3 in `docs/DOC-AUDIT-2026-11-23.md`):** the rule above - that a recipe line stays out of
+`prod.env` for the duration of the campaign because it moves the control arm - no longer holds. `prod.env` is the recipe we intend
+to ship and it changes when a measured candidate earns promotion or when a table row needs its value chosen; the campaign's
+measurements still run on `KNOBS=dev`, and a candidate is promoted with its cells in the commit that carries them. The paragraph
+above is kept as the record of the rule as it stood on 2026-11-22.
+
 ## 88. queue106: DRAFT_NOISE stays, at +0.86% and not decided
 
 queue106 supplied the two cells `TF_GLM_OVN_DRAFT_NOISE` was adopted without: 6 and 8 clients, sampled prose and sampled
@@ -3083,3 +3089,22 @@ for any later batching arm names four clients explicitly.
 its admission are carried by `patches/port-multi-fill` (the two packages cannot stack and multi-fill embeds the admission).
 So the thing to land is the multi-fill package with `TF_GLM_PROMPT_MANY=1` set and `TF_GLM_OVN_MULTI_FILL` left off - not the
 standalone prompt-many package, which has never been measured against the same series.
+
+## 115. DRAW1's premise is still untested: the two cells that matter collided with another boot
+
+The question DRAW1 needs answered before any subsystem is written: does a larger `top_k` cost decode time on the
+whole-row path? Four cells were planned at four clients on `m130a`, one boot each: greedy, `top_k=40`, `128` and `1024`.
+
+| cell | result |
+|---|---|
+| greedy | 154.41, 154.74, 155.67 tok/s per round, mean **154.94** |
+| `top_k=40` | 152.19, 150.68, 150.32, mean **151.06** (sampled is 2.5% slower than greedy, as expected and not the question) |
+| `top_k=128` | **invalid: connection refused** |
+| `top_k=1024` | **invalid: connection refused** |
+
+The two failures are mine: `screen118` started while this arm was still booting, the two runs fought for the three boxes, and
+`s top_k` boots found `rank 1: no container, rank 2: no container`. So the grep-able cells are one pair of a comparison
+that needs three, and the DRAW1 question is unanswered rather than answered negatively.
+
+Both cells are re-queued to run after the screen finishes, with a fresh `top_k=40` control booted in the same conditions so
+the three-point comparison is internally consistent. Until then, no conclusion about DRAW1's premise, and no subsystem work.
