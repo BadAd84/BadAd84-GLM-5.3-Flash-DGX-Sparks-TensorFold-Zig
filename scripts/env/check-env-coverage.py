@@ -7,6 +7,10 @@ default, and scripts/env/register.env records one verdict per row:
 
   measured NAME=VALUE   a measurement chose the value (its cells are in docs/KNOBS.md) or it was verified
                         equal to the engine's own computed answer;
+  launcher NAME=        serve.sh computes the value per boot (rank, world, reserve, parallel); the env line stays
+                        blank and setting one would override the launcher
+  absent NAME=          no value is the decision (no key file, no captured kernels, no ceiling); the register says what
+                        the absence means
   debt NAME=VALUE       set to the engine's own default and not measured on this stack: a lead, not permission;
   candidate NAME=VALUE  dev.env's candidates override the value prod.env keeps at the engine's default (or name a
                         setting prod.env does not carry); the value must be dev.env's.
@@ -33,7 +37,7 @@ WORDS = re.compile(r"\.words = &\.\{([^}]*)\}")
 ONLY = re.compile(r"\.only = &\.\{([^}]*)\}")
 FLAGS = {k: re.compile(r"\.%s = (\w+)" % k) for k in ("first_digit", "blank_default")}
 LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-VERDICT = re.compile(r"^#\s*(measured|debt|default-ok|unreachable|raw|candidate)\s+([A-Z0-9_]+)=(\S*): (.*)$")  # values hold no space
+VERDICT = re.compile(r"^#\s*(measured|debt|launcher|absent|default-ok|unreachable|raw|candidate)\s+([A-Z0-9_]+)=(\S*): (.*)$")  # values hold no space
 CITE = re.compile(r"(work/[A-Za-z0-9_./-]+|docs/[A-Za-z0-9_./-]+|int-docs/[A-Za-z0-9_./-]+|scripts/[A-Za-z0-9_./-]+)")
 EXTERNAL = re.compile(r"^(NCCL_|HF_HUB_OFFLINE$)")
 
@@ -220,6 +224,12 @@ def main() -> int:
     for name in stale:
         problems.append(f"STALE {name}: the register names a setting this table does not have")
     for name, (kind, value, _) in sorted(verdicts.items()):
+        if kind in ("launcher", "absent"):
+            # launcher: serve.sh computes it per boot, so the env must not carry a value
+            # absent: no value is the decision, recorded with what the absence means
+            if name in prod and prod[name] != "":
+                problems.append(f"VALUE {name}: {kind}, so its env line must be blank, but prod.env sets {prod[name]!r}")
+            continue
         if name in prod and prod[name] != value:
             problems.append(f"VALUE {name}: the register says {value!r}, prod.env sets {prod[name]!r}")
     for name, value in sorted(prod.items()):
