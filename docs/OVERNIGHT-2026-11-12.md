@@ -2985,3 +2985,17 @@ applied because the package is not in the engine series.
 The two faults the screen caught on the way, both fork-era: a qualified `Lanes.marksOf` call missing `self` for a
 three-argument method, and a check assigning `e.link` on `cuda_engine.Engine` where this series keeps the link on
 `follow.Leader`.
+
+## 110. Two ported packages cannot be stacked: they both edit the family build file
+
+`LATENT_TILE` applied clean to the engine tree and `MULTI_FILL` then failed on `zig/build/glm_family_host.zig:106`, because
+both packages attach a host-test step to the same build file and the second one's context no longer matches. Each applies
+and screens green on its own; together they need the build-step hunks re-anchored or merged by hand.
+
+So images are built one package at a time for now, starting with `lt2` from the latent-tile tree (32 engine patches plus
+`patches/port-latent-tile`, 199,454,720 bytes of source tar). The multi-fill image follows with its own build once its
+strict-env screen is green, and the two measurements are separate arms rather than one image carrying both.
+
+This is the third integration fact of the porting project and the pattern is consistent: each lever's own code is fine and
+the friction is in the shared plumbing - the vtable between multi-fill and prompt-many, this build file between latent-tile
+and multi-fill, and the test registrations the screen keeps catching.
