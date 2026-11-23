@@ -38,7 +38,9 @@ Production and both GLM watchdogs must be stopped for a window: the watchdog res
 ## State (2026-11-21, base moved to the upstream tip)
 
 **The base moved on 2026-11-21.** `patches/` now holds the series re-seated on upstream main `fa13df5dd` (the tip, 206 commits past the 1ece6e6db re-seat and 1,427 past v1.2.9): 32 engine patches (0011 is retired, upstream has it as our PR #2044) and the seven packages `pr1411`, `cache-salt`,
-`learn-starts`, `solo-cuts`, `disk-any-position`, `restore-held` and `port-multi-fill` - 41 patches in all (the 2026-11-21 re-seat's final
+`learn-starts`, `solo-cuts`, `disk-any-position`, `restore-held` and `port-multi-fill` - 41 patches in all. The repo also holds four candidate packages that are NOT in the stack - `port-latent-tile`
+(measured -4.24%, rejected), `port-prompt-many` (superseded by multi-fill's carrier), `port-hc-dec` (screened, arm
+pending) and `port-fp8-pages` (step one cut, restructure in progress) - so `ls patches/*/*.patch` counts 45 (the 2026-11-21 re-seat's final
 tree was `19c545b35927` and its gate run `sg-20261121-100241`; the stack has moved since, with the 2026-11-22 retirements and
 `port-multi-fill` last, and `docs/ENV-REGISTER.md` names the current applied tree) (`docs/audit-2026-11-12/reseat-main-fa13df5/`: `REPORT.md`, `DECISIONS.md`, the gate's own log; run `sg-20261121-100241`, 7,869 of 7,912 tests with 43 skipped, no test name failing that the base does not also fail, lean 7,306 files 168 problems against 7,376 files 168, 0 new). **Every measurement below it was taken on an earlier base** (the 1ece6e6db re-seat or the v1.2.9 stack) and says so where it is quoted; the first queue on this base is the re-run of queue101's stock rung, which upstream's new memory preflight refuses on these boxes (OVERNIGHT section 79, `docs/audit-2026-11-12/memory-preflight-fa13df5.md`). The environment is two files, `scripts/env/prod.env` and `scripts/env/dev.env`.
 
