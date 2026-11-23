@@ -72,3 +72,26 @@ verdict before any re-seat work, and the earlier measurement on `v1.3.3` was 9 o
 Our other open pull requests upstream are not this workstream: `#4449`, `#4075`, `#3523`, `#3218` are Flash Next, `#3592` is
 DSV4.1, `#4183` is the int4 GPTQ kernel. `#3333` (COPY_SHARE) is open and matters only because the maintainer wants
 NO_COPY measured against it.
+
+## 6. State of the two the maintainer asked for
+
+Both are cut from upstream `main` at `281d81b8be7514145e2c72bc93db481dd72f45ee`, one lever a branch, and neither is
+pushed yet: the owner approves the text before anything is posted.
+
+**`TF_GLM_KEEP_SEQS`** (branch `keep-seqs`, head `ed007da20`, 8 commits, 10 files, +367/-4). The lever is a row of
+`platform/environment.zig`, a field of `ranks.Settings` read once and passed in the engine's options, a field of
+`Engine` that `release` consults, a `Fingerprint` field with the layout at 24 (and its enum, mismatch walk, explain
+and divergence test), a host test of four cases, and the GPU check registered in `zig/tests/cuda/main.zig`. Gates:
+`tools/pr_check.py` 0 errors and its one warning is the changelog line, which needs the number; lean 165 problems on
+both sides with 7,697 and 7,699 files, 0 new; `compile-cuda-tests` rc 0; `test-glm-keep-seqs-host` 4 of 4; the eight
+GLM host steps pass; `zig build test test-golden` fails the same 27 test binaries as the pristine base on a host whose
+GPU cannot run these kernels; `zig fmt --check` and `git diff --check` clean. Receipt on one GB10 with
+`TF_GLM_LAYERS=2` (the snapshot is 163.6 GiB): `PASS kept sequences, as left and with every byte poisoned, equal
+fresh ones: 24 greedy steps' tokens, bf16 logits rows and MTP drafts after prompts of { 600, 3000 } tokens, fp8 and
+bf16 caches`, with four planted controls firing, and with the switch unset the same command stops at
+`needs TF_GLM_KEEP_SEQS=1`. The logs are in spark1 `~/bench/receipts/`.
+
+**`TF_GLM_NO_COPY`** (branch `no-copy`, head `59719f09f`, base `281d81b8b`). Same shape: settings row, engine field
+from the options, fingerprint at 24, the tests converted off the registry fake, and the lean gate at 0 new. It is
+measured on its own, with `TF_GLM_COPY_SHARE` at its default, and `#3333` is open and mergeable with the two meeting
+only at `zig/src/core/lanes/lanes.zig`'s test block.
