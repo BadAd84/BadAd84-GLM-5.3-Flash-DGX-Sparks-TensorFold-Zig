@@ -3249,3 +3249,19 @@ apparent loss is inside that spread rather than established. What the table does
 +1.06%, `DRAFT_NODES=8` **+2.89 / +2.35 / +1.63%**, `LINK_WAIT=1` **+3.90 / +2.12 / +1.30%**. So the first stays level, and
 the other two read above the 2% band at one and two clients in both rounds. They earn proper arms rather than a verdict from
 one boot each.
+
+## 123. Correction: the 16-warp 64-row unit would cost 128 KB of shared, so it is not the design
+
+I recorded the 64-row unit as sixteen warps of 512 threads (OVERNIGHT 120). Reading the shared allocation refutes it: `red[W][16][NT * 16]` is a per-warp reduction buffer, 32 KB at the four warps in use and **128 KB at sixteen**, against a
+kernel that already spends 32,832 bytes. On this part that is one block an SM instead of two, which removes the occupancy
+the form was supposed to exploit, so the design as written trades a launch-count win for a worse one.
+
+What survives from the reading is the row mapping (`rows_sh[16]`, `rows_sh[g]` and `rows_sh[g + 8]`) and the constraint that a
+bigger row unit cannot be reached by more warps or a wider accumulator. The remaining candidate is **fewer launches for the
+same block shape** - batching row groups into one grid rather than growing the block - and that has to be checked against how
+the launch is already gridded (`TF_EXL3_OVN_BLOCKS` takes its block index from `blockIdx.y` or `blockIdx.x` by `o.g.ord`),
+because if a launch already covers many tiles then the 10,920 launches in a window are a different count than I assumed and
+the skew is elsewhere.
+
+So the expert-skew item stays open with its design corrected rather than with a design that would not pay. The lane has been
+told to stop at the reading.
