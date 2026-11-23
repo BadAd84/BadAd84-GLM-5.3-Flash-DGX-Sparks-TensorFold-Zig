@@ -3141,3 +3141,23 @@ chose to spend on both subsystem ports rather than record them as closed:
 
 The lane declined to cut a half FP8 patch (paged writes with unpaged reads is not the lever and would screen green while
 measuring nothing), which is the same discipline that kept a guessed resolution out of the tree.
+
+## 118. Our gates cannot see a `.cuh`: nvcc runs only in the image build
+
+The FP8 step 1 exposed an instrument gap that applies to every kernel patch this campaign has gated. `scripts/gates.sh`'
+five steps are all Zig: `check-native-cuda-host`, `test-cuda-host`, `compile-cuda-tests` (which compiles the GPU test binary
+from `zig/tests/cuda`), the standalone host steps, and `fmt`. **Nothing in them invokes nvcc.** The only place a `.cu` or
+`.cuh` is compiled is the image build (`zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 ... fatbins`).
+
+So a gate can be green on a tree whose kernel source does not compile, and the kernels this series changes - `mla.cuh`,
+`glm_glue_attn_ovn.cuh`, `glm_onepass.cu`, `exl3_ovn.cuh`, `glm_glue_hc_rows.cuh` - are exactly the files those steps cannot
+read. The reason our kernel patches have survived is that each was also built into an image before it was measured, not that
+a gate checked it.
+
+The lane's nvcc proof for FP8 step 1 is therefore the correct instrument and the one to standardise: `nvcc -std=c++17
+-arch=sm_121a -ptx` on `mla.cu` and `glm_glue.cu` from a tree with the series applied, rc 0 on both. Its own caveat is the
+right one too: `-ptx` proves the source and the device instantiations compile, not that a kernel keeps its register budget;
+that needs the image build's SASS.
+
+**The fix is to add an nvcc step to `scripts/gates.sh`**, so a kernel patch cannot be called gated until its translation
+units compile.
