@@ -2786,3 +2786,33 @@ before. Two captures cannot resolve 3%, which is exactly why the honest reading 
 
 The rule the receipt carried before its rows was: a decode regression beyond the spread is a HOLD back to the patch, and
 a share that does not fall is a HOLD with the numbers. The share did not fall.
+
+## 102. One kernel is 46% of four-client decode: tf_exl3_ovn_nc1
+
+A four-client sampled decode of the shipped recipe (`KNOBS=dev`, `--parallel 4`) captured with software CUDA tracing
+(`--trace=cuda-sw`), 294,438 kernels and 19,244.0 ms of kernel time across the window:
+
+| kernel | launches | ms | share |
+|---|---|---|---|
+| `tf_exl3_ovn_nc1` | 10,920 | 8,847.2 | **45.97%** |
+| `tf_exl3_prompt_gu` | 504 | 977.2 | 5.08% |
+| `paced_kernel` | 11,570 | 755.0 | 3.92% |
+| `ncclDevKernel_AllReduce_Sum_f64_TR` | 24 | 751.4 | 3.90% |
+| `ncclDevKernel_AllGather_RING_LL` | 7,640 | 675.6 | 3.51% |
+| `glm_mm4_32` | 21,330 | 632.7 | 3.29% |
+| `tf_exl3_prompt_down` | 504 | 487.7 | 2.53% |
+| `tf_glm_kda_out` + `kda_step` | 31,144 | 692.3 | 3.59% |
+| `tf_glm_hc_partial8` | 12,780 | 332.1 | 1.73% |
+
+By family: `nc1` 10,920 launches and 8,847.2 ms (45.97%), KDA 47,192 and 876.3 ms (4.55%), absorb and expand 3,124 and
+300.3 ms (1.56%), partial 12,780 and 332.1 ms.
+
+**So the decode path has one dominant kernel, and it is not the one any knob in the campaign has touched.** `nc1` averages
+810 us a launch over 10,920 launches: a decode row touches only the eight active experts, so each launch is a small
+matmul against a small slice of weights. Whether that 810 us is a bandwidth floor or a launch-and-latency cost is the next
+question, and it is answerable from this capture: its per-launch bytes are the eight experts' sliced weights at 4 bits,
+against the 273 GB/s the prompt-side pair reached.
+
+That reframes the remaining decode work. The `paced_kernel` at 11,570 launches and 755.0 ms (3.9%) is the pacing of those
+launches, and the two NCCL kernels together are 7.4% of the window. None of the six candidate lines still in `dev.env`'s
+history addresses `nc1`.
