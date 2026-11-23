@@ -3185,3 +3185,20 @@ rule says is what UNCLEAR means.
 
 **The instrument held up:** the control's three cells sit where the recipe's own cells do, and no arm's verdict depends on a
 difference smaller than the 2% band the rule chose.
+
+## 120. The expert skew's 64-row unit is a 512-thread block, not a wider accumulator
+
+The owner's decision was to take the skew's scheduling win with the block order byte-exact. The register ceiling ruled out a
+wider tile (OVERNIGHT 107: `acc[8][2][4]` is already 64 floats a thread inside 118 registers). Reading the geometry gives
+the way through.
+
+`nc_body` (`exl3_ovn.cuh:27-60`): `NT = 8, W = 4, TW = 32`; `warp = threadIdx.x >> 5`; `g = lane >> 2`, `t = lane & 3`, and
+`rows_sh[16]` holds **sixteen rows inside one warp's lanes**, with `r0 = rows_sh[g]` and `r1 = rows_sh[g + 8]`. The four
+warps split the K dimension, not the rows.
+
+So a 64-row unit is **four times the warps** - 16 warps, 512 threads - each warp taking a 16-row group and a column slice,
+with the per-thread accumulator unchanged at 64 floats. Every row's chain and its reduction order are then identical to
+today's, which is what "byte-exact" requires, and the launch count for a chunk falls fourfold.
+
+That is a kernel project with a host test that pins the per-row bytes against today's kernel at several row counts, and it is
+the one remaining decode-side item from the review list that is neither measured-negative nor blocked.
