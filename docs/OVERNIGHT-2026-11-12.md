@@ -3414,7 +3414,7 @@ queue128, one boot an arm, the control and the six settings in the same director
 | arm | 1 | 2 | 4 | percent against the control |
 |---|---|---|---|---|
 | ctl | 81.51 | 85.04 | 112.65 | - |
-| decisx | 81.80 | 85.27 | 112.30 | +0.36 +0.27 -0.31 |
+| decidx | 81.80 | 85.27 | 112.30 | +0.36 +0.27 -0.31 |
 | form | 82.24 | 84.73 | 112.85 | +0.90 -0.36 +0.18 |
 | drafts | 80.49 | 83.94 | 112.72 | -1.25 -1.29 +0.06 |
 | half | 80.55 | 84.11 | 112.30 | -1.18 -1.09 -0.31 |
