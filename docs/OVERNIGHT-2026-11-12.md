@@ -3161,3 +3161,27 @@ that needs the image build's SASS.
 
 **The fix is to add an nvcc step to `scripts/gates.sh`**, so a kernel patch cannot be called gated until its translation
 units compile.
+
+## 119. The fast screen of six unmeasured settings: one promising, two dead, three unclear
+
+One boot an arm on `m130a`, each boot measured at 1, 2 and 4 clients, control booted first with the same cache drop. The
+rule (OVERNIGHT 118's design, `scripts/queues/queue118.sh`, written before any row): DEAD over 2.0% slower at any level,
+PROMISING over 2.0% faster somewhere with no level over 1.0% slower, UNCLEAR otherwise.
+
+| arm | 1 client | 2 clients | 4 clients | verdict |
+|---|---|---|---|---|
+| control | 81.02 | 85.06 | 113.29 | |
+| `TF_GLM_PROMPT_STEPS=0` | 83.75 (+3.37%) | 87.07 (+2.36%) | 114.69 (+1.24%) | **PROMISING** |
+| `TF_GLM_DRAFT_CONFIDENCE=0.6` | 81.93 (+1.12%) | 86.40 (+1.58%) | 114.25 (+0.85%) | UNCLEAR |
+| `TF_GLM_LINK_WAIT=1` | 82.04 (+1.26%) | 85.64 (+0.68%) | 114.89 (+1.41%) | UNCLEAR |
+| `TF_DRAFT_NODES=8` | 81.46 (+0.54%) | 86.01 (+1.12%) | 113.93 (+0.56%) | UNCLEAR |
+| `TF_GLM_HOST_CACHE=1` | 82.98 (+2.42%) | 80.97 (-4.81%) | 111.36 (-1.70%) | **DEAD** |
+| `TF_GLM_SHARED=0` | 83.06 (+2.52%) | 71.20 (-16.29%) | 74.39 (-34.34%) | **DEAD** |
+
+So one boot each closed two settings outright and pointed at a third: turning **chunked prompt passes off**
+(`TF_GLM_PROMPT_STEPS=0`) is faster at every level by 1.2 to 3.4%, which is a surprise for a default that ships on, and
+`SHARED=0` costs a third of throughput at four clients. The three inside the band need one confirm boot apiece, which the
+rule says is what UNCLEAR means.
+
+**The instrument held up:** the control's three cells sit where the recipe's own cells do, and no arm's verdict depends on a
+difference smaller than the 2% band the rule chose.
