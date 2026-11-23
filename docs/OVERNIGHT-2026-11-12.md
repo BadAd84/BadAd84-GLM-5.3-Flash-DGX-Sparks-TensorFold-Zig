@@ -3395,5 +3395,6 @@ copy window of three rows with no held draft, `round(false)` a head window of th
 wired; what it needs is a session where the server proposes a copied continuation, which no instrument we have
 produces.
 
-Upstream's rule is that a switch arrives with a measured benefit, so `TF_GLM_NO_COPY` stays on the fork branch
-(`no-copy`, `59719f09f`) and is not posted. Two workloads, both null, is the record.
+Upstream's rule is that a switch arrives with a measured benefit, so nothing was posted, and the owner dropped the
+lever: the branch is deleted from the fork (`no-copy` was `59719f09f`) and the images and drafts are off the boxes. Two
+workloads, both null, is the record.

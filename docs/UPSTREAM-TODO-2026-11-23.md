@@ -91,7 +91,11 @@ fresh ones: 24 greedy steps' tokens, bf16 logits rows and MTP drafts after promp
 bf16 caches`, with four planted controls firing, and with the switch unset the same command stops at
 `needs TF_GLM_KEEP_SEQS=1`. The logs are in spark1 `~/bench/receipts/`.
 
-**`TF_GLM_NO_COPY`** (branch `no-copy`, head `59719f09f`, base `281d81b8b`). Same shape: settings row, engine field
-from the options, fingerprint at 24, the tests converted off the registry fake, and the lean gate at 0 new. It is
-measured on its own, with `TF_GLM_COPY_SHARE` at its default, and `#3333` is open and mergeable with the two meeting
-only at `zig/src/core/lanes/lanes.zig`'s test block.
+**`TF_GLM_NO_COPY`: measured twice, null both times, rejected by the owner and dropped (2026-11-23).** It was carried
+to the same base with the same plumbing (settings row, engine field from the options, fingerprint at 24, tests off the
+registry fake, lean at 0 new) as branch `no-copy`, and the branch is deleted from the fork. Upstream `main` against it
+at the five levels, tuning stripped: 52.7/60.5/81.5/109.1/133.5 against 52.3/60.1/80.8/109.1/134.2 tok/s, acceptance
+identical, token digests equal. A prompt built to repeat its own head, the same image both ways: acceptance 0.664
+against 0.664, 54.0 against 54.4 ms a round, 102 rounds each. `windows.zig` takes its `Copy` from the stream's own
+context or Recall's record and neither workload gives the server one, so the switch had nothing to act on; upstream's
+rule wants a measured benefit, so nothing was posted.
