@@ -2919,3 +2919,25 @@ have been a numerics change with its own evidence, and it is not wanted now.
 
 Both are running: the porting project on its own lane against `patches/port-*/` with `patches/engine/` left alone, and the
 decode `AllGather` prefetch diagnosis on the other against the engine series.
+
+## 107. The 64-row EXL3 unit cannot be a bigger tile: the accumulator is already 64 floats a thread
+
+The owner's decision was to take the expert-skew scheduling win with the block order byte-exact, which means 64-row EXL3
+units with the same arithmetic. Reading `nc_body` says that unit cannot be reached by enlarging the tile.
+
+`exl3_ovn.cuh`: `constexpr int NT = 8, W = 4, NV = NT / 4, TW = 32;` and `float acc[NT][2][4]`, so **64 floats of
+accumulator a thread** inside the 118 registers `tf_exl3_ovn_nc1` already uses, against 32,832 bytes of shared memory.
+The tile is 16 rows: `__shared__ int rows_sh[16]`, filled by `threadIdx.x < 16`, with each warp taking `rows_sh[g]` and
+`rows_sh[g + 8]`.
+
+Four times the rows is four times that accumulator: 256 floats a thread before any operand, which cannot fit in the 255
+register ceiling, let alone in the 118 this kernel uses. So a 64-row unit is not a tile change; it is either 512-thread
+blocks with the same per-thread accumulator, or a split accumulation across launches, and both are kernel projects with
+their own exactness arguments rather than a scheduling tweak.
+
+**What that leaves for the skew**, with the block order fixed as decided: the wins available without touching arithmetic
+are the launch shape (fewer, larger blocks covering more rows through more threads, not deeper per-thread state) and the
+decode `AllGather` prefetch now under diagnosis on the other lane, which is 675.6 ms of main-stream time and needs no
+tile change at all.
+
+Stated plainly: the engine's decode tile is register-limited at 16 rows, and that is why 10,920 launches of 810 us exist.
