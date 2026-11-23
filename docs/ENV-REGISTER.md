@@ -24,6 +24,7 @@ prose throughput gap. Record: Qwen3.8-Flash-Next `work/ProseDraft/RESULT.md`.
 | verdict | meaning |
 |---|---|
 | `measured NAME=VALUE` | a measurement chose it: its cells are in `docs/KNOBS.md` (and the OVERNIGHT section that file names), or it was verified equal to the engine's own computed answer |
+| `inert NAME=VALUE` | examined, and it cannot be a lever on this serve: a log or receipt switch, a limit of a path this serve never runs (vision, PDF, another family), or plumbing. The reason on the line is the record, and it is what stops the row being re-opened as a question |
 | `debt NAME=VALUE` | set to the engine's own default and not measured on this stack; each one is a lead |
 | `candidate NAME=VALUE` | `dev.env`'s candidates section overrides the value `prod.env` keeps at the engine's default (or names a setting prod does not carry); the value must be `dev.env`'s, and the overridden row must be a completeness-block line |
 
@@ -52,9 +53,12 @@ rows are blank for this reason and each says why in its register line.
         --prod scripts/env/prod.env --dev scripts/env/dev.env --register scripts/env/register.env \
         --scopes glm,cuda,common
 
-One clean run prints `101 rows in scope, set 101, measured 32, debt 69, raw 6, candidates 1, unset 0, unrecorded 0`. The gate's own
-test, `python scripts/tests/test_check_env_coverage.py`, holds one defect class a case on a fixture table and fixture env files (ten
-tests: clean, UNSET, VALUE, the retired word, REFUSED, BLANK, the three candidate rules, UNREAD, STALE). Proven to fail on copies of
+One clean run prints a line of the form `coverage: 85 rows in scope, set 85, measured 55, inert 25, debt 5, raw 6,
+candidates 0, unset 0, unrecorded 0`; the register's own counts are authoritative for that line, and the gate reruns it
+from the tree it is given. The gate's own
+test, `python scripts/tests/test_check_env_coverage.py`, holds one defect class a case on a fixture table and fixture env files (sixteen
+tests: clean, UNSET, VALUE, the retired word, REFUSED, BLANK, the three candidate rules, UNREAD, STALE, and inert counted
+and inert without a citation). Proven to fail on copies of
 the real files too: a row deleted from `prod.env` (`UNSET`), a register value changed
 (`VALUE`), a verdict renamed `default-ok` (retired word + `UNRECORDED`), a line for a row the table lacks (`STALE`), and
 a `raw` line removed (`UNREAD`), a candidate line whose value differs from `dev.env` (`VALUE candidate`), a candidate

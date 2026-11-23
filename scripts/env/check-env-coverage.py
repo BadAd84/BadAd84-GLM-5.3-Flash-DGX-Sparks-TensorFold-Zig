@@ -11,6 +11,9 @@ default, and scripts/env/register.env records one verdict per row:
                         blank and setting one would override the launcher
   absent NAME=          no value is the decision (no key file, no captured kernels, no ceiling); the register says what
                         the absence means
+  inert NAME=VALUE      examined and it cannot be a lever on this serve (a log, a receipt, a limit of a path this
+                        serve never runs, another family's row, plumbing): the reason is the record, and no boot
+                        will ever move it;
   debt NAME=VALUE       set to the engine's own default and not measured on this stack: a lead, not permission;
   candidate NAME=VALUE  dev.env's candidates override the value prod.env keeps at the engine's default (or name a
                         setting prod.env does not carry); the value must be dev.env's.
@@ -37,7 +40,7 @@ WORDS = re.compile(r"\.words = &\.\{([^}]*)\}")
 ONLY = re.compile(r"\.only = &\.\{([^}]*)\}")
 FLAGS = {k: re.compile(r"\.%s = (\w+)" % k) for k in ("first_digit", "blank_default")}
 LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-VERDICT = re.compile(r"^#\s*(measured|debt|launcher|absent|default-ok|unreachable|raw|candidate)\s+([A-Z0-9_]+)=(\S*): (.*)$")  # values hold no space
+VERDICT = re.compile(r"^#\s*(measured|debt|inert|launcher|absent|default-ok|unreachable|raw|candidate)\s+([A-Z0-9_]+)=(\S*): (.*)$")  # values hold no space
 CITE = re.compile(r"(work/[A-Za-z0-9_./-]+|docs/[A-Za-z0-9_./-]+|int-docs/[A-Za-z0-9_./-]+|scripts/[A-Za-z0-9_./-]+)")
 EXTERNAL = re.compile(r"^(NCCL_|HF_HUB_OFFLINE$)")
 
@@ -276,8 +279,9 @@ def main() -> int:
             if prod.get(name) == value:
                 problems.append(f"CANDIDATE {name}: repeats prod.env's value, so it decides nothing")
     measured = sum(1 for n in rows if verdicts.get(n, ("",))[0] == "measured")
+    inert = sum(1 for n in rows if verdicts.get(n, ("",))[0] == "inert")
     debt = sum(1 for n in rows if verdicts.get(n, ("",))[0] == "debt")
-    print(f"coverage: {len(rows)} rows in scope, set {len(rows) - len(silent)}, measured {measured}, debt {debt}, "
+    print(f"coverage: {len(rows)} rows in scope, set {len(rows) - len(silent)}, measured {measured}, inert {inert}, debt {debt}, "
           f"raw {len(raw)}, candidates {len(dev_cand)}, unset {len(silent)}, unrecorded {len(unrecorded)}")
     for p in problems:
         print(p)

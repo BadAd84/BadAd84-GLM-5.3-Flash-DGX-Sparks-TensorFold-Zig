@@ -82,7 +82,19 @@ class Coverage(unittest.TestCase):
     def test_a_complete_pair_is_clean(self):
         rc, out = self.check()
         self.assertEqual(0, rc, out)
-        self.assertIn("4 rows in scope, set 4, measured 1, debt 3, raw 0, candidates 1, unset 0", out)
+        self.assertIn("4 rows in scope, set 4, measured 1, inert 0, debt 3, raw 0, candidates 1, unset 0", out)
+
+    def test_an_inert_verdict_is_clean_and_counted(self):
+        rc, out = self.check(reg=REG.replace("# debt TF_C=1: the default; evidence docs/ENV-REGISTER.md",
+                                             "# inert TF_C=1: a log switch; evidence docs/ENV-REGISTER.md"))
+        self.assertEqual(0, rc, out)
+        self.assertIn("inert 1, debt 2", out)
+
+    def test_an_inert_verdict_without_a_citation_is_a_finding(self):
+        rc, out = self.check(reg=REG.replace("# debt TF_C=1: the default; evidence docs/ENV-REGISTER.md",
+                                             "# inert TF_C=1: a log switch, no path named"))
+        self.assertEqual(1, rc)
+        self.assertIn("cites no evidence path", out)
 
     def test_a_row_missing_from_prod_is_unset(self):
         rc, out = self.check(prod=PROD.replace("TF_B=4\n", ""))
