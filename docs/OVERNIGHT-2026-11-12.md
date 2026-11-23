@@ -3406,3 +3406,23 @@ lever makes. The cause is the env sync: the control's cells were recorded at 20:
 skips an arm whose `P4.jsonl` exists, so the six arms (21:10 to 21:33) were compared against the pre-sync recipe while
 they themselves ran the synced one. Re-run as queue128 with a fresh `screen128/` so the control and the arms are
 measured together, which is the only shape that can decide anything.
+
+## The screen's second batch, measured properly: six UNCLEAR, none escalated
+
+queue128, one boot an arm, the control and the six settings in the same directory and the same env:
+
+| arm | 1 | 2 | 4 | percent against the control |
+|---|---|---|---|---|
+| ctl | 81.51 | 85.04 | 112.65 | - |
+| decisx | 81.80 | 85.27 | 112.30 | +0.36 +0.27 -0.31 |
+| form | 82.24 | 84.73 | 112.85 | +0.90 -0.36 +0.18 |
+| drafts | 80.49 | 83.94 | 112.72 | -1.25 -1.29 +0.06 |
+| half | 80.55 | 84.11 | 112.30 | -1.18 -1.09 -0.31 |
+| notrees | 81.23 | 84.22 | 112.68 | -0.34 -0.96 +0.03 |
+| idxfrom | 81.49 | 85.60 | 112.30 | -0.03 +0.66 -0.31 |
+
+Every arm is inside 1.3 percent at every level, so none is DEAD (over 2.0 percent slower somewhere) and none is
+PROMISING (over 2.0 percent faster with no level over 1.0 percent slower): six UNCLEAR, and no escalation to a
+five-level arm. The same six arms against the pre-sync control read 1.8 to 3.6 percent slower at every level, which is
+what comparing across the env change cost; the correct control moves the whole batch by about 2.5 points and turns
+apparent regressions into flat cells.
