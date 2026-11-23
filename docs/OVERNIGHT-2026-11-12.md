@@ -3460,3 +3460,14 @@ The promotion model itself holds and is gated: `dev.env` is `prod.env` plus cand
 candidate that does not raise a row prod keeps at its engine default. Measured today, the two files carry the same 118
 settings with zero differences, so there is no candidate outstanding: every measured winner is already in both, and
 nothing is under test.
+
+## The disk tier is promoted and boots; the failing boots were page memory, not the tier
+
+`LEARN` now defaults to 1 in `serve.sh` and in `zig-tp3.sh`, whose forwarding line would otherwise have pinned it to 0.
+The first arm on the promoted shape failed every level in about eighty seconds each, which is the shape of an instant
+refusal rather than a slow boot: the memory preflight read `2.4 GiB free less a 13.0 GiB reserve` and refused the
+61.3 GiB of one rank's weights. The cause was page memory: the checkpoint digest reads 163.6 GiB, the preflight counts
+reclaimable cache against the weights, and `bench-arm.sh` never dropped it - the queues did that in their own boot
+functions, so the defect only appeared when an arm booted straight after another. `bench-arm.sh` now drops the cache on
+all three ranks before every level. After a clean drop the promoted boot came up in 140 s with `/v1/models` answering,
+so the tier is fine and the promotion stands; the arm's cells are re-running on the promoted shape.
