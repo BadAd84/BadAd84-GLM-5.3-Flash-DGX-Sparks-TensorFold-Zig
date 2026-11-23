@@ -17,8 +17,10 @@ engine.prompt_rows` with the knob on, and both clear with it off.
 `apply.sh --check` against the engine series: `before: 59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, `checked 1 patch(es);
 tree id: 20be2ed8893783afecbc5a95c6896b6deddfa524`, rc 0, nothing written.
 
-Gate: not yet taken. `python scripts/spark-gates.py iter --name port-prompt-many --pin
-fa13df5dd1fdd23ada775510a464c9aa03a39e09 --dir patches/engine,patches/port-prompt-many check fmt test ctest --max-load 14`.
+Screened: `check fmt ctest` rc 0 on tree `20be2ed8893783afecbc5a95c6896b6deddfa524` (`iter --name port-prompt-many --pin
+fa13df5dd1fdd23ada775510a464c9aa03a39e09 --dir patches/engine,patches/port-prompt-many check fmt ctest --max-load 14`,
+`ITER-DONE rc=0` after 351 s; `check-native-cuda-host`, `fmt` and `compile-cuda-tests` each clean, no error lines). Host
+tests (`test`) are NOT run and stay open until the integrator runs them. No compile ran on the workstation.
 
 ## The measurement that decides it
 

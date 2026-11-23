@@ -1,0 +1,653 @@
+From: Adam Hillson <598804+BadAd84@users.noreply.github.com>
+Subject: [PATCH] glm glue: TF_GLM_OVN_HC_ROWS=16|32 and TF_GLM_OVN_HC_DEC, hc mixing with fewer weight reads
+
+Ported from ai-engine fork-ssh/ovn-up's 6c92d7ec2 (2026-10-30). The mixing
+pass reads each block's weights once a 4-row step and once a 16-block row; the
+fork's variants stage 16 or 32 prompt rows a block (HC_ROWS) and run the
+hc.cu decode layout for windows under 64 rows (HC_DEC, 16 x 3 x rows/4, 288
+threads), every row on today's chain so the bytes are unchanged.
+
+Adapted by hand, not replayed: this series has no ROUTER16 field or loader at
+the site the fork's patch hooks, so the two optional-kernel groups are loaded
+by hcLoad() from Kernels.loadOvn instead; the launches go through
+cuda_pdl.launch, which applies TF_GLM_PDL itself, so the fork's explicit .pdl
+flags and cuda.launch.launch calls are gone; and the build step is attached to
+test-glm-keep-seqs-host, which exists here. The fork's GPU reference check
+(glm_ref_hc_rows / glm_ref_ovn) is not carried: it needs the forked
+glm_ref_tests registry this series does not have. cuda_hc_ovn_test.zig is
+carried as the host receipt of the choice, grid and arguments; glm_hc_bench.zig
+is not carried and the measurement is the arm below.
+
+Receipts here: the host test's launch records (16/32-row grids, HC_DEC's
+288-thread launch, the knobs-off paths), and the two rows' parsing.
+Measurement: a fresh arm on the current series, HC_DEC=1 against unset at 1, 2,
+4, 6 and 8 streams with replies equal (the fork read +1.0% at P8 and +0.4% at
+P4, before the re-seat), and HC_ROWS=16|32 on cold 8k / 32k / 120k.
+
+diff --git a/zig/build/glm_family_host.zig b/zig/build/glm_family_host.zig
+index 965973b55..bd236e1ed 100644
+--- a/zig/build/glm_family_host.zig
++++ b/zig/build/glm_family_host.zig
+@@ -106,6 +106,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
+     const x3 = b.step("test-glm-exl3-x3-host", "TF_GLM_OVN_X3_*: knobs, each grouped launch's kernel and its tail, without a GPU");
+     for ([_]*std.Build.Module{ cuda, glm }) |m| x3.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"EXL3 X3:"} })).step);
+     b.step("test-glm-keep-seqs-host", "TF_GLM_OVN_KEEP_SEQS: a released slot's sequence kept or freed, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM keep seqs:"} })).step);
++    b.step("test-glm-hc-host", "TF_GLM_OVN_HC_ROWS and _HC_DEC: the mixing kernels' choice, grid and args through recorded launches").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"TF_GLM_OVN_HC_"} })).step);
+ }
+ 
+ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+diff --git a/zig/kernels/cuda/glm_glue.cu b/zig/kernels/cuda/glm_glue.cu
+index a9ad6e65c..7b2b0ce65 100644
+--- a/zig/kernels/cuda/glm_glue.cu
++++ b/zig/kernels/cuda/glm_glue.cu
+@@ -2,6 +2,7 @@
+ #include "glm_glue_norm.cuh"
+ #include "glm_glue_rows.cuh"
+ #include "glm_glue_hc.cuh"
++#include "glm_glue_hc_rows.cuh"
+ #include "glm_glue_moe.cuh"
+ #include "glm_glue_router.cuh"
+ #include "glm_glue_latent.cuh"
+diff --git a/zig/kernels/cuda/glm_glue_hc_rows.cuh b/zig/kernels/cuda/glm_glue_hc_rows.cuh
+new file mode 100644
+index 000000000..e20c5fa63
+--- /dev/null
++++ b/zig/kernels/cuda/glm_glue_hc_rows.cuh
+@@ -0,0 +1,207 @@
++// TF_GLM_OVN_HC_ROWS and TF_GLM_OVN_HC_DEC: hc_partial's dots and squares on other layouts, every row's bits as today.
++#pragma once
++
++#include "glm_glue_hc.cuh"
++
++namespace glm_hc_rows {
++
++// K block b of R rows by 128 threads in tf_glm_hc_partial's lanes and chains, a step's weights read once for R rows.
++template <int R>
++__device__ __forceinline__ void dots(const __nv_bfloat16* x, const __nv_bfloat16* fn, int64_t wide, int64_t kb,
++                                     int b, int64_t r0, int64_t rows, int t, float* acc, int stride,
++                                     float (*sq)[4]) {
++  const int lane = t & 31, warp = t >> 5, c = t & 15, m0 = (t >> 4) & 7;
++  float ss[R];  // acc(q, m) at acc[q * stride + m], owned by lane c == 0; sq[q][warp]: the warps' sums of squares
++#pragma unroll
++  for (int q = 0; q < R; ++q) {
++    ss[q] = 0.0f;
++    if (c == 0)
++      for (int i = 0; i < 3; ++i) acc[q * stride + m0 + 8 * i] = 0.0f;
++  }
++  for (int64_t step = 0; step < kb / 128; ++step) {
++    const int64_t base = b * kb + step * 128;
++    float w[3][8];
++#pragma unroll
++    for (int i = 0; i < 3; ++i) {  // the step's weights, once for the R rows (tf_glm_hc_partial: once every 4)
++      const uint4 u = __ldg(reinterpret_cast<const uint4*>(fn + (int64_t)(m0 + 8 * i) * wide + base + c * 8));
++      const __nv_bfloat16* hw = reinterpret_cast<const __nv_bfloat16*>(&u);
++#pragma unroll
++      for (int j = 0; j < 8; ++j) w[i][j] = bf(hw[j]);
++    }
++#pragma unroll
++    for (int q0 = 0; q0 < R; q0 += 4) {  // 4 rows' loads in flight at once, as tf_glm_hc_partial's
++      float xv[4][8];
++#pragma unroll
++      for (int q = 0; q < 4; ++q) {  // plain loads: the row kernel wrote x in place before its barrier
++        uint4 u = make_uint4(0, 0, 0, 0);
++        if (r0 + q0 + q < rows) u = *reinterpret_cast<const uint4*>(x + (r0 + q0 + q) * wide + base + c * 8);
++        const __nv_bfloat16* h = reinterpret_cast<const __nv_bfloat16*>(&u);
++#pragma unroll
++        for (int j = 0; j < 8; ++j) xv[q][j] = bf(h[j]);
++      }
++#pragma unroll
++      for (int i = 0; i < 3; ++i) {
++#pragma unroll
++        for (int q = 0; q < 4; ++q) {
++          float d = __fmul_rn(xv[q][1], w[i][1]);
++          d = __fmaf_rn(xv[q][0], w[i][0], d);
++#pragma unroll
++          for (int j = 2; j < 8; ++j) d = __fmaf_rn(xv[q][j], w[i][j], d);
++#pragma unroll
++          for (int o = 8; o > 0; o >>= 1) d = d + __shfl_xor_sync(0xffffffffu, d, o);
++          float* a = acc + (q0 + q) * stride + m0 + 8 * i;
++          if (c == 0) *a = *a + d;
++        }
++      }
++#pragma unroll
++      for (int q = 0; q < 4; ++q) {
++        const float xt = r0 + q0 + q < rows ? bf(x[(r0 + q0 + q) * wide + base + t]) : 0.0f;
++        ss[q0 + q] = __fmaf_rn(xt, xt, ss[q0 + q]);
++      }
++    }
++  }
++#pragma unroll
++  for (int q = 0; q < R; ++q) {
++    for (int o = 16; o > 0; o >>= 1) ss[q] += __shfl_xor_sync(0xffffffffu, ss[q], o);
++    if (lane == 0) sq[q][warp] = ss[q];
++  }
++}
++
++// tf_glm_hc_partial16 / 32: block (R rows, K block b) of 128 threads, PART as tf_glm_hc_partial writes it.
++template <int R>
++__device__ __forceinline__ void partial(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide,
++                                        int nb, int64_t rows) {
++  __shared__ float acc[R][24];
++  __shared__ float sq[R][4];
++  const int64_t r0 = (int64_t)blockIdx.x * R;
++  const int b = blockIdx.y, t = threadIdx.x;
++  dots<R>(x, fn, wide, wide / nb, b, r0, rows, t, &acc[0][0], 24, sq);
++  __syncthreads();
++  for (int u = t; u < R * 25; u += 128) {
++    const int q = u / 25, m = u % 25;
++    if (r0 + q >= rows) break;  // u rises with q: every later u is a later row
++    part[((r0 + q) * nb + b) * 32 + m] = m < 24 ? acc[q][m] : (sq[q][0] + sq[q][2]) + (sq[q][1] + sq[q][3]);
++  }
++}
++
++// GLUE_ROW with HC_ROWS: glm_hc::rows4 on R rows a block, dots<R> its partials; PART [R][16][32] dynamic shared.
++template <typename W, int R>
++__device__ __forceinline__ void rows(__nv_bfloat16* x, const float* g, int64_t rs, int world, const __nv_bfloat16* fn,
++                                     const float* base, const float* scale, const W* nw, __nv_bfloat16* out, float* xs,
++                                     float* post, float* comb, float eps, float hc_eps, int iters, int64_t rows) {
++  constexpr int D = 4096, S = 4, NB = 16, KB = S * D / NB, QUARTERS = D / KB, CHUNKS = KB / 8;
++  constexpr int64_t wide = S * D;
++  extern __shared__ __align__(16) unsigned char smem[];
++  float* part = reinterpret_cast<float*>(smem);
++  __shared__ float sq[2][R][4];
++  const int64_t r0 = (int64_t)blockIdx.x * R;
++  const int tid = threadIdx.x, grp = tid >> 7, t = tid & 127;
++  for (int qq = 0; qq < QUARTERS; ++qq) {
++    for (int u = tid; u < R * CHUNKS; u += 256) {
++      const int64_t row = r0 + u / CHUNKS;
++      if (row < rows) glm_glue::hc_post8(x, x, g, post, comb, rs, D, world, row, qq * KB + u % CHUNKS * 8);
++    }
++    __syncthreads();
++    for (int h = 0; h < 2; ++h) {
++      const int b = (grp + 2 * h) * QUARTERS + qq;
++      dots<R>(x, fn, wide, KB, b, r0, rows, t, part + b * 32, NB * 32, sq[grp]);
++      __syncthreads();
++      if (t < R) part[(t * NB + b) * 32 + 24] = (sq[grp][t][0] + sq[grp][t][2]) + (sq[grp][t][1] + sq[grp][t][3]);
++      __syncthreads();
++    }
++  }
++  for (int q = 0; q < R && r0 + q < rows; ++q)
++    glm_hc::finish<W>(x + r0 * wide, part, base, scale, nw, out + r0 * D, xs + r0 * (D / 64), post + r0 * S,
++                      comb + r0 * 16, eps, hc_eps, NB, iters, q);
++}
++
++// TF_GLM_OVN_HC_DEC: hc.cu's block (K block, part p, 4 rows), warp w < 8 mixing row 8 p + w, warp 8 the squares.
++template <bool PDL>
++__device__ __forceinline__ void partial48(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t rows) {
++  constexpr int WIDE = 16384, NB = 16, KB = WIDE / NB, SUB = 128, STEPS = KB / SUB, RPB = 4;
++  const int b = blockIdx.x, p = blockIdx.y;
++  const int64_t r0 = (int64_t)blockIdx.z * RPB, r1 = r0 + RPB < rows ? r0 + RPB : rows;
++  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, h = lane >> 4, l = lane & 15, m = p * 8 + warp;
++  uint4 wu[4];  // half h = lane / 16: steps 2 i + h; lane l = lane % 16: their inputs 8 l .. 8 l + 7
++  if (warp < 8) {  // with PDL, launched dependent: the weights load before griddepcontrol.wait, x after it
++    const __nv_bfloat16* wr = fn + (int64_t)m * WIDE + b * KB;
++    for (int i = 0; i < 4; ++i) wu[i] = __ldg(reinterpret_cast<const uint4*>(wr + (2 * i + h) * SUB + 8 * l));
++  }
++  if constexpr (PDL) qmm_frag::grid_wait();
++  if (warp < 8) {
++    float wf[4][8];
++    for (int i = 0; i < 4; ++i)
++      for (int j = 0; j < 8; ++j) wf[i][j] = bf(reinterpret_cast<const __nv_bfloat16*>(&wu[i])[j]);
++    for (int64_t r = r0; r < r1; ++r) {
++      const __nv_bfloat16* xr = x + r * WIDE + b * KB;
++      uint4 xu[4];
++      for (int i = 0; i < 4; ++i) xu[i] = *reinterpret_cast<const uint4*>(xr + (2 * i + h) * SUB + 8 * l);
++      float s[4];
++      for (int i = 0; i < 4; ++i) {
++        const __nv_bfloat16* hx = reinterpret_cast<const __nv_bfloat16*>(&xu[i]);
++        float d = __fmul_rn(bf(hx[1]), wf[i][1]);
++        d = __fmaf_rn(bf(hx[0]), wf[i][0], d);
++        for (int j = 2; j < 8; ++j) d = __fmaf_rn(bf(hx[j]), wf[i][j], d);
++        for (int o = 8; o > 0; o >>= 1) d = d + __shfl_xor_sync(0xffffffffu, d, o);
++        s[i] = d;
++      }
++      float acc = 0.0f;  // partial8's chains and order: steps added 0, 1, .., 7
++      for (int i = 0; i < 4; ++i) {
++        acc = acc + s[i];                                  // step 2 i (half 0)
++        acc = acc + __shfl_sync(0xffffffffu, s[i], 16);  // step 2 i + 1 (half 1)
++      }
++      if (lane == 0) part[(r * NB + b) * 32 + m] = acc;
++    }
++  } else if (p == 0) {
++    for (int64_t r = r0; r < r1; ++r) {
++      const __nv_bfloat16* xr = x + r * WIDE + b * KB;
++      float w[4];
++      for (int j = 0; j < 4; ++j) {  // partial8's warp j: input 32 j + lane of each step
++        float ss = 0.0f;
++        for (int st = 0; st < STEPS; ++st) {
++          const float xt = bf(xr[st * SUB + 32 * j + lane]);
++          ss = __fmaf_rn(xt, xt, ss);
++        }
++        for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
++        w[j] = ss;
++      }
++      if (lane == 0) part[(r * NB + b) * 32 + 24] = (w[0] + w[2]) + (w[1] + w[3]);
++    }
++  }
++}
++
++}  // namespace glm_hc_rows
++
++// TF_GLM_OVN_HC_ROWS=16 / 32: prompt rows' partials, R rows a 128-thread block.
++#define TF_GLM_HC_PARTIAL_ROWS(name, R)                                                                            \
++  extern "C" __global__ void __launch_bounds__(128, 4)                                                             \
++      name(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb, int64_t rows) {    \
++    glm_hc_rows::partial<R>(x, fn, part, wide, nb, rows);                                                          \
++  }
++TF_GLM_HC_PARTIAL_ROWS(tf_glm_hc_partial16, 16)
++TF_GLM_HC_PARTIAL_ROWS(tf_glm_hc_partial32, 32)
++#undef TF_GLM_HC_PARTIAL_ROWS
++
++// TF_GLM_OVN_HC_ROWS with GLUE_ROW: tf_glm_hc_row's arguments, R rows a block; bf16 or float32 norm weight.
++#define TF_GLM_HC_ROW_ROWS(name, W, R)                                                                             \
++  extern "C" __global__ void __launch_bounds__(256)                                                                \
++      name(__nv_bfloat16* x, const float* g, int64_t rs, int world, const __nv_bfloat16* fn, const float* base,   \
++           const float* scale, const W* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,    \
++           float hc_eps, int iters, int64_t rows) {                                                                \
++    glm_hc_rows::rows<W, R>(x, g, rs, world, fn, base, scale, nw, out, xs, post, comb, eps, hc_eps, iters, rows);  \
++  }
++TF_GLM_HC_ROW_ROWS(tf_glm_hc_row16, __nv_bfloat16, 16)
++TF_GLM_HC_ROW_ROWS(tf_glm_hc_row16_f32w, float, 16)
++TF_GLM_HC_ROW_ROWS(tf_glm_hc_row32, __nv_bfloat16, 32)
++TF_GLM_HC_ROW_ROWS(tf_glm_hc_row32_f32w, float, 32)
++#undef TF_GLM_HC_ROW_ROWS
++
++// TF_GLM_OVN_HC_DEC: decode windows' partials on hc.cu's layout; _pdl launched dependent (TF_GLM_OVN_PDL_EARLY).
++extern "C" __global__ void __launch_bounds__(288)
++    tf_glm_hc_partial48(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t rows) {
++  glm_hc_rows::partial48<false>(x, fn, part, rows);
++}
++extern "C" __global__ void __launch_bounds__(288)
++    tf_glm_hc_partial48_pdl(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t rows) {
++  glm_hc_rows::partial48<true>(x, fn, part, rows);
++}
+diff --git a/zig/src/families/glm/cuda.zig b/zig/src/families/glm/cuda.zig
+index 9ae2d75ba..5b577631c 100644
+--- a/zig/src/families/glm/cuda.zig
++++ b/zig/src/families/glm/cuda.zig
+@@ -53,6 +53,7 @@ test {
+     _ = @import("cuda_kv8_test.zig");
+     _ = @import("cuda_kvb.zig");
+     _ = @import("cuda_mla_ovn_test.zig");
++    _ = @import("cuda_hc_ovn_test.zig");
+     _ = kv8_ref;
+     _ = @import("cuda_prof.zig");
+     _ = @import("cuda_load_owner.zig");
+diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
+index 55f8cc082..140e8db08 100644
+--- a/zig/src/families/glm/cuda_glue.zig
++++ b/zig/src/families/glm/cuda_glue.zig
+@@ -113,6 +113,15 @@ pub const Kernels = struct {
+     hc_row_f32w: cuda.Function,
+     hc_post_pdl: cuda.Function,
+     hc_partial8_pdl: cuda.Function,
++    // TF_GLM_OVN_HC_ROWS=16|32 (prompt rows) and TF_GLM_OVN_HC_DEC (rows under 64): glm_glue_hc_rows.cuh (hcLoad)
++    hc_partial16: ?cuda.Function,
++    hc_partial32: ?cuda.Function,
++    hc_row16: ?cuda.Function,
++    hc_row16_f32w: ?cuda.Function,
++    hc_row32: ?cuda.Function,
++    hc_row32_f32w: ?cuda.Function,
++    hc_partial48: ?cuda.Function,
++    hc_partial48_pdl: ?cuda.Function,
+     hc_finish_pdl: cuda.Function,
+     hc_finish_f32w_pdl: cuda.Function,
+     rmsnorm_4096_pdl: cuda.Function,
+@@ -147,6 +156,7 @@ pub const Kernels = struct {
+         inline for (@typeInfo(Kernels).@"struct".field_names, 0..) |name, i| {
+             if (@FieldType(Kernels, name) == cuda.Function) @field(k, name) = if (i < from or ovn) try m.function("tf_glm_" ++ name) else .{ .d = m.d, .handle = null };
+         }
++        try hcLoad(&k, m, try hcRows(), cuda.ovn.on("HC_DEC"));
+         try k.bmm_tile.allowDynamicShared(bmm_tile_smem);
+         try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
+         try k.chunks_16.allowDynamicShared(chunksSmem(16));
+@@ -291,15 +301,63 @@ pub fn hcPartBytes(rows: usize) usize {
+     return rows * hc_blocks * 32 * 4;
+ }
+ 
++/// TF_GLM_OVN_HC_ROWS: unset or 0 off, else 16 or 32 prompt rows a block; any other value is refused.
++pub fn hcRows() error{BadOvnKnob}!u32 {
++    const n = try cuda.ovn.int("HC_ROWS", 0);
++    return switch (n) {
++        0, 16, 32 => @intCast(n),
++        else => error.BadOvnKnob,
++    };
++}
++
++/// HC_ROWS' row kernels' dynamic shared memory: a block's partials, rows x hc_blocks x 32 fp32.
++pub fn hcRowSmem(rows: u32) u32 {
++    return rows * hc_blocks * 32 * 4;
++}
++
++/// HC_ROWS' kernels for `rows` (16 or 32, 0 none) and HC_DEC's when `dec` into `k`, every other of them null.
++pub fn hcLoad(k: *Kernels, m: cuda.Module, rows: u32, dec: bool) !void {
++    inline for (.{ 16, 32 }) |n| {
++        const p = std.fmt.comptimePrint("{d}", .{n});
++        @field(k, "hc_partial" ++ p) = if (rows == n) try m.function("tf_glm_hc_partial" ++ p) else null;
++        inline for (.{ "", "_f32w" }) |w| {
++            const f = if (rows == n) try m.function("tf_glm_hc_row" ++ p ++ w) else null;
++            if (f) |x| try x.allowDynamicShared(hcRowSmem(n));
++            @field(k, "hc_row" ++ p ++ w) = f;
++        }
++    }
++    k.hc_partial48 = if (dec) try m.function("tf_glm_hc_partial48") else null;
++    k.hc_partial48_pdl = if (dec) try m.function("tf_glm_hc_partial48_pdl") else null;
++}
++
++/// HC_ROWS' kernel for prompt rows (`prompt`: the forward's b.prefill, as production's prompt=), and its rows a block.
++const RowsForm = struct { f: cuda.Function, n: u32 };
++fn rowsForm(prompt: bool, by16: ?cuda.Function, by32: ?cuda.Function) ?RowsForm {
++    if (!prompt) return null;
++    if (by32) |f| return .{ .f = f, .n = 32 };
++    if (by16) |f| return .{ .f = f, .n = 16 };
++    return null;
++}
++
+ /// glue.hc_pre: streams [rows][s d] -> the collapsed RMS-normed row and its 64-sums `xs`; `post`, `comb` (Sinkhorn).
+ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale: u64, norm: Norm, out: u64, xs: u64, post: u64, comb: u64, part: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize) !void {
+     if (d != 4096 or s != 4) return error.HcShape;
+     var a: cuda.Args = .{};
+     inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
+-    // Decode windows (16 blocks a row) take each block's 8 steps at once; prompt rows 4 rows a 128-thread block.
+-    if (rows < 64) {
+-        const p8 = if (set.pdl_early) set.glue.hc_partial8_pdl else set.glue.hc_partial8; // _pdl: launched dependent
+-        try cuda_pdl.launch(p8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
++    // Prompt rows: HC_ROWS' R-row blocks; under 64 rows: HC_DEC's hc.cu layout or 16 blocks a row; else 4 rows a block.
++    if (rowsForm(set.prompt, set.glue.hc_partial16, set.glue.hc_partial32)) |r| {
++        a.add(i64of(rows));
++        try cuda_pdl.launch(r.f, .{ .grid = .{ .x = cdiv(rows, r.n), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
++    } else if (rows < 64) {
++        if (set.glue.hc_partial48) |plain| {
++            const f = if (set.pdl_early) (set.glue.hc_partial48_pdl orelse return error.HcDecUnloaded) else plain;
++            var c: cuda.Args = .{};
++            inline for (.{ x, fn_w, part, i64of(rows) }) |v| c.add(v);
++            try cuda_pdl.launch(f, .{ .grid = .{ .x = hc_blocks, .y = 3, .z = cdiv(rows, 4) }, .block = .{ .x = 288 } }, stream, &c);
++        } else {
++            const p8 = if (set.pdl_early) set.glue.hc_partial8_pdl else set.glue.hc_partial8; // _pdl: launched dependent
++            try cuda_pdl.launch(p8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
++        }
+     } else {
+         a.add(i64of(rows));
+         try cuda_pdl.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
+@@ -342,13 +400,14 @@ pub fn hcGlue(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, fn_w: u6
+ pub fn hcRow(set: Set, stream: cuda.Stream, x: u64, g: u64, fn_w: u64, base: u64, scale: u64, norm: Norm, out: u64, xs: u64, post: u64, comb: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize, world: usize) !void {
+     if (d != 4096 or s != 4) return error.HcShape;
+     inline for (.{ x, g }) |p| if (p % 16 != 0) return error.RowsUnaligned;
+-    const f, const w = switch (norm) {
+-        .bf16 => |p| .{ set.glue.hc_row, p },
+-        .f32 => |p| .{ set.glue.hc_row_f32w, p },
++    const f, const w, const r = switch (norm) {
++        .bf16 => |p| .{ set.glue.hc_row, p, rowsForm(set.prompt, set.glue.hc_row16, set.glue.hc_row32) },
++        .f32 => |p| .{ set.glue.hc_row_f32w, p, rowsForm(set.prompt, set.glue.hc_row16_f32w, set.glue.hc_row32_f32w) },
+     };
+     var a: cuda.Args = .{};
+     inline for (.{ x, g, i64of(rows * d), cint(world), fn_w, base, scale, w, out, xs, post, comb, eps, hc_eps, cint(iters), i64of(rows) }) |v| a.add(v);
+-    try cuda.launch.launch(f, .{ .grid = .{ .x = cdiv(rows, 4) }, .block = .{ .x = 256 } }, stream, &a);
++    if (r) |h| return cuda_pdl.launch(h.f, .{ .grid = .{ .x = cdiv(rows, h.n) }, .block = .{ .x = 256 }, .shared = hcRowSmem(h.n) }, stream, &a);
++    try cuda_pdl.launch(f, .{ .grid = .{ .x = cdiv(rows, 4) }, .block = .{ .x = 256 } }, stream, &a);
+ }
+ 
+ /// glue.rank_sum: out bf16 = partials summed rank 0 first, `me`'s from `own`, others' from `peers` in rank order.
+diff --git a/zig/src/families/glm/cuda_hc_ovn_test.zig b/zig/src/families/glm/cuda_hc_ovn_test.zig
+new file mode 100644
+index 000000000..b56ebb331
+--- /dev/null
++++ b/zig/src/families/glm/cuda_hc_ovn_test.zig
+@@ -0,0 +1,241 @@
++//! TF_GLM_OVN_HC_ROWS and _HC_DEC under a recording driver: which mixing kernel each call launches, its grid and args.
++const std = @import("std");
++const cuda = @import("cuda");
++const glue = @import("cuda_glue.zig");
++const t = std.testing;
++
++/// One launch: its kernel, grid, block, dynamic shared bytes, whether launched by cuLaunchKernelEx, and its arguments.
++const Launch = struct { f: usize, grid: [3]c_uint, block: c_uint, shared: c_uint, ex: bool, args: [24]u64, count: usize };
++
++const Rec = struct {
++    var log: [8]Launch = undefined;
++    var n: usize = 0;
++
++    fn note(f: cuda.abi.Function, grid: [3]c_uint, block: c_uint, shared: c_uint, by_ex: bool, params: ?[*]?*anyopaque) void {
++        const ptrs: *const [cuda.Args.max_args]?*anyopaque = @ptrCast(params.?);
++        const a: *const cuda.Args = @alignCast(@fieldParentPtr("ptrs", ptrs));
++        var l: Launch = .{ .f = @intFromPtr(f), .grid = grid, .block = block, .shared = shared, .ex = by_ex, .args = @splat(0), .count = a.count };
++        for (0..a.count) |i| l.args[i] = a.integer(i) orelse 0;
++        log[n] = l;
++        n += 1;
++    }
++
++    fn plain(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, shared: c_uint, _: cuda.abi.Stream, params: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
++        note(f, .{ gx, gy, gz }, bx, shared, false, params);
++        return cuda.abi.success;
++    }
++
++    fn ex(c: *const cuda.abi.LaunchConfig, f: cuda.abi.Function, params: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
++        note(f, .{ c.grid_x, c.grid_y, c.grid_z }, c.block_x, c.shared_bytes, true, params);
++        return cuda.abi.success;
++    }
++};
++
++/// A kernel's handle in `kernels`: its field's index plus one.
++fn id(comptime name: []const u8) usize {
++    return std.meta.fieldIndex(glue.Kernels, name).? + 1;
++}
++
++/// Every kernel at its own handle; HC_ROWS' kernels for `rows` (16, 32; 0 none) and HC_DEC's when `dec`, else null.
++fn kernels(d: *cuda.Driver, rows: u32, dec: bool) glue.Kernels {
++    var ks: glue.Kernels = undefined;
++    inline for (@typeInfo(glue.Kernels).@"struct".field_names, 0..) |name, i| @field(ks, name) = .{ .d = d, .handle = @ptrFromInt(i + 1) };
++    inline for (.{ "hc_partial16", "hc_row16", "hc_row16_f32w" }) |n| if (rows != 16) {
++        @field(ks, n) = null;
++    };
++    inline for (.{ "hc_partial32", "hc_row32", "hc_row32_f32w" }) |n| if (rows != 32) {
++        @field(ks, n) = null;
++    };
++    if (!dec) ks.hc_partial48 = null;
++    if (!dec) ks.hc_partial48_pdl = null;
++    return ks;
++}
++
++const x: u64 = 0x1000_0000;
++const fnw: u64 = 0x2000_0000;
++const part: u64 = 0x3000_0000;
++const nw: glue.Norm = .{ .bf16 = 0x4000_0000 };
++const counts = [_]usize{ 1, 2, 4, 5, 8, 16, 32, 63, 64, 65, 70, 130, 683, 1366 };
++
++/// hcPre's launches (the partials, then hc_finish).
++fn pre(set: glue.Set, s: cuda.Stream, rows: usize) ![]const Launch {
++    Rec.n = 0;
++    try glue.hcPre(set, s, x, fnw, 0x5000, 0x6000, nw, 0x7000, 0x8000, 0x9000, 0xa000, part, 1e-6, 1e-6, 20, rows, 4096, 4);
++    return Rec.log[0..Rec.n];
++}
++
++/// hcRow's one launch.
++fn row(set: glue.Set, s: cuda.Stream, norm: glue.Norm, rows: usize) !Launch {
++    Rec.n = 0;
++    try glue.hcRow(set, s, x, 0x5000, fnw, 0x6000, 0x7000, norm, 0x8000, 0x9000, 0xa000, 0xb000, 1e-6, 1e-6, 20, rows, 4096, 4, 3);
++    try t.expectEqual(@as(usize, 1), Rec.n);
++    return Rec.log[0];
++}
++
++fn cdiv(a: usize, b: usize) c_uint {
++    return @intCast((a + b - 1) / b);
++}
++
++/// Today's partial for `rows`: hc_partial8 (16 blocks a row) under 64 rows, else hc_partial's 4-row blocks.
++fn today(l: Launch, rows: usize, pdl: bool) !void {
++    if (rows < 64) {
++        try t.expectEqual(if (pdl) id("hc_partial8_pdl") else id("hc_partial8"), l.f);
++        try t.expectEqual([3]c_uint{ @intCast(rows), 16, 1 }, l.grid);
++        try t.expectEqual(@as(c_uint, 1024), l.block);
++        try t.expectEqual(pdl, l.ex);
++    } else {
++        try t.expectEqual(id("hc_partial"), l.f);
++        try t.expectEqual([3]c_uint{ cdiv(rows, 4), 16, 1 }, l.grid);
++        try t.expectEqual(@as(c_uint, 128), l.block);
++    }
++}
++
++test "TF_GLM_OVN_HC_ROWS and _HC_DEC off: hcPre and hcRow launch today's kernels, prompt rows or not" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.plain;
++    d.api.cuLaunchKernelEx = Rec.ex;
++    const ks = kernels(&d, 0, false);
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    for ([_]bool{ false, true }) |prompt| for (counts) |rows| {
++        const l = try pre(.{ .glue = &ks, .prompt = prompt }, s, rows);
++        try t.expectEqual(@as(usize, 2), l.len);
++        try today(l[0], rows, false);
++        try t.expectEqual(id("hc_finish"), l[1].f);
++        const r = try row(.{ .glue = &ks, .prompt = prompt }, s, nw, rows);
++        try t.expectEqual(id("hc_row"), r.f);
++        try t.expectEqual([3]c_uint{ cdiv(rows, 4), 1, 1 }, r.grid);
++        try t.expectEqual(@as(c_uint, 0), r.shared);
++    };
++}
++
++test "TF_GLM_OVN_HC_ROWS: prompt rows on R-row blocks at every row count, decode rows on today's kernels" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.plain;
++    d.api.cuLaunchKernelEx = Rec.ex;
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const f32w: glue.Norm = .{ .f32 = 0x4100_0000 };
++    inline for (.{ 16, 32 }) |n| {
++        const p = std.fmt.comptimePrint("{d}", .{n});
++        const ks = kernels(&d, n, false);
++        for (counts) |rows| {
++            const l = try pre(.{ .glue = &ks, .prompt = true, .pdl_early = true }, s, rows); // a prompt partial never waits
++            try t.expectEqual(id("hc_partial" ++ p), l[0].f);
++            try t.expectEqual([3]c_uint{ cdiv(rows, n), 16, 1 }, l[0].grid);
++            try t.expectEqual(@as(c_uint, 128), l[0].block);
++            try t.expectEqual(false, l[0].ex);
++            try t.expectEqualSlices(u64, &.{ x, fnw, part, 16384, 16, rows }, l[0].args[0..l[0].count]);
++            try t.expectEqual(id("hc_finish_pdl"), l[1].f);
++            try today((try pre(.{ .glue = &ks }, s, rows))[0], rows, false);
++            try today((try pre(.{ .glue = &ks, .pdl_early = true }, s, rows))[0], rows, true);
++            for ([_]glue.Norm{ nw, f32w }, [_]usize{ id("hc_row" ++ p), id("hc_row" ++ p ++ "_f32w") }) |norm, want| {
++                const r = try row(.{ .glue = &ks, .prompt = true }, s, norm, rows);
++                try t.expectEqual(want, r.f);
++                try t.expectEqual([3]c_uint{ cdiv(rows, n), 1, 1 }, r.grid);
++                try t.expectEqual(@as(c_uint, 256), r.block);
++                try t.expectEqual(@as(c_uint, n * 16 * 32 * 4), r.shared);
++                try t.expectEqual(rows, r.args[15]);
++                const w = try row(.{ .glue = &ks }, s, norm, rows); // a decode window's glue: rows4's kernel
++                try t.expectEqual(if (norm == .bf16) id("hc_row") else id("hc_row_f32w"), w.f);
++                try t.expectEqual([3]c_uint{ cdiv(rows, 4), 1, 1 }, w.grid);
++                try t.expectEqual(@as(c_uint, 0), w.shared);
++            }
++        }
++    }
++}
++
++test "TF_GLM_OVN_HC_DEC: rows under 64 on hc.cu's grid, launched dependent under PDL_EARLY; 64 rows as today" {
++    var d: cuda.Driver = undefined;
++    d.api.cuLaunchKernel = Rec.plain;
++    d.api.cuLaunchKernelEx = Rec.ex;
++    const s: cuda.Stream = .{ .d = &d, .handle = null };
++    const ks = kernels(&d, 0, true);
++    for (counts) |rows| for ([_]bool{ false, true }) |pdl| for ([_]bool{ false, true }) |prompt| {
++        const l = (try pre(.{ .glue = &ks, .pdl_early = pdl, .prompt = prompt }, s, rows))[0];
++        if (rows >= 64) {
++            try today(l, rows, pdl);
++            continue;
++        }
++        try t.expectEqual(if (pdl) id("hc_partial48_pdl") else id("hc_partial48"), l.f);
++        try t.expectEqual([3]c_uint{ 16, 3, cdiv(rows, 4) }, l.grid);
++        try t.expectEqual(@as(c_uint, 288), l.block);
++        try t.expectEqual(pdl, l.ex);
++        try t.expectEqualSlices(u64, &.{ x, fnw, part, rows }, l.args[0..l.count]);
++    };
++    const both = kernels(&d, 16, true); // with HC_ROWS too: prompt rows take its blocks, decode windows HC_DEC's
++    try t.expectEqual(id("hc_partial16"), (try pre(.{ .glue = &both, .prompt = true }, s, 5))[0].f);
++    try t.expectEqual(id("hc_partial48"), (try pre(.{ .glue = &both }, s, 5))[0].f);
++    var half = ks;
++    half.hc_partial48_pdl = null;
++    try t.expectError(error.HcDecUnloaded, pre(.{ .glue = &half, .pdl_early = true }, s, 5));
++}
++
++/// A module whose every symbol resolves, its handle the order of lookup; dynamic shared memory opt-ins recorded.
++const Mod = struct {
++    var names: [256][]const u8 = undefined;
++    var smem: [256]c_int = undefined;
++    var n: usize = 0;
++
++    fn function(out: *cuda.abi.Function, _: cuda.abi.Module, name: [*:0]const u8) callconv(.c) cuda.abi.Result {
++        names[n] = std.mem.span(name);
++        smem[n] = 0;
++        n += 1;
++        out.* = @ptrFromInt(n);
++        return cuda.abi.success;
++    }
++
++    fn attribute(f: cuda.abi.Function, a: cuda.abi.FunctionAttribute, v: c_int) callconv(.c) cuda.abi.Result {
++        if (a == .max_dynamic_shared_size_bytes) smem[@intFromPtr(f) - 1] = v;
++        return cuda.abi.success;
++    }
++
++    /// `f`'s symbol and opt-in, or null for a kernel not looked up.
++    fn of(f: ?cuda.Function) ?struct { []const u8, c_int } {
++        const g = f orelse return null;
++        return .{ names[@intFromPtr(g.handle) - 1], smem[@intFromPtr(g.handle) - 1] };
++    }
++};
++
++fn expectLoaded(f: ?cuda.Function, name: []const u8, shared: c_int) !void {
++    const got = Mod.of(f) orelse return error.TestExpectedLoaded;
++    try t.expectEqualStrings(name, got[0]);
++    try t.expectEqual(shared, got[1]);
++}
++
++test "TF_GLM_OVN_HC_ROWS and _HC_DEC: loadOvn looks up the knob's kernels only, a bad row count refused" {
++    var d: cuda.Driver = undefined;
++    d.api.cuModuleGetFunction = Mod.function;
++    d.api.cuFuncSetAttribute = Mod.attribute;
++    const m: cuda.Module = .{ .d = &d, .handle = null };
++    defer cuda.ovn.fake("HC_ROWS", null);
++    defer cuda.ovn.fake("HC_DEC", null);
++    cuda.ovn.fake("HC_DEC", null);
++    for ([_]?[]const u8{ null, "0", "16", "32" }) |v| {
++        cuda.ovn.fake("HC_ROWS", v);
++        Mod.n = 0;
++        const k = try glue.Kernels.loadOvn(m, false);
++        const n = try glue.hcRows();
++        inline for (.{ 16, 32 }) |r| {
++            const p = std.fmt.comptimePrint("{d}", .{r});
++            const want = n == r;
++            try t.expectEqual(want, @field(k, "hc_partial" ++ p) != null);
++            if (want) try expectLoaded(@field(k, "hc_partial" ++ p), "tf_glm_hc_partial" ++ p, 0);
++            inline for (.{ "", "_f32w" }) |w| {
++                if (want) try expectLoaded(@field(k, "hc_row" ++ p ++ w), "tf_glm_hc_row" ++ p ++ w, r * 16 * 32 * 4) else try t.expectEqual(@as(?cuda.Function, null), @field(k, "hc_row" ++ p ++ w));
++            }
++        }
++        try t.expectEqual(@as(?cuda.Function, null), k.hc_partial48);
++        try t.expectEqual(@as(?cuda.Function, null), k.hc_partial48_pdl);
++    }
++    cuda.ovn.fake("HC_ROWS", null);
++    cuda.ovn.fake("HC_DEC", "1");
++    Mod.n = 0;
++    const dec = try glue.Kernels.loadOvn(m, false);
++    try expectLoaded(dec.hc_partial48, "tf_glm_hc_partial48", 0);
++    try expectLoaded(dec.hc_partial48_pdl, "tf_glm_hc_partial48_pdl", 0);
++    try t.expectEqual(@as(?cuda.Function, null), dec.hc_partial16);
++    for ([_][]const u8{ "8", "64", "x" }) |v| {
++        cuda.ovn.fake("HC_ROWS", v);
++        Mod.n = 0;
++        try t.expectError(error.BadOvnKnob, glue.Kernels.loadOvn(m, false));
++    }
++}
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 45b4debfd..0a103cffb 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -160,6 +160,8 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_GLM_OVN_ONEPASS_PIPE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_MLA_FUSEMERGE", .scope = .glm, .kind = .u64, .forms = "0 (off), 1 (from a prompt chunk's rows) or the rows from which an attention launch fuses chunks and merge" },
+     .{ .name = "TF_GLM_OVN_ABSORB_VEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TF_GLM_OVN_HC_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 16, 32 }, .forms = "0 (off), 16 or 32: prompt rows a mixing block" },
++    .{ .name = "TF_GLM_OVN_HC_DEC", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_KVB8", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
+     .{ .name = "TF_GLM_OVN_SIDE_PRIO", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+-- 
+2.52.0.windows.1
+

@@ -27,6 +27,18 @@ index 965973b55..d58496e0f 100644
  }
  
  pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
+index 80cb2596f..050744fc6 100644
+--- a/zig/src/families/glm/cuda_env_test.zig
++++ b/zig/src/families/glm/cuda_env_test.zig
+@@ -14,6 +14,7 @@ const switches = [_]Name{
+     .{ .name = "TF_GLM_LINK_WAIT" },
+     .{ .name = "TF_GLM_PDL", .default = true },
+     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
++    .{ .name = "TF_GLM_PROMPT_MANY" },
+     .{ .name = "TF_GLM_SHARED", .default = true },
+     .{ .name = "TF_GLM_DSEL", .default = true },
+     .{ .name = "TF_GLM_DSCORES", .default = true },
 diff --git a/zig/src/families/glm/cuda_lanes.zig b/zig/src/families/glm/cuda_lanes.zig
 index 4506334d0..1f7a5d12a 100644
 --- a/zig/src/families/glm/cuda_lanes.zig

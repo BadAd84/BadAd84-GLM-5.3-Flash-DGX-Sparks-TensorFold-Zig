@@ -247,7 +247,7 @@ index 55f8cc082..3c0373676 100644
      pub fn load(m: cuda.Module) !Kernels {
          return loadOvn(m, Mla.wanted());
 diff --git a/zig/src/families/glm/cuda_latent.zig b/zig/src/families/glm/cuda_latent.zig
-index 4620b2d49..31826923b 100644
+index 4620b2d49..40e58a7a2 100644
 --- a/zig/src/families/glm/cuda_latent.zig
 +++ b/zig/src/families/glm/cuda_latent.zig
 @@ -13,6 +13,11 @@ pub const heads_tile_wide = 32;
@@ -304,7 +304,7 @@ index 4620b2d49..31826923b 100644
  }
  
  /// The absorb and expand launches (pointers, then rows, heads, rb): rows in one block in decode, prompt_rb in prompts.
-@@ -72,14 +100,28 @@ fn rowBlocks(f: cuda.Function, stream: cuda.Stream, ptrs: anytype, rows: usize,
+@@ -72,14 +100,27 @@ fn rowBlocks(f: cuda.Function, stream: cuda.Stream, ptrs: anytype, rows: usize,
      try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(heads), .y = @intCast(cols), .z = cdiv(rows, rb) }, .block = .{ .x = 128 } }, stream, &a);
  }
  
@@ -314,8 +314,7 @@ index 4620b2d49..31826923b 100644
 +    var a: cuda.Args = .{};
 +    inline for (ptrs) |v| a.add(@as(u64, v));
 +    inline for (.{ @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(i64, @intCast(rb)) }) |v| a.add(v);
-+    const grid = .{ .x = @intCast(heads), .y = cdiv(cols, g), .z = cdiv(rows, rb) };
-+    try cuda_pdl.launch(f, .{ .grid = grid, .block = .{ .x = @intCast(128 * g) } }, stream, &a);
++    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(heads), .y = cdiv(cols, g), .z = cdiv(rows, rb) }, .block = .{ .x = @intCast(128 * g) } }, stream, &a);
 +}
 +
  /// latent.expand_v: out [rows][heads][dv] bf16 = o_lat [rows][heads][lw] . wv [heads][dv][lw]; sv: E4M3 kv_b's.
@@ -337,7 +336,7 @@ index 4620b2d49..31826923b 100644
  }
  
  /// A latent cache holds BF16 rows, or E4M3 rows followed by one FP32 scale per row.
-@@ -203,8 +245,10 @@ test "latent.py's tiling rules" {
+@@ -203,8 +244,10 @@ test "latent.py's tiling rules" {
  const Rec = struct {
      var n: usize = 0;
      var ids: [8]usize = undefined;
@@ -349,7 +348,7 @@ index 4620b2d49..31826923b 100644
          n += 1;
          return 0;
      }
-@@ -245,3 +289,72 @@ test "TF_GLM_OVN_LATENT_ROWS: rows 2 and 4 take the x2 and x4 launches; vec and
+@@ -245,3 +288,72 @@ test "TF_GLM_OVN_LATENT_ROWS: rows 2 and 4 take the x2 and x4 launches; vec and
      try expandV(x4, s, 256, 4096, 8192, 512, 2, 22, 256, 512);
      try std.testing.expectEqualSlices(usize, &.{ id("absorb_q8"), id("expand_v8") }, Rec.ids[0..Rec.n]);
  }
@@ -436,7 +435,7 @@ index 45b4debfd..e5aed8f30 100644
      .{ .name = "TF_GLM_OVN_PIECE_FFN", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
 diff --git a/zig/tests/cuda/glm_latent_tile_check.zig b/zig/tests/cuda/glm_latent_tile_check.zig
 new file mode 100644
-index 000000000..8f797ad67
+index 000000000..9bf06e8b9
 --- /dev/null
 +++ b/zig/tests/cuda/glm_latent_tile_check.zig
 @@ -0,0 +1,149 @@
@@ -540,7 +539,7 @@ index 000000000..8f797ad67
 +        try one(set, s, op, in0, w, out, rows, heads);
 +        try t1.record(s);
 +        try t1.synchronize();
-+        m.* = @as(f64, try t0.elapsedMs(t1));
++        m.* = @as(f64, try t0.*.elapsedMs(t1.*));
 +    }
 +    return check.median(ms);
 +}

@@ -95,6 +95,18 @@ index 9ae2d75ba..586ba91e9 100644
      _ = engine;
      _ = follow;
      _ = lanes;
+diff --git a/zig/src/families/glm/cuda_env_test.zig b/zig/src/families/glm/cuda_env_test.zig
+index 80cb2596f..050744fc6 100644
+--- a/zig/src/families/glm/cuda_env_test.zig
++++ b/zig/src/families/glm/cuda_env_test.zig
+@@ -14,6 +14,7 @@ const switches = [_]Name{
+     .{ .name = "TF_GLM_LINK_WAIT" },
+     .{ .name = "TF_GLM_PDL", .default = true },
+     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
++    .{ .name = "TF_GLM_PROMPT_MANY" },
+     .{ .name = "TF_GLM_SHARED", .default = true },
+     .{ .name = "TF_GLM_DSEL", .default = true },
+     .{ .name = "TF_GLM_DSCORES", .default = true },
 diff --git a/zig/src/families/glm/cuda_follow.zig b/zig/src/families/glm/cuda_follow.zig
 index 1e8724243..8ad09645b 100644
 --- a/zig/src/families/glm/cuda_follow.zig
@@ -197,7 +209,7 @@ index 4506334d0..0949829b5 100644
          self.x.e.gpa.free(kv.value.marks);
 diff --git a/zig/src/families/glm/cuda_lanes_fill.zig b/zig/src/families/glm/cuda_lanes_fill.zig
 new file mode 100644
-index 000000000..f4904bf28
+index 000000000..475cf0a96
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_lanes_fill.zig
 @@ -0,0 +1,190 @@
@@ -270,7 +282,7 @@ index 000000000..f4904bf28
 +        from[i] = try self.opening(s);
 +        opened += 1;
 +        at[i] = if (from[i]) |r| r.at else 0;
-+        marks[i] = Lanes.marksOf(s, &keeps[i]);
++        marks[i] = self.marksOf(s, &keeps[i]);
 +    }
 +    while (true) {
 +        var lens: [max]usize = undefined;
@@ -588,10 +600,10 @@ index 45b4debfd..853b2a3e5 100644
      .{ .name = "TF_GLM_OVN_LATENT_ROWS", .scope = .glm, .kind = .u64, .only = &.{ 0, 2, 4 }, .forms = "0 (off), 2 or 4: the rows the absorb and expand kernels take in one loop step" },
 diff --git a/zig/tests/cuda/glm_multifill_check.zig b/zig/tests/cuda/glm_multifill_check.zig
 new file mode 100644
-index 000000000..a7edc80b7
+index 000000000..654194bdb
 --- /dev/null
 +++ b/zig/tests/cuda/glm_multifill_check.zig
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,187 @@
 +//! glm-multifill-check (GPU): TF_GLM_OVN_MULTI_FILL's batched resumed prefill against solo chunk fills, byte for byte.
 +const std = @import("std");
 +const cuda = @import("cuda");
@@ -701,7 +713,6 @@ index 000000000..a7edc80b7
 +        check.pass("rank {d} followed rank 0's solo and batched resumed prompt passes", .{rank});
 +        return;
 +    }
-+    e.link = &link;
 +    const x: glm.follow.Leader = .{ .e = e, .link = &link };
 +    defer x.end() catch {};
 +    try x.snapshots(2 << 30);

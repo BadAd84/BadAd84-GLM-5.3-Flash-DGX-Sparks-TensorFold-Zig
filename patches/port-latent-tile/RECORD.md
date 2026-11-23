@@ -20,13 +20,15 @@ The text was edited, because the review's open arm is a variant the fork never b
   table, and the fork's `.gitignore` hunk is dropped (this repo already ignores `work/`).
 
 `apply.sh --check` against the engine series: `before: 59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, `checked 1 patch(es);
-tree id: 81dd3fa6b4c30684622471e5685815a863283cc3`, rc 0, nothing written in the tree.
+tree id: c0ad0c2a15529bf99a4de0d08050a7eddea57293`, rc 0, nothing written in the tree.
 
-Gate: `python scripts/spark-gates.py iter --name port-latent-tile --pin fa13df5dd1fdd23ada775510a464c9aa03a39e09
---dir patches/engine,patches/port-latent-tile check fmt test ctest --max-load 14` was started on the gate host; its
-verdict had not returned when this record was written (`check fmt test ctest`: build, host tests including the new
-`TF_GLM_OVN_LATENT_TILE` tests, and the CUDA-test binary compile; it does not run the GPU check). Run the same command
-to take the verdict.
+Screened: `check fmt ctest` rc 0 on tree `c0ad0c2a15529bf99a4de0d08050a7eddea57293` (`iter --name latent-s5 --pin
+fa13df5dd1fdd23ada775510a464c9aa03a39e09 --dir patches/engine,patches/port-latent-tile check fmt ctest --max-load 14`,
+`ITER-DONE rc=0` after 328 s; `check-native-cuda-host`, `fmt` and `compile-cuda-tests` each clean). Two earlier screens of this
+lever were red on errors in this package's own text, both fixed here: the grid literal hoisted into a `const` (which loses
+the field type the inline `.grid = .{...}` gets, `expected type 'abi.Dim3'` and then `@intCast must have a known result
+type`), and a bench event call that passed `*cuda.Event` where `Event.elapsedMs` takes values. Host tests (`test`) are NOT
+run and stay open until the integrator runs them. No compile ran on the workstation.
 
 ## The measurement that decides it
 
