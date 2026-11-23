@@ -3353,3 +3353,13 @@ Four boots, `KNOBS=dev`, image `glm53-zig:hc1` (engine + six packages + port-hc-
 | dec2 | 82.91 | 87.74 | 119.39 | 117.16 | 119.75 |
 
 Control mean 83.64 87.12 114.99 110.23 138.00 against decode mean 82.00 86.25 116.56 116.61 121.83: -1.96, -1.00, +1.37, +5.79, -11.72 percent. The 6-client gain is beyond the boots' spread and the 8-client loss is far beyond it, so this is a trade: it wins at 4 and 6 streams and loses at 8. It is not adopted; the rewrite path is to find what the decode change costs at 8 streams, or gate it on the live stream count with the off path byte-identical.
+
+## The box's env files were stale until 2026-11-23 20:03
+
+`scripts/check-spark-sync.py adam@192.168.99.11` reported `env/prod.env`, `env/dev.env`, `check-env.py`, `env/words.sh`
+and `serve.sh` STALE: the box carried 68- and 80-line env files where the repo has 172 and 168, so every arm that ran
+`KNOBS=dev` before the 20:03 sync (queue122's HC_DEC arm and the ones before it today) was measured on the older env
+model, not on the recipe the repo documents. The files were copied to the box and the gate now reads OK. Cells on
+either side of that sync are not comparable; the note is here so the HC_DEC trade and the arms beside it are read as
+the old env's numbers. The sync gate is the reason this was caught, and it belongs in every queue's first line:
+queue125 prints no first boot before the gate passes.
