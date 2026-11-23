@@ -3058,3 +3058,28 @@ over a different transport and changes nothing measurable at this size.
 
 That closes the side-stream item entirely: the collectives are dependency-bound in decode, the movable majority is not
 movable, and the one transport change available does not pay.
+
+## 114. PROMPT_MANY pays at every level; MULTI_FILL costs 4.6% at four clients
+
+Six boots on the `mf1` image (engine plus `patches/port-multi-fill`), two an arm, cache dropped before each, one client
+plus upstream's `bench_concurrent` at four and eight clients on the long-prompt file. Replies are identical across all six
+arms in the one-client cell (one token hash).
+
+| arm | 1 client | 4 clients | 8 clients |
+|---|---|---|---|
+| unset | 110.8 | 81.2 | 71.8 |
+| `TF_GLM_OVN_MULTI_FILL=1` | 110.0 (-0.71%) | **77.5 (-4.59%)** | 72.6 (+1.08%) |
+| `TF_GLM_PROMPT_MANY=1` | **112.5 (+1.55%)** | **85.7 (+5.45%)** | **73.9 (+2.96%)** |
+
+So the alternative wins everywhere and the batching switch does not: `PROMPT_MANY` is +1.55, +5.45 and +2.96% across the
+three levels, while `MULTI_FILL` gains 1.08% at eight clients and loses 4.59% at four, which is the level the fleet rule
+calls everyday load.
+
+**The rule I wrote had a gap and this run exposed it**: it named eight clients and one client but not four, so `MULTI_FILL`
+would have passed a rule that omits the level where it loses most. The verdict is taken on all three levels, and the RECORD
+for any later batching arm names four clients explicitly.
+
+**One caveat that matters for what lands:** the `PROMPT_MANY` arm ran on the multi-fill image, where that switch's row and
+its admission are carried by `patches/port-multi-fill` (the two packages cannot stack and multi-fill embeds the admission).
+So the thing to land is the multi-fill package with `TF_GLM_PROMPT_MANY=1` set and `TF_GLM_OVN_MULTI_FILL` left off - not the
+standalone prompt-many package, which has never been measured against the same series.
