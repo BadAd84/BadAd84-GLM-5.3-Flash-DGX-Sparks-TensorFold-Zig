@@ -23,7 +23,15 @@ Not carried: the fork's GPU reference checks (`glm_ref_hc_rows.zig`, `glm_ref_ov
 needs the forked `glm_ref_tests` registry this series does not have; the bench and the reference check are the two files a
 reviewer should add if the arm is worth keeping. Carried: `cuda_hc_ovn_test.zig` (the host receipt: which mixing kernel a
 call launches, its grid, shared bytes and arguments at 16 and 32 prompt rows, HC_DEC's 288-thread launch, and the
-knobs-off paths), plus `test-glm-hc-host` and the `TF_GLM_OVN_HC_` filter.
+knobs-off paths), plus `test-glm-hc-host` and the `TF_GLM_OVN_HC_` filter. Its three routing tests - off, HC_ROWS at every
+row count, HC_DEC under 64 rows with 64 on today's path - are the package's receipt for the routing, not a smoke check.
+
+The third fork-era assumption this package hit, found by those three tests: the fork's mixing launches were plain
+(`cuda.launch.launch`), while this series launches hc_pre's partial kernels through `cuda_pdl.launch`, which is dependent
+under TF_GLM_PDL (default on). So `hcRow` keeps this series' plain launches for both today's and the new R-row kernel
+(changing them would alter the default path), while hcPre's paths are all dependent and the receipt compares `l.ex`
+against `pdl or cuda_pdl.on()` rather than against `pdl`. A port that flips either side is a default-path change or a
+false receipt; this one does neither.
 
 Rows added to `zig/src/platform/environment.zig`: `TF_GLM_OVN_HC_ROWS` (`.u64`, `.only = &.{ 0, 16, 32 }`) and
 `TF_GLM_OVN_HC_DEC` (`.flag`). Both are `TF_GLM_OVN_`-prefixed, so the strict-env test's non-OVN count is unchanged, but

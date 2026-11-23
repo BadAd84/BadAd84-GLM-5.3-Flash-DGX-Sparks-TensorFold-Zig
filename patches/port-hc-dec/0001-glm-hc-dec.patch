@@ -274,7 +274,7 @@ index 9ae2d75ba..5b577631c 100644
      _ = @import("cuda_prof.zig");
      _ = @import("cuda_load_owner.zig");
 diff --git a/zig/src/families/glm/cuda_glue.zig b/zig/src/families/glm/cuda_glue.zig
-index 55f8cc082..140e8db08 100644
+index 55f8cc082..0370e2f3e 100644
 --- a/zig/src/families/glm/cuda_glue.zig
 +++ b/zig/src/families/glm/cuda_glue.zig
 @@ -113,6 +113,15 @@ pub const Kernels = struct {
@@ -369,7 +369,7 @@ index 55f8cc082..140e8db08 100644
      } else {
          a.add(i64of(rows));
          try cuda_pdl.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
-@@ -342,13 +400,14 @@ pub fn hcGlue(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, fn_w: u6
+@@ -342,12 +400,13 @@ pub fn hcGlue(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, fn_w: u6
  pub fn hcRow(set: Set, stream: cuda.Stream, x: u64, g: u64, fn_w: u64, base: u64, scale: u64, norm: Norm, out: u64, xs: u64, post: u64, comb: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize, world: usize) !void {
      if (d != 4096 or s != 4) return error.HcShape;
      inline for (.{ x, g }) |p| if (p % 16 != 0) return error.RowsUnaligned;
@@ -382,22 +382,21 @@ index 55f8cc082..140e8db08 100644
      };
      var a: cuda.Args = .{};
      inline for (.{ x, g, i64of(rows * d), cint(world), fn_w, base, scale, w, out, xs, post, comb, eps, hc_eps, cint(iters), i64of(rows) }) |v| a.add(v);
--    try cuda.launch.launch(f, .{ .grid = .{ .x = cdiv(rows, 4) }, .block = .{ .x = 256 } }, stream, &a);
-+    if (r) |h| return cuda_pdl.launch(h.f, .{ .grid = .{ .x = cdiv(rows, h.n) }, .block = .{ .x = 256 }, .shared = hcRowSmem(h.n) }, stream, &a);
-+    try cuda_pdl.launch(f, .{ .grid = .{ .x = cdiv(rows, 4) }, .block = .{ .x = 256 } }, stream, &a);
++    if (r) |h| return cuda.launch.launch(h.f, .{ .grid = .{ .x = cdiv(rows, h.n) }, .block = .{ .x = 256 }, .shared = hcRowSmem(h.n) }, stream, &a);
+     try cuda.launch.launch(f, .{ .grid = .{ .x = cdiv(rows, 4) }, .block = .{ .x = 256 } }, stream, &a);
  }
  
- /// glue.rank_sum: out bf16 = partials summed rank 0 first, `me`'s from `own`, others' from `peers` in rank order.
 diff --git a/zig/src/families/glm/cuda_hc_ovn_test.zig b/zig/src/families/glm/cuda_hc_ovn_test.zig
 new file mode 100644
-index 000000000..b56ebb331
+index 000000000..c98df6790
 --- /dev/null
 +++ b/zig/src/families/glm/cuda_hc_ovn_test.zig
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,242 @@
 +//! TF_GLM_OVN_HC_ROWS and _HC_DEC under a recording driver: which mixing kernel each call launches, its grid and args.
 +const std = @import("std");
 +const cuda = @import("cuda");
 +const glue = @import("cuda_glue.zig");
++const cuda_pdl = @import("cuda_pdl.zig");
 +const t = std.testing;
 +
 +/// One launch: its kernel, grid, block, dynamic shared bytes, whether launched by cuLaunchKernelEx, and its arguments.
@@ -478,7 +477,7 @@ index 000000000..b56ebb331
 +        try t.expectEqual(if (pdl) id("hc_partial8_pdl") else id("hc_partial8"), l.f);
 +        try t.expectEqual([3]c_uint{ @intCast(rows), 16, 1 }, l.grid);
 +        try t.expectEqual(@as(c_uint, 1024), l.block);
-+        try t.expectEqual(pdl, l.ex);
++        try t.expectEqual(pdl or cuda_pdl.on(), l.ex);
 +    } else {
 +        try t.expectEqual(id("hc_partial"), l.f);
 +        try t.expectEqual([3]c_uint{ cdiv(rows, 4), 16, 1 }, l.grid);
@@ -518,7 +517,7 @@ index 000000000..b56ebb331
 +            try t.expectEqual(id("hc_partial" ++ p), l[0].f);
 +            try t.expectEqual([3]c_uint{ cdiv(rows, n), 16, 1 }, l[0].grid);
 +            try t.expectEqual(@as(c_uint, 128), l[0].block);
-+            try t.expectEqual(false, l[0].ex);
++            try t.expectEqual(cuda_pdl.on(), l[0].ex);
 +            try t.expectEqualSlices(u64, &.{ x, fnw, part, 16384, 16, rows }, l[0].args[0..l[0].count]);
 +            try t.expectEqual(id("hc_finish_pdl"), l[1].f);
 +            try today((try pre(.{ .glue = &ks }, s, rows))[0], rows, false);
@@ -554,7 +553,7 @@ index 000000000..b56ebb331
 +        try t.expectEqual(if (pdl) id("hc_partial48_pdl") else id("hc_partial48"), l.f);
 +        try t.expectEqual([3]c_uint{ 16, 3, cdiv(rows, 4) }, l.grid);
 +        try t.expectEqual(@as(c_uint, 288), l.block);
-+        try t.expectEqual(pdl, l.ex);
++        try t.expectEqual(pdl or cuda_pdl.on(), l.ex);
 +        try t.expectEqualSlices(u64, &.{ x, fnw, part, rows }, l.args[0..l.count]);
 +    };
 +    const both = kernels(&d, 16, true); // with HC_ROWS too: prompt rows take its blocks, decode windows HC_DEC's
