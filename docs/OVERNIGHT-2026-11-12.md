@@ -3363,3 +3363,17 @@ model, not on the recipe the repo documents. The files were copied to the box an
 either side of that sync are not comparable; the note is here so the HC_DEC trade and the arms beside it are read as
 the old env's numbers. The sync gate is the reason this was caught, and it belongs in every queue's first line:
 queue125 prints no first boot before the gate passes.
+
+## TF_GLM_NO_COPY measured on the standard bench: inert, because no prompt repeats a continuation
+
+queue125 built upstream `main` (`glm53-zig:upmain1`) and the branch (`glm53-zig:nc1`) from their own trees with
+`KNOBS=off`, a fresh boot a level, and ran both: main `52.7 60.5 81.5 109.1 133.5` tok/s from 1 to 8 clients, the
+branch with `TF_GLM_NO_COPY=1` `52.3 60.1 80.8 109.1 134.2`. Acceptance is identical to three places (0.627 and
+0.626 at one client, 0.650 at eight) and the token digests are equal at every level, so the switch changed nothing.
+
+That is not a verdict on the lever. The branch image provably carries the switch (2 occurrences of `TF_GLM_NO_COPY` in
+its binary against 0 in main's) and `XENV` is the launcher's `-e` path, so it was on. The copy window is planned only
+when a stream's own context repeats the continuation (`windows.zig`: a copied continuation from the stream's context
+or Recall's record), and the bench's prose prompts never do, so no copy was ever proposed and the setting had nothing
+to act on. A receipt for this lever needs a prompt whose tail repeats a block of its own context; until then the A/B
+above says only that the lever is free when the copy path is idle.
