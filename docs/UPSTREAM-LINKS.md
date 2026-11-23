@@ -1,0 +1,47 @@
+# Patch to upstream link
+
+`main` accumulates every lever as a numbered patch under `patches/engine/`; that is the branch that becomes production.
+A lever is ALSO cut as a branch from upstream `main` when we open it there, because upstream cannot take a patch series -
+they take one behaviour a pull request. The branch is transport, not a second source of truth: it is cut from upstream's
+tree, never merged back into this one, and the two are tied together by this table.
+
+When upstream lands a lever, the PATCH is retired here (deleted from the series, with the upstream commit recorded), so
+this repo's main and upstream's main converge on the same behaviour from opposite directions.
+
+Every patch needs a row. `-` in the pull-request column means it has not been opened upstream yet; the state column says
+whether it is planned, blocked (with why) or not upstreamable (with why).
+
+| patch | subject | pull request | branch | state | retirement |
+|---|---|---|---|---|---|
+| `0001` | [PATCH] glm tests: the shared-window check sizes its rows from the eng | - | - | not opened | - |
+| `0002` | [PATCH] core and server: the disk grid on the I/O worker, and a quiesc | - | - | not opened | - |
+| `0003` | [PATCH] host: the prompt-bench step, so request preparation can be tim | - | - | not opened | - |
+| `0004` | [PATCH] core: the TF_GLM_OVN knob registry | - | - | not opened | - |
+| `0005` | [PATCH] glm: TF_GLM_KDA_PAD pads the KDA input stack at one width | - | - | not opened | - |
+| `0006` | [PATCH] glm: the DFlash2 draft knobs (TF_GLM_OVN_DRAFT_*) | - | - | not opened | - |
+| `0007` | [PATCH] glm cuda: the index kernels take decode windows (TF_GLM_INDEX_ | - | - | not opened | - |
+| `0008` | [PATCH] core: kept-state walks gated by the last id (TF_GLM_OVN_KEPT_W | - | - | not opened | - |
+| `0009` | [PATCH] glm cuda: a pass the rebased index ring cannot hold is refused | - | - | not opened | - |
+| `0010` | [PATCH] glm checks: the OVN check commands in their own table beside m | - | - | not opened | - |
+| `0012` | [PATCH] glm cuda: TF_GLM_OVN_DECODE_INDEX, _INDEX_SCHED, _POOLS32 | - | - | not opened | - |
+| `0014` | [PATCH] glm lanes: the stepped prompt pass in its own file beside cuda | - | - | not opened | - |
+| `0019` | [PATCH] glm cuda: TF_GLM_OVN_SPARSE_ONEPASS, production's prompt spars | - | - | not opened | - |
+| `0020` | [PATCH] glm: TF_GLM_OVN_ONEPASS_PIPE, the one-pass pipeline with bit-e | - | - | not opened | - |
+| `0021` | [PATCH] glm cuda: TF_GLM_OVN_KDA_CHUNKED, production's chunked KDA pro | - | - | not opened | - |
+| `0022` | [PATCH] glm cuda: TF_GLM_OVN_MM_WIDE, _SWIGLU_REDUCE, _MM_CLUSTER, _MM | - | - | not opened | - |
+| `0023` | [PATCH] glm cuda: TF_GLM_OVN_MLA_FUSEMERGE, _ABSORB_VEC, _KVB8 | - | - | not opened | - |
+| `0024` | [PATCH] glm cuda: TF_GLM_OVN_GLUE_FUSE, _GLUE_ROW, _PDL_EARLY | - | - | not opened | - |
+| `0025` | [PATCH] glm latent: the head block takes the head count back (test-cud | - | - | not opened | - |
+| `0026` | [PATCH] glm cuda: the MTP head's own passes run only without a DFlash2 | - | - | not opened | - |
+| `0027` | [PATCH] exl3: TF_EXL3_DEC_ORDER launches each k slice's blocks before  | - | - | not opened | - |
+| `0028` | [PATCH] host: byte equality by indexOfDiff, and a string index that st | - | - | not opened | - |
+| `0029` | [PATCH] glm cuda: FP8 latent keys fetched a tile ahead, in 8-byte load | - | - | not opened | - |
+| `0030` | [PATCH] server: render and tokenize a request once, and TF_GLM_OVN_HOS | - | - | not opened | - |
+| `0031` | [PATCH] glm exl3: TF_GLM_OVN_X3_NC, X3_XROW and X3_FUSEDOWN, productio | - | - | not opened | - |
+| `0032` | [PATCH] glm cuda: TF_GLM_OVN_KEEP_SEQS, a released stream's sequence s | `#4809` | `keep-seqs` | open, renamed `TF_GLM_KEEP_SEQS` upstream | not landed |
+| `0033` | [PATCH] server: TF_GLM_OVN_OFF_EFFORT_LINE, a thinking-off GLM-5.3 pro | - | - | not opened | - |
+| `0034` | [PATCH] glm lanes: TF_GLM_OVN_NO_COPY, a DFlash2 drafter's windows wit | - | - | not opened | - |
+| `0035` | [PATCH] glm cuda tests: glm-mm-ovn, the matmul launch variants against | - | - | not opened | - |
+| `0036` | [PATCH] glm latent: TF_GLM_OVN_LATENT_ROWS, absorb_q and expand_v two  | - | - | not opened | - |
+| `0037` | [PATCH] glm cuda: TF_GLM_OVN_SIDE_PRIO, the prompt exchanges' side str | - | - | not opened | - |
+| `0038` | [PATCH] glm cuda: TF_GLM_OVN_PIECE_FRONT, _MLA and _FFN, the next bloc | - | - | not opened | - |
