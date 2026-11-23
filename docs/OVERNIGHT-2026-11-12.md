@@ -2999,3 +2999,22 @@ strict-env screen is green, and the two measurements are separate arms rather th
 This is the third integration fact of the porting project and the pattern is consistent: each lever's own code is fine and
 the friction is in the shared plumbing - the vtable between multi-fill and prompt-many, this build file between latent-tile
 and multi-fill, and the test registrations the screen keeps catching.
+
+## 111. LATENT_TILE is a loss on this series: G=2 is 4.2% slower, G=4 4.9%
+
+The first ported lever measured on the serve. Image `glm53-zig:lt2` built from 32 engine patches plus
+`patches/port-latent-tile`, six boots, two an arm, cache dropped before each, cold prompts at 8,192 and 32,768 tokens,
+replies identical across all six (one `token_sha256`).
+
+| arm | cold 8k | cold 32k |
+|---|---|---|
+| unset (the recipe's vector path) | **3.338 s** | **13.048 s** |
+| `TF_GLM_OVN_LATENT_TILE=2` | 3.480 s (+4.24%) | 13.601 s (+4.24%) |
+| `TF_GLM_OVN_LATENT_TILE=4` | 3.494 s (+4.68%) | 13.683 s (+4.87%) |
+
+So G=2 closes most of G=4's gap and still loses to the vector path by more than four percent, at both lengths, with two
+boots a side agreeing to 0.3%. The rule written before the rows wanted 1% better than unset; this is 4.2% worse, so the
+lever is rejected and `patches/port-latent-tile` stays a package rather than entering the series.
+
+**That closes the first of the seven ports with a number rather than a theory:** the fork's G=4 was 1.7x slower than the
+vector path, the port's G=2 was the only form that could plausibly beat it, and it does not. The next port takes the boots.
