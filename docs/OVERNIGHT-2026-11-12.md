@@ -2901,3 +2901,21 @@ Two of the remaining items are real work in this series:
 So the honest state of the list is: seven items need a port decision before they can be measured, and two are actionable.
 Measuring a knob that is not compiled into the image would have produced a NOT DECIDED and a wasted window, which is the
 third time this session that reading first was cheaper than booting.
+
+## 106. Owner decisions: port all seven, and the expert skew stays byte-exact
+
+Two decisions taken 2026-11-23, recorded so the next session does not re-derive them.
+
+**Port all seven archive-only levers**, in value order, as a porting project rather than a measurement: `MULTI_FILL`
+(several cold prompts in one pass), `LATENT_TILE`'s G=2 variant, `PROMPT_MANY` gated at four or more streams, `DRAW1`'s
+sampled top-k cells, PRX and ZC's P6 cells, `HC_DEC`, and FP8 KV pages at depth. Each becomes a numbered package under
+`patches/port-<lever>/` with `RECORD.md`, `SHA256SUMS`, and a tree that passes `check fmt` on the gate host, and each
+carries the measurement that would decide it. A lever that cannot be ported cleanly is reported with the reason rather
+than forced.
+
+**The rank-0 expert skew keeps its block order byte-exact.** Only the scheduling win is taken, which means 64-row EXL3
+units with the same arithmetic and the same summation order, so the digests must not move. A reordered reduction would
+have been a numerics change with its own evidence, and it is not wanted now.
+
+Both are running: the porting project on its own lane against `patches/port-*/` with `patches/engine/` left alone, and the
+decode `AllGather` prefetch diagnosis on the other against the engine series.
