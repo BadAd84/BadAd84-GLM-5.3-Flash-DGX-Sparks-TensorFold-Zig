@@ -2765,3 +2765,24 @@ host cannot clear it. The capture-boot wrap therefore needs one more look before
 Two faults of mine in the run itself, both already fixed in the queue: it booted twice without dropping the page cache,
 so both boots refused on the preflight, and its first attempt left a root-owned capture directory that the second could
 not use cleanly.
+
+## 101. The vec_x2 receipt is negative: no decode gain, and absorb plus expand rose
+
+Both halves are now measured on the patched image, the capture matched to the baseline's workload (`SIZES="8192 32768"`,
+`WARMCHAIN=3`, the settings queue85 used).
+
+| | baseline (`pf-f85w`, ABSORB_VEC alone) | vec_x2 image | change |
+|---|---|---|---|
+| `tf_glm_absorb_q_x2` | 1,419 launches, 765.5 ms | 1,320 launches, 829.4 ms | +8.3% |
+| `tf_glm_expand_v_x2` | 935 launches, 841.4 ms | 814 launches, 954.2 ms | +13.4% |
+| absorb plus expand | 1,606.9 ms of 28,992.7 (5.54%) | 1,783.6 ms of 31,135.8 (5.73%) | +0.19 points |
+| decode, 1 client | 81.7 | 81.3 | -0.50% |
+| decode, 4 clients | 112.1 | 112.6 | +0.40% |
+
+So the patch buys nothing: the launch count falls 9.3% because the vector form now covers prompt rows too, decode is
+unmoved inside half a percent, and the kernels it was supposed to make cheaper are 3.4% of the path larger in share than
+before. Two captures cannot resolve 3%, which is exactly why the honest reading is "no demonstrated gain" rather than
+"a small loss".
+
+The rule the receipt carried before its rows was: a decode regression beyond the spread is a HOLD back to the patch, and
+a share that does not fall is a HOLD with the numbers. The share did not fall.
