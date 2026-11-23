@@ -13,7 +13,12 @@ itself is untouched, and `SHA256SUMS` was regenerated.
 four files, and `cuda_lanes.zig` at 605 lines). Fixed with the behaviour unchanged: each two- or three-line comment is now
 one line within 120 columns; the two new vtables moved from `cuda_lanes.zig` into `cuda_lanes_fill.zig` (built from
 `Lanes.steps_vt` and `Lanes.prefillManyFn`, which became `pub`), so `cuda_lanes.zig` is 595 lines. Base against head lean
-is 168 against 168, 0 new; the tree the patch makes is byte-identical to the fixed one, and `SHA256SUMS` was regenerated. It also carries the stepped many vtable (`TF_GLM_PROMPT_MANY`)
+is 168 against 168, 0 new; the tree the patch makes is byte-identical to the fixed one, and `SHA256SUMS` was regenerated.
+
+The next run, `sg-20261123-120611`, did not compile: `cuda_lanes_fill.zig` named `lanes.backend.VTable`, and the type is
+nested in `backend.zig`'s `Backend`. Both constants now name `lanes.backend.Backend.VTable`. The stack then PASSED:
+run `sg-20261123-123354`, stack tree `fe60f611502a`, 41 of 41 patches, every step rc 0, `gate-names` 0 failing names,
+lean 168 against 168 with 0 new. It also carries the stepped many vtable (`TF_GLM_PROMPT_MANY`)
 because `prefill_many` is not admitted without it, so **this package and `patches/port-prompt-many` are alternatives, not a
 stack**: both add the same vtable block.
 

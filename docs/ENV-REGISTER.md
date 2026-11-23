@@ -70,7 +70,7 @@ model: it only knew how to append the absent.
 TensorFold `fa13df5dd1fdd23ada775510a464c9aa03a39e09` plus, in their recorded order, `patches/engine` (32),
 `patches/pr1411` (2), `patches/cache-salt` (2), `patches/learn-starts` (1), `patches/solo-cuts` (1),
 `patches/disk-any-position` (1), `patches/restore-held` (1) and `patches/port-multi-fill` (1): **41 patches,
-101 in-scope table rows for 101 names**.
+101 in-scope table rows for 101 names**, stack tree `fe60f611502a`.
 The register was read field by field from `zig/src/platform/environment.zig` in the tree that stack makes, and each
 default from the row's own reader in that tree (the `default` its `environment.read`/`value` call passes, its
 `ovn.int`/`ovn.on` default, or for a path/null row the absent case itself), never from memory of an older base. To
