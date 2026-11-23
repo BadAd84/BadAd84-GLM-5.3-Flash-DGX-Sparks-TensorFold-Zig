@@ -3471,3 +3471,19 @@ reclaimable cache against the weights, and `bench-arm.sh` never dropped it - the
 functions, so the defect only appeared when an arm booted straight after another. `bench-arm.sh` now drops the cache on
 all three ranks before every level. After a clean drop the promoted boot came up in 140 s with `/v1/models` answering,
 so the tier is fine and the promotion stands; the arm's cells are re-running on the promoted shape.
+
+## Eight settings our prod env sets are not in the served binary
+
+`scripts/check-env-in-image.py` compares every engine-prefixed setting in an env file against the strings of the binary
+in the image we serve (the table is compiled in, so the binary is the oracle for "does this option still exist"). Against
+`glm53-zig:m130a` it finds eight of our 107 engine settings absent from the binary:
+
+| finding | class |
+|---|---|
+| `TF_GLM_OVN_MULTI_FILL`, `TF_GLM_PROMPT_MANY` | real: our env sets the switches of a package this image does not carry |
+| `TF_GLM_DSCORES`, `TF_GLM_HEAD_BITS`, `TF_CUDA_SEGMENTS`, `TF_HY4_MEM_FLOOR_GIB` | to confirm one by one: either a row the engine dropped or a name the extractor misses |
+| `TENSORFOLD_PARALLEL`, `TENSORFOLD_CUDA_KERNELS` | likely extraction artifacts: `capabilities --json` lists `TENSORFOLD_PARALLEL` as honoured |
+
+The library variables (`NCCL_*`, `HF_HUB_OFFLINE`) are excluded by construction: the engine never reads them and they must
+be in the container. A silently ignored row is the dangerous shape, because the serve runs without the setting while the
+env says it is on, so this check belongs in front of every promotion, against the image being promoted.
