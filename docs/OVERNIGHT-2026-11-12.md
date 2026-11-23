@@ -2852,3 +2852,26 @@ difference that a single boot makes look like a result.
 launches in a window. Prefetch depth is ruled out; the remaining candidates inside that kernel are the tile size and the
 launch count, which is the same direction as the expert-skew item's "64-row EXL3 units" and is a kernel change with its
 own receipt rather than a knob.
+
+## 104. In decode, the collectives run on the main stream: 8.1% of the window, unoverlapped
+
+The item read "close the residual side-stream and NCCL exposure on transport and host staging, not EXCHANGE_KB". The
+four-client decode capture answers where that exposure is, and it is not where prefill's is.
+
+| kernel | stream | launches | ms |
+|---|---|---|---|
+| `ncclDevKernel_AllReduce_Sum_f64_TREE_LL` | **18 (main)** | 24 | 751.4 |
+| `ncclDevKernel_AllGather_RING_LL` | **18 (main)** | 7,640 | 675.6 |
+| `ncclDevKernel_AllGatherV_RING_LL` | **18 (main)** | 470 | 125.6 |
+| `ncclDevKernel_Broadcast_RING_LL` | **18 (main)** | 781 | 3.2 |
+| `ncclDevKernel_SendRecv` | 19 (side) | 2,160 | 115.9 |
+
+So in decode **1,555.8 ms of the 19,244.0 ms of kernel time, 8.1%, is collective work sitting on the main stream**, and
+the side stream carries 115.9 ms. That is the opposite of the prompt path, where the exchange is 475.6 ms of side-stream
+busy time behind a main stream that is 96.9% busy, and it is why the prefill experiments said the exchange was hidden: in
+prefill it is.
+
+What that means for a change: up to 8% of decode is available only if some of those collectives can move off the main
+stream. The `AllReduce` after the expert phases is a true dependency and cannot move; the 7,640-launch `AllGather` of
+weights is the part that could be prefetched on the side stream the way prefill's exchange already is. That is a real lead
+with a measured ceiling, and it is the first decode-side lever this campaign has found that is not a kernel shape.
