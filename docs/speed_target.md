@@ -111,8 +111,10 @@ Also measured: **cache and kept-state policy IS part of the warm-turn gap, thoug
 `--prompt-cache-disk` and our boots log a 16 GiB prompt cache, so both engines keep prompt states, and the one-stream decode difference is in the decode path. But the warm resumed
 turn is the largest single deficit (about 2x production), and two upstream switches move exactly it: `TF_CACHE_EVICT=decayed_resume` rebuilt 47.40% fewer prompt rows on six concurrent
 conversations (14,396,073 to 7,572,137), cut the summed first-token times 47.16% and took an agent turn's mean first token from 23.7 s to 2.1 s, with 103 of 138 agent turns losing their
-conversation's state without it and none with it (section 75); `TF_GLM_REQUEST_STARTS=1` takes 34.51% off a warm turn (section 80). Neither is in `prod.env`: the first is held by
-three 6- and 8-client decode cells inside their own spread (section 78), the second by six cells, one of them the cold 8k that `patches/solo-cuts` exists to fix (section 80).
+conversation's state without it and none with it (section 75); `TF_GLM_REQUEST_STARTS=1` takes 34.51% off a warm turn (section 80). Neither is the recipe's value: `TF_CACHE_EVICT` is set to its other word, `main`,
+held by three 6- and 8-client decode cells inside their own spread (section 78), and `TF_GLM_REQUEST_STARTS` is set in no file at
+all, held by six cells, one of them the cold 8k that `patches/solo-cuts` exists to fix (section 80); it is upstream's switch, not a
+row of our table, so the env files do not carry it.
 
 Tiers, by exact-name grep of the clean pin and the newer era tree (`ai-engine` fair-base): **pin** = the
 pinned upstream already implements it, so it is an env switch today; **era** = absent at the pin but

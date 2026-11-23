@@ -1,10 +1,15 @@
 # RECORD.md - patches/port-multi-fill
 
-## Base: upstream main `fa13df5dd1fdd23ada775510a464c9aa03a39e09`, then the 32 patches of `patches/engine/`
+## Base: upstream main `fa13df5dd1fdd23ada775510a464c9aa03a39e09`, the engine series and the six packages before it
 
-Applies to the engine series alone (tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`). It also carries the stepped
-many vtable (`TF_GLM_PROMPT_MANY`) because `prefill_many` is not admitted without it, so **this package and
-`patches/port-prompt-many` are alternatives, not a stack**: both add the same vtable block.
+Lands LAST on the stack - engine, pr1411, cache-salt, learn-starts, solo-cuts, disk-any-position, restore-held, then this
+package (41 patches) - and was gated on the engine series alone first (tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`,
+`iter mf-final`: `check fmt test ctest`, `test-cuda-host` 7,995 of 8,038 with 43 skipped and no failures, `compile-cuda-tests`
+10 of 10, `ctest` rc 0). Two hunks were context-repaired for the full stack when it landed there: `cuda_native.zig`'s
+`release(own);` (added by `restore-held`) and the `own.link.lead(...)` line that had replaced `own.link.asleep`; the change
+itself is untouched, and `SHA256SUMS` was regenerated. It also carries the stepped many vtable (`TF_GLM_PROMPT_MANY`)
+because `prefill_many` is not admitted without it, so **this package and `patches/port-prompt-many` are alternatives, not a
+stack**: both add the same vtable block.
 
 Source: `archive/ai-engine`, branch `ovn-batchresume` (`refs/heads/ovn-batchresume`), merged into `ovn-up` by
 `93dfbf29ab1010c0cac9209119bc3fe73f2aaf2b`; the lever's own commits are `32060d70636136570111de75ec65805e0221fa09`

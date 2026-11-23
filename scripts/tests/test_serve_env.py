@@ -22,9 +22,92 @@ OLD_REV = "4c02515"
 # Dropped on purpose: two names nothing in zig/src reads at the v1.2.9 pin or at main (the inventory of the move to main checked both), and the switch main's
 # unconditional item plan retired (upstream 4e6cdeed9 and 51a6fe02a).
 REMOVED = {"TF_GLM_COPY_MAX", "TF_GLM_COPY_REPLY_MATCH", "TF_GLM_OVN_EXL3_ITEMS"}
-# Added on purpose: a knob the pre-split launcher had no line for, promoted into prod.env with its cells. One name a promotion;
-# the comparison drops it from both sides so every other name stays held to the old launcher exactly.
-ADDED = {"TF_GLM_OVN_ABSORB_VEC", "TF_GLM_OVN_MM_WIDE", "TF_GLM_OVN_SIDE_PRIO", "TF_GLM_OVERLAP_PIECES", "TF_GLM_OVN_LATENT_ROWS", "TF_GLM_OVN_PIECE_FRONT", "TF_GLM_OVN_PIECE_FFN", "TF_GLM_OVN_PIECE_MLA", "NCCL_NCHANNELS_PER_NET_PEER", "TF_GLM_OVN_SOLO_TO_START", "TF_GLM_OVN_RESTORE_HELD"}
+# Names serve.sh computes per boot; their env-file lines are blank so the boot always wins (prod.env's header).
+BOOT = {"TF_GLM_RANK", "TF_GLM_WORLD", "TENSORFOLD_MEMORY_RESERVE_GIB"}
+# Added on purpose, so the comparison drops them from both sides and every other name stays held to the old launcher exactly: the
+# knobs the pre-split launcher had no line for and that were promoted with their cells, and (owner rule 2026-11-23) every row of
+# the engine's table this serve reads, which prod.env and dev.env now set at the engine's own default so no setting is left
+# unset. A blank env line is not passed at all (serve.sh), so it appears on neither side.
+ADDED = {"NCCL_NCHANNELS_PER_NET_PEER",
+         "TENSORFOLD_CUDA_KERNELS",
+         "TENSORFOLD_DEVICE_CHECK",
+         "TENSORFOLD_HIP_MEMORY_LIMIT_GB",
+         "TENSORFOLD_LFM2_KV_PAGES",
+         "TENSORFOLD_MAX_PDF_PAGES",
+         "TENSORFOLD_PARALLEL",
+         "TENSORFOLD_PREFIX_WAIT_MS",
+         "TENSORFOLD_PRESSURE_CACHE_PERCENT",
+         "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS",
+         "TENSORFOLD_RESTORE_PREFETCH",
+         "TENSORFOLD_RESTORE_PREFETCH_GIB",
+         "TENSORFOLD_RESTORE_PREFETCH_MS",
+         "TENSORFOLD_TOOL_ID_KEY_FILE",
+         "TENSORFOLD_UNIFIED_HOST_COUNTS",
+         "TENSORFOLD_VIDEO_TOKENS",
+         "TF_CACHE_EVICT",
+         "TF_COST_KEY_TRACE",
+         "TF_CUDA_CARVEOUT",
+         "TF_CUDA_CARVEOUT_MIB",
+         "TF_CUDA_DEVICE",
+         "TF_CUDA_SEGMENTS",
+         "TF_DRAFT_NODES",
+         "TF_DSPINE_WINDOW",
+         "TF_FLASHNEXT_BATCH_DRAWS",
+         "TF_GLM_CONTEXT_CEILING",
+         "TF_GLM_DFLASH2_LOG",
+         "TF_GLM_DRAFT_CONFIDENCE",
+         "TF_GLM_DSCORES",
+         "TF_GLM_DSEL",
+         "TF_GLM_EXPERT_FORM",
+         "TF_GLM_HOST_CACHE",
+         "TF_GLM_INDEX_CUDA",
+         "TF_GLM_INDEX_DECODE_FROM",
+         "TF_GLM_KDA_DUMP",
+         "TF_GLM_KV_HOST_GIB",
+         "TF_GLM_LINK_WAIT",
+         "TF_GLM_OVERLAP_PIECES",
+         "TF_GLM_OVN_ABSORB_VEC",
+         "TF_GLM_OVN_DECODE_INDEX",
+         "TF_GLM_OVN_DISK_SLICE_MIB",
+         "TF_GLM_OVN_FRONT_ROWS",
+         "TF_GLM_OVN_GLUE_FUSE",
+         "TF_GLM_OVN_GLUE_ROW",
+         "TF_GLM_OVN_KVB8",
+         "TF_GLM_OVN_LATENT_ROWS",
+         "TF_GLM_OVN_MM_WIDE",
+         "TF_GLM_OVN_MULTI_FILL",
+         "TF_GLM_OVN_PDL_EARLY",
+         "TF_GLM_OVN_PIECE_FFN",
+         "TF_GLM_OVN_PIECE_FRONT",
+         "TF_GLM_OVN_PIECE_MLA",
+         "TF_GLM_OVN_RESTORE_HELD",
+         "TF_GLM_OVN_SIDE_PRIO",
+         "TF_GLM_OVN_SOLO_TO_START",
+         "TF_GLM_PDL",
+         "TF_GLM_PROF",
+         "TF_GLM_PROMPT_MANY",
+         "TF_GLM_PROMPT_STEPS",
+         "TF_GLM_SHARED",
+         "TF_GLM_VISION_HOST",
+         "TF_HY4_MEM_FLOOR_GIB",
+         "TF_MTP_BATCH",
+         "TF_MTP_DRAFTS",
+         "TF_MTP_TREES",
+         "TF_NCCL_LIB",
+         "TF_NO_TREES",
+         "TF_PROMPT_INTERMEDIATE",
+         "TF_Q27_GEMM",
+         "TF_Q27_POCKET_OFF",
+         "TF_Q27_TAIL",
+         "TF_QMMF_HALF_BELOW",
+         "TF_QWEN35_CHUNK_SOLO",
+         "TF_QWEN_KEEP_LATE",
+         "TF_QWEN_KV_PAGE_TEST",
+         "TF_QWEN_POOL_LOG",
+         "TF_ROCE_GID_INDEX",
+         "TF_SHARED_PRICE_LOG",
+         "TF_STARTUP_RECEIPT",
+         "TF_TIMING"}
 
 
 def wsl(path):
@@ -135,6 +218,13 @@ class ServeEnv(unittest.TestCase):
         self.assertEqual("0", got["TF_GLM_OVN_KEEP_SEQS"])
         self.assertEqual("4", got["TF_GLM_HEAD_BITS"])
 
+    def test_a_candidate_overrides_a_prod_default_in_dev_only(self):
+        # D4/D5: prod carries the engine default (0); dev.env's candidates line is applied after the recipe, so a dev boot runs 1.
+        prod = dict(new_environment("measured", 4, 3, "192.0.2.1:29561", "", {}, False))
+        dev = dict(new_environment("dev", 4, 3, "192.0.2.1:29561", "", {}, False))
+        self.assertEqual("0", prod["TF_GLM_PROMPT_MANY"])
+        self.assertEqual("1", dev["TF_GLM_PROMPT_MANY"])
+
     def test_caller_environment_wins_for_the_two_nccl_names(self):
         got = dict(self.same("measured", 4, 3, caller={"NCCL_IB_HCA": "mlx5_0", "NCCL_SOCKET_IFNAME": "eth9"}))
         self.assertEqual("mlx5_0", got["NCCL_IB_HCA"])
@@ -144,19 +234,27 @@ class ServeEnv(unittest.TestCase):
         got = dict(new_environment("off", 4, 3, "192.0.2.1:29561", "", {}, False))
         for n, v in env_words("prod", "runtime"):
             self.assertEqual(v, got[n], n)
-        for n, _ in env_words("prod", "recipe"):
+        for n, v in env_words("prod", "recipe"):
+            if n in BOOT:  # the launcher's own per-boot value, never the file's (whose line is blank)
+                continue
+            if v == "":  # a blank completeness line: the row's own "no value" default, nothing to pass
+                continue
             self.assertNotIn(n, got, n)
 
     def test_dev_is_prod_plus_its_candidates_and_nothing_else_differs(self):
         prod = dict(new_environment("measured", 4, 3, "192.0.2.1:29561", "", {}, False))
         dev = dict(new_environment("dev", 4, 3, "192.0.2.1:29561", "", {}, False))
-        self.assertEqual(dict(env_words("dev")), {k: v for k, v in dev.items() if k in dict(env_words("dev"))})
-        for k, v in prod.items():
-            self.assertEqual(v, dev.get(k), f"dev lost or changed {k}")
-        extra = {k for k in dev if k not in prod}
-        self.assertEqual({n for n, _ in env_words("dev")} - {n for n, _ in env_words("prod")}, extra)
+        words = {k: v for k, v in env_words("dev") if v != ""}  # a blank line is a decision, not a value passed
+        self.assertEqual(words, {k: v for k, v in dev.items() if k in words})
         cand = {n for n, _ in env_words("dev", "candidates")}
-        self.assertEqual(cand, extra, "dev.env differs from prod beyond its candidates section")
+        for k, v in prod.items():
+            if k in cand:
+                self.assertNotEqual(v, dev.get(k), f"candidate {k} decides nothing")
+            else:
+                self.assertEqual(v, dev.get(k), f"dev lost or changed {k}")
+        extra = {k for k in dev if k not in prod}
+        self.assertEqual({n for n, _ in env_words("dev")} - {n for n, _ in env_words("prod")}, extra,
+                         "dev.env differs from prod beyond its candidates section")
 
     def test_the_check_launcher_takes_its_runtime_settings_from_prod_env(self):
         text = (ROOT / "scripts/gpu-check-tp3.sh").read_text(encoding="utf-8")

@@ -4,9 +4,12 @@
 scripts/env/prod.env is the production environment: a `# --- runtime` section, then a `# --- recipe` section. scripts/env/dev.env is the development environment:
 the same two sections, then a `# --- candidates` section. Rules, each a finding when broken:
   1. every line is blank, a # comment, a section marker or NAME=value (no space in the value); a section marker comes once, in order; prod.env has no candidates section
-  2. a name appears once in a file
+  2. a name appears once in a section; dev.env's candidates section may repeat a RECIPE name (an override: serve.sh applies the recipe, then
+     the candidates, so the later -e is the value a KNOBS=dev boot runs), and nothing else repeats: not a runtime name, not a second line
+     in one section
   3. dev.env's runtime and recipe sections are prod.env's, line for line (names, values and order): dev differs from production only by its candidates
-  4. a candidate name is not a name of prod.env (a value change of a production setting is an arm passed through XENV, never a second line)
+  4. a candidate is a setting prod.env does not carry, or an override of a recipe line whose value differs; check-env-coverage.py refuses an
+     override of a measured recipe line (a candidate upgrades an engine default, never silently rewrites a measured value: that is XENV's job)
   5. with --tree GITDIR:TREEISH (a git directory and a commit or tree in it, the tree the series makes): every name outside NCCL_* and HF_HUB_OFFLINE, which NCCL
      and the Hugging Face client read, appears as a quoted string "NAME" somewhere under zig/src of that tree, so a setting the engine no longer reads, or that
      a retired patch added, is found here and not at boot
@@ -53,8 +56,13 @@ def parse(path, order):
             bad.append(f"{path.name}:{n}: a setting before the first section marker: {m.group(1)}")
             continue
         if m.group(1) in seen:
-            bad.append(f"{path.name}:{n}: {m.group(1)} again (first at line {seen[m.group(1)]})")
-        seen.setdefault(m.group(1), n)
+            prev_sec, prev = seen[m.group(1)]
+            if prev_sec == sec:
+                bad.append(f"{path.name}:{n}: {m.group(1)} again in the {sec} section (first at line {prev})")
+            elif prev_sec != "recipe" or sec != "candidates":
+                bad.append(f"{path.name}:{n}: {m.group(1)} again (first in {prev_sec} at line {prev}); only a candidates line may "
+                           f"repeat a recipe name")
+        seen[m.group(1)] = (sec, n)
         out[sec].append((m.group(1), m.group(2), n))
     for s in expect:
         bad.append(f"{path.name}: no '# --- {s}' section")
@@ -82,9 +90,13 @@ def check(env_dir, tree=None):
             extra = [x for x in b if x not in a]
             findings.append(f"dev.env's {s} section is not prod.env's: missing {gone[:4]}, extra {extra[:4]}" + ("" if set(a) != set(b) else ", same lines in another order"))
     prod_names = {n for s in prod.values() for n, _, _ in s}
-    for n, _, ln in dev.get("candidates", []):
-        if n in prod_names:
-            findings.append(f"dev.env:{ln}: candidate {n} is a setting of prod.env")
+    runtime_names = {n for n, _, _ in prod.get("runtime", [])}
+    prod_value = {n: v for s in prod.values() for n, v, _ in s}
+    for n, v, ln in dev.get("candidates", []):
+        if n in runtime_names:
+            findings.append(f"dev.env:{ln}: candidate {n} overrides a runtime setting; a runtime line is not a candidate")
+        elif n in prod_names and prod_value.get(n) == v:
+            findings.append(f"dev.env:{ln}: candidate {n}={v} repeats prod.env's value: an override must differ")
     if tree:
         gitdir, treeish = tree.rsplit(":", 1)
         names = sorted({n for f in (prod, dev) for s in f.values() for n, _, _ in s})

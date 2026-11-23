@@ -50,7 +50,11 @@ SPARK-GATES-DONE 2026-11-21T10:50:30Z verdict=PASS
 Patches, in file-name order:
 
 - `0001-glm-solo-between-starts.patch`
-- `0002-glm-solo-to-start.patch`
+
+Withdrawn 2026-11-23: `0002-glm-solo-to-start.patch`. It changed nothing of its own: after the 2026-11-21 re-seat its only
+hunks added, a second time, the `TF_GLM_OVN_SOLO_TO_START` documentation row and registry row that `0001` already adds (measured
+on a scratch apply of the series: 1 row after `0001`, 2 after `0002`, so 100 rows for 99 names in the applied tree). The package
+is now one patch and the applied tree carries 99 rows for 99 names. See `docs/ENV-REGISTER.md`.
  This line was rewritten 2026-11-21 by the retirement lane: the package was applied again on the engine series
 after its dead switches came out (engine tree `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`). The package's own hunks
 are unchanged; only context lines that named removed engine fields moved (`Snap.win_from`, the dead `Marks.win_from`,

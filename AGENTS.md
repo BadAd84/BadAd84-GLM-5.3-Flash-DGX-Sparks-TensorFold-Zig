@@ -26,7 +26,21 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 - `patches/engine/` - EVERY change we own on the engine, numbered, applied in file-name order to a pristine tree at
   `TF_REF` by `scripts/apply.sh`. `RECORD.md` says where each patch's text comes from, `SHA256SUMS` pins the files.
 - `scripts/` - the serve and bench files, AUTHORED here and COPIED to spark1 `~/work/glm53-zig/`; the repo copy is
-  the source. Environment: `scripts/env/prod.env` (production: a runtime section, then the adopted recipe) and `scripts/env/dev.env` (production line for line plus a candidates section), read by `serve.sh` (`KNOBS=measured` or `prod` applies prod, `dev` applies dev, `off` only prod's runtime section; `XENV` wins over a line), checked by `scripts/check-env.py` (`python scripts/tests/test_check_env.py`) and `python scripts/tests/test_serve_env.py` (the launcher against the pre-split one). **`prod.env` is the baseline the campaign is measured against and it does not move while the campaign runs** (owner 2026-11-22, twice in one session): measurements run on `KNOBS=dev`, the recipe plus the candidates we are actually developing, and a candidate that has passed its ladder stays in `dev.env`'s candidates until parity with production is reached. A line in `prod.env` silently becomes part of the control arm of the next queue, so a promotion there is the FIRST action after parity, never a step inside the hunt. A candidate is promoted by moving its line from `dev.env` to `prod.env`'s recipe section, and to `dev.env`'s recipe section the same line, in the commit that carries its cells. Serve: `serve.sh` (one rank), `zig-tp3.sh` / `zig-tp3-stop.sh` (the whole TP=3 from spark1),
+  the source. Environment: `scripts/env/prod.env` (production: a runtime section, then the recipe) and `scripts/env/dev.env` (production
+  line for line plus a candidates section), read by `serve.sh` (`KNOBS=measured` or `prod` applies prod, `dev` applies dev, `off`
+  only prod's runtime section; `XENV` wins over a line), checked by `scripts/check-env.py`
+  (`python scripts/tests/test_check_env.py`) and `python scripts/tests/test_serve_env.py` (the launcher against the pre-split
+  one). **No row of the engine's table is left unset** (owner 2026-11-23): both files set every row of
+  `zig/src/platform/environment.zig` whose scope is `glm`, `cuda` or `common`, and `scripts/env/register.env` records one verdict
+  per row (`measured` with its cells, or `debt`: set to the engine's own default, unmeasured),
+  `scripts/env/check-env-coverage.py` enforcing it; a blank line is a decision (the row's own "no value" default, or a value the
+  launcher computes per boot) and `serve.sh` does not pass it. `prod.env` is the recipe we intend to ship and it changes when a
+  measured candidate earns promotion, or when a table row needs its value chosen (owner 2026-11-23, superseding "prod.env does
+  not move while the campaign runs"): measurements run on `KNOBS=dev`, prod's lines plus the candidates we are developing, and a
+  candidate is promoted by moving its line into `prod.env`'s recipe section and into `dev.env`'s recipe section in the commit
+  that carries its cells. `docs/ENV-REGISTER.md` is the model; `docs/DOC-AUDIT-2026-11-23.md` is the pass that removed the
+  statements contradicting it.
+  Serve: `serve.sh` (one rank), `zig-tp3.sh` / `zig-tp3-stop.sh` (the whole TP=3 from spark1),
   `build-image.sh`, `dist-image.sh` (copy the image to spark2 and spark3: every rank needs it). Bench: `streams.py`
   (the instrument), `turns.py` (first token of each turn of a growing chat), `bench-arm.sh` (five levels, a fresh boot
   each), `arms-file.sh` (a list of arms), `abba.sh`, `cells.py` and `rounds.py` (tables), `nsys-rank0.sh` (kernel
@@ -223,14 +237,18 @@ otherwise.
 Run on the applied tree on a shared gate host, never on the workstation (`scripts/gates.sh` picks `~/tools/zig-$(uname -m)-linux-<version>`). spark5 is rank 1 of the DeepSeek-V4.1 pair and takes no gates (owner 2026-11-15) and spark1-3 serve GLM, so the host is a shared x86_64 box named by `SPARK_GATES_HOST`; a full pass of three trees takes about 26 minutes there. Its pristine-base run is the reference of the same invocation: an x86_64 host and an aarch64 one fail different environment tests of a pristine tree (on the v1.2.9 pin `listener` Nagle on aarch64 with IPv6 off and `cli_config_test` serve --config on both; on upstream main `1ece6e6db` the x86_64 gate host fails only `cli_config_test`'s serve --config case, 1 of 7,731), so a result is only read against the base of its own run. A quick-loop checkpoint (`spark-gates.py iter`) must include the `test` step: the re-seat onto main passed `check fmt ctest lean pdl contract` with 7 failing host tests that only the full gate (and `test`) showed:
 
 - `scripts/spark-gates.py` runs all three from the workstation without compiling anything here (see its docstring and `scripts/tests/test_spark_gates_verdict.py`). `gates --pin TAG --tree base --tree NAME=DIR[,DIR...] ... [--expect NAME=TREEID ...] [--clean]` ships the pin archive, the patch directories and these scripts to the gate host (`SPARK_GATES_HOST`, `SPARK_GATES_SSH_SOCK` for a Windows ssh agent), builds every tree there the way the lanes record tree ids, runs `gates.sh` on each and `gate-names.sh` and `lean.sh` of base against every other tree, detached, at nice 15, 6 jobs and a 14 GiB cap; `wait --run RUN` prints the verdict table and exits 0 only when every tree passes against the base of the same run (a build failure, a missing step or an unexplained test-cuda-host rc is a failure); `iter --pin TAG --dir DIR [check] [fmt] [test] [lean] [ctest]` is the fast loop on one tree (`ctest` is `compile-cuda-tests`: the GPU test files under `zig/tests/cuda` compile nowhere else before the full gate, and a name clash or a keyword there cost a gate otherwise). Windows python in the top-level shell, never WSL. The gate host has no lingering, so its user manager (and the detached run's systemd scope) stops 10 s after the last login session ends: a run killed 10 s in with `the runner exited early rc=143` had no session held. `gates` and `wait` hold one themselves; anything that launches a run and polls later holds its own (`ssh HOST 'sleep N'` in the background).
-- `python scripts/env/check-env-coverage.py --table <tree>/zig/src/platform/environment.zig --dev scripts/env/dev.env
-  --register scripts/env/register.env --scopes glm,cuda,common --carried-pattern '^([A-Za-z_][A-Za-z0-9_]*)=([^\s]*)$'`
-  - every setting the engine's table carries holds a verdict: carried in `dev.env`, `default-ok`, `debt`
-  (counted) or `unreachable` in `register.env`; SILENT and STALE fail. It complements `check-env.py` (whose
-  rule 5 asks whether a name we set is read): this asks whether a setting the engine carries is decided.
-  Run `update-env-register.py` against the tree the series makes at every re-seat and after any patch that
-  adds a registry row; a new upstream default then lands as a visible entry, not a silent inherit. Why: an
-  upstream default in no env file cost the Qwen serve 7 to 11 percent for two days (`docs/ENV-REGISTER.md`).
+- `python scripts/env/check-env-coverage.py --table <tree>/zig/src/platform/environment.zig --prod scripts/env/prod.env
+  --dev scripts/env/dev.env --register scripts/env/register.env --scopes glm,cuda,common`
+  - every row of the engine's table this serve reads must be SET in both env files and hold one verdict in
+  `register.env`: `measured NAME=VALUE` (its cells decide it) or `debt NAME=VALUE` (set to the engine's own default,
+  unmeasured). `default-ok` and `unreachable` are retired with the model that let a row go unset; a name we set that
+  has no table row needs a `raw` line (it is read through a raw `getenv`), and UNSET, UNRECORDED, VALUE, STALE and
+  UNREAD all fail. **A base that adds a table row is a hard stop**: choose its value, write it into both files and
+  give it a verdict before anything else. It complements `check-env.py` (whose rule 5 asks whether a name we set is
+  read): this asks whether a setting the engine carries is decided, and at what value. Why: an upstream default in
+  no env file cost the Qwen serve 7 to 11 percent for two days (`docs/ENV-REGISTER.md`, and
+  `docs/DOC-AUDIT-2026-11-23.md` for the documentation pass that removed the old wording). Its test is
+  `python scripts/tests/test_check_env_coverage.py` (ten cases, one defect class each).
 - `python scripts/check-spark-sync.py USER@HOST` - run before EVERY GPU window, from the top-level shell: it exits 1 when any runtime script this repo authors (serve, clients, tables, queues) differs from the copy on the box. A stale `serve.sh` (without `TF_GLM_OVN_EXL3_ITEMS=1` or `KEEP_SEQS`) made a whole day of v1.2.9 cells run another decode path and read as a 4 to 11% regression; the cause showed only in an nsys launch list (`scripts/tests/test_check_spark_sync.py`, and it fails on the two files that were really stale). Queue scripts print its output first.
 - `bash scripts/tests/test_serve_learn.sh [SERVE_SH]` - `serve.sh`'s `LEARN` switch against a recording `docker`, no GPU (a mutated copy goes in as the first argument: an env-var prefix does not cross into this bash from the Windows shell).
 - `python scripts/tests/test_disk_newest.py` - the disk tier harness's notion of a conversation's newest kept state (`scripts/disk.py`): under `TF_GLM_REQUEST_STARTS=1` a turn keeps its states at request starts and at its prompt's end, not on the 2,048-row grid, so the tool records the highest position the RAM store created during each turn; the test fails on the grid-only rule that left the first window's eviction step clearing nothing.

@@ -418,7 +418,7 @@ index e933c6b4c..b12776657 100644
 +    const together = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_MANY", ranks.environment("TF_GLM_PROMPT_MANY"), false);
 +    const multi = cuda.ovn.on("MULTI_FILL");
      const shared = try @import("sys").environment.value(bool, "TF_GLM_SHARED", ranks.environment("TF_GLM_SHARED"), true);
-     own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
+     own.link.lead(cuda.tp_watch.open(), p.world); // the other ranks begin asleep (follow): the first step wakes them
 -    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared, .mtp_confidence = o.mtp_confidence };
 +    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .together = together or multi, .multi = multi, .alone = !shared, .mtp_confidence = o.mtp_confidence };
      const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);

@@ -71,6 +71,10 @@ envfile() {
     line=${line%% #*}; line=${line%"${line##*[![:space:]]}"}
     [[ $line =~ ^([A-Za-z_][A-Za-z0-9_]*)=([^[:space:]]*)$ ]] || { echo "serve.sh: bad line in $f: $line" >&2; exit 2; }
     name=${BASH_REMATCH[1]}; val=${BASH_REMATCH[2]}
+    # A blank value is a decision, never an omission: it is the row's own "no value" default (prod.env's header), so nothing is
+    # passed and the engine sees the setting absent exactly as the row documents. It must not become `-e NAME=`, a present empty
+    # setting, which would also override the rank, world and memory reserve this script computes above.
+    [[ -z $val ]] && continue
     [[ " ${XENV:-} " == *" -e $name="* ]] && continue
     if [[ $CALLER_WINS == *" $name "* && -n "${!name:-}" ]]; then val=${!name}; fi
     ENV+=(-e "$name=$val")

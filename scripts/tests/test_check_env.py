@@ -99,9 +99,18 @@ class CheckEnv(unittest.TestCase):
             f = self.fx(dev=dev)
             self.assertTrue(any("not prod.env's" in x for x in f.run()), dev)
 
-    def test_a_candidate_that_is_a_production_name_is_a_finding(self):
+    def test_a_candidate_overriding_a_recipe_value_is_clean(self):
+        # the override model (owner 2026-11-23): serve.sh applies the recipe then the candidates, so a later line wins
         f = self.fx(dev=DEV + "TF_GLM_KDA_PAD=2\n")
-        self.assertTrue(any("is a setting of prod.env" in x for x in f.run()))
+        self.assertEqual([], f.run())
+
+    def test_a_candidate_repeating_a_production_value_is_a_finding(self):
+        f = self.fx(dev=DEV + "TF_GLM_KDA_PAD=1\n")
+        self.assertTrue(any("repeats prod.env's value" in x for x in f.run()))
+
+    def test_a_candidate_overriding_a_runtime_setting_is_a_finding(self):
+        f = self.fx(dev=DEV + "NCCL_P2P_DISABLE=0\n")
+        self.assertTrue(any("overrides a runtime setting" in x for x in f.run()))
 
     def test_a_name_the_tree_does_not_read_is_a_finding_but_nccl_and_hf_are_exempt(self):
         f = self.fx(src='const names = .{ "TF_GLM_HEAD_BITS", "TF_GLM_KDA_PAD", "TF_GLM_OVN_SOLO_TO_START" };\n')

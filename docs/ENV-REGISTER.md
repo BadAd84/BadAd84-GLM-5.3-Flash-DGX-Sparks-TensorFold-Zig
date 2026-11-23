@@ -1,102 +1,129 @@
-# The env register: a verdict for every setting the engine's table carries
+# The env register: every row of the engine's table, set, and one verdict each
 
-This repo's `scripts/env/prod.env` and `scripts/env/dev.env` list what we chose to set. They cannot, by
-themselves, tell a reader which of the engine's other settings were considered, and on a newer base a
-default-on clause can exist in no env file at all. This register and its gate close that gap, the way
-`scripts/check-env.py` closes the "is every name we set actually read?" gap.
+This repo's `scripts/env/prod.env` and `scripts/env/dev.env` set every row of the engine's own settings table,
+`zig/src/platform/environment.zig`, whose scope this serve reads (`glm`, `cuda`, `common`). `scripts/env/register.env`
+records one verdict per row. That is the whole model (owner 2026-11-23): **no setting is left unset**, and the only
+question left about a row is whether its value was measured or is debt.
+
+The rule replaced the earlier four-verdict register (`carried`, `default-ok`, `debt`, `unreachable`) because
+`default-ok` meant "we keep the engine default and no env file holds a line for it", which is exactly how a default
+inherits itself into a serve unnoticed. `default-ok` no longer exists; `unreachable` is gone too, because a row is
+now always set (a row this serve's family never reads is set to its default like any other, and its verdict says so).
 
 ## The failure it comes from
 
-On the Qwen3.8 Flash Next serve (same engine family tree, `flashnext` scope), upstream added
-`shared_stop = 0.6` on 2026-11-10: beside another open stream a greedy chain's draft stops below 0.6
-confidence. The setting appears in no env file, and the production engine predates the clause, so
-production drafted 3.03 tokens a round while the dev stack drafted 1.92. The difference read as an
-engine gap; depth and confidence arms chased it; the cause was a base default nobody had looked at.
-Turning the switch off was worth 7 to 11 percent at 2 to 8 streams and closed 54 percent of a prose
-throughput gap. Record: Qwen3.8-Flash-Next `work/ProseDraft/RESULT.md`.
+On the Qwen3.8 Flash Next serve (same engine family tree, `flashnext` scope), upstream added `shared_stop = 0.6` on
+2026-11-10: beside another open stream a greedy chain's draft stops below 0.6 confidence. The setting appeared in no
+env file and the production engine predated the clause, so production drafted 3.03 tokens a round while the dev stack
+drafted 1.92. The difference read as an engine gap; depth and confidence arms chased it; the cause was a base default
+nobody had looked at. Turning the switch off was worth 7 to 11 percent at 2 to 8 streams and closed 54 percent of a
+prose throughput gap. Record: Qwen3.8-Flash-Next `work/ProseDraft/RESULT.md`.
 
 ## What the register is
 
-The engine's own table, `zig/src/platform/environment.zig`, is the authoritative list. Every row whose
-scope this serve reads (`glm`, `cuda`, `common`) must hold one of four verdicts:
+| verdict | meaning |
+|---|---|
+| `measured NAME=VALUE` | a measurement chose it: its cells are in `docs/KNOBS.md` (and the OVERNIGHT section that file names), or it was verified equal to the engine's own computed answer |
+| `debt NAME=VALUE` | set to the engine's own default and not measured on this stack; each one is a lead |
+| `candidate NAME=VALUE` | `dev.env`'s candidates section overrides the value `prod.env` keeps at the engine's default (or names a setting prod does not carry); the value must be `dev.env`'s, and the overridden row must be a completeness-block line |
 
-| verdict | where | meaning |
-|---|---|---|
-| carried | `scripts/env/dev.env` | we set it; `check-env.py` already proves the served tree reads it |
-| default-ok | `scripts/env/register.env` `# default-ok NAME:` | we keep the engine default, measured level or better, evidence cited |
-| debt | `scripts/env/register.env` `# debt NAME:` | unmeasured on this stack: counted, each one a lead |
-| unreachable | `scripts/env/register.env` `# unreachable NAME:` | the path cannot run on this serve, with the reason |
+Both row verdicts sit on a line the env files hold; the value in the verdict must equal the value in both files. A row
+with no verdict, a verdict for a row the table no longer has, a verdict whose value differs from the files, a duplicate
+verdict, and the retired words `default-ok` / `unreachable` all fail the gate. A candidate is the one way `dev.env`
+differs from `prod.env` in the recipe: `serve.sh` applies the recipe and then the candidates, so the later `-e` is what a
+`KNOBS=dev` boot runs (D4/D5), and `scripts/check-env.py` grew that rule with this change.
 
-SILENT (no verdict) fails. STALE (a verdict for a setting the table no longer has) fails. Debt is
-counted and printed on every run; it is a worklist, not permission.
+`scripts/env/register.env` also carries `raw NAME=VALUE` lines for every name our env files set that the table has no
+row for: they are read through a raw `getenv`, which `scripts/check-env.py` rule 5 covers. A table row is the ideal for
+each (D9 below), and the gate fails on a name set with neither a row nor a raw line.
 
-## How it sits beside check-env.py
+## A blank value is a decision
 
-`scripts/check-env.py --tree` answers "is every name we set read in the tree the series makes?", which
-catches a retired patch's leftover line and a name the engine no longer reads. The register answers the
-opposite question, "is every setting the engine carries decided?", which catches a default inherited
-without anyone looking. A name read through a raw `getenv` with no table row is invisible to the
-register by construction and is `check-env.py`'s business; upstream treats an unregistered read as a
-finding of its own, and the registry patch (`patches/engine/0004-ovn-knob-registry.patch` and its
-successors) is where a name graduates into the table.
+Some rows have no value to write: the engine's default is "no value" (no dump file, no captured kernel set, no HIP
+limit, no operator key file, no max), or the launcher computes the value per boot (`TF_GLM_RANK`, `TF_GLM_WORLD`,
+`TENSORFOLD_MEMORY_RESERVE_GIB`). Those lines exist in both env files with **an empty value**, and `serve.sh` does not
+pass a blank line, so the engine sees the setting absent exactly as the row documents. The alternative, `-e NAME=`, is
+a present empty setting and would also override the rank, world and memory reserve the launcher computes. 16 of the 101
+rows are blank for this reason and each says why in its register line.
 
-## Files and procedure
+## The gate
 
-- `scripts/env/check-env-coverage.py`: the gate. Reads the table field by field, so a row carrying an
-  optional field cannot hide from it.
-- `scripts/env/update-env-register.py`: run at every re-seat and after every patch that adds a registry
-  row. Keeps every verdict and appends `debt` for each new row.
-- `scripts/env/register.env`: the register. Generated against the series' APPLIED tree: TensorFold
-  `fa13df5dd` plus the seven packages in their recorded order (engine, pr1411, cache-salt, learn-starts,
-  solo-cuts, disk-any-position, restore-held; 41 patches, every one applied with `git apply`, 0
-  failures). In scope: 100 table rows for 99 names (see the duplicate below), 29 carried, 70 debt, 0
-  silent.
+    python scripts/env/check-env-coverage.py --table <tree>/zig/src/platform/environment.zig \
+        --prod scripts/env/prod.env --dev scripts/env/dev.env --register scripts/env/register.env \
+        --scopes glm,cuda,common
 
-## Findings from the first applied-tree run
+One clean run prints `101 rows in scope, set 101, measured 32, debt 69, raw 6, candidates 1, unset 0, unrecorded 0`. The gate's own
+test, `python scripts/tests/test_check_env_coverage.py`, holds one defect class a case on a fixture table and fixture env files (ten
+tests: clean, UNSET, VALUE, the retired word, REFUSED, BLANK, the three candidate rules, UNREAD, STALE). Proven to fail on copies of
+the real files too: a row deleted from `prod.env` (`UNSET`), a register value changed
+(`VALUE`), a verdict renamed `default-ok` (retired word + `UNRECORDED`), a line for a row the table lacks (`STALE`), and
+a `raw` line removed (`UNREAD`), a candidate line whose value differs from `dev.env` (`VALUE candidate`), a candidate
+overriding a measured recipe line (`CANDIDATE`) and a candidates line with no `candidate` record (`UNRECORDED candidate`).
 
-1. **A duplicated setting row, which the series must fix.** `TF_GLM_OVN_SOLO_TO_START` is added
-   TWICE, identically, once by `patches/solo-cuts/0001-glm-solo-between-starts.patch` (line 609 of the
-   patch, the `environment.zig` hunk) and again by `patches/solo-cuts/0002-glm-solo-to-start.patch`
-   (line 71), and the same duplication appears in that family's documentation table. The applied tree
-   therefore carries 100 rows for 99 names, so any census that counts rows overstates the settings by
-   one. Measured on a scratch apply of the whole series, counting the row after each step: 0 rows after
-   the four packages before solo-cuts, 1 after `solo-cuts/0001`, 2 after `solo-cuts/0002`, so the later
-   patch is the duplicate. The fix is: remove the duplicate doc row and registry row from
-   `solo-cuts/0002`, regenerate the package's `SHA256SUMS`, re-run the stack gates (`spark-gates.py`),
-   and refresh this register. This register needs no edit after the fix; only its printed row count
-   changes, 100 to 99.
-2. **Six carried names are not in the table**, so this gate cannot judge them: `TF_GLM_CHUNK_SOLO`,
-   `TF_GLM_DENSE_BITS`, `TF_GLM_HEAD_BITS`, `TF_GLM_KDA_PAD`, `TF_GLM_OVERLAP_PIECES` and
-   `TENSORFOLD_NO_UPDATE_CHECK`. Each is either registered by a patch that should have added a row, or
-   is a raw `getenv` read that `check-env.py` rule 5 covers; decide which per name and record the
-   verdict here.
-3. **Debt is 70 settings**, the list in `register.env`. Each needs a row in `docs/KNOBS.md` (promote it
-   into `dev.env` as a candidate with its cells), a measured `default-ok`, or an `unreachable` reason.
-   Nothing was measured to generate this run; the register only records what exists.
+The rule that ties it to a rebase (D7): a base that adds a table row is a hard stop. The gate fails until a value is
+chosen, written into both env files and given a verdict; there is no generator that appends debt for you, because a
+chosen value is the decision the gate exists to force. `scripts/env/update-env-register.py` was deleted with the old
+model: it only knew how to append the absent.
 
-### Rebuilding the applied tree without compiling
+## The applied tree this register is against
+
+TensorFold `fa13df5dd1fdd23ada775510a464c9aa03a39e09` plus, in their recorded order, `patches/engine` (32),
+`patches/pr1411` (2), `patches/cache-salt` (2), `patches/learn-starts` (1), `patches/solo-cuts` (1),
+`patches/disk-any-position` (1), `patches/restore-held` (1) and `patches/port-multi-fill` (1): **41 patches,
+101 in-scope table rows for 101 names**.
+The register was read field by field from `zig/src/platform/environment.zig` in the tree that stack makes, and each
+default from the row's own reader in that tree (the `default` its `environment.read`/`value` call passes, its
+`ovn.int`/`ovn.on` default, or for a path/null row the absent case itself), never from memory of an older base. To
+rebuild the tree without compiling:
 
     git -C <upstream clone> archive fa13df5dd1fdd23ada775510a464c9aa03a39e09 | tar -x -C <dir>
     cd <dir> && git init -q .
-    for pkg in engine pr1411 cache-salt learn-starts solo-cuts disk-any-position restore-held; do
+    for pkg in engine pr1411 cache-salt learn-starts solo-cuts disk-any-position restore-held port-multi-fill; do
       for p in <repo>/patches/$pkg/*.patch; do git apply --check "$p" && git apply "$p"; done
     done
 
-`patches/*/apply.sh` does the same through a temporary index and prints the tree id the package makes,
-which is the check to quote when a stack is re-seated.
+Examples of the derivations that are not a bare number in the row's `forms`: `TF_CACHE_EVICT`'s reader falls back to
+`main`; `TENSORFOLD_RESTORE_PREFETCH`/`_GIB`/`_MS` to 2 reads, 16 GiB and 30 s (`core/rows_prefetch.zig`'s `Limits`);
+`TENSORFOLD_PRESSURE_CACHE_PERCENT` to 50; `TF_QMMF_HALF_BELOW` to 96; `TF_HY4_MEM_FLOOR_GIB` to 10;
+`TF_MTP_DRAFTS` to `cuda_mtp.zig`'s `default_depth` 3; `TF_DRAFT_NODES` to `draft_tree.zig`'s `default_nodes` 15;
+`TENSORFOLD_MAX_PDF_PAGES` to 16 (still capped by `--vision-max-images`); `TF_GLM_PROMPT_MANY` and
+`TF_GLM_OVN_MULTI_FILL` to 0 (the multi-fill package's `environment.value(..., false)` and `ovn.on`); `TF_ROCE_GID_INDEX` to 3, the index the
+engine's own table search picks on all four HCAs of spark1 (probed: each HCA's `gid_attrs/types/3` is `RoCE v2` and its
+GID is the IPv4-mapped form), so the value is the search's own answer rather than a second opinion.
 
-Then classify what the refresh appended: a measured row in `docs/KNOBS.md` makes it `default-ok` (or
-moves the setting into `dev.env` as a candidate, with its cells, per the promotion rule), a path this
-serve never runs makes it `unreachable`, and the rest stays `debt` and is the candidate list for the
-next queue.
+## Findings that produced this model
+
+1. **The duplicate row (D8), fixed 2026-11-23.** `TF_GLM_OVN_SOLO_TO_START` was added twice: once by
+   `patches/solo-cuts/0001` (line 609 of the patch) and again by `0002` (line 71), with the same duplicated in that
+   family's documentation table, so the applied tree carried 100 rows for 99 names. `0002` turned out to be nothing but
+   that duplication (after the 2026-11-21 re-seat its only hunks were those two rows), so it was withdrawn; the package
+   is now `0001` alone. `patches/restore-held/0001`, written on top of the duplicate, had that second row as a context
+   line in two hunks; the context lines and their header counts were repaired and its `SHA256SUMS` regenerated. The
+   `port-multi-fill` package, landed on the stack the same day, needed one context line of its own (`cuda_native.zig`'s
+   `release(own);`, added by `restore-held`) and nothing else. Both packages' `SHA256SUMS` verify
+   (`scripts/check-patch-packages.sh` CLEAN); the 41-patch stack (engine series + seven packages) applies cleanly and is
+   gated on the gate host in run `sg-20261123-112522`, whose verdict is the run log's `VERDICT` line.
+2. **Six names with no table row (D9).** `TF_GLM_CHUNK_SOLO`, `TF_GLM_DENSE_BITS`, `TF_GLM_HEAD_BITS`,
+   `TF_GLM_KDA_PAD`, `TF_GLM_OVERLAP_PIECES` and `TENSORFOLD_NO_UPDATE_CHECK` are read through a raw `getenv`
+   (`zig/src/families/glm/cuda_ranks.zig`, `cuda_kda_block.zig`, `zig/src/server/benchmark_server.zig`). They are `raw`
+   lines in the register with their reader named; a table row is the ideal for each, and one arriving is a rebase that
+   moves the line to a verdict.
+3. **Debt is 69 rows**, the worklist in `register.env`. A debt row is set, boots as its default and is counted; it
+   becomes `measured` only when a cell exists, which for a speed knob means the five-level rule in `docs/KNOBS.md`.
 
 ## Honest limits
 
-- The register judges names, not values: it proves every setting was considered, not that a carried
-  value still beats the default today. `docs/KNOBS.md` and the queue rows remain that record.
-- `--strict-carried` is not used on this repo yet: even in the applied tree six names we set are read
-  through a raw `getenv` without a table row, which is `check-env.py`'s rule 5, not this gate's. Turn
-  the strict flag on once those six are registered or recorded.
-- The committed register is generated against the applied tree of `fa13df5dd` plus the seven packages.
-  A re-seat, or any patch that adds or renames a registry row, needs `update-env-register.py` before
-  this file can be quoted as current.
+- The register judges every row's VALUE and presence, not that a carried value still beats its default today: the
+  cells in `docs/KNOBS.md` are that record, and a row whose cells are superseded goes back to `debt` in the same commit
+  that says so.
+- `measured` includes a value verified against the engine's own computation (`TF_ROCE_GID_INDEX`); it does not claim a
+  speed measurement where none was run.
+- The register is against the applied tree named above. Any patch that adds or renames a registry row, or a re-seat,
+  needs a new read of the table: the gate fails until it happens, which is the point.
+
+One carried candidate's cells need their carrier named: `TF_GLM_PROMPT_MANY=1` was measured on the mf1 image, which carries
+`patches/port-multi-fill` - the package's own ladder. Its switch came from the standalone `patches/port-prompt-many`, which cannot
+stack with that package, so the +1.55 / +5.45 / +2.96% are the carrier's numbers and not the old package's. A later stack that
+carries the switch another way needs its own cells.
+
+See `docs/DOC-AUDIT-2026-11-23.md` for the documentation pass that removed the statements contradicting this model.

@@ -80,3 +80,9 @@ speed candidate, receipts in their headers). Engine tree `59bcb17a86a99e7dff5c5e
 2026-11-22 (fourth pass): `0025` bounds the dense call to the rows the select leaves alone (a 4,096-row first
 chunk no longer runs dense attention over the 2,045 rows the sparse pass rewrites). Engine tree
 `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, whole stack `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f`, gate run sg-20261122-090022 PASS.
+
+2026-11-23: the `SOLO_TO_START` context repaired. `0001` was written on top of the duplicate row `solo-cuts/0002` carried, so two
+of its hunks (`docs/environment.md`, `zig/src/platform/environment.zig`) had that second row as a context line. `0002` was
+withdrawn as a pure duplicate, so the context line went with it: the two hunks lost it and their header counts moved 6/7 to 5/6.
+The patch adds and removes nothing else; `SHA256SUMS` regenerated. Stack: 40 patches, applied tree 99 rows for 99 names
+(`docs/ENV-REGISTER.md`).
