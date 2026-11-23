@@ -3037,5 +3037,24 @@ between two instruments: queue113's 4,117 ms came from `streams_sampled` with `c
 were one measurement.
 
 The rule that caught it is the one this campaign keeps needing: a comparison is only a comparison when the two arms differ
-by the thing under test. I applied that to patches for two days and then failed to apply it to images, and one boot on the
+by the thing under test. I applied that to patches across this stretch - its first commit is 2026-11-21 19:49:58 and the
+clock read 2026-11-23 10:09 UTC when I checked, so a day and a half - and then failed to apply it to images, and one boot on the
 old image was the whole cost of finding out.
+
+## 113. The mailbox size does not help: +0.18%, inside the band
+
+The decode rank-fold sits on NCCL's ring because 393 KB a rank exceeds `TF_TP_MAILBOX_MAX_KB`'s 256 KiB default, so raising
+it to 1,024 was the one lever the dependency analysis left. Six boots, three an arm, four clients, sampled code, rule written
+first: adopt 1,024 at 1% over the default with identical tokens.
+
+| arm | boots | mean |
+|---|---|---|
+| `TF_TP_MAILBOX_MAX_KB=256` (default) | 152.28, 152.29, 151.88 | 152.15 |
+| `TF_TP_MAILBOX_MAX_KB=1024` | 152.07, 152.49, 152.69 | 152.42 |
+
+**+0.18%, so HOLD and the default stays.** The folds still go over the ring at four clients, and the arithmetic that said
+the wait is the transfer (393 KB at 88 us a launch, 13.6 GB/s) is not contradicted: the mailbox path moves the same bytes
+over a different transport and changes nothing measurable at this size.
+
+That closes the side-stream item entirely: the collectives are dependency-bound in decode, the movable majority is not
+movable, and the one transport change available does not pay.
