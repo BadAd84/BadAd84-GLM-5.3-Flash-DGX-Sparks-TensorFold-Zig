@@ -3284,3 +3284,22 @@ of the window is the decode MoE compute itself.
 That closes the two designs I proposed for this item and points the remaining one where the review put it: **the rank-0 expert
 skew is a balance problem** - how many experts and rows each rank draws - not a tile size or a launch count. The measurement
 that would size it is per-rank work in the same capture, which the existing trace's per-stream kernel times can give.
+
+## 125. Rank 0 is saturated, not waiting: 116.7% busy, and nc1 is 53.7% of its wall
+
+Reading the four-client capture's own CUPTI table (`work/pp118cap/dec4.sqlite`, rank 0):
+
+- **294,438 launches, 19,244.0 ms of kernel time over a 16,486.2 ms span: 116.7% busy.** Kernels overlap across streams
+  (PDL and the pieces' second stream), so summed device time exceeding wall is what a rank with more work than time looks
+  like. A rank waiting on its peers would sit well under 100%.
+- **The top kernel is 10,920 launches and 8,847.2 ms**, which is 810 us a launch, matching the earlier figure to the tenth of
+  a millisecond and confirming by both count and time that it is `tf_exl3_ovn_nc1`.
+- **That is 53.7% of rank 0's wall.**
+
+So the review's "+51 ms a chunk of avoidable wall" cannot be rank 0 idling. If it is real it is extra expert work landing on
+rank 0, and the lever would have to act on the split of experts and row groups across ranks - not on the kernel's tile shape,
+launch count or warp count, all three of which this session has now ruled out with evidence.
+
+**The honest limit:** one rank's capture cannot show ranks 1 and 2 idle. It shows rank 0 saturated and names the kernel that
+owns its wall. Proving the other half needs their captures from the same window, which is a two-boot job rather than an
+argument, and it is queued.
