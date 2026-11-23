@@ -2816,3 +2816,14 @@ against the 273 GB/s the prompt-side pair reached.
 That reframes the remaining decode work. The `paced_kernel` at 11,570 launches and 755.0 ms (3.9%) is the pacing of those
 launches, and the two NCCL kernels together are 7.4% of the window. None of the six candidate lines still in `dev.env`'s
 history addresses `nc1`.
+
+**It is our own kernel, which is the good news.** `tf_exl3_ovn_nc1` is `nc_body<1>` from patch `0031`
+(`glm-exl3-x3-decode`), launched for gate/up and down while `TF_GLM_OVN_X3_NC` is set, which the recipe sets together with
+`X3_XROW` and `X3_FUSEDOWN`. So the dominant decode cost is code this campaign owns and can change, not an upstream kernel
+to route around.
+
+**What is not yet established:** whether its 810 us a launch is a bandwidth floor or a launch-and-latency cost. The bytes
+a launch moves are the active experts' sliced weights at 4 bits, and this device exposes no DRAM counters (section 91b), so
+the answer comes from reading `nc_body`'s grid, block and per-launch loop against the 273 GB/s the prompt-side pair reached,
+not from a counter. That reading is the next step, and it decides whether the decode work worth doing is a tile-shape
+change or a scheduling one.
