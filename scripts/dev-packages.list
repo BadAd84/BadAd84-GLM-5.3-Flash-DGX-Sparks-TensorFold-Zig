@@ -1,0 +1,22 @@
+# The dev engine's package set: every beneficial candidate applied together, one tree, one image.
+#
+# The dev arm is the UNION of what has measured well. A package that won is not left on a branch while the dev tree
+# runs without it: five beneficial patches in five places test nothing about their combination, and the combination is
+# what ships.
+#
+# Every directory under patches/ (except engine) is either listed below or named in the EXCLUDED block with the verdict
+# that keeps it out. scripts/check-dev-packages.py fails on a package that is in neither place, on a listed package that
+# does not exist, and on an exclusion without a verdict.
+cache-salt
+disk-any-position
+learn-starts
+port-multi-fill
+pr1411
+restore-held
+solo-cuts
+
+# EXCLUDED, with the record that keeps each one out:
+#   port-hc-dec      a trade: -1.96 -1.00 +1.37 +5.79 -11.72 percent at 1, 2, 4, 6 and 8 clients (queue122)
+#   port-latent-tile rejected: -4.24 percent; not to be revisited without a new mechanism
+#   port-prompt-many superseded by port-multi-fill, which carries the same batched prompt pass
+#   port-fp8-pages   unmeasured beyond step 1; it joins when a measured improvement exists
