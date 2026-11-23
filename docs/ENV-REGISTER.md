@@ -102,7 +102,10 @@ GID is the IPv4-mapped form), so the value is the search's own answer rather tha
    `port-multi-fill` package, landed on the stack the same day, needed one context line of its own (`cuda_native.zig`'s
    `release(own);`, added by `restore-held`) and nothing else. Both packages' `SHA256SUMS` verify
    (`scripts/check-patch-packages.sh` CLEAN); the 41-patch stack (engine series + seven packages) applies cleanly and is
-   gated on the gate host in run `sg-20261123-112522`, whose verdict is the run log's `VERDICT` line.
+   gated on the gate host. The first run, `sg-20261123-112522`, failed on nine lean findings the port-multi-fill package
+   carried (multi-line comments and `cuda_lanes.zig` at 605 lines); they were fixed with the behaviour unchanged
+   (`patches/port-multi-fill/RECORD.md`), and the re-run is `sg-20261123-120611`, whose verdict is the run log's
+   `VERDICT` line.
 2. **Six names with no table row (D9).** `TF_GLM_CHUNK_SOLO`, `TF_GLM_DENSE_BITS`, `TF_GLM_HEAD_BITS`,
    `TF_GLM_KDA_PAD`, `TF_GLM_OVERLAP_PIECES` and `TENSORFOLD_NO_UPDATE_CHECK` are read through a raw `getenv`
    (`zig/src/families/glm/cuda_ranks.zig`, `cuda_kda_block.zig`, `zig/src/server/benchmark_server.zig`). They are `raw`
