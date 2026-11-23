@@ -3398,3 +3398,11 @@ produces.
 Upstream's rule is that a switch arrives with a measured benefit, so nothing was posted, and the owner dropped the
 lever: the branch is deleted from the fork (`no-copy` was `59719f09f`) and the images and drafts are off the boxes. Two
 workloads, both null, is the record.
+
+## The screen's second batch was null by construction and is re-run
+
+queue124's six arms came back 1.8 to 3.6 percent under the control at every level, uniformly, which is a shape no
+lever makes. The cause is the env sync: the control's cells were recorded at 20:03 in `screen124/ctl` and the script
+skips an arm whose `P4.jsonl` exists, so the six arms (21:10 to 21:33) were compared against the pre-sync recipe while
+they themselves ran the synced one. Re-run as queue128 with a fresh `screen128/` so the control and the arms are
+measured together, which is the only shape that can decide anything.
