@@ -219,14 +219,14 @@ new file mode 100644
 +const max = engine.max_together;
 +
 +/// The steps vtable with batched fresh prompts (open.batchable's many_rows); MULTI_FILL's adds many_resumed.
-+pub const steps_many_vt: lanes.backend.VTable = vt: {
++pub const steps_many_vt: lanes.backend.Backend.VTable = vt: {
 +    var v = Lanes.steps_vt;
 +    v.prefill_many = Lanes.prefillManyFn;
 +    v.many_rows = @intCast(engine.prompt_rows);
 +    break :vt v;
 +};
 +/// TF_GLM_OVN_MULTI_FILL: resumed prompts join batched passes too.
-+pub const steps_multi_vt: lanes.backend.VTable = vt: {
++pub const steps_multi_vt: lanes.backend.Backend.VTable = vt: {
 +    var v = steps_many_vt;
 +    v.many_resumed = true;
 +    break :vt v;
