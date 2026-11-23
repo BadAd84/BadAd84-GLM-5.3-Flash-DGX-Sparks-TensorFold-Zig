@@ -14,8 +14,17 @@ IMAGE=${1:?usage: bench-arm.sh IMAGE TAG}; TAG=${2:?usage: bench-arm.sh IMAGE TA
 OUT="$HOME/bench/$TAG"; mkdir -p "$OUT"
 G="$HOME/work/glm53-zig"
 read -r -a SA <<< "${SARGS:-}"
+# Every boot starts from clean page memory: the checkpoint digest reads 163.6 GiB and the engine's memory preflight
+# counts reclaimable cache against it, so an arm that inherits the last boot's cache refuses to load.
+drop() {
+  docker run --rm --privileged --entrypoint sh "$IMAGE" -c 'sync; echo 3 > /proc/sys/vm/drop_caches' >/dev/null 2>&1
+  for h in spark2.ots-int.net spark3.ots-int.net; do
+    ssh -n -o BatchMode=yes "adam@$h" "docker run --rm --privileged --entrypoint sh $IMAGE -c 'sync; echo 3 > /proc/sys/vm/drop_caches'" >/dev/null 2>&1
+  done
+}
 for P in ${LEVELS:-1 2 4 6 8}; do
   echo "[bench $TAG] P=$P boot at $(date +%T)"
+  drop
   IMAGE="$IMAGE" KNOBS="${KNOBS:-off}" DRAFTER="${DRAFTER:-1}" CTX="${CTX:-}" bash "$G/zig-tp3.sh" "$P" > "$OUT/boot-P$P.log" 2>&1 \
     || { echo "[bench $TAG] BOOT FAILED P=$P"; bash "$G/zig-tp3-stop.sh" >/dev/null 2>&1; sleep 10; continue; }
   python3 "$G/streams.py" 8300 "$P" --kind prose --max-tokens 400 --rounds 3 "${SA[@]}" \
