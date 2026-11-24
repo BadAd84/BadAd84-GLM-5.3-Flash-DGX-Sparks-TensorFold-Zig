@@ -276,3 +276,15 @@ each patch that carries it, 28 applies, 0 failures) and the tree now holds 47 of
 
 The lesson for the next re-seat: after the three-way merge, audit `new file mode` against the tree before anything else,
 then run `compile-cuda-tests`, which is the gate that actually compiles them.
+
+## 15. Patch 0012 is only partly in the tree
+
+With the 47 files restored, `compile-cuda-tests` (the gate the host suite does not run) exposes that the index-split
+feature itself is missing from `zig/src/families/glm/cuda_index.zig`: the `split_rows` and `split_fn` fields, the `sr`
+the load computes, and the `decodeSelect` and `splits` methods are all absent, while the check file and the kernels that
+use them are present. Its hunks were rejected in the three-way merge and the rejection was not noticed because nothing
+in `test-cuda-host` compiles that file's new surface.
+
+The port is not a mechanical re-apply: the patch no longer applies to `cuda_index.zig` (context drift at line 60), and
+upstream renamed `Mode.all` to `Mode.both`, so the hunks need re-reading against the current struct before they go in.
+That is the next piece of work on this series, and `compile-cuda-tests` is the gate that says when it is done.
