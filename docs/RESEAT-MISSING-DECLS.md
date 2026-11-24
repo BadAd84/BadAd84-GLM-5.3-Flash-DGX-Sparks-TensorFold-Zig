@@ -7,6 +7,16 @@ locals and context lines; this one does neither.
 The image builds with these absent, because a patch whose declaration and call site were both dropped leaves nothing
 that references it.
 
+**CURRENT STATE: zero.** All 42 declarations this audit named are now in the tree, ported from
+`work/premerge` (the series applied cleanly to `fa13df5dd`), file by file with `compile-cuda-tests` behind each batch.
+Commits: `12f88816d`, `b5ab47f9a`, `a4b87e997` (patch 0030's fifteen), `16ad13dd4`, `29db29575` (0038's twelve and the
+last twelve), plus `qakvRows` and `projectedRows`, private helpers the compiler named.
+
+`keepsSequence` was among them: the method our KEEP_SEQS pull request adds was absent from the series' own tree, so the
+feature was partly missing here as well as unmerged upstream.
+
+The table below is the audit as it stood before the port, kept as the record of what was missing.
+
 | patch | file | name |
 |---|---|---|
 | 0007-index-decode-windows.patch | `zig/src/families/glm/cuda_index.zig` | `decodeFrom` |
