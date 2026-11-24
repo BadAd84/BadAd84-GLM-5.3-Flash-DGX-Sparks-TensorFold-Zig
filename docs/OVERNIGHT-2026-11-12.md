@@ -3577,3 +3577,23 @@ is the prompt with least room to diverge. So the +4.23 / +2.40 / +2.28 percent i
 a different answer on open-ended work, which is not a trade to keep locally either - Mia-AI-Lab's lossy weights are a
 one-time quantisation of the model, while this is a per-token precision loss in the attention that compounds through a
 generation. `TF_GLM_OVN_KVB8` stays 0, recorded in the register with these cells.
+
+## Production's exact shape (1M context, 4 slots): ahead at one and six clients, behind at two, four and eight
+
+`queue138` booted `--parallel 4` with `--context 1048576`, which is production's shape at every stream count:
+
+| clients | dev shape | production (target) | delta |
+|---|---|---|---|
+| 1 | 85.0 | 83.43 | +1.9% |
+| 2 | 86.3 | 91.07 | -5.2% |
+| 4 | 115.2 | 119.97 | -4.0% |
+| 6 | 122.3 | 111.99 | +9.2% |
+| 8 | 124.2 | 136.18 | -8.8% |
+
+Two levels lead and three trail, so the honest summary is "close, not ahead": the lead at one client (+1.9%) and at six
+(+9.2%) is real, and the eight-client cell is still the widest gap. The 256k cells taken earlier (83.4 85.3 113.1 108.4
+123.4) are within a percent of these, so at short prompts the context budget is not what separates the two serves.
+
+**Eight slots at 1M does not fit**: the second arm in the same queue refused to boot on the memory preflight, so the
+four-slot cap production lived under is still a real constraint on our engine at a 1M sequence budget. More slots are
+available only at smaller contexts, which is the trade the launcher's context scaling already encodes.
