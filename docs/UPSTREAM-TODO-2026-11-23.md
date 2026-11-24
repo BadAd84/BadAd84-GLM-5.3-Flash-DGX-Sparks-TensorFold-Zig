@@ -317,3 +317,11 @@ it also matches declarations the patches merely mention in context lines).
 What is reliable is the gate, not the audit: `compile-cuda-tests` plus the image build name a genuinely missing
 declaration and its use site, and the pre-merge tree supplies the definition. The port proceeds file by file with the
 gate behind each, and the audit is at most a coarse map.
+
+## 18. A new kernel needs its build registration, not just its source
+
+With the onepass pipe ported, the image build failed on `zig/src/cuda/kernels.zig:8: failed opening
+"fatbin_glm_onepass_pipe": FileNotFound`. Patch 0020 also adds the fatbin's entry to
+`zig/build/cuda_kernels.zig` (`.{ .name = "glm_onepass_pipe", .flags = &.{"-O3"} }`), and that hunk was rejected with the
+rest. A declaration that embeds a blob is therefore two pieces: the const, and the build step that produces the blob, and
+only the image build checks the second.
