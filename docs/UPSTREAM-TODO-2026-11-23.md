@@ -115,3 +115,19 @@ All three postdate our pin `fa13df5dd`, so each is a test, not a fact:
 The test is the standing one: re-seat onto the base that carries the upstream commit, remove our patch, run the gates
 and the five levels, and retire only if the behaviour and the numbers hold without it. `20cb27d32` is the cheapest test
 because it touches one file and one patch; the sparse pair is a family of five patches and needs a prefix build.
+
+## 8. The series against current upstream (`ea37382cb`): 8 clean, 24 partial, none absorbed
+
+`scripts/reseat-survey.sh ea37382cb work/reseat2 patches/engine` over all 32 patches, text only:
+
+| verdict | patches | meaning |
+|---|---|---|
+| clean | 8 (`0001`, `0004`, `0009`, `0014`, `0021`, `0028`, `0029`, `0035`) | apply whole on the new base unchanged |
+| partial | 24 | some hunks apply, the rest reject; each needs a re-seat |
+| absorbed | 0 | **not one patch's lines are already in upstream** |
+| refused | 0 | none is obsolete in the sense of "files gone" |
+
+So the answer to "why 32 local patches" is not that upstream declined them: only one has ever been offered
+(`#4809`), and none is absorbed, so every one is still ours to submit. The eight clean ones can go up as they are;
+each partial one is a re-seat, and per the owner's rule of 2026-11-24 the default is to submit rather than keep local,
+reworking a lever into an acceptable shape while the trade is small.
