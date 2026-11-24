@@ -306,3 +306,14 @@ check) is necessary but not sufficient.
 
 State at this point: 47 of 47 files present, 0012's index surface ported, three `sparseAttentionFormat` callers given the
 head block; `compile-cuda-tests` still fails, now inside patch 0020's onepass pipe.
+
+## 17. The declaration audit's two flaws, both measured
+
+The audit that produced the 70-row list searched for `pub fn`/`pub const` only, so a declaration that exists WITHOUT
+`pub` counted as missing: the tokenizer's eight were all present that way, and porting them duplicated members the gate
+rejected in one round. Widening the pattern to any visibility then over-counted in the other direction (170 rows, because
+it also matches declarations the patches merely mention in context lines).
+
+What is reliable is the gate, not the audit: `compile-cuda-tests` plus the image build name a genuinely missing
+declaration and its use site, and the pre-merge tree supplies the definition. The port proceeds file by file with the
+gate behind each, and the audit is at most a coarse map.
