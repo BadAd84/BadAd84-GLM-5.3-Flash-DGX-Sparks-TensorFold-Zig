@@ -354,3 +354,24 @@ the reference copy silently reverted them. Two builds then failed on errors that
 Rule for the next pass: a file taken from `work/premerge` is the series' content, not the tree's, so every adaptation the
 tree needs is re-applied in the same edit and checked by the gate. When a fix keeps coming back, look for the step that
 overwrote it before writing it a third time.
+
+## 21. pr1411's rung, state after the first pass
+
+Landed and committed (`d4412dd33`, `bad3d08e3`): 25 code files, the `TF_GLM_OVN_DISK_SLICE_MIB` settings row and doc row,
+and the `TF_GLM_OVN_KEEP_SEQS` doc row the merge had also dropped.
+
+Rejected hunks still to work, in the tree as `.rej` files:
+
+| file | lines |
+|---|---|
+| `docs/api.md` | 12 |
+| `zig/src/core/lane_cache_queue.zig` | 16 |
+| `zig/src/core/rows_ask.zig` | 9 |
+| `zig/src/core/rows_pool_select_test.zig` | 117 |
+| `zig/src/core/rows_read.zig` | 121 |
+| `zig/src/core/rows_refusal_test.zig` | 10 |
+| `zig/src/core/rows_select.zig` | 19 |
+| plus seven more | |
+
+They are interdependent: `rows_select`'s hunk tests `f.reuses`, a vtable hook whose definition arrives in another of the
+same package's hunks, so the `rows_*` cluster is worked as a set rather than file by file.
