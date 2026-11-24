@@ -288,3 +288,17 @@ in `test-cuda-host` compiles that file's new surface.
 The port is not a mechanical re-apply: the patch no longer applies to `cuda_index.zig` (context drift at line 60), and
 upstream renamed `Mode.all` to `Mode.both`, so the hunks need re-reading against the current struct before they go in.
 That is the next piece of work on this series, and `compile-cuda-tests` is the gate that says when it is done.
+
+## 16. The re-seat needs a per-patch symbol audit, not a file audit
+
+Fixing 0012's surface (the split fields, `selectSplit`, the exported types in `glm_index_check.zig`, the two
+`selectTokens` geometries) moved `compile-cuda-tests` on to the next one: `cuda_onepass` has no member `PipeKernels`, so
+patch 0020 is partly missing too. The pattern is the same in both: hunks that ADDED declarations were rejected in the
+three-way merge, while the files that use them arrived whole, and nothing in `test-cuda-host` compiles that surface.
+
+So the audit is per patch and per declaration: for every patch, take the declarations it adds (`pub fn`, `pub const`,
+struct fields) and check each exists in the tree, then run `compile-cuda-tests`. Recovering files by name (the 47-file
+check) is necessary but not sufficient.
+
+State at this point: 47 of 47 files present, 0012's index surface ported, three `sparseAttentionFormat` callers given the
+head block; `compile-cuda-tests` still fails, now inside patch 0020's onepass pipe.
