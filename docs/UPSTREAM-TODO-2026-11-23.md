@@ -427,3 +427,19 @@ current headers in different ways:
 
 Also restored from the pin-built tree: `struct OvnTail` in `exl3_grouped.cuh`, 9 lines, which the merge had dropped and
 which `exl3_ovn.cuh` uses. The X3 path may have further drift of the same kind; the build names it one at a time.
+
+## 25. The kernel surface compiles with the ports and the restored includes
+
+`glm53-zig:reseat-ports` built on spark1 from the tree at `a7ff51b12`: the 32-patch series, the seven dev packages, the
+restored `glm_index_split.cuh` include and the restored `OvnTail` in `exl3_grouped.cuh`. No `nvcc` error. That is the
+first build in which any of those compiled:
+
+- every package rung had only `test-cuda-host` behind it, and that compiles no `.cu`;
+- `glm_index_split.cuh` had never been in a translation unit, because its include hunk was dropped;
+- `exl3_grouped.cuh` had no `OvnTail` and `exl3_ovn.cuh` used it.
+
+`glm_index_sched.cuh` stays out on purpose: its `key_at` call needs a fourth argument the file's scope does not carry, so
+`INDEX_SCHED` needs a signature port rather than an include. Recorded in section 24.
+
+The build takes about 12 minutes, most of it in `tf_exl3` template instantiation, and its log sits at one line for
+minutes at a time; `pgrep` plus CPU, not the log tail, is how to tell it is alive.
