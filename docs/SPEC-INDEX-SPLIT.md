@@ -51,11 +51,16 @@ recomputes the chain from `tot` alone, which is what the "reads the row's runnin
   count reaches the running `need`, then subtract the count above it); add this chunk's counts above digit `p - 1` into
   `gt[row][chunk]`, read from the histogram the previous step left; zero this chunk's histogram; count byte `p` over this
   chunk's scores whose bytes above equal the fixed prefix; add the chunk's counts into `tot[row][p]`.
-- **step 4**: recompute the digits for all four bytes from `tot[0..3]`; add this chunk's counts above digit 0 into
-  `gt[row][chunk]`; emit the picks. A pool is picked when its key is above the row's fixed prefix, or equal to it and
+- **step 4**: recompute the digits for all four bytes from `tot[0..3]`; emit the picks. It does NOT write `gt`. A pool is picked when its key is above the row's fixed prefix, or equal to it and
   among the first `need` equals, `need` being `K` minus the number of keys strictly above the prefix. Output order is
   pool order, and only the first `K` picks of each row are meaningful. Chunk 0 also writes the incomplete visible pool's
   tokens and the row's output count.
+
+`gt` is written by steps 1 to 3 only, and step 4 must not write it. The reason is ordering: a chunk's emission has
+to read its PREDECESSOR chunks' counts to know which output slot its picks take, and a step-4 write by a predecessor is
+not ordered against that read, so a chunk would observe the predecessor's value with or without its step-4 increment
+depending on scheduling. Only the step-3 state of `gt` is stable, and the emission uses `gt[chunk]` plus this launch's
+byte-0 histogram, which is the one byte whose "count above" is not in `gt` yet. Writing it too would double count.
 
 The `gt` contribution is why step 4 decides byte 0 rather than step 3: a byte's "count above" contributes only once its
 digit is fixed, and byte 0's digit is the last to be known.
