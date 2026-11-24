@@ -24,13 +24,16 @@ below the decode ceiling, and `np` at or above the split floor.
 - `chs`: scores a chunk CTA takes (`splitChunk(np)`: 2048 up to 16384 pools, else 4096).
 - `cp`: chunks a row takes, a power of two (`splitChunks(np)`, at least 1).
 - `step`: which of the five steps this launch performs, 0 to 4.
-- `scratch`: zeroed by the caller before step 0, `rows * 1024` dwords at the front (see Layout).
+- `scratch`: the caller zeroes the `tot` region before step 0 (`rows * 1024` dwords at the front, which is
+  exactly `rows * 4 * 256`). It does NOT zero `hist`: the kernel writes each chunk's histogram before reading
+  it, so `hist` needs no initial value.
 - `pt`, `page_rows`: the token indirection described under Output.
 
 ## Layout inside scratch (the caller's carving)
 
 - `tot`: `rows` by 4 by 256 `int` at `scratch`.
-- `hist`: `rows` by `cp` by 256 `int` at `scratch + rows * 1024 * 4` (this is where the caller zeroes).
+- `hist`: `rows` by `cp` by 256 `int` at `scratch + rows * 1024 * 4`. Written by the kernel in every step before
+  it is read; the caller does not zero it.
 - `gt`: `rows` by `cp` `int` at `hist + rows * cp * 256 * 4`.
 
 ## The five steps
@@ -38,16 +41,24 @@ below the decode ceiling, and `np` at or above the split floor.
 Every step first reads the row's running radix state: the digits fixed so far, and how many more picks are needed. A step
 that fixes another byte updates the row's per-chunk histogram for that byte and accumulates it into `tot`.
 
-- **steps 0 to 3**, one byte per step, most significant first (byte 24 down to 0):
-  1. From the row's totals so far, decide the next digit: the highest bin whose cumulative count reaches the remaining
-     `need`. Fix that byte to it and reduce `need` by the count above it.
-  2. For step > 0, add the chunk's own histogram counts above that digit into `gt[row][chunk]`.
-  3. Zero the chunk's histogram, then count this chunk's scores whose bytes above are already equal to the fixed
-     prefix, keyed by this step's byte.
-  4. Add the chunk's counts into the row's `tot`.
-- **step 4** emits the picks. A pool is picked when its key is above the row's fixed prefix, or equal to it and among
-  the first `need` equals. Output order is pool order, and only the first `K` picks of each row are meaningful. It also
-  writes the incomplete visible pool's tokens and the row's output count.
+The digit for a byte can only be decided once that byte's histogram is complete across the row's chunks, and chunks
+are separate CTAs with no barrier between them. The steps therefore PIPELINE: step `p` counts byte `p` and decides byte
+`p - 1`, using the totals the previous step completed. `need` and the fixed prefix are not carried in memory; each step
+recomputes the chain from `tot` alone, which is what the "reads the row's running radix state" above means.
+
+- **step 0**: count byte 24. Nothing is decided (no byte precedes it).
+- **steps 1 to 3**: recompute digits for bytes 24 up to `p - 1` from `tot[0..p-1]` (the highest bin whose cumulative
+  count reaches the running `need`, then subtract the count above it); add this chunk's counts above digit `p - 1` into
+  `gt[row][chunk]`, read from the histogram the previous step left; zero this chunk's histogram; count byte `p` over this
+  chunk's scores whose bytes above equal the fixed prefix; add the chunk's counts into `tot[row][p]`.
+- **step 4**: recompute the digits for all four bytes from `tot[0..3]`; add this chunk's counts above digit 0 into
+  `gt[row][chunk]`; emit the picks. A pool is picked when its key is above the row's fixed prefix, or equal to it and
+  among the first `need` equals, `need` being `K` minus the number of keys strictly above the prefix. Output order is
+  pool order, and only the first `K` picks of each row are meaningful. Chunk 0 also writes the incomplete visible pool's
+  tokens and the row's output count.
+
+The `gt` contribution is why step 4 decides byte 0 rather than step 3: a byte's "count above" contributes only once its
+digit is fixed, and byte 0's digit is the last to be known.
 
 A chunk whose start is at or past its row's visible bound leaves immediately without writing anything.
 
