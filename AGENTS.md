@@ -119,6 +119,21 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 
 ## Contributing upstream (`ashhart/TensorFold`)
 
+**The target is as close to zero local engine patches as possible (owner 2026-11-24).** Upstream must be as fast as our
+local serve, so a lever that upstream would take is submitted, not held: every local patch is debt that costs a re-seat
+on each upstream bump and drifts from the code everyone else is improving. The order of work is therefore:
+
+1. **Submit anything they will accept**, as its own pull request, ahead of more local work.
+2. **Rework what they would not accept into a shape they would**, while the trade is small: "I would rather lose 0.7% of
+   speed and have the patch accepted upstream than have a bunch of local-only patches". Record the reworked lever's cells
+   beside the original's, so the price of acceptance is a number.
+3. **Only a lever that cannot be made acceptable and carries a real measured gain stays local**, and that is the owner's
+   decision case by case. Its `RECORD.md` says why it cannot go upstream, so the local set is auditable and nobody
+   re-opens it by accident.
+
+A local-only patch is the exception that needs an argument, never the default. `docs/UPSTREAM-LINKS.md` is the table that
+says, per patch, whether it has been opened and in what shape.
+
 The same text is in the three serve repos (GLM Zig, Qwen3.8 Flash Next, DeepSeek-V4.1). It was written 2026-11-12
 from upstream `main` at `000b534a2`: `CONTRIBUTING.md`, `AGENTS.md`, the README's "Contributing with agents",
 `docs/atc/SKILL.md`, `docs/pr/SKILL.md`, `docs/recipes/SKILL.md`, `.github/pull_request_template.md` and
