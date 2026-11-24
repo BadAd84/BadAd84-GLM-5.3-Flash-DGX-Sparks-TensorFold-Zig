@@ -4,16 +4,20 @@
 # runs without it: five beneficial patches in five places test nothing about their combination, and the combination is
 # what ships.
 #
+# THE ORDER BELOW IS THE APPLICATION ORDER, and it is the order the packages were cut in (git's first commit of each
+# RECORD.md): each was cut against the state left by the ones before it, so applying them in any other order conflicts
+# in environment.zig, cuda.zig and cuda_follow.zig, which every one of them edits.
+#
 # Every directory under patches/ (except engine) is either listed below or named in the EXCLUDED block with the verdict
 # that keeps it out. scripts/check-dev-packages.py fails on a package that is in neither place, on a listed package that
 # does not exist, and on an exclusion without a verdict.
-cache-salt
-disk-any-position
-learn-starts
-port-multi-fill
 pr1411
-restore-held
+cache-salt
+learn-starts
 solo-cuts
+disk-any-position
+restore-held
+port-multi-fill
 
 # EXCLUDED, with the record that keeps each one out:
 #   port-hc-dec      a trade: -1.96 -1.00 +1.37 +5.79 -11.72 percent at 1, 2, 4, 6 and 8 clients (queue122)
