@@ -157,3 +157,16 @@ decision taken for the first two has to cover these as well. The same three opti
   land together, which is the exception the rule allows.
 - **Rewrite from TensorFold's own specification**, with the reference source closed while we write it.
 - **Remove**, with the lever it serves retired in the same change.
+
+## The second flagged file is live; the first was dead (checked 2026-11-24)
+
+`exl3_ovn.cuh` (patch 0031) is included by `zig/kernels/cuda/exl3_experts.cu`, so unlike `glm_index_split.cuh` it reaches a
+compiler today and its lever `TF_GLM_OVN_X3_NC` runs. That changes what a clean-room replacement buys: for the index split
+the replacement is what makes the lever exist at all, while here it replaces working code, and the existing tests are the
+oracle either way.
+
+Its exports are small and enumerable for a specification: `tf_exl3::OvnArgs` (a `GroupedArgs` plus an `OvnTail`),
+`ldg_nc_v4` (16-byte trellis loads through the read-only path without L1), `words_of` (a 4-bit lane's two words from one
+load plus a shuffle) and `nc_body<PD>` (the grouped body with PD steps of 16-byte loads staged ahead). A page written from
+those plus the call site in `exl3_experts.zig` and the `TF_GLM_OVN_X3_NC` setting is the next clean-room job, after the
+index split's implementation is verified on hardware.
