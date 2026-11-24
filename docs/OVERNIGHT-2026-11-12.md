@@ -3522,3 +3522,24 @@ Four are UNCLEAR and reply-equal. `TF_GLM_OVN_KVB8=1` is the first PROMISING cel
 change: its four digests (27b8b2a3, 340f3fcd, b86a9c12, e551bb65) differ from the control's (04b1fcb4, 72f1039f, 9eb3186f,
 cc13b95e) at every stream count, so the 4.23 / 2.40 / 2.28 percent buys a different answer. It goes to the owner with
 the five-level arm attached, never into the recipe by discretion.
+
+## Parity against the target, measured the same way: level at one stream, behind at every other
+
+queue135 (`prodshape`) booted `--parallel 4` at every level, which is the shape production runs and the only form a cell
+can be set beside `docs/speed_target.md`:
+
+| clients | production (target) | dev shape (4 slots) | delta |
+|---|---|---|---|
+| 1 | 83.43 | 83.4 | -0.04% |
+| 2 | 91.07 | 85.3 | -6.3% |
+| 4 | 119.97 | 113.1 | -5.7% |
+| 6 | 111.99 | 108.4 | -3.2% |
+| 8 | 136.18 | 123.4 | -9.4% |
+
+First token: ours 139 172 283 205 279 ms against the target's 122 157 228 232 128.
+
+The earlier promoted-shape cells (149.3 and 184.6 at six and eight clients) are NOT a win against this target: they were
+taken with `--parallel` equal to the client count, six and eight slots where production runs four. Measured in
+production's shape we are level at one stream, 5.7 to 6.3 percent behind at two and four, and 9.4 percent behind at
+eight, so the recipe has real work before it can replace production, and the widest opening is the eight-stream cell.
+Every cell here ran with the disk tier on, and the tier-off control showed the tier free, so the gap is the engine's.
