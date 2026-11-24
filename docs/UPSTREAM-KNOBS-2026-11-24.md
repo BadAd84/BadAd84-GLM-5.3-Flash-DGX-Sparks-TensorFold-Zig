@@ -16,6 +16,19 @@ LFM3 - or are outside CUDA (`XPU_CHUNK`, `XPU_CHUNK_SOLO`, scope `.xpu`), and a 
 | `TF_GLM_WIDE_EXPERT_TILE` | 0 | 0 or 1 | a GLM expert tile width |
 | `TF_DFLASH_GRAPH` | 0 | replays DFlash2 holds and live absorbs from CUDA graphs | our drafter is the DFlash2 family |
 
+## Read sites, from the tree at `ea37382cb`
+
+- `TF_GLM_MOE_DIRECT` - `cuda_forward.zig:112`, `read(bool, "TF_GLM_MOE_DIRECT", false)`: **default off**, and its own
+  comment says "a decode window's EXL3 MoE without row copies (cuda_moe.direct)". A decode-path lever, which is where
+  this serve is bound, so it is the first arm to boot.
+- `TF_GLM_INDEX_SPLIT` - consumed in `cuda_engine.zig`, `cuda_follow.zig` and `cuda_forward.zig:182` as "a prompt
+  chunk's indexer rows split across the ranks (rank 0's choice)"; default 2048. A prefill path, so its arms are 0 (never
+  split) and a larger split point.
+- `TF_GLM_WIDE_EXPERT_TILE` - **no consumer**: nothing outside the settings table and its test reads it. A registered
+  row with no reader is inert, so it needs no boot.
+- `TF_DFLASH_GRAPH` - read only in `families/qwen3_5/cuda_draft_graphs.zig:10`, the Qwen family's drafter, not the GLM
+  one; rejected with `TF_CUDA_POOL_AFTER_WARMUP` for the same reason.
+
 ## Rejected before screening
 
 - `TF_MTP_TREES` (default 0): sampled MTP tree drafting - a mode that changes output tokens, which upstream takes on
