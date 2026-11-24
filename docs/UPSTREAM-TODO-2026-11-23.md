@@ -249,3 +249,12 @@ So the comparison holds on the whole model rather than the two-layer probe: ever
 across all three ranks. What remains of his ask is the prompt-cache resume that lands on a kept slot, and the driver had
 to be fixed twice to get here (the binary lives at `/usr/local/bin` in the check image, and `XENV` is its fourth
 positional argument, not an environment variable).
+
+## 13. The re-seat is green
+
+A full clean rebuild of the host suite on the gate host returns 0: `zig build test-cuda-host` with the cache removed
+ran 364 s and every test passed, against the same invocation on the pristine base at `ea37382cb` which also returns 0.
+The seven failures the merge produced are closed, each by a real cause rather than an expectation moved:
+the eleven-argument `absorbQ`, the sparse path's caller-supplied head block, `headBlockFor` for the roped row, the
+drafter window from patch 0038, the wide prompt step stopping at the next request start, and the blank lease including
+the head rows.
