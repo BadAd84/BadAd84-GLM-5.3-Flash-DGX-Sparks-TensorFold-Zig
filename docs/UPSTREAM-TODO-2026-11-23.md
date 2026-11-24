@@ -131,3 +131,24 @@ So the answer to "why 32 local patches" is not that upstream declined them: only
 (`#4809`), and none is absorbed, so every one is still ours to submit. The eight clean ones can go up as they are;
 each partial one is a re-seat, and per the owner's rule of 2026-11-24 the default is to submit rather than keep local,
 reworking a lever into an acceptable shape while the trade is small.
+
+## 9. The re-seat itself: a three-way merge, 22 API conflicts, not 114 text hunks
+
+Applying the series with `git apply --3way` (the patch blobs are reachable from the parity clone) collapses the survey's
+114 rejected hunks to **27 conflict blocks in 18 files**; ten patches merge clean and the rest leave markers. Five blocks
+were "ours empty, theirs adds" and are resolved by taking theirs (`docs/environment.md`, `platform/environment.zig`,
+`tests/cuda/glm_ovn_checks.zig`). The remaining 22 are real merges in fifteen files, concentrated in
+`cuda_latent.zig` (4), `prompt_cache.zig` (3), `cuda_glue.zig` (2), `cuda_forward.zig` (2):
+
+| file | blocks |
+|---|---|
+| `zig/src/families/glm/cuda_latent.zig` | 4 |
+| `zig/src/core/prompt_cache.zig` | 3 |
+| `zig/src/families/glm/cuda_glue.zig`, `cuda_forward.zig` | 2 each |
+| `prompt_cache_fork.zig`, `prompt_cache_index.zig`, `prompt_cache_keep.zig`, `cuda.zig`, `cuda_dsa_block.zig`, `cuda_env_test.zig`, `cuda_prompt_pair.zig`, `cuda_prompts.zig`, `cuda_state.zig`, `cuda/kernels.zig`, `test_support/glm_snap_fixture.zig` | 1 each |
+
+They are API merges, not text drift: upstream changed `absorbQ` to take E4M3 `sk` scales and `rowBlocks`/`chunks` to take
+a pointer tuple, while our patches add the roped (YaRN) branch and the fuse/skip path into the same functions. Each needs
+the two APIs reconciled and the call sites updated, and each is also the moment to decide **port or retire**: where
+upstream's new body already does what our hunk did (`20cb27d32` against `0024` is the clearest), the patch is retired
+instead of merged.
