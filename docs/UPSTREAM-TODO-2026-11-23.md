@@ -412,3 +412,18 @@ store, a rows handle, a prompt, a born mark and spans. So it is a name collision
 The rung is therefore blocked on a function body, not on effort. The remaining places to look are the upstream project the
 package was cut from, or the lane that wrote `pr1411`, and until one of those is found the call in `rows_slices.zig` has
 no definition.
+
+## 24. One of the two restored includes cannot be fixed as an include
+
+Restoring patch 0012's two includes made the image build compile both files for the first time, and they disagree with the
+current headers in different ways:
+
+- `glm_index_split.cuh` is kept. It needs the call-site adaptations already made (the `Mode` rename, the geometry
+  arguments) and nothing else the build has objected to.
+- `glm_index_sched.cuh` is reverted. It calls `key_at(pt, ps / 2, p)` with three arguments where the current
+  `glm_index_scores.cuh:36` takes four, `(pt, page_elems, p, pp)`, and the missing `pp` is `512 / pool` in the sibling
+  kernel's scope, which the sched file does not have. That is a kernel-signature port, not an include fix, so
+  `INDEX_SCHED` stays dormant until it gets one.
+
+Also restored from the pin-built tree: `struct OvnTail` in `exl3_grouped.cuh`, 9 lines, which the merge had dropped and
+which `exl3_ovn.cuh` uses. The X3 path may have further drift of the same kind; the build names it one at a time.
