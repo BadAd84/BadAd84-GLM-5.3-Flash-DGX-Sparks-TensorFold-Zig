@@ -3560,3 +3560,20 @@ writes into a temporary index while the files on disk never move. So the package
 never at the pin at all. With the lock removed the checkout landed at `fa13df5dd` and the tree carries its 480 core
 files; the series and then the packages can be applied for real. A staged tree that reports a clean status at the wrong
 sha, or an empty "before:", is the tell.
+
+## KVB8's drift, measured: a different answer, not a flipped token
+
+`scripts/text-probe.py` ran the same three prompts with `TF_GLM_OVN_KVB8` off and on, on the same image and env:
+
+| prompt | first difference | text similarity | lengths |
+|---|---|---|---|
+| prose | char 179 of 1260 | 0.244 | 1260 then 1107 |
+| code | char 146 of 938 | 0.225 | 938 then 908 |
+| arithmetic | char 242 of 786 | 0.915 | 786 then 784 |
+
+The replies agree for the first 150 to 240 characters and then continue into materially different text: similarity 0.22
+to 0.24 on prose and code, with the second answer shorter in both. Only the arithmetic answer survives (0.91), and that
+is the prompt with least room to diverge. So the +4.23 / +2.40 / +2.28 percent is not a cosmetic precision loss: it buys
+a different answer on open-ended work, which is not a trade to keep locally either - Mia-AI-Lab's lossy weights are a
+one-time quantisation of the model, while this is a per-token precision loss in the attention that compounds through a
+generation. `TF_GLM_OVN_KVB8` stays 0, recorded in the register with these cells.
