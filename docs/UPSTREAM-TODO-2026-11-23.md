@@ -174,3 +174,23 @@ What the cycles taught, each of which cost a rebuild:
   already a `Function`.
 - **The env test's lists are part of the re-seat**: a row our patches add must be named in one of its lists or the count
   assertion fails (`TF_GLM_INDEX_DECODE_FROM` was the one).
+
+## 11. The re-seat compiles and runs; six tests still fail, in two classes
+
+`zig build test-cuda-host` on the re-seated tree: 482/484 steps, **1270 of 1277 tests pass, 6 fail**, 1 skipped. The
+build is clean; the failures are behaviour.
+
+**Four are our own MLA tests** asserting exact launch records (`absorb_q_192`, the 16-head roped tiles, the fuse_rows
+split, the E4M3 forms): the merged `absorbQ`/`rowBlocks`/`chunks` signatures moved where the arguments come from, so the
+recorded grids and argument tuples no longer match. Each has to be re-derived from the merged implementation, not edited
+to fit it.
+
+**Two are upstream's own tests that our patches break**, which is the serious class:
+
+| test | what happens |
+|---|---|
+| `cuda_disk_ranks_test`: a blank state takes bytes past its words and front only once sealed | our guard in `cuda_prompt_cuts.zig:56` returns `error.BadChunk` ("a solo pass would step over a request start") on a pass upstream's test performs |
+| `dflash`: the drafter's window bounds its context from below | `windowFrom(90, WIN + 100)` returns 100 where upstream expects 90, so one of our window levers changed the resumed-stream rule |
+
+So "current" is not yet true in the full sense: the tree builds and runs, and six tests stand between it and the base's
+own green. The two upstream ones are regressions our patches introduce on the new code and are fixed first.
