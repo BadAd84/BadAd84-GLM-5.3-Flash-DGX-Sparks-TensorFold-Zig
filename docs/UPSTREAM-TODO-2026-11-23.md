@@ -194,3 +194,22 @@ to fit it.
 
 So "current" is not yet true in the full sense: the tree builds and runs, and six tests stand between it and the base's
 own green. The two upstream ones are regressions our patches introduce on the new code and are fixed first.
+
+## 12. The full-checkpoint receipt the maintainer asked for
+
+`gpu-check-tp3-keep-seqs.sh prkeep-full glm-keep-seqs-check` with `TF_GLM_KEEP_SEQS=1`, on the complete checkpoint at
+TP=3 (spark1-3, 2026-11-24): **rc 0 0 0 (ranks 0, 1, 2) in 266 s**, rank 0 reporting 1 PASS and 0 FAIL.
+
+```
+RESULT control kv8=false, 600-token prompt: differs from the fresh run at step 0, as planted
+RESULT control kv8=false, 3000-token prompt: differs from the fresh run at step 0, as planted
+RESULT control kv8=true, 600-token prompt: differs from the fresh run at step 0, as planted
+RESULT control kv8=true, 3000-token prompt: differs from the fresh run at step 0, as planted
+PASS kept sequences, as left and with every byte poisoned, equal fresh ones: 24 greedy steps' tokens,
+bf16 logits rows and MTP drafts after prompts of { 600, 3000 } tokens, fp8 and bf16 caches
+```
+
+So the comparison holds on the whole model rather than the two-layer probe: every layer kind and the MTP head are in it,
+across all three ranks. What remains of his ask is the prompt-cache resume that lands on a kept slot, and the driver had
+to be fixed twice to get here (the binary lives at `/usr/local/bin` in the check image, and `XENV` is its fourth
+positional argument, not an environment variable).
