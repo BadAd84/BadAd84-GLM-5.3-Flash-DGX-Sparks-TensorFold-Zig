@@ -375,3 +375,17 @@ Rejected hunks still to work, in the tree as `.rej` files:
 
 They are interdependent: `rows_select`'s hunk tests `f.reuses`, a vtable hook whose definition arrives in another of the
 same package's hunks, so the `rows_*` cluster is worked as a set rather than file by file.
+
+## 22. Two kernels were dead: patch 0012's include hunk was dropped
+
+`zig/kernels/cuda/glm_index_split.cuh` and `glm_index_sched.cuh` exist in the tree and are included by NOTHING.
+Patch 0012 adds their two includes to `zig/kernels/cuda/glm_index.cu`, right after `glm_index_pools.cuh`, and that hunk
+was rejected in the three-way merge while the files themselves were created.
+
+The consequence is not cosmetic: `tf_glm_index_split` and the sched kernels are loaded BY NAME at run time
+(`cuda_index.zig`), so `TF_GLM_OVN_DECODE_INDEX` and `INDEX_SCHED` have been loading symbols that the `glm_index`
+fatbin never contained. Nothing in `test-cuda-host` sees it, and the declaration audit cannot see it either: it checks
+that a NAME exists in a file, not that the file is included by anything.
+
+Restored. The audit needs a third question for the next re-seat: after the declaration audit, ask which translation unit
+compiles each restored file, and whether its include is present.
