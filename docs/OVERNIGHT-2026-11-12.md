@@ -3608,6 +3608,8 @@ same env, the same `--parallel 4` and the same 1M context as our dev cells:
 | 1 | 68.3 | 85.0 | +24.5% |
 | 2 | 72.8 | 86.3 | +18.5% |
 | 4 | 88.3 | 115.2 | +30.5% |
+| 6 | 87.4 | 122.3 | +39.9% |
+| 8 | 89.7 | 124.2 | +38.4% |
 
 Acceptance agrees: 0.638 / 0.626 / 0.631 on the base against 0.690 / 0.657 / 0.707 on ours.
 
