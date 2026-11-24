@@ -140,3 +140,10 @@ One import is not ours and must not be counted as such: `scripts/engine/import-m
 `miaai-glm` branch as TensorFold v1.0.7 plus **MiaAI-Lab's recipe zig-engine patches 0001-0007**, committed under a
 synthetic identity (`ai-engine import <adam@onetouchtechnical.com>`). Code that arrives that way is MiaAI-Lab's, and a patch
 touching it is ours only in the adaptation.
+
+**Checked, and the import is not in the archive at all**: across the bundle's 82 refs there are zero commits by
+`ai-engine import`. The `miaai-glm` branch those seven patches built lived in a local worktree and was never bundled, so no
+reachable commit in the archived fork carries MiaAI-Lab's identity. What the bundle therefore cannot settle is whether a
+lever was *inspired* by that port's code; what it does settle is that no imported code sits in the history the series came
+from. A file-level comparison against v1.0.7 is not evidence either way, because those refs are thousands of upstream
+commits past that base.
