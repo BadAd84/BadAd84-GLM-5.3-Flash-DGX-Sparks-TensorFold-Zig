@@ -6,6 +6,8 @@
 #   bash bench-arm.sh glm53-zig:pin9c9 pin
 #   bash bench-arm.sh glm53-zig:9c9bf54 full
 # Env: KNOBS, DRAFTER, CTX, XENV, XSERVE as zig-tp3.sh; LEVELS (default "1 2 4 6 8") the stream counts to run;
+#      SPLOTS the serve's --parallel (default: the level, our own shape); set SPLOTS=4 to measure the shape
+#      production runs at every stream count, which is the only form a 6 or 8 client cell can be compared in;
 #      SARGS extra streams.py arguments (for example "--pad 6000" for a long prompt pass).
 # Each level also keeps rank 0's engine log (its last 800 lines) as r0-P<N>.log: the startup facts and the per-request
 # lines (kept states, paired prompt steps) a cell's numbers are read against.
@@ -25,7 +27,7 @@ drop() {
 for P in ${LEVELS:-1 2 4 6 8}; do
   echo "[bench $TAG] P=$P boot at $(date +%T)"
   drop
-  IMAGE="$IMAGE" KNOBS="${KNOBS:-off}" DRAFTER="${DRAFTER:-1}" CTX="${CTX:-}" bash "$G/zig-tp3.sh" "$P" > "$OUT/boot-P$P.log" 2>&1 \
+  IMAGE="$IMAGE" KNOBS="${KNOBS:-off}" DRAFTER="${DRAFTER:-1}" CTX="${CTX:-}" bash "$G/zig-tp3.sh" "${SPLOTS:-$P}" > "$OUT/boot-P$P.log" 2>&1 \
     || { echo "[bench $TAG] BOOT FAILED P=$P"; bash "$G/zig-tp3-stop.sh" >/dev/null 2>&1; sleep 10; continue; }
   python3 "$G/streams.py" 8300 "$P" --kind prose --max-tokens 400 --rounds 3 "${SA[@]}" \
       --tag "$TAG-P$P" --out "$OUT/P$P.jsonl" > "$OUT/P$P.out" 2>&1 \

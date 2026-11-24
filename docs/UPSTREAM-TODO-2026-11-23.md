@@ -200,6 +200,9 @@ The one that remained:
   its tip, so the divergence is the size the seal recomputes from `s.shared` exceeding the lease `keepAs` took from
   `plan.len` on the same kept state - an input difference between the two calls, not a guard to relax. Relaxing it was
   tried and moved the failure to the `n >` clause on the next boot, which is why the guard is restored byte-identical.
+  The lead: the test seals with `at - 1` as the MTP length (`cuda_disk_ranks_test.zig:183`), so `Plan.size` at the seal
+  adds 2,047 MTP rows to a lease that `blankAs` took with none - and `blank`/`blankAs` are upstream's own, so the lease
+  sizing or a `Plan.size` input is what one of our patches changes. That is where the next pass starts.
 
 ## 11b. The older notes
 
