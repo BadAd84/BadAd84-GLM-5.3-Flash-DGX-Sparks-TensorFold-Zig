@@ -3487,3 +3487,20 @@ in the image we serve (the table is compiled in, so the binary is the oracle for
 The library variables (`NCCL_*`, `HF_HUB_OFFLINE`) are excluded by construction: the engine never reads them and they must
 be in the container. A silently ignored row is the dangerous shape, because the serve runs without the setting while the
 env says it is on, so this check belongs in front of every promotion, against the image being promoted.
+
+## The recipe on the promoted shape, and the control it still needs
+
+`queue131` ran the five levels with `LEARN` at its promoted default and the cache drop in place:
+
+| clients | 1 | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| decode tok/s | 82.9 | 85.8 | 113.0 | 149.3 | 184.6 |
+| first token ms | 134 | 172 | 211 | 463 | 137 |
+| acceptance | 0.690 | 0.657 | 0.707 | 0.722 | 0.780 |
+
+At one, two and four clients this is 1.7, 0.9 and 0.3 percent over the post-sync control (81.51 85.04 112.65), so the
+tier costs nothing there. At six and eight the cells (149.3 and 184.6) are far above anything measured before, but the
+only earlier six and eight cells (110.2 and 138.0) were taken before the env sync, so nothing yet says whether the gain
+is the tier, the kept sequences the tier now restores, or a different env. `queue134` runs the same image, env and
+harness with `LEARN=0` after the five-row screen; that pair is the like-for-like comparison, and only then does a claim
+get written here.
