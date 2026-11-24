@@ -14,6 +14,22 @@ whether it is planned, blocked (with why) or not upstreamable (with why).
 | patch | subject | pull request | branch | state | retirement |
 |---|---|---|---|---|---|
 | `0001` | [PATCH] glm tests: the shared-window check sizes its rows from the eng | - | - | not opened | - |
+
+## Candidate order for the upstream queue (assessed 2026-11-24)
+
+`0001` is ready: one file, one behaviour, a latent defect, branch `lanes-test-window-rows` at `d16df9218`, fmt-green.
+
+The next candidates are not equals, and this is what the series looks like when read for upstream shape:
+
+| patch | shape | note |
+|---|---|---|
+| `0001` | one test file | a latent sizing defect; the clearest candidate |
+| `0002` | three test files plus `server/root.zig` | mostly tests, but the `root.zig` hunk makes it a core and server change, so it needs its own one-behaviour argument |
+| `0003` | host prompt-bench step | a tool addition, likely acceptable on its own |
+| `0005`, `0019`, `0020`, `0022` | knobs with kernels | each needs the five settings places, a kernel-contract entry and a GPU receipt |
+| `0032` | already up as pull request 4809 | in review |
+
+So after `0001` the queue is a choice between `0003` (a tool, low risk), `0002` (mostly tests but touches `root.zig`), and taking a kernel lever through the full recipe. That choice is the owner's, and it is worth making before a branch is cut for the wrong one.
 | `0002` | [PATCH] core and server: the disk grid on the I/O worker, and a quiesc | - | - | not opened | - |
 | `0003` | [PATCH] host: the prompt-bench step, so request preparation can be tim | - | - | not opened | - |
 | `0004` | [PATCH] core: the TF_GLM_OVN knob registry | - | - | not opened | - |
