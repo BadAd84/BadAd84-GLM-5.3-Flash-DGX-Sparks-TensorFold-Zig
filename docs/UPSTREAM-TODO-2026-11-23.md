@@ -250,7 +250,7 @@ across all three ranks. What remains of his ask is the prompt-cache resume that 
 to be fixed twice to get here (the binary lives at `/usr/local/bin` in the check image, and `XENV` is its fourth
 positional argument, not an environment variable).
 
-## 13. The re-seat is green
+## 13. The host suite is green (and what that does not cover)
 
 A full clean rebuild of the host suite on the gate host returns 0: `zig build test-cuda-host` with the cache removed
 ran 364 s and every test passed, against the same invocation on the pristine base at `ea37382cb` which also returns 0.
@@ -258,6 +258,10 @@ The seven failures the merge produced are closed, each by a real cause rather th
 the eleven-argument `absorbQ`, the sparse path's caller-supplied head block, `headBlockFor` for the roped row, the
 drafter window from patch 0038, the wide prompt step stopping at the next request start, and the blank lease including
 the head rows.
+
+**Scope warning, added after the image build:** `test-cuda-host` compiles none of the CUDA kernel surface, so this green
+result does not cover it. Sections 14 to 16 record what that hid: 27 missing new files, and 70 added declarations absent
+across twelve patches. The re-seat is green on the host suite and NOT complete.
 
 ## 14. The apply had silently lost 27 of the series' 47 new files
 
