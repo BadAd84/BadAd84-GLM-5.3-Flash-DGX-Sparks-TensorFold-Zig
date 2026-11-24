@@ -389,3 +389,18 @@ that a NAME exists in a file, not that the file is included by anything.
 
 Restored. The audit needs a third question for the next re-seat: after the declaration audit, ask which translation unit
 compiles each restored file, and whether its include is present.
+
+## 23. pr1411 needs a function the package does not fully carry
+
+`rows_slices.zig` calls `read.place(...)`, and `rows_read.zig` has no `place`. The call is in the tree because
+`pr1411`'s patch applied, but the function's own hunks were rejected: its `.rej` holds a ONE-LINE fragment (the
+signature and an opening brace), and its body is not in the reject, not in the file, and not in the pre-merge tree,
+where `rows_read.zig` has no `place` either. Appending that fragment corrupts the file, which is what happened the first
+time and again just now before the revert.
+
+Two related fixes are real and kept: `scatter` in `rows_read.zig` and `Snapshot` in `lane_cache_queue.zig` both needed
+`pub`, which they now have.
+
+So the rung is not "three small edits from done": the package is missing a function body that nothing we hold contains.
+Recovering it means the retired fork's own history (the bundle's `ovn-*` or `ots-*` refs) or the upstream project the
+package was cut from, and that is the next place to look rather than a fifth attempt at the fragment.
