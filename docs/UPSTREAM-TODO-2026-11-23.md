@@ -203,6 +203,10 @@ The one that remained:
   The lead: the test seals with `at - 1` as the MTP length (`cuda_disk_ranks_test.zig:183`), so `Plan.size` at the seal
   adds 2,047 MTP rows to a lease that `blankAs` took with none - and `blank`/`blankAs` are upstream's own, so the lease
   sizing or a `Plan.size` input is what one of our patches changes. That is where the next pass starts.
+  Found: `planBytes` (ours, from patch 0026) took the head's rows as none while the head flag is off, so `blankAs` leased
+  10 pages for a state at 2048 where the seal, which includes the MTP rows regardless of the flag, needs 11 (measured:
+  `n=22614272 lease=20971520 pos=2048 mtp_len=2047 shared=0 cap=6144 mtp=true pages=2097152`). A blank lease is the most
+  a state at that position can need, so it now includes the head rows as upstream's does.
 
 ## 11b. The older notes
 
