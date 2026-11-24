@@ -1,0 +1,77 @@
+# Declarations the re-seat is missing
+
+Every `pub fn` or `pub const` a patch adds whose declaration is absent from the tree at `ea37382cb`.
+`test-cuda-host` cannot see most of these; `compile-cuda-tests` and the image build can.
+
+| patch | file | kind | name |
+|---|---|---|---|
+| 0007-index-decode-windows.patch | `zig/src/families/glm/cuda_index.zig` | fn | `decodeFrom` |
+| 0012-index-sched-decode-pools32.patch | `zig/src/families/glm/cuda_sparse.zig` | fn | `ovnListBytes` |
+| 0020-onepass-pipe.patch | `zig/src/cuda/kernels.zig` | const | `glm_onepass_pipe` |
+| 0020-onepass-pipe.patch | `zig/src/families/glm/cuda_onepass.zig` | const | `pipe_smem` |
+| 0020-onepass-pipe.patch | `zig/src/families/glm/cuda_onepass.zig` | fn | `wantedPipe` |
+| 0020-onepass-pipe.patch | `zig/src/families/glm/cuda_onepass.zig` | const | `PipeKernels` |
+| 0020-onepass-pipe.patch | `zig/src/families/glm/cuda_onepass.zig` | fn | `openPipe` |
+| 0020-onepass-pipe.patch | `zig/src/families/glm/cuda_onepass.zig` | fn | `takesExact` |
+| 0020-onepass-pipe.patch | `zig/src/families/glm/cuda_onepass.zig` | fn | `runPipe` |
+| 0021-kda-chunked.patch | `zig/src/cuda/kernels.zig` | const | `glm_l2pf` |
+| 0022-mm-knobs.patch | `zig/src/families/glm/cuda_mm.zig` | const | `Ovn` |
+| 0022-mm-knobs.patch | `zig/src/families/glm/cuda_mm.zig` | const | `Choice` |
+| 0022-mm-knobs.patch | `zig/src/families/glm/cuda_mm.zig` | fn | `choose` |
+| 0022-mm-knobs.patch | `zig/src/families/glm/cuda_mm.zig` | fn | `tiledBy` |
+| 0022-mm-knobs.patch | `zig/src/families/glm/cuda_mm.zig` | fn | `swigluReduceB16` |
+| 0022-mm-knobs.patch | `zig/src/families/glm/cuda_mm.zig` | fn | `tileShared` |
+| 0022-mm-knobs.patch | `zig/src/families/glm/cuda_mm.zig` | fn | `swigluReduce` |
+| 0024-glue-fuse.patch | `zig/src/families/glm/cuda_forward.zig` | fn | `l2pfFor` |
+| 0024-glue-fuse.patch | `zig/src/families/glm/cuda_forward.zig` | fn | `post` |
+| 0024-glue-fuse.patch | `zig/src/families/glm/cuda_glue.zig` | fn | `hcGlue` |
+| 0024-glue-fuse.patch | `zig/src/families/glm/cuda_glue.zig` | fn | `hcRow` |
+| 0025-head-block-rule.patch | `zig/src/families/glm/cuda_dsa_block.zig` | fn | `denseRows` |
+| 0025-head-block-rule.patch | `zig/src/families/glm/cuda_latent.zig` | fn | `headBlockOf` |
+| 0030-render-once-host-once.patch | `zig/src/core/template/eval.zig` | fn | `rootMarked` |
+| 0030-render-once-host-once.patch | `zig/src/core/template/template.zig` | const | `Watch` |
+| 0030-render-once-host-once.patch | `zig/src/core/template/template.zig` | const | `More` |
+| 0030-render-once-host-once.patch | `zig/src/core/template/template.zig` | fn | `renderMore` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | const | `kept` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | fn | `validMasked` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | fn | `checkSpans` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | const | `Segment` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | fn | `segments` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | fn | `refuseAdded` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | fn | `encodeSegment` |
+| 0030-render-once-host-once.patch | `zig/src/core/tokenizer/tokenizer.zig` | fn | `encodeTextMasked` |
+| 0030-render-once-host-once.patch | `zig/src/server/messages.zig` | const | `Args` |
+| 0030-render-once-host-once.patch | `zig/src/server/messages.zig` | fn | `toolArgumentsWith` |
+| 0030-render-once-host-once.patch | `zig/src/server/model_text.zig` | const | `Kept` |
+| 0030-render-once-host-once.patch | `zig/src/server/model_text.zig` | const | `Pieces` |
+| 0030-render-once-host-once.patch | `zig/src/server/model_text.zig` | fn | `keep` |
+| 0030-render-once-host-once.patch | `zig/src/server/model_text.zig` | fn | `pieces` |
+| 0030-render-once-host-once.patch | `zig/src/server/model_text.zig` | fn | `prefixPieces` |
+| 0030-render-once-host-once.patch | `zig/src/server/prompt.zig` | fn | `needsUserAfterTool` |
+| 0031-glm-exl3-x3-decode.patch | `zig/src/cuda/exl3_experts.zig` | const | `Ovn` |
+| 0031-glm-exl3-x3-decode.patch | `zig/src/cuda/exl3_experts.zig` | const | `Variant` |
+| 0031-glm-exl3-x3-decode.patch | `zig/src/cuda/exl3_experts.zig` | fn | `variant` |
+| 0031-glm-exl3-x3-decode.patch | `zig/src/cuda/exl3_experts.zig` | fn | `fusable` |
+| 0031-glm-exl3-x3-decode.patch | `zig/src/cuda/exl3_experts.zig` | fn | `rowsIn` |
+| 0032-glm-keep-seqs.patch | `zig/src/families/glm/cuda_engine.zig` | fn | `keepsSequence` |
+| 0037-glm-side-prio.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `high` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_dsa_block.zig` | fn | `bodyRest` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_dsa_block.zig` | fn | `prepareRows` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward.zig` | const | `pieceFront` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward.zig` | const | `pieceMla` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward.zig` | const | `pieceFfn` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward.zig` | const | `pieceFrontRows` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward.zig` | fn | `mixerFrom` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward.zig` | fn | `ffnFrom` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pair.zig` | fn | `exchangeGlue` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `pieceFront` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `pieceFfn` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `pieceMla` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `handsFront` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `frontRows` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `frontRanges` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_forward_pieces.zig` | fn | `gluePiecesAsync` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_kda_block.zig` | fn | `bodyRest` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_kda_block.zig` | fn | `projectRows` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_moe.zig` | fn | `routeRows` |
+| 0038-glm-piece-front.patch | `zig/src/families/glm/cuda_moe.zig` | fn | `bodyRest` |
