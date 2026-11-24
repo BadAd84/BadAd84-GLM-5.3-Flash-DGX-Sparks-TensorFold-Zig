@@ -58,6 +58,17 @@ today is the Python engine's (`ots/GLM-5.3-Flash-DGX-Sparks-TensorFold-Python-TP
 
 No source file, kernel or substantial code block is copied or adapted into this repo from another project (engine, library, recipe, vendor sample), permissive licences included. Interfaces, formats, protocols and behaviour are facts we implement ourselves, with the reference source closed while we write. A file that came from elsewhere does not enter a patch series, a PR or this repo; the only exception is the owner's explicit written approval in the session, and then the licence, the upstream copyright line and a `THIRD_PARTY_NOTICES` entry land with it. Every new file names its origin in its patch RECORD (a kernel also in its own header), and a copied file found later is replaced by an original implementation or removed, with the change recorded. This governs incorporation; running or modifying permissively or copyleft-licensed software we deploy is unaffected. The rule exists because PR #4183's int4 kernel was another project's Apache-2.0 file and put that contribution at risk on provenance alone.
 
+## Gates for the clean-room work
+
+- `python scripts/check-spec-index-split.py . <tree>` holds `docs/SPEC-INDEX-SPLIT.md` to the facts an adversarial review
+  established from our own call sites: the counts rule keys on `npool > K` with `4 * K`, the caller zeroes `tot` only so
+  step 1 STORES into `gt`, step 4 writes neither `gt` nor `hist`, and the launch contract (grid, block, one stream,
+  parameter order). It reports the call-site checks as unrun when the tree is absent, since this repo tracks no engine
+  tree; run it with the applied tree, as `apply.sh` produces it.
+- The specification is written so the kernel can be implemented with the reference closed, and it has been corrected four
+  times, each time for the same class: a read whose producing write is not ordered. When editing it, ask of every read of
+  `tot`, `hist`, `gt`, `TOK` or `CNT`: which launch wrote it, and is that launch ordered with respect to this one?
+
 ## Conventions
 
 - **On every TensorFold version bump, re-test the whole patch stack and retire what upstream absorbed (owner
