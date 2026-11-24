@@ -343,3 +343,14 @@ before it left. The order in that file is priority, not applicability.
 
 The rung order to port in, lightest first, is the list's own: pr1411, cache-salt, learn-starts, solo-cuts,
 disk-any-position, restore-held, port-multi-fill.
+
+## 20. Replacing a file from the reference tree reverts the adaptations already in it
+
+Chasing a build that failed on `glm_index_ovn_check.zig`, I installed the series' own copy of that file from the
+reconstructed tree. That is the right source for CONTENT, but the tree's copy had also carried two adaptations to the new
+base (`.both` for the renamed `Mode`, and the geometry arguments `poolBucket` and `selectTokens` gained), and installing
+the reference copy silently reverted them. Two builds then failed on errors that had already been fixed once.
+
+Rule for the next pass: a file taken from `work/premerge` is the series' content, not the tree's, so every adaptation the
+tree needs is re-applied in the same edit and checked by the gate. When a fix keeps coming back, look for the step that
+overwrote it before writing it a third time.
