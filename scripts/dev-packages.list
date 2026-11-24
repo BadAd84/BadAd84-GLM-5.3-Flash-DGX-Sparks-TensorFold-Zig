@@ -12,7 +12,6 @@
 # that keeps it out. scripts/check-dev-packages.py fails on a package that is in neither place, on a listed package that
 # does not exist, and on an exclusion without a verdict.
 pr1411
-cache-salt
 learn-starts
 solo-cuts
 disk-any-position
@@ -24,6 +23,10 @@ port-multi-fill
 #   port-latent-tile rejected: -4.24 percent; not to be revisited without a new mechanism
 #   port-prompt-many superseded by port-multi-fill, which carries the same batched prompt pass
 #   port-fp8-pages   unmeasured beyond step 1; it joins when a measured improvement exists
+#   cache-salt       superseded: upstream main carries the behaviour (per-request cache_salt, per-key salting,
+#                    isolated RAM states, redaction, golden tests), so 78 of its 81 hunks were already present and the
+#                    other 3 were whitespace deletions in lane_host.zig and cli.zig. Ported as a rung on 2026-11-24 and
+#                    retired the same way a patch is when upstream lands it.
 
 # HOW THE UNION IS BUILT (measured 2026-11-24): not by applying these in sequence.
 # Every package here edits zig/src/platform/environment.zig, zig/src/families/glm/cuda.zig and
