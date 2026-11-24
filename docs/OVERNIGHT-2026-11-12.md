@@ -3549,3 +3549,14 @@ taken with `--parallel` equal to the client count, six and eight slots where pro
 production's shape we are level at one stream, 5.7 to 6.3 percent behind at two and four, and 9.4 percent behind at
 eight, so the recipe has real work before it can replace production, and the widest opening is the eight-stream cell.
 Every cell here ran with the disk tier on, and the tier-off control showed the tier free, so the gap is the engine's.
+
+## The dev-union failures were a stale git lock, not conflicting patches
+
+Every attempt to stack the packages reported "applied" with a tree id and left the working tree unchanged, and one tree
+answered `fatal: bad object HEAD`. The cause was a stale `index.lock` inside the staged tree's `.git` (an earlier apply
+was interrupted): `git checkout` then refuses with "a git process may have crashed in this repository earlier: remove
+the file manually to continue", the applier's own `read-tree`/`write-tree` reports an empty "before:", and `git apply`
+writes into a temporary index while the files on disk never move. So the packages looked incompatible when the tree was
+never at the pin at all. With the lock removed the checkout landed at `fa13df5dd` and the tree carries its 480 core
+files; the series and then the packages can be applied for real. A staged tree that reports a clean status at the wrong
+sha, or an empty "before:", is the tell.
