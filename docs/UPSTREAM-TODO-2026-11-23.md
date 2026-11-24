@@ -402,5 +402,13 @@ Two related fixes are real and kept: `scatter` in `rows_read.zig` and `Snapshot`
 `pub`, which they now have.
 
 So the rung is not "three small edits from done": the package is missing a function body that nothing we hold contains.
-Recovering it means the retired fork's own history (the bundle's `ovn-*` or `ots-*` refs) or the upstream project the
-package was cut from, and that is the next place to look rather than a fifth attempt at the fragment.
+Searched the retired fork's refs for it (fetched into `work/up/TensorFold` as `refs/aie/*`): `pub fn place(` appears in
+two patch files there, `patches/dsv41/0301-dsv41-split-prefill.patch` and
+`patches/upstream-dsv41/0025-dsv41-recipe-series.patch`, both DeepSeek V4.1's. That one takes `(used, size, cap)` and
+returns an optional offset, a buffer slot finder, which is NOT the function the call needs: `rows_slices.zig` passes a
+store, a rows handle, a prompt, a born mark and spans. So it is a name collision, the fork's `rows_read.zig` has no
+`place` at all, and the body the package needs is not in anything we hold.
+
+The rung is therefore blocked on a function body, not on effort. The remaining places to look are the upstream project the
+package was cut from, or the lane that wrote `pr1411`, and until one of those is found the call in `rows_slices.zig` has
+no definition.
