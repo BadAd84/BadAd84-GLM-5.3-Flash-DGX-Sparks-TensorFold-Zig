@@ -111,6 +111,17 @@ outside the two patches above and the two docs (2.1).
 
 ---
 
+## This repo's case is not the Qwen repo's case (checked 2026-11-24)
+
+The Qwen repo's single copied-source file, `zig/kernels/cuda/fn_int4.cu`, is DECLARED in the full sense: the patch
+carries the Apache-2.0 licence, `Copyright 2026 MiaAI-Lab`, the upstream commit `04f2b53826`, the three files it
+touches, and a `## MiaAI-Lab Flash Next int4 kernel` section added to upstream's own `THIRD_PARTY_NOTICES.md` in the
+same series. Its only gap is that the notice lives in the patched tree rather than in that repo's tracked files.
+
+None of the four patches here has any of that. `0012` and `0031` name a licence but no copyright line and no
+upstream commit; `0021` names an engine tree (`glm5_next`) and a licence; `0022` names `prod-src` with no licence.
+So the two repos need different actions, and a single "add the notice" step does not cover this one.
+
 ## Correction, re-derived independently (2026-11-24)
 
 The table above lists two engine patches. Re-running the method's own second pattern over the live series finds four,
