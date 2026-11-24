@@ -20,3 +20,11 @@ solo-cuts
 #   port-latent-tile rejected: -4.24 percent; not to be revisited without a new mechanism
 #   port-prompt-many superseded by port-multi-fill, which carries the same batched prompt pass
 #   port-fp8-pages   unmeasured beyond step 1; it joins when a measured improvement exists
+
+# HOW THE UNION IS BUILT (measured 2026-11-24): not by applying these in sequence.
+# Every package here edits zig/src/platform/environment.zig, zig/src/families/glm/cuda.zig and
+# zig/src/families/glm/cuda_follow.zig, and three of them also cuda_lanes.zig / cuda_engine.zig, so each patch applies
+# to the engine series alone and refuses on top of its neighbours ("does not apply: 0001-glm-multifill.patch" with the
+# tree at 0e85a179). The union is therefore a REBASE job: pick the lightest package first, port the next one's hunks onto
+# it in the same files, and gate each rung. The image that carries all of them was composed that way by hand; a script
+# that applies this list in order does not reproduce it, and the list's order is a record of priority, not of application.
