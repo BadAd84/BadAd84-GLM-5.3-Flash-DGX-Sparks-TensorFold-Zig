@@ -60,6 +60,10 @@ No source file, kernel or substantial code block is copied or adapted into this 
 
 ## Gates for the clean-room work
 
+- `python scripts/check-patch-reach.py PATCH_DIR TREE` - every include and every build registration a patch adds is
+  present in the tree. A three-way merge drops these silently: the file exists, the name exists, every test passes, and
+  the kernel is loaded by name at run time into a symbol its fatbin never built. Four were found that way in the GLM
+  series (`glm_index_split`, `glm_index_sched`, the X3 decode include set, and the `glm_l2pf` build entry).
 - `python scripts/check-spec-index-split.py . <tree>` holds `docs/SPEC-INDEX-SPLIT.md` to the facts an adversarial review
   established from our own call sites: the counts rule keys on `npool > K` with `4 * K`, the caller zeroes `tot` only so
   step 1 STORES into `gt`, step 4 writes neither `gt` nor `hist`, and the launch contract (grid, block, one stream,
