@@ -41,8 +41,9 @@ below the decode ceiling, and `np` at or above the split floor.
 ## Layout inside scratch (the caller's carving)
 
 - `tot`: `rows` by 4 by 256 `int` at `scratch`.
-- `hist`: `rows` by `cp` by 256 `int` at `scratch + rows * 1024 * 4`. Written by the kernel in every step before
-  it is read; the caller does not zero it.
+- `hist`: `rows` by `cp` by 256 `int` at `scratch + rows * 1024 * 4` (byte offset). Steps 0 to 3 each overwrite
+  their chunk's histogram before that generation is read. Step 4 does NOT write it: it reads the byte-0 histograms step 3
+  left, whose writes the launch boundary orders. The caller does not zero it.
 - `gt`: `rows` by `cp` `int` at `hist + rows * cp * 256 * 4`.
 
 ## The five steps
@@ -134,6 +135,25 @@ never fewer than `K` either. Only the visible part of a chunk is scanned.
 9. `TOK` slots not written by any pick are undefined when the row's count is 0, which this caller never reaches.
 10. The three tail entries are `-1` where the token is not visible, including when the incomplete pool has no visible
     token at all.
+
+## Further decisions from an independent model (2026-11-24)
+
+An independent reviewer modelled this page and compared it against brute-force top-K over 12,318 rows with ties and
+random chunk order, and found no divergence and no remaining unordered read. It had to choose six things the page did not
+say, and they are decided here so the next reader does not choose:
+
+11. The digit rule: scan bins from 255 downwards and take the first whose count AT OR ABOVE reaches `need`; then
+    subtract the count strictly above that bin from `need`. If no bin reaches it, the digit is 0 and `need` is reduced by
+    the row's total for that generation, which the caller's geometry never reaches.
+12. `order_key` is defined in `glm_index_pools.cuh` and is not restated here; it canonicalises both zeros and orders by
+    the unsigned bits. A reimplementation must use that mapping, not one of its own.
+13. The slot rule combines the predecessor and local counts before the `min`: an above-prefix pool also counts the
+    equals picked before it, and splitting the two `min` operations is wrong when their combined equals cross `need`.
+14. The incomplete pool is pool `npool`, and its visible tokens are its first `(pos[0] + row + 1) % 4` lanes.
+15. "Phases" means there is a barrier between zeroing a histogram and the next accumulation into it, and between a count
+    phase and the reads that follow it in the same launch.
+16. The offsets in the Layout section are BYTE offsets; a pointer "is 32-bit" means it points to 32-bit elements, not
+    that its address is 32 bits.
 
 ## What this specification deliberately does not contain
 

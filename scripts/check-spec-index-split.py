@@ -60,6 +60,13 @@ want(re.search(r"step 4[^\n]*does NOT write", spec, re.I) is not None,
      "the spec does not say step 4 writes neither gt nor hist")
 want("step 3 left in `hist`" in spec, "the spec does not attribute the emission's byte-0 histogram to step 3")
 
+# 3b. No sentence may say hist is written in every step: step 4 must not write it, and a reader could take that
+# literally and reintroduce the same-launch race the review found.
+want(not re.search(r"written by the kernel in every step", spec, re.I),
+     "the spec still says hist is written in every step, which contradicts step 4")
+want(re.search(r"Steps 0 to 3 each overwrite", spec) is not None,
+     "the spec does not say which steps overwrite hist")
+
 # 4. The ABI: the parameter order and the launch shape, straight from the call site.
 order = ["scores_ptr", "np", "at", "topk", "chs", "cp", "step", "scratch", "tokens", "counts", "pt", "page_rows"]
 present = [name for name in order if name in body]
@@ -76,4 +83,4 @@ want("glm_index_pools.cuh" in spec, "the spec does not name glm_index_pools.cuh 
 if fails:
     for f in fails: print("SPEC-FAIL:", f)
     sys.exit(1)
-print("spec-index-split: OK (%d checks)" % 16)
+print("spec-index-split: OK (%d checks)" % 18)
