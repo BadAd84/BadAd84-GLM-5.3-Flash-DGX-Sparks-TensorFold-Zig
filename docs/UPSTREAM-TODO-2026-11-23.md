@@ -101,3 +101,17 @@ identical, token digests equal. A prompt built to repeat its own head, the same 
 against 0.664, 54.0 against 54.4 ms a round, 102 rounds each. `windows.zig` takes its `Copy` from the stream's own
 context or Recall's record and neither workload gives the server one, so the switch had nothing to act on; upstream's
 rule wants a measured benefit, so nothing was posted.
+
+## 7. The retirement candidates, mapped to our patches
+
+All three postdate our pin `fa13df5dd`, so each is a test, not a fact:
+
+| upstream commit | what it does | our patches on the same files |
+|---|---|---|
+| `20cb27d32` | `glm_glue_rows.cuh`: follow main's dependent-launch prologue for `combine_tail` | `0024-glue-fuse` - the same file |
+| `ff64ef9d9` | `cuda_dsa_block.zig`: skip sparse-overwritten dense rows (+ a latent test, a build step) | `0019-sparse-onepass`, `0020-onepass-pipe`, `0023-mla-knobs`, `0025-head-block-rule`, `0038-glm-piece-front` |
+| `37db5c593` | `cuda_dsa_block.zig`, `cuda.zig`, `cuda_engine.zig`, `glm_prompt_host.zig`: skip unread prefill projections | as above |
+
+The test is the standing one: re-seat onto the base that carries the upstream commit, remove our patch, run the gates
+and the five levels, and retire only if the behaviour and the numbers hold without it. `20cb27d32` is the cheapest test
+because it touches one file and one patch; the sparse pair is a family of five patches and needs a prefix build.
