@@ -135,10 +135,12 @@ carries the switch another way needs its own cells.
 
 ### The env of record, in numbers
 
-`prod.env` and `dev.env` carry the same 118 settings, and the register gives every table row one of 55 `measured`,
-25 `inert` and 5 `debt` verdicts (plus the raw and launcher names). The `measured` lines name their cells,
-the `inert` lines name the reason they can never be a lever here, and the `debt` lines are the whole of what a boot
-could still move: `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, `TF_PROMPT_INTERMEDIATE`, `TF_GLM_DSCORES`, `TF_GLM_OVN_KVB8`, `TF_GLM_OVN_DISK_SLICE_MIB`.
+`prod.env` and `dev.env` carry the same 118 settings, and the register now gives every table row one of 60 `measured`,
+25 `inert` or 0 `debt` verdicts (plus the raw and launcher names). There is no unmeasured row left: each `measured` line
+names its cells, and each `inert` line names the reason it cannot be a lever here. The last five to close were screened
+in queue132: four came back reply-equal and neutral and stand at their defaults, and `TF_GLM_OVN_KVB8=1` came back
++4.23 / +2.40 / +2.28 percent with the replies changed at every level, which is a speed change that alters the answer -
+upstream takes no mode that changes output tokens even opt-in, so it stays off and the row records why.
 
 What none of that claims:
 
