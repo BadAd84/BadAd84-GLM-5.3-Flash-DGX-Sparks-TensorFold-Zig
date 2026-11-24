@@ -3597,3 +3597,20 @@ Two levels lead and three trail, so the honest summary is "close, not ahead": th
 **Eight slots at 1M does not fit**: the second arm in the same queue refused to boot on the memory preflight, so the
 four-slot cap production lived under is still a real constraint on our engine at a 1M sequence budget. More slots are
 available only at smaller contexts, which is the trade the launcher's context scaling already encodes.
+
+## Step 2: the current upstream base alone is 18 to 30 percent behind our dev shape
+
+`queue140` built `ea37382cb` (upstream today, 1,094 commits past our pin) into `glm53-zig:ea37` and measured it with the
+same env, the same `--parallel 4` and the same 1M context as our dev cells:
+
+| clients | upstream `ea37382cb` alone | our dev shape | delta |
+|---|---|---|---|
+| 1 | 68.3 | 85.0 | +24.5% |
+| 2 | 72.8 | 86.3 | +18.5% |
+| 4 | 88.3 | 115.2 | +30.5% |
+
+Acceptance agrees: 0.638 / 0.626 / 0.631 on the base against 0.690 / 0.657 / 0.707 on ours.
+
+So upstream's own work has NOT closed the gap: the levers in this series are worth roughly a quarter more throughput at
+the levels our agents use, on upstream's current code. That also settles the framing for step 1: re-seating is not a
+concession, it is the way the same levers keep their value as the base moves.
