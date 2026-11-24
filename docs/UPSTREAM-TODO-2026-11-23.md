@@ -258,3 +258,21 @@ The seven failures the merge produced are closed, each by a real cause rather th
 the eleven-argument `absorbQ`, the sparse path's caller-supplied head block, `headBlockFor` for the roped row, the
 drafter window from patch 0038, the wide prompt step stopping at the next request start, and the blank lease including
 the head rows.
+
+## 14. The apply had silently lost 27 of the series' 47 new files
+
+`test-cuda-host` cannot see this: the `.cu` and `.cuh` kernels, the onepass pipe, the glue and two tests compile only in
+the image build (and in `compile-cuda-tests`), so a tree that passes the host suite can still be missing them. It was the
+image build that said so, one file at a time:
+
+```
+zig/tests/cuda/glm_index_ovn_check.zig:1:1: error: unable to load "glm_index_ovn_check.zig": FileNotFound
+```
+
+Auditing every `new file mode` in `patches/engine/` against the tree found 27 absent, including
+`zig/kernels/cuda/glm_index_sched.cuh`, `glm_index_split.cuh`, `glm_onepass_pipe.cu`, `glm_l2fp.cu` and
+`cuda_onepass_order_test.zig`. All 27 were reconstructed from the series in patch order (`git apply --include=<file>` for
+each patch that carries it, 28 applies, 0 failures) and the tree now holds 47 of 47.
+
+The lesson for the next re-seat: after the three-way merge, audit `new file mode` against the tree before anything else,
+then run `compile-cuda-tests`, which is the gate that actually compiles them.
