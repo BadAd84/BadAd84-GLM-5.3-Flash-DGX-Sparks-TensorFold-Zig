@@ -177,6 +177,9 @@ What the cycles taught, each of which cost a rebuild:
 
 ## 11. The re-seat compiles and runs; six tests still fail, in two classes
 
+**The pristine base is green**: `zig build test-cuda-host` on `ea37382cb` alone returns 0 with no failing test, so every
+failure below is OURS - introduced by the patches or by the merge - and none of them is inherited from upstream.
+
 `zig build test-cuda-host` on the re-seated tree: 482/484 steps, **1270 of 1277 tests pass, 6 fail**, 1 skipped. The
 build is clean; the failures are behaviour.
 
