@@ -3538,6 +3538,12 @@ can be set beside `docs/speed_target.md`:
 
 First token: ours 139 172 283 205 279 ms against the target's 122 157 228 232 128.
 
+**Caveat, and it is a real one: the context differs.** `zig-tp3.sh` scales `--context` with the slot count (1M at one
+slot, 262k at four, 196k at eight) while production runs 1M at every level, so the cells above are our serve at 256k
+against production at 1M. They are the same slot count and not the same sequence budget. `queue138` re-runs both at
+1M: four slots (production's shape) and eight slots (whether our engine fits more slots at that context than the Python
+one did, which is the point of moving to an engine that is still being worked on).
+
 The earlier promoted-shape cells (149.3 and 184.6 at six and eight clients) are NOT a win against this target: they were
 taken with `--parallel` equal to the client count, six and eight slots where production runs four. Measured in
 production's shape we are level at one stream, 5.7 to 6.3 percent behind at two and four, and 9.4 percent behind at
