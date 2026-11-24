@@ -182,7 +182,12 @@ consequences of the merged `absorbQ` signature (eleven arguments, `rd` before `l
 pointer) and of `sparseAttentionFormat` needing `headBlockFor(rows, lw)` for the 576-wide roped row rather than
 upstream's `headBlock(rows)`; the drafter window came back with patch 0038's hunk.
 
-The two that remain:
+The fuse failure's cause was the sparse attention path: our version takes the caller's head block, upstream's computes
+its own, and the merge kept upstream's, so a call that asks for 32-head tiles silently got 16. Restoring the parameter
+(production callers pass `headBlockFor(rows, lw)`, byte-identical to what upstream computes for a 512-wide row) brought
+the suite to 1,286 of 1,288.
+
+The one that remained:
 - **`TF_GLM_OVN_MLA_FUSEMERGE: 32-head launches`** expects `chunks_32_fp8_skip, merge, chunks_32_fp8_skip, merge`
   and gets `54, 49, 53, 49`: the second chunk of one attention call launches the non-fp8 `chunks_32_skip` instead of
   the fp8 form, so the scales pointer does not reach that launch. The merge left `sparseAttentionFormat` with two
