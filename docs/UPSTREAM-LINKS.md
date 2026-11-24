@@ -45,3 +45,14 @@ whether it is planned, blocked (with why) or not upstreamable (with why).
 | `0036` | [PATCH] glm latent: TF_GLM_OVN_LATENT_ROWS, absorb_q and expand_v two  | - | - | not opened | - |
 | `0037` | [PATCH] glm cuda: TF_GLM_OVN_SIDE_PRIO, the prompt exchanges' side str | - | - | not opened | - |
 | `0038` | [PATCH] glm cuda: TF_GLM_OVN_PIECE_FRONT, _MLA and _FFN, the next bloc | - | - | not opened | - |
+
+## #4809 on 2026-11-24: base merged, CI running
+
+The pull request had gone `CONFLICTING` as main advanced (a conflicting pull request runs no checks at all), so main was
+merged into `keep-seqs` twice: `9edf2f89d45b` first, then `0d8cbb26f` once upstream moved again inside the hour. Both
+conflicts were the changelog alone, resolved as upstream's file plus our one bullet.
+
+- Merge commits `35600b2b2` and `436ef4b5c`, gated on the gate host at the first: `zig fmt --check` rc 0 and
+  `zig build test-glm-rev25-host` rc 0.
+- With the conflict gone the checks run again: `fmt`, `zig`, `pytest`, `benchmark-clients` on both runners and the rest
+  were queued at 2026-11-24.
