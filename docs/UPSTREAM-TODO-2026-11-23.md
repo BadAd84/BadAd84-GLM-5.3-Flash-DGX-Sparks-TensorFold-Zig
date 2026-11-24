@@ -325,3 +325,21 @@ With the onepass pipe ported, the image build failed on `zig/src/cuda/kernels.zi
 `zig/build/cuda_kernels.zig` (`.{ .name = "glm_onepass_pipe", .flags = &.{"-O3"} }`), and that hunk was rejected with the
 rest. A declaration that embeds a blob is therefore two pieces: the const, and the build step that produces the blob, and
 only the image build checks the second.
+
+## 19. The four packages that would not stack, surveyed on the re-seated base
+
+`git apply --check` of every patch in each package against the tree at `ea37382cb`:
+
+| package | applies |
+|---|---|
+| port-multi-fill | 0 of 1 |
+| restore-held | 0 of 1 |
+| solo-cuts | 0 of 1 |
+| pr1411 | 0 of 2 |
+
+So the port is a hand rebase of each package's hunks, not an application, and `scripts/dev-packages.list` already says why:
+every package edits `environment.zig`, `cuda.zig` and `cuda_follow.zig`, and each was cut against the state the ones
+before it left. The order in that file is priority, not applicability.
+
+The rung order to port in, lightest first, is the list's own: pr1411, cache-salt, learn-starts, solo-cuts,
+disk-any-position, restore-held, port-multi-fill.
