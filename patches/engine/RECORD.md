@@ -125,3 +125,18 @@ speed candidate, receipts in their headers). Engine tree `59bcb17a86a99e7dff5c5e
 2026-11-22 (fourth pass): `0025` bounds the dense call to the rows the select leaves alone (a 4,096-row first
 chunk no longer runs dense attention over the 2,045 rows the sparse pass rewrites). Engine tree
 `59bcb17a86a99e7dff5c5e6d0fabfb4c8cb59450`, whole stack `aaa0859cd487c032f0e3c10ac1b38041e0b4b33f`, gate run sg-20261122-090022 PASS.
+
+## Provenance of the text (checked 2026-11-24 against the archived fork)
+
+All 32 patches carry `From: Adam Hillson <598804+BadAd84@users.noreply.github.com>`; none attributes its text to another
+author. Twenty-one name their source commit in our archived fork `ots/ai-engine` (bundle `archive/ai-engine/ai-engine.bundle`,
+sha256 `177a5bbc...`), and two say "Ours ... nothing ported".
+
+What that fork's own history contains, measured over its 82 refs excluding upstream's commits: 1,270 commits, of which
+1,237 are OTS identities (paperclip-agent 544, Adam Hillson 398, BadAd84 295, plus four). The remaining ~33 carry other
+names and their subjects are this series' own levers.
+
+One import is not ours and must not be counted as such: `scripts/engine/import-miaai-glm.sh` (commit `5f46a1ca0`) builds a
+`miaai-glm` branch as TensorFold v1.0.7 plus **MiaAI-Lab's recipe zig-engine patches 0001-0007**, committed under a
+synthetic identity (`ai-engine import <adam@onetouchtechnical.com>`). Code that arrives that way is MiaAI-Lab's, and a patch
+touching it is ours only in the adaptation.
