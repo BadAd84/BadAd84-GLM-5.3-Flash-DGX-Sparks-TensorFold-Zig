@@ -152,3 +152,25 @@ a pointer tuple, while our patches add the roped (YaRN) branch and the fuse/skip
 the two APIs reconciled and the call sites updated, and each is also the moment to decide **port or retire**: where
 upstream's new body already does what our hunk did (`20cb27d32` against `0024` is the clearest), the patch is retired
 instead of merged.
+
+## 10. The re-seat lands: compiles, passes the GLM host suite, fmt clean
+
+On `ea37382cb` with all 32 patches applied and the 27 conflicts resolved (branch `reseat-ea37382cb` in the parity clone):
+
+- `zig build check-native-cuda-host`: rc 0.
+- `zig build test-glm-rev25-host`: rc 0, 31 tests (30 pass, then the env-test row fix made it 31).
+- `zig fmt --check build.zig zig`: rc 0.
+
+What the cycles taught, each of which cost a rebuild:
+
+- **`Mla` and `compactKv` are upstream's own definitions.** A resolution that takes "theirs" (our patch's side of a
+  three-way apply) can delete a type or function upstream added earlier; check the base file before replacing a block.
+- **Never merge the settings table hunk by hunk.** Row insertions from different patches land in the same region and are
+  silently dropped: 25 of the 36 rows our patches add had vanished. Rebuild it by union, the base's rows plus every row
+  our patches add that the file lacks, and verify the count afterwards.
+- **Our new fields belong where the code reads them**: `roped` and `onepass_pipe` live on `Modules` (because `set()`
+  reads `f.m`), and `roped` is a value whose address the `Set` takes, since `Mla.load` returns a value.
+- **Three call sites follow the new APIs**: `longestShared` takes the salt, `width` is `sparse.width`, `onepass_pipe` is
+  already a `Function`.
+- **The env test's lists are part of the re-seat**: a row our patches add must be named in one of its lists or the count
+  assertion fails (`TF_GLM_INDEX_DECODE_FROM` was the one).
