@@ -133,4 +133,23 @@ One carried candidate's cells need their carrier named: `TF_GLM_PROMPT_MANY=1` w
 stack with that package, so the +1.55 / +5.45 / +2.96% are the carrier's numbers and not the old package's. A later stack that
 carries the switch another way needs its own cells.
 
+### The env of record, in numbers
+
+`prod.env` and `dev.env` carry the same 118 settings, and the register gives every table row one of 55 `measured`,
+25 `inert` and 5 `debt` verdicts (plus the raw and launcher names). The `measured` lines name their cells,
+the `inert` lines name the reason they can never be a lever here, and the `debt` lines are the whole of what a boot
+could still move: `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, `TF_PROMPT_INTERMEDIATE`, `TF_GLM_DSCORES`, `TF_GLM_OVN_KVB8`, `TF_GLM_OVN_DISK_SLICE_MIB`.
+
+What none of that claims:
+
+- **`inert` is an argument, not a measurement.** Each one says why the row cannot move a chat cell on this serve; a new
+  model family or a new serving path can turn an inert row into a real one, and then it is re-examined.
+- **The values were measured one at a time**, against the others as they stood. No arm has run the whole set as a block,
+  so an interaction between two measured winners is untested until the dev union is measured as a combination.
+- **The launcher is part of the env.** `LEARN` (the NVMe tier) is promoted to a default in `serve.sh` and the driver that
+  forwards it, and its long-context cells are the open item; the short-prompt cells are flat against the tier-off control.
+- **A setting our env sets that the binary does not carry is silently ignored.** `scripts/check-env-in-image.py` reports
+  them per image; eight were found against `m130a`, two of them real (a package that image does not carry) and the rest
+  to confirm one by one.
+
 See `docs/DOC-AUDIT-2026-11-23.md` for the documentation pass that removed the statements contradicting this model.
