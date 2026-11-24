@@ -72,3 +72,14 @@ conflicts were the changelog alone, resolved as upstream's file plus our one bul
   `zig build test-glm-rev25-host` rc 0.
 - With the conflict gone the checks run again: `fmt`, `zig`, `pytest`, `benchmark-clients` on both runners and the rest
   were queued at 2026-11-24.
+
+## #4809's checks after the merges (2026-11-24)
+
+Nine of the ten ran and passed. One fails: `benchmark-clients (ubuntu-latest)`, job "No GPU", in
+`tools/tests/test_bench_prose.py::test_serialized_streams_measure_shared_interval`, asserting `draft_arm["overlapped"]` is
+false when it came back true. Evidence that it is not ours: the branch touches only
+`zig/src/families/glm/cuda_env_test.zig`, `zig/src/platform/environment.zig` and their test, and the failing test lives in
+`tools/`, which the branch does not modify; its windows counterpart passes on the same head.
+
+Not claimed: that it fails on upstream main. Main's runs of that workflow are being cancelled repeatedly, so its history
+cannot settle it, and the honest statement is the one above rather than a guess.
