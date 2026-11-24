@@ -111,6 +111,28 @@ outside the two patches above and the two docs (2.1).
 
 ---
 
+## Correction, re-derived independently (2026-11-24)
+
+The table above lists two engine patches. Re-running the method's own second pattern over the live series finds four,
+and the two extra are the same kind of hit, not dictionary noise:
+
+| | |
+|---|---|
+| Path | `patches/engine/0021-kda-chunked.patch:5` |
+| Header line | "production's chunked (WY) KDA chain (from glm5_next/cuda/kda_chunk.cu, Apache-2.0, ..." |
+| Licence | Apache-2.0 named; `glm5_next` is an engine tree, not identified further |
+| Notice | None |
+
+| | |
+|---|---|
+| Path | `patches/engine/0022-mm-knobs.patch:135` |
+| Added line | `+// BANDS: qmm_prefill.cu's tile_of order (prod-src cuda/kernels/qmm_prefill.cu); CLUSTER: ...` |
+| Licence | not stated on the line; `prod-src` is the same unnamed origin `0012` cites |
+| Notice | None |
+
+So the set of engine patches whose own text names an outside origin is `0012`, `0021`, `0022` and `0031`, and any
+decision taken for the first two has to cover these as well. The same three options apply to each, unchanged.
+
 ## Files here that came from another engine or library
 
 - **Qwen** `fn_int4.cu` and its host companions: MiaAI-Lab's dual-Spark recipe (an engine recipe). [DECLARED]
