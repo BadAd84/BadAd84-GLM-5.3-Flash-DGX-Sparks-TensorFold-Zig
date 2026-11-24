@@ -175,7 +175,24 @@ What the cycles taught, each of which cost a rebuild:
 - **The env test's lists are part of the re-seat**: a row our patches add must be named in one of its lists or the count
   assertion fails (`TF_GLM_INDEX_DECODE_FROM` was the one).
 
-## 11. The re-seat compiles and runs; six tests still fail, in two classes
+## 11. The re-seat compiles and runs; two tests still fail, both understood
+
+Status after the argument and guard fixes: 1,274 of 1,277 pass. The four that were fixed were call-site
+consequences of the merged `absorbQ` signature (eleven arguments, `rd` before `lw`, `sk` carrying the scales
+pointer) and of `sparseAttentionFormat` needing `headBlockFor(rows, lw)` for the 576-wide roped row rather than
+upstream's `headBlock(rows)`; the drafter window came back with patch 0038's hunk.
+
+The two that remain:
+- **`TF_GLM_OVN_MLA_FUSEMERGE: 32-head launches`** expects `chunks_32_fp8_skip, merge, chunks_32_fp8_skip, merge`
+  and gets `54, 49, 53, 49`: the second chunk of one attention call launches the non-fp8 `chunks_32_skip` instead of
+  the fp8 form, so the scales pointer does not reach that launch. The merge left `sparseAttentionFormat` with two
+  `fuses(...)` early returns (`cuda_latent.zig:135` and `:201`, each passing a different pair of `tokens`/`counts`
+  zeros) where one side had one; reconciling those two paths is the work, and the fused launch reads `scales` at its
+  own call site (`:179`).
+- **`GLM disk ranks: a blank state takes bytes past its words and front only once sealed`** dies on our own guard
+  in `cuda_prompt_cuts.zig` that refuses a solo pass stepping over a request start, which is what that test does.
+
+## 11b. The older notes
 
 **The pristine base is green**: `zig build test-cuda-host` on `ea37382cb` alone returns 0 with no failing test, so every
 failure below is OURS - introduced by the patches or by the merge - and none of them is inherited from upstream.
