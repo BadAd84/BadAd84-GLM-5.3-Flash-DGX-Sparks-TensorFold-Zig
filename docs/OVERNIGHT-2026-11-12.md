@@ -3504,3 +3504,21 @@ only earlier six and eight cells (110.2 and 138.0) were taken before the env syn
 is the tier, the kept sequences the tier now restores, or a different env. `queue134` runs the same image, env and
 harness with `LEARN=0` after the five-row screen; that pair is the like-for-like comparison, and only then does a claim
 get written here.
+
+## The five rows a boot could still move: one promising, and it changes the replies
+
+queue132 (control and the five arms in the same directory and the same env):
+
+| arm | 1 | 2 | 4 | percent against the control | replies |
+|---|---|---|---|---|---|
+| ctl | 81.48 | 84.86 | 111.97 | - | the control's four digests |
+| dscores (`TF_GLM_DSCORES=0`) | 81.28 | 84.39 | 112.12 | -0.25 -0.55 +0.13 | equal |
+| slice (`TF_GLM_OVN_DISK_SLICE_MIB=16`) | 80.83 | 84.70 | 112.15 | -0.80 -0.19 +0.16 | equal |
+| keepothers (`TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS=1`) | 80.92 | 84.68 | 111.98 | -0.69 -0.21 +0.01 | equal |
+| intermediate (`TF_PROMPT_INTERMEDIATE=1`) | 81.23 | 83.53 | 111.72 | -0.31 -1.57 -0.22 | equal |
+| kvb8 (`TF_GLM_OVN_KVB8=1`) | 84.93 | 86.90 | 114.52 | **+4.23 +2.40 +2.28** | **changed at every level** |
+
+Four are UNCLEAR and reply-equal. `TF_GLM_OVN_KVB8=1` is the first PROMISING cell of the campaign and it is a NUMERICS
+change: its four digests (27b8b2a3, 340f3fcd, b86a9c12, e551bb65) differ from the control's (04b1fcb4, 72f1039f, 9eb3186f,
+cc13b95e) at every stream count, so the 4.23 / 2.40 / 2.28 percent buys a different answer. It goes to the owner with
+the five-level arm attached, never into the recipe by discretion.
