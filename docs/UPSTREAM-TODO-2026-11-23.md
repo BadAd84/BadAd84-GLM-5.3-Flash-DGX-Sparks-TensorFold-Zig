@@ -194,8 +194,12 @@ The one that remained:
   `fuses(...)` early returns (`cuda_latent.zig:135` and `:201`, each passing a different pair of `tokens`/`counts`
   zeros) where one side had one; reconciling those two paths is the work, and the fused launch reads `scales` at its
   own call site (`:179`).
-- **`GLM disk ranks: a blank state takes bytes past its words and front only once sealed`** dies on our own guard
-  in `cuda_prompt_cuts.zig` that refuses a solo pass stepping over a request start, which is what that test does.
+- **`GLM disk ranks: a blank state takes bytes past its words and front only once sealed`** now runs through the prompt
+  steps (the wide step stops at the next start instead of refusing, and our own prompt-cuts test follows that) and dies
+  at `cuda_snapshots.zig:99` in `seal`: `n > s.lease.ids.items.len * pages.page`. That guard is upstream's, identical at
+  its tip, so the divergence is the size the seal recomputes from `s.shared` exceeding the lease `keepAs` took from
+  `plan.len` on the same kept state - an input difference between the two calls, not a guard to relax. Relaxing it was
+  tried and moved the failure to the `n >` clause on the next boot, which is why the guard is restored byte-identical.
 
 ## 11b. The older notes
 
