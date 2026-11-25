@@ -187,3 +187,30 @@ whichever launch ran first, which the log does not name.
 Recorded as still unread. The next step has to name the failing launch rather than add a third guess: the check launches
 `selectTokens` twice (old and new) before the comparison, and the invalid value could be the split launch inside the
 `new` arm, a `cuMemsetD32Async` before it, or the check's own buffer sizing.
+
+## The failing kernel is NOT the split: `tf_glm_select_rows` is rejected first (2026-11-25)
+
+The full driver message names it:
+
+```
+error: cuLaunchKernel: CUDA_ERROR_INVALID_VALUE (1) invalid argument; kernel tf_glm_select_rows,
+grid 5x1x1, block 128x1x1, shared 0 B
+```
+
+`tf_glm_select_rows` is UPSTREAM's select kernel (`glm_glue_index.cuh:212`), launched by the check's `old` arm before the
+split's `new` arm ever runs. So both hardware failures were the check's own setup, not the clean-room kernel: the split was
+never reached.
+
+What that means:
+
+- the clean-room kernel is exonerated by this run, and my `glm_pdl::enter()` addition stays because the contract needs it but
+  was never the cause;
+- `glm-index-ovn-check` cannot currently run on this tree at all, with either kernel, because its `old` arm's
+  `tf_glm_select_rows` launch is rejected (grid 5x1x1 with a valid block, so a bad pointer or a changed argument list is
+  the candidate);
+- the check was restored from patch 0012 with its call sites adapted for `absorbQ` and the head block, but this launch's
+  argument list was not re-checked against `glm_glue_index.cuh`'s current signature.
+
+The next step is the same `selectSplit`-style argument comparison for `tf_glm_select_rows`: its signature in
+`glm_glue_index.cuh` against the arguments `cuda_index.zig:149` builds. That is a bounded read, and it is the last thing
+between the clean-room kernel and a real verdict.
