@@ -105,3 +105,16 @@ Design, from reading the existing check (`zig/tests/cuda/glm_keep_seqs_tests.zig
   so a passing case cannot pass vacuously;
 - the receipt names the image tag, the head sha, the checkpoint revision and the launch settings, which is what the
   maintainer asked for.
+
+## The resume case is on the branch (2026-11-25)
+
+`keep-seqs` is at `2ca51d7de`, one file, 78 insertions: `zig/tests/cuda/glm_keep_seqs_tests.zig` gains a resume case that
+keeps a prompt state at 2,048, resumes onto that kept slot, compares it against a fresh run on tokens, bf16 logits rows
+and MTP drafts, and plants a control that poisons every prompt-cache byte and must make the comparison fail.
+
+Host-side checks on the gate host: `zig fmt --check` clean, `zig build compile-cuda-tests` exit 0 (the runner with the new
+case), `test-glm-keep-seqs-host` exit 0. The GPU check itself needs an image, and the receipt for a pull request is taken
+from its own head, so `glm53-zig:prkeep2` is building from `2ca51d7de` rather than from the adjacent tree.
+
+The receipt the maintainer asked for needs, beside the run: the head sha (`2ca51d7de`), the checkpoint revision, and the
+launch settings (image tag, `TF_GLM_KEEP_SEQS=1`, the rank and world the check runs with).
