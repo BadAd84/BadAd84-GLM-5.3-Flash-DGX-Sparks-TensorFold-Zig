@@ -147,3 +147,22 @@ from the launcher, not the kernel.
 Recorded as UNREAD rather than guessed: this file has twice been called broken by me on a wrong reading, so the next step is
 the instrumented one (print the argument count and the scratch base at the failing launch) rather than a third reading of
 the source.
+
+## Run 1's cause found: the kernel was not a PDL kernel (2026-11-25)
+
+The flagged original opens its body with `glm_pdl::enter()`; my kernel did not. The launcher (`cuda_pdl.launch`) takes the
+programmatic-dependent-launch path, and a kernel that does not enter PDL is rejected there with
+`CUDA_ERROR_INVALID_VALUE` before any work runs. Fixed by restoring `#include "glm_pdl.cuh"` and the `glm_pdl::enter()`
+call, and `glm53-zig:cleanroom2` builds with it.
+
+The emulator re-runs at `120 cases, 0 failures` with the fix in, twice, so the logic is unchanged and the launch is the only
+difference.
+
+**Three levels, and each catches what the one before cannot:**
+
+1. the emulator, against brute-force top-K: proves the LOGIC, and cannot see a launch at all;
+2. `nvcc` in the image build: proves it COMPILES, and cannot see that the driver rejects the launch;
+3. the GPU run: proves the LAUNCH and the numerics on hardware.
+
+Run 1 was caught by level 3 only. The clean-room procedure in `AGENTS.md` should say so: a pair that stops at the emulator
+and the compile has not verified the kernel, and this file is the evidence.
