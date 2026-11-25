@@ -61,3 +61,18 @@ for a slot written twice. If there are duplicates, `base_above` is wrong for som
 ordering is wrong in a way that needs the model's per-chunk scratch to see.
 
 Not yet done, and stated as a hypothesis rather than a finding.
+
+## The collision hypothesis is confirmed in shape (2026-11-25)
+
+`SPLIT_DUMP_CASE=119 ./emu` -- 150 `UNFILLED SLOT` lines for a case with 3 rows, and the row in the dump had K=64 picks
+of which the output showed non-monotone pool indices. 150 unfilled slots across 3 rows is far more than a mis-ordering:
+the writes are not covering the slots at all, so two effects are present together, and a single `slot` value is being
+computed for more than one pick.
+
+That makes the last defect structural rather than a sign error: `base_above` (and `base_eq`) are per-chunk constants the
+emitter derives from `gt` and `hist`, and a wrong one shifts every slot in that chunk, producing both collisions and
+unfilled slots at once. The next measurement is the one that names it: print `base_above` and `base_eq` per chunk for the
+failing case and compare with the model's, which the model already computes.
+
+This is where the file stands: written, compiling, and structurally wrong in its chunk base. It is not a one-line fix and
+it needs the per-chunk comparison rather than another reading.
