@@ -43,3 +43,21 @@ which is what ref and the model produce.
 So the last defect is in the emitter's slot arithmetic, not in the counting: a pool's slot must equal the number of picked
 pools with a lower pool index, and the emulator is placing picks by a running count that is not monotonic in pool order.
 That is one function and one invariant, and it is the last thing between this file and a pass against the oracle.
+
+## Reading the emitter against the symptom (2026-11-25)
+
+The emitter's formula reads correctly in isolation: `slot = base_above + ab + dg + min(base_eq + eq + de, need)` for an
+above key, `base_above + ab + dg + (base_eq + eq + de)` for an equal inside the cutoff, with `ab`/`eq` advanced by TILE
+totals only. Within one chunk that is monotone in pool order, so the scramble in the dump cannot come from the formula
+alone.
+
+The reading that fits a non-monotone output with well-formed tokens: TWO picks computing the SAME slot, so a later write
+overwrites an earlier one. On the emulator the overwrite order is thread scheduling; on a GPU it would be launch order,
+which makes it a nondeterministic output rather than a mis-ordered one. That fits "the picks are right, the order is not"
+better than a wrong running count, because a wrong count would drop or duplicate slots consistently.
+
+So the next check is not a code change: print, for one failing case, every (slot, pool) pair the emitter writes and look
+for a slot written twice. If there are duplicates, `base_above` is wrong for some chunk pair; if there are none, the
+ordering is wrong in a way that needs the model's per-chunk scratch to see.
+
+Not yet done, and stated as a hypothesis rather than a finding.
