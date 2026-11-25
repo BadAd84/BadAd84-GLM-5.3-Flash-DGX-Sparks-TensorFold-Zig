@@ -110,3 +110,18 @@ on hardware, which is the remaining step.
 
 The lesson worth keeping: a generated artefact that is checked in or left on disk is a second source of truth, and reading
 the source while running the generated copy is how a correct file gets called broken.
+
+## It compiles, and it is in the tree (2026-11-25)
+
+`work/index-split-clean/index_split.cuh` was swapped into `work/reseat4/tree/zig/kernels/cuda/glm_index_split.cuh`
+(the flagged original kept at `work/flagged-original.cuh`), and `glm53-zig:cleanroom1` built from that tree with **no
+`nvcc` error**: 25 GB, one BUILT line. `grep` finds no `prod-src`, no `jayleaton` and no Apache reference in the new file, so
+the provenance point holds on inspection as well as on the header.
+
+So `TF_GLM_OVN_DECODE_INDEX` now has original code behind it that compiles on the real toolchain and agrees with
+brute-force top-K over the emulator's 120 cases. What it has not had is a run on hardware: `glm-index-ovn-check` compares
+the split against today's kernels byte for byte and is the next step, on three ranks with the image distributed.
+
+The swap is uncommitted in the tree, deliberately: the original is the file patch 0012 carries, so the replacement belongs
+in the patch series (a new numbered patch that replaces the flagged header) rather than as an uncommitted working-tree
+change. That is the next decision after the hardware run.
