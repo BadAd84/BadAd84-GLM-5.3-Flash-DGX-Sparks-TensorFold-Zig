@@ -125,3 +125,25 @@ the split against today's kernels byte for byte and is the next step, on three r
 The swap is uncommitted in the tree, deliberately: the original is the file patch 0012 carries, so the replacement belongs
 in the patch series (a new numbered patch that replaces the flagged header) rather than as an uncommitted working-tree
 change. That is the next decision after the hardware run.
+
+## Hardware run 1: the launch is rejected (2026-11-25)
+
+`glm-index-ovn-check` on `glm53-zig:cleanroom1` at TP=3 with `TF_GLM_OVN_DECODE_INDEX=1`:
+
+```
+[check] rank 0 wrote no unique id in 120 s:     split counts: read 20 bytes twice
+error: cuLaunchKernel: CUDA_ERROR_INVALID_VALUE
+r0: FAIL glm-index-ovn-check: CudaFailed
+```
+
+What I ruled out before stopping: the signature is fourteen parameters in the launcher's order (checked line by line
+against `selectSplit`), the grid is `(rows, cp)` and the block is `split_threads` = `T` = 128, and `Smem` is about 1 KB,
+far inside the default limit. So it is not the shape, the block, or the shared memory.
+
+What that leaves, in order of likelihood: an argument `cuda.Args` cannot marshal (a count or a type the driver rejects
+before any kernel runs), or the split's `scratch` base being invalid for the launch that first touches it. Both are read
+from the launcher, not the kernel.
+
+Recorded as UNREAD rather than guessed: this file has twice been called broken by me on a wrong reading, so the next step is
+the instrumented one (print the argument count and the scratch base at the failing launch) rather than a third reading of
+the source.
