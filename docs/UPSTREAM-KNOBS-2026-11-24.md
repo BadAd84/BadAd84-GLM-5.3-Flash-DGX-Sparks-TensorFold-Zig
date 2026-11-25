@@ -56,7 +56,13 @@ Decode aggregate, tokens a second, a fresh boot a level, `SPLOTS=4 CTX=1048576 K
 | `screen-moe1` (`TF_GLM_MOE_DIRECT=1`) | 75.4 | 83.7 | 100.9 | 98.7 | 104.2 |
 | `screen-idx0` (`TF_GLM_INDEX_SPLIT=0`) | 74.7 | 81.3 | 102.9 | - | - |
 
-`moe1` reads +0.7, +1.6, -1.3, -2.6 and +0.3 percent against the control, which is inside the spread this serve shows
+`moe1` reads +0.7, +1.6, -1.3, -2.5 and +0.3 percent against the control, and `idx0` reads -0.4, -1.3, +0.7, +1.4 and
++9.9 percent. The `moe1` row is inside the spread this serve shows between boots at the high levels, so nothing is
+promoted on it. The `idx0` eight-client cell is the only reading outside noise in either arm, and one boot cannot tell a
+real gain from a noisy cell, so an A B B A at level 8 only is queued behind the screen (`~/work/queue-abba-idx8.sh`).
+Reading it as +9.9% before that rerun would be the trade the repo's rules forbid: a single cell, one boot.
+
+The historical note stays true:, which is inside the spread this serve shows
 between boots at the high levels, so nothing is promoted on it yet and its four and six cells get an ABBA rerun first.
 `idx0` tracks the control at the three levels it has.
 
