@@ -98,3 +98,29 @@ A B B A at level 8, one boot a cell, image `glm53-zig:reseat-ports`, `INDEX_SPLI
 The control alone spans 139.0 to 139.3 and the arm sits inside it, so the screen's +9.9% at that level was a noisy
 single cell and there is no gain to record. This is the confirmation working: one boot suggested +9.9%, four boots show
 nothing. The `idx4096` arm is under the same test now.
+
+## The idx4096 eight-client cell is also CLEARED (ABBA, 2026-11-25)
+
+| cell | decode tokens a second |
+|---|---|
+| A1 (control) | 138.6 |
+| B1 (`INDEX_SPLIT=4096`) | 139.2 |
+| B2 (`INDEX_SPLIT=4096`) | 139.4 |
+| A2 (control) | 138.7 |
+
+The arm is 139.2 and 139.4 against controls of 138.6 and 138.7: about +0.5 percent with the control spanning 0.1, so it
+is a hair above rather than the +4.2 percent the screen's single boot showed. Cleared as a gain.
+
+## Verdict on the settings upstream added since our pin
+
+| setting | screen | confirmation | verdict |
+|---|---|---|---|
+| `TF_GLM_MOE_DIRECT=1` | +0.7 / +1.6 / -1.3 / -2.5 / +0.3 percent | not needed, inside the spread | inert at every level |
+| `TF_GLM_INDEX_SPLIT=0` | eight clients +9.9 percent | 139.3 / 138.5 against 139.0 / 139.3 | cleared: a noisy cell |
+| `TF_GLM_INDEX_SPLIT=4096` | +1.3 / +2.0 / +0.5 / +3.6 / +4.2 percent | 139.2 / 139.4 against 138.6 / 138.7 | cleared: about +0.5 percent, not a gain |
+| `TF_GLM_WIDE_EXPERT_TILE` | not run | - | no reader in the tree |
+| `TF_DFLASH_GRAPH` | not run | - | the Qwen family's, not ours |
+
+So the answer to step 3 is that upstream's own new settings hold no gain for this serve: one is inert, two were a single
+boot's noise, and the other two are not on our path. That is a result, and it is consistent with step 2, where our own
+series measured 18 to 40 percent over the same base.
