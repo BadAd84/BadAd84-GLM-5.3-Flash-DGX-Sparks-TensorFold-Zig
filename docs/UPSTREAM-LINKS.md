@@ -207,3 +207,23 @@ rank 0 through `keepState`; the other ranks then reach `keepAs` for the SAME id 
 for something the ranked protocol does not allow: a state kept on one rank only. The fix is in the case (keep through
 the ranked path, so all ranks agree) or the check needs a single-rank form for this case, and that is the decision the
 next pass takes.
+
+## #4809 is MERGED: TF_GLM_KEEP_SEQS is upstream (2026-11-25 09:22Z)
+
+`gh pr view 4809` returns `state: MERGED`, `mergeCommit: ef4d6429fc873fe34cf37379f69921a791b04ab3`, merged at
+`2026-11-25T09:22:24Z`, at head `241d842bc8c9`.
+
+The twelve commits are ours: `ea38fdcf8` "glm cuda: TF_GLM_KEEP_SEQS, a released stream's sequence stays for the next
+request on it" by BadAd84, then the check registration, the release-comment wording, the rank/world cast and the rank
+setting commits, under one `changelog: #4258 under Unreleased` from the maintainer. So the feature landed, with the
+switches fix from `40d4e19b4` among it.
+
+Three consequences:
+
+- The branch `keep-seqs` on the fork is a DIFFERENT lineage from the merged head. Every push tonight was rejected as a
+  non-fast-forward for that reason, and none of `436ef4b5c`, `2ca51d7de`, `022992f21`, `22915d1af` is upstream. They are
+  our own follow-on work, not a PR.
+- The resume case has no PR to attach to. Its home is our series, and it is worth keeping: it found that a keep on every
+  rank collides (`StateKept`) and that rank 0 then waits in the fence while its followers have exited.
+- `docs/UPSTREAM-LINKS.md`'s row for `0032` changes from "open as #4809" to merged, with `ea38fdcf8` as the commit that
+  absorbed it, which is the retirement record the file asks for.
