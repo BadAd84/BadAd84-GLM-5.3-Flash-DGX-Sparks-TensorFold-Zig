@@ -128,3 +128,21 @@ because an id is already taken. Fixed by making the callback spend itself (`0229
 
 The rebuilt head `022992f21` is in `glm53-zig:prkeep3` and the check reruns against it. Lesson worth keeping: a new case
 in a GPU check produces failures of its own, and they look like engine failures in the log until the callback is read.
+
+## Where the resume receipt stands (2026-11-25, unattended)
+
+`keep-seqs` is at `022992f21` on the fork with the resume case and its `StateKept` fix. `glm53-zig:prkeep3` is the image
+built from that head and it ran the check twice:
+
+- first run: the two earlier planted controls printed, then `FAIL glm-keep-seqs-check: StateKept` on ranks 1 and 2, which
+  was the case's own save callback firing twice. Fixed and committed.
+- second run, against the fixed image: the two controls printed and then the check sat at that point for thirty-five
+  minutes with its container alive, which is a hang rather than a slow case. Stopped.
+
+The ssh key to the Sparks stopped authenticating during that second run (retries over several minutes all return
+`Permission denied (publickey,password)`), and restarting the agent drops the cached YubiKey PIN, so it is left alone in
+an unattended session. That means the hang's cause is not yet read and the receipt is not yet produced.
+
+Next pass, in order: bring the key back (owner present), then rerun the check with the driver's output unbuffered to see
+the last line before the hang, then fix the case and rerun. The likely place is the case's pool sizing
+(`r.x.snapshots(e.stateBytes(resume_at))`) or the resumed request waiting on a state the first request still holds.
