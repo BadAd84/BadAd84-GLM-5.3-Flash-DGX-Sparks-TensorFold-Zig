@@ -118,3 +118,13 @@ from its own head, so `glm53-zig:prkeep2` is building from `2ca51d7de` rather th
 
 The receipt the maintainer asked for needs, beside the run: the head sha (`2ca51d7de`), the checkpoint revision, and the
 launch settings (image tag, `TF_GLM_KEEP_SEQS=1`, the rank and world the check runs with).
+
+## The resume case's first run failed on its own callback (2026-11-25)
+
+`glm-keep-seqs-check` on `2ca51d7de` printed the two earlier planted controls and then
+`FAIL glm-keep-seqs-check: StateKept` on ranks 1 and 2, at 03:31. The cause is in the case, not in the engine: the mark
+callback that keeps the prompt state ran twice for one request, and the second `keepState` collides with the first
+because an id is already taken. Fixed by making the callback spend itself (`022992f21`), with a comment saying why.
+
+The rebuilt head `022992f21` is in `glm53-zig:prkeep3` and the check reruns against it. Lesson worth keeping: a new case
+in a GPU check produces failures of its own, and they look like engine failures in the log until the callback is read.
