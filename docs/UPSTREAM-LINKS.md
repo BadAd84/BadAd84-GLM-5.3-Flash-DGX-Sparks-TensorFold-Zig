@@ -143,7 +143,20 @@ The second run reproduced it on a third attempt (08:17, stopped): rank 0 printed
 container sat at 199 percent CPU and the GPU at 96 percent, so it SPINS rather than waits. A wait would show near-zero
 CPU.
 
-Found, and it is an engine defect the case provoked rather than a fault in the case. `cuda_snapshots.zig:139` `gate`:
+FIRST DIAGNOSIS, WITHDRAWN: I called `gate`'s loop a leader-side spin. Reading it whole and reading `shared` refutes
+that. `Engine.shared` (`cuda_engine_gate.zig:23`) is an NCCL all-reduce with `max` over `f64`: every rank sends its word
+and every rank receives the maximum. The leader's word is `2*announce` when its `dropped` list is empty, a follower sends
+0, so with `announce == 0` both sides see 0 and BOTH RETURN in the same step. There is no state in which one returns and
+the other loops.
+
+So the spin's cause is not read yet, and the earlier claim was mine rather than the code's. What is still true: the
+process spins at 199 percent CPU at that point, and the case is the only caller that combines `keepState` with a resume,
+so the next place to look is the resume path in `prefill` and what it does with a kept id, not `gate`.
+
+Recording the withdrawn diagnosis below as the finding it was, because a wrong cause in the record costs the next pass a
+whole run.
+
+The original note, kept for the record: `cuda_snapshots.zig:139` `gate`:
 
 ```zig
 while (true) {
