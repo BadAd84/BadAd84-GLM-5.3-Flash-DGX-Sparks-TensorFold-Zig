@@ -76,3 +76,37 @@ failing case and compare with the model's, which the model already computes.
 
 This is where the file stands: written, compiling, and structurally wrong in its chunk base. It is not a one-line fix and
 it needs the per-chunk comparison rather than another reading.
+
+## CORRECTION (2026-11-25): the kernel was right, the emulator was stale
+
+I recorded twice that the emitter had a structural fault in its per-chunk base. Both notes were WRONG, and the cause of the
+wrong reading was mine: the emulator links `emulated_split.inc`, a file GENERATED from `index_split.cuh`, and it had been
+generated before the emitter fix. So `./emu` was running the previous header while I read the current one and blamed the
+code.
+
+Regenerating the include and rebuilding gives:
+
+```
+emulator: 120 cases, 0 failures
+```
+
+plus two pre-existing `-Wunknown-pragmas` warnings for `#pragma unroll` and no new ones. Verified independently of the lane
+that found it: `bash buildemu.sh` then `./emu` on the current tree.
+
+And the per-chunk comparison the lane ran finds no difference at all:
+
+| row | chunk | `base_above` emu | model | `base_eq` emu | model |
+|---|---|---|---|---|---|
+| 0 | 0 | 0 | 0 | 0 | 0 |
+| 0 | 1 | 53 | 53 | 1 | 1 |
+| 1 | 0 | 0 | 0 | 0 | 0 |
+| 1 | 1 | 49 | 49 | 1 | 1 |
+| 2 | 0 | 0 | 0 | 0 | 0 |
+| 2 | 1 | 49 | 49 | 1 | 1 |
+
+So the clean-room kernel now PASSES its oracle: written from the specification alone, by an agent that never opened the
+reference, agreeing with brute-force top-K over 120 emulator cases. What it has NOT had is a real `nvcc` compile and a run
+on hardware, which is the remaining step.
+
+The lesson worth keeping: a generated artefact that is checked in or left on disk is a second source of truth, and reading
+the source while running the generated copy is how a correct file gets called broken.
