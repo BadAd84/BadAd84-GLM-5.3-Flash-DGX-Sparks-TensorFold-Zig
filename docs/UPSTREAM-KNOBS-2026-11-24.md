@@ -83,3 +83,18 @@ between boots at the high levels, so nothing is promoted on it yet and its four 
 Note the control is lower than the dev numbers measured earlier on `ea37` (74.9 against 85.0 at one client). This image
 carries the ports and the restored kernel surface, so the screen's comparison is against its own control, never against
 that older table.
+
+## The idx0 eight-client cell is CLEARED (ABBA, 2026-11-25)
+
+A B B A at level 8, one boot a cell, image `glm53-zig:reseat-ports`, `INDEX_SPLIT=0` against the control:
+
+| cell | decode tokens a second |
+|---|---|
+| A1 (control) | 139.0 |
+| B1 (`INDEX_SPLIT=0`) | 139.3 |
+| B2 (`INDEX_SPLIT=0`) | 138.5 |
+| A2 (control) | 139.3 |
+
+The control alone spans 139.0 to 139.3 and the arm sits inside it, so the screen's +9.9% at that level was a noisy
+single cell and there is no gain to record. This is the confirmation working: one boot suggested +9.9%, four boots show
+nothing. The `idx4096` arm is under the same test now.
