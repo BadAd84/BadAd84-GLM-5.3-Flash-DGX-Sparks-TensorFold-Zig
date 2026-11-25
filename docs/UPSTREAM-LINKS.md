@@ -139,9 +139,14 @@ built from that head and it ran the check twice:
 - second run, against the fixed image: the two controls printed and then the check sat at that point for thirty-five
   minutes with its container alive, which is a hang rather than a slow case. Stopped.
 
-The ssh key to the Sparks stopped authenticating during that second run (retries over several minutes all return
-`Permission denied (publickey,password)`), and restarting the agent drops the cached YubiKey PIN, so it is left alone in
-an unattended session. That means the hang's cause is not yet read and the receipt is not yet produced.
+The second run reproduced it on a third attempt (08:17, stopped): rank 0 printed the same two controls and then the
+container sat at 199 percent CPU and the GPU at 96 percent, so it is SPINNING rather than waiting on a lock. A wait would
+show near-zero CPU. That is a real defect in what the resume case asks the engine to do, not a deadlock, and the next
+place to read is `snapshots.keep` and the `from` resume path in `prefill`, which are the two things the case combines
+that no other case does.
+
+The ssh key also failed for several minutes during that window and recovered on its own, which is the transient agent
+state the fleet rules describe rather than the card.
 
 Next pass, in order: bring the key back (owner present), then rerun the check with the driver's output unbuffered to see
 the last line before the hang, then fix the case and rerun. The likely place is the case's pool sizing
