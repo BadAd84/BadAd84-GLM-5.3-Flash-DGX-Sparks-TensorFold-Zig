@@ -258,5 +258,9 @@ Run 2's cause: keeping on rank 0 only left the followers asserting an id their o
 their own check and exited, and rank 0 waited again. Fixed by having the followers read the id from their snapshot map,
 which is where the fence put it.
 
-Both fixes are in `99c6ed56e` and `glm53-zig:prkeep5` is building from it. The lesson is the same twice: a ranked test
-cannot assert per-rank state that only one rank is meant to hold.
+Both fixes are in `99c6ed56e`, and `glm53-zig:prkeep5` PASSED at TP=3 (run 3, 2026-11-25 20:10): rc 0 on all three
+ranks, `PASS prompt-cache resume at 2048 onto kept slot 14 equals a fresh 3000-token prompt` on `kv8=false` AND `kv8=true`,
+with `RESULT resume control ... poisoned prompt state differs from fresh at step 0, as planted` firing first on both. So
+the receipt the maintainer asked for now exists.
+
+The lesson, learned twice: a ranked test cannot assert per-rank state that only one rank is meant to hold.
