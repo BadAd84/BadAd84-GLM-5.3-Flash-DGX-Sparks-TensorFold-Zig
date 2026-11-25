@@ -83,3 +83,13 @@ false when it came back true. Evidence that it is not ours: the branch touches o
 
 Not claimed: that it fails on upstream main. Main's runs of that workflow are being cancelled repeatedly, so its history
 cannot settle it, and the honest statement is the one above rather than a guess.
+
+## #4809's last ask: a prompt-cache resume onto a kept slot (2026-11-25)
+
+The maintainer accepted both fixes and asked for one receipt with its exact head, checkpoint revision and launch settings.
+The check that exists is `glm-keep-seqs-check CKPT ID_PATH`, which compares a kept sequence against a fresh one; it does
+NOT exercise a prompt-cache RESUME onto a kept slot, so the ask is a new case rather than a run of the existing one.
+
+What the case has to show: a request whose prompt reuses a state a released slot kept, resumed rather than recomputed,
+with the same tokens a fresh run gives, and the settings, head and checkpoint revision named. That is a GPU case on
+spark1-3, so it is queued behind the running screen rather than beside it.
