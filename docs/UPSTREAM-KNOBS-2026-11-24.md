@@ -62,6 +62,20 @@ promoted on it. The `idx0` eight-client cell is the only reading outside noise i
 real gain from a noisy cell, so an A B B A at level 8 only is queued behind the screen (`~/work/queue-abba-idx8.sh`).
 Reading it as +9.9% before that rerun would be the trade the repo's rules forbid: a single cell, one boot.
 
+## All four arms (screen closed 01:05)
+
+| arm | 1 | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| `screen-ctl` | 74.9 | 82.4 | 102.2 | 101.3 | 103.9 |
+| `screen-moe1` | +0.7% | +1.6% | -1.3% | -2.5% | +0.3% |
+| `screen-idx0` | -0.4% | -1.3% | +0.7% | +1.4% | +9.9% |
+| `screen-idx4096` | +1.3% | +2.0% | +0.5% | +3.6% | +4.2% |
+
+`TF_GLM_INDEX_SPLIT=4096` is the only arm positive at every level, and it grows with concurrency, which is the shape a
+prefill change has rather than the shape noise has. `TF_GLM_MOE_DIRECT=1` is inside the spread at every level. Two ABBAs
+at level 8 are queued in series to confirm the two index cells: `~/work/queue-abba-idx8.sh` then
+`~/work/queue-abba-idx4096.sh`, the second waiting on the first's done marker so they never share the box.
+
 The historical note stays true:, which is inside the spread this serve shows
 between boots at the high levels, so nothing is promoted on it yet and its four and six cells get an ABBA rerun first.
 `idx0` tracks the control at the three levels it has.
