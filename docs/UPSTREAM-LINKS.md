@@ -238,3 +238,25 @@ That is a follow-up PR in exactly upstream's shape: one behaviour, two lines of 
 already have. Branch `keep-seqs-resume-fix` is cut from `8d3f8f923` in `work/resume-fix`, eight insertions and one
 deletion, and its gate runs on a copy of upstream main (`~/pr/rf` on the gate host) rather than on the reseated tree,
 because `test-glm-keep-seqs-host` exists only in the newer tree.
+
+## The follow-up branch, three runs deep (2026-11-25)
+
+`keep-seqs-resume-fix` on the fork: `261d4831f` then `99c6ed56e`, cut from upstream `8d3f8f923`, one file, gate green
+(`zig fmt --check` clean, `zig build test-glm-keep-seqs-host` exit 0 on `~/pr/rf`).
+
+The TP=3 runs and what each taught:
+
+| run | image | ranks 1 and 2 | rank 0 |
+|---|---|---|---|
+| 1 | `prkeep4` (`261d4831f`) | `FAIL StateKept` | waits in the fence |
+| 2 | `prkeep4` | `FAIL TestFailed` | waits in the fence |
+
+Run 1's cause: a keep on every rank takes the same id everywhere and the fence's own `keepAs` refuses it. Fixed by keeping
+on rank 0 only.
+
+Run 2's cause: keeping on rank 0 only left the followers asserting an id their own callback never set, so they failed
+their own check and exited, and rank 0 waited again. Fixed by having the followers read the id from their snapshot map,
+which is where the fence put it.
+
+Both fixes are in `99c6ed56e` and `glm53-zig:prkeep5` is building from it. The lesson is the same twice: a ranked test
+cannot assert per-rank state that only one rank is meant to hold.
