@@ -93,3 +93,15 @@ NOT exercise a prompt-cache RESUME onto a kept slot, so the ask is a new case ra
 What the case has to show: a request whose prompt reuses a state a released slot kept, resumed rather than recomputed,
 with the same tokens a fresh run gives, and the settings, head and checkpoint revision named. That is a GPU case on
 spark1-3, so it is queued behind the running screen rather than beside it.
+
+Design, from reading the existing check (`zig/tests/cuda/glm_keep_seqs_tests.zig`):
+
+- its `Run.request` already drives bind, begin, prefill and the draft loop, and its `Trace` already records each step's
+  token, bf16 logits row and MTP drafts;
+- the new case adds the middle three steps around that: run a prompt on slot `s` and record it; release `s` and confirm
+  the sequence is kept (`e.keepsSequence(s)`); then run a prompt that RESUME from what `s` kept, and compare its `Trace`
+  against a fresh run of the same ids on a clean slot, on tokens, logits rows and drafts;
+- the planted control is the same shape the existing check uses: poison the kept arena and confirm the comparison fails,
+  so a passing case cannot pass vacuously;
+- the receipt names the image tag, the head sha, the checkpoint revision and the launch settings, which is what the
+  maintainer asked for.
