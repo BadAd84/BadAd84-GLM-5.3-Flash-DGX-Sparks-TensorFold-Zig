@@ -45,3 +45,21 @@ LFM3 - or are outside CUDA (`XPU_CHUNK`, `XPU_CHUNK_SOLO`, scope `.xpu`), and a 
 
 One boot an arm, the control in the same directory, the same five levels and the same env as `dev.env`, digests
 compared: a candidate that changes replies is rejected before its numbers are read, as `TF_GLM_OVN_KVB8` was.
+
+## The screen, three of four arms (2026-11-25, image `glm53-zig:reseat-ports`)
+
+Decode aggregate, tokens a second, a fresh boot a level, `SPLOTS=4 CTX=1048576 KNOBS=dev`:
+
+| arm | 1 | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| `screen-ctl` | 74.9 | 82.4 | 102.2 | 101.3 | 103.9 |
+| `screen-moe1` (`TF_GLM_MOE_DIRECT=1`) | 75.4 | 83.7 | 100.9 | 98.7 | 104.2 |
+| `screen-idx0` (`TF_GLM_INDEX_SPLIT=0`) | 74.7 | 81.3 | 102.9 | - | - |
+
+`moe1` reads +0.7, +1.6, -1.3, -2.6 and +0.3 percent against the control, which is inside the spread this serve shows
+between boots at the high levels, so nothing is promoted on it yet and its four and six cells get an ABBA rerun first.
+`idx0` tracks the control at the three levels it has.
+
+Note the control is lower than the dev numbers measured earlier on `ea37` (74.9 against 85.0 at one client). This image
+carries the ports and the restored kernel surface, so the screen's comparison is against its own control, never against
+that older table.
