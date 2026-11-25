@@ -214,3 +214,20 @@ What that means:
 The next step is the same `selectSplit`-style argument comparison for `tf_glm_select_rows`: its signature in
 `glm_glue_index.cuh` against the arguments `cuda_index.zig:149` builds. That is a bounded read, and it is the last thing
 between the clean-room kernel and a real verdict.
+
+## The real defect: patch 0012's `pools` launcher passed nine arguments to a six-argument kernel
+
+`tf_glm_select_rows` in `glm_glue_index.cuh:212` takes `(scores, out, np, pos, k, pool)`. The launcher in
+`cuda_index.zig` passed `(scores_ptr, out, np, at, topk, t.cap, t.target, path, pool)`: three arguments too many, left over
+from an older `pools`-style signature. `cuLaunchKernel` rejects that with `CUDA_ERROR_INVALID_VALUE`, which is what every
+hardware run reported, and it means `TF_GLM_OVN_DECODE_INDEX`'s comparison could never have run on this tree with either
+kernel.
+
+Fixed: the launcher now passes the kernel's six arguments and discards `path` with a comment. `t = tile(np)` goes with it.
+
+This is the same class the re-seat produced three times already (`absorbQ`'s eleven arguments, the dropped includes, the
+missing build entry): a call site speaking an older API, invisible to every gate that does not run it. The clean-room
+kernel was never at fault, and both of my earlier diagnoses of it were wrong for that reason.
+
+`glm53-zig:cleanroom3` builds with the launcher fix and the clean-room kernel together; the run after it is the first one
+that can reach the split at all.
