@@ -140,10 +140,32 @@ built from that head and it ran the check twice:
   minutes with its container alive, which is a hang rather than a slow case. Stopped.
 
 The second run reproduced it on a third attempt (08:17, stopped): rank 0 printed the same two controls and then the
-container sat at 199 percent CPU and the GPU at 96 percent, so it is SPINNING rather than waiting on a lock. A wait would
-show near-zero CPU. That is a real defect in what the resume case asks the engine to do, not a deadlock, and the next
-place to read is `snapshots.keep` and the `from` resume path in `prefill`, which are the two things the case combines
-that no other case does.
+container sat at 199 percent CPU and the GPU at 96 percent, so it SPINS rather than waits. A wait would show near-zero
+CPU.
+
+Found, and it is an engine defect the case provoked rather than a fault in the case. `cuda_snapshots.zig:139` `gate`:
+
+```zig
+while (true) {
+    const word: u64 = if (!leader) 0 else if (dropped < e.dropped.items.len) 2 * e.dropped.items[dropped] + 1 else 2 * e.announce;
+    const shared = try e.shared(@floatFromInt(word));
+    ...
+    if (got & 1 != 0) { if (leader) dropped += 1 else e.dropState(got / 2); continue; }
+    if (leader) { e.dropped.clearRetainingCapacity(); e.announce = 0; } else if (got > 0) try e.keepAs(got / 2);
+    return;
+}
+```
+
+A follower that reads an ODD word drops that state and loops, and the leader advances its own cursor, so the two sides
+only converge while the leader still has a dropped id or an announce to send. When the leader's list is empty and
+`announce` is 0 it sends the even word 0, the follower takes it and returns, and the LEADER keeps looping on a word that
+no longer changes. The check's new case reaches this because it keeps a state on rank 0 alone, so the ranks disagree
+about what is pending.
+
+So the resume case is blocked on an engine fix: `gate` must return when the leader has nothing left to send AND the
+followers have caught up, rather than treating the absence of work as a reason to keep asking. That is a one-condition
+change on the leader's side, but it changes rank agreement in the KEEP_SEQS path, so it needs a run at TP=3 to confirm
+and belongs in its own commit rather than folded into the test.
 
 The ssh key also failed for several minutes during that window and recovered on its own, which is the transient agent
 state the fleet rules describe rather than the card.
