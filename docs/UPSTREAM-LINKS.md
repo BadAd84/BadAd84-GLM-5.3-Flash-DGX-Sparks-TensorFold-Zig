@@ -186,3 +186,24 @@ state the fleet rules describe rather than the card.
 Next pass, in order: bring the key back (owner present), then rerun the check with the driver's output unbuffered to see
 the last line before the hang, then fix the case and rerun. The likely place is the case's pool sizing
 (`r.x.snapshots(e.stateBytes(resume_at))`) or the resumed request waiting on a state the first request still holds.
+
+## The failure chain, read off the saved rank logs (2026-11-25, run 5)
+
+The driver's own limit bounded the run (`rc 124 1 1`, rank 0 with zero PASS and zero FAIL lines), and its saved logs name
+the chain:
+
+```
+r0: RESULT control kv8=false, 3000-token prompt: differs from the fresh run at step 0, as planted   (then silence)
+r1: FAIL glm-keep-seqs-check: StateKept
+r2: FAIL glm-keep-seqs-check: StateKept
+```
+
+So it is not a spin in the engine: ranks 1 and 2 EXIT with `StateKept` while rank 0 keeps running, and rank 0's 199
+percent CPU is it waiting in the rank fence for partners that are already gone. The earlier "engine spins" reading was
+wrong for the second time, and the honest description is a follower exits and the leader waits.
+
+`StateKept` is `snapshots.keepAs` refusing an id already in the map (`cuda_snapshots.zig:44`). The case keeps a state on
+rank 0 through `keepState`; the other ranks then reach `keepAs` for the SAME id and are refused. So the case is asking
+for something the ranked protocol does not allow: a state kept on one rank only. The fix is in the case (keep through
+the ranked path, so all ranks agree) or the check needs a single-rank form for this case, and that is the decision the
+next pass takes.
