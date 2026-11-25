@@ -24,7 +24,7 @@ The next candidates are not equals, and this is what the series looks like when 
 | patch | shape | note |
 |---|---|---|
 | `0001` | one test file | a latent sizing defect; the clearest candidate |
-| `0002` | three test files plus `server/root.zig` | mostly tests, but the `root.zig` hunk makes it a core and server change, so it needs its own one-behaviour argument |
+| `0002` | three test files plus one import line in `server/root.zig` | test-only in substance: the `root.zig` change is `_ = @import("health_quiesce_test.zig")`, so it registers a test rather than changing behaviour |
 | `0003` | host prompt-bench step | a tool addition, likely acceptable on its own |
 | `0005`, `0019`, `0020`, `0022` | knobs with kernels | each needs the five settings places, a kernel-contract entry and a GPU receipt |
 | `0032` | already up as pull request 4809 | in review |
