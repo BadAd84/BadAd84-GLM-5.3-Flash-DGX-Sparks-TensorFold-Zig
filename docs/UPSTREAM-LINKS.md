@@ -15,21 +15,6 @@ whether it is planned, blocked (with why) or not upstreamable (with why).
 |---|---|---|---|---|---|
 | `0001` | [PATCH] glm tests: the shared-window check sizes its rows from the eng | - | - | not opened | - |
 
-## Candidate order for the upstream queue (assessed 2026-11-24)
-
-`0001` is ready: one file, one behaviour, a latent defect, branch `lanes-test-window-rows` at `d16df9218`, fmt-green.
-
-The next candidates are not equals, and this is what the series looks like when read for upstream shape:
-
-| patch | shape | note |
-|---|---|---|
-| `0001` | one test file | a latent sizing defect; the clearest candidate |
-| `0002` | three test files plus one import line in `server/root.zig` | test-only in substance: the `root.zig` change is `_ = @import("health_quiesce_test.zig")`, so it registers a test rather than changing behaviour |
-| `0003` | host prompt-bench step | a tool addition, likely acceptable on its own |
-| `0005`, `0019`, `0020`, `0022` | knobs with kernels | each needs the five settings places, a kernel-contract entry and a GPU receipt |
-| `0032` | already up as pull request 4809 | in review |
-
-So after `0001` the queue is a choice between `0003` (a tool, low risk), `0002` (mostly tests but touches `root.zig`), and taking a kernel lever through the full recipe. That choice is the owner's, and it is worth making before a branch is cut for the wrong one.
 | `0002` | [PATCH] core and server: the disk grid on the I/O worker, and a quiesc | - | - | not opened | - |
 | `0003` | [PATCH] host: the prompt-bench step, so request preparation can be tim | - | - | not opened | - |
 | `0004` | [PATCH] core: the TF_GLM_OVN knob registry | - | - | not opened | - |
@@ -54,7 +39,7 @@ So after `0001` the queue is a choice between `0003` (a tool, low risk), `0002` 
 | `0029` | [PATCH] glm cuda: FP8 latent keys fetched a tile ahead, in 8-byte load | - | - | not opened | - |
 | `0030` | [PATCH] server: render and tokenize a request once, and TF_GLM_OVN_HOS | - | - | not opened | - |
 | `0031` | [PATCH] glm exl3: TF_GLM_OVN_X3_NC, X3_XROW and X3_FUSEDOWN, productio | - | - | not opened | - |
-| `0032` | [PATCH] glm cuda: TF_GLM_OVN_KEEP_SEQS, a released stream's sequence s | `#4809` | `keep-seqs` | open, renamed `TF_GLM_KEEP_SEQS` upstream | not landed |
+| `0032` | [PATCH] glm cuda: TF_GLM_OVN_KEEP_SEQS, a released stream's sequence s | `#4809` | `keep-seqs` | MERGED as `TF_GLM_KEEP_SEQS`, upstream `ea38fdcf8` | RETIRED: upstream absorbed it; the test's two fixes are `#5122` |
 | `0033` | [PATCH] server: TF_GLM_OVN_OFF_EFFORT_LINE, a thinking-off GLM-5.3 pro | - | - | not opened | - |
 | `0034` | [PATCH] glm lanes: TF_GLM_OVN_NO_COPY, a DFlash2 drafter's windows wit | - | - | not opened | - |
 | `0035` | [PATCH] glm cuda tests: glm-mm-ovn, the matmul launch variants against | - | - | not opened | - |
