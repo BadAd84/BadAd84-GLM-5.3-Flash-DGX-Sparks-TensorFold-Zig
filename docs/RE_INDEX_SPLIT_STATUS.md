@@ -166,3 +166,24 @@ difference.
 
 Run 1 was caught by level 3 only. The clean-room procedure in `AGENTS.md` should say so: a pair that stops at the emulator
 and the compile has not verified the kernel, and this file is the evidence.
+
+## Run 2: the PDL fix did not help, and it was a guess (2026-11-25)
+
+`glm-index-ovn-check` on `glm53-zig:cleanroom2` (with `glm_pdl::enter()` added) fails the same way:
+
+```
+[check] rank 0 wrote no unique id in 120 s:  split counts: read 20 bytes twice  error: cuLaunchKernel: CUDA_ERROR_INVALID_VALUE
+FAIL glm-index-ovn-check: CudaFailed
+```
+
+So the PDL call was NOT the cause. I called the flagged original's `glm_pdl::enter()` a missing piece of the contract and it
+is the right thing to have (the launcher takes the PDL path and a PDL kernel must enter), but it is not what the driver is
+rejecting.
+
+Also worth reading correctly: "split counts: read 20 bytes twice" is the check's own comparison reporting a ZERO-LENGTH
+read on both sides, not a diagnosis from the driver. The driver's message is the `cuLaunchKernel` line, and it comes from
+whichever launch ran first, which the log does not name.
+
+Recorded as still unread. The next step has to name the failing launch rather than add a third guess: the check launches
+`selectTokens` twice (old and new) before the comparison, and the invalid value could be the split launch inside the
+`new` arm, a `cuMemsetD32Async` before it, or the check's own buffer sizing.
