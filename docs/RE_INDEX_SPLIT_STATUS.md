@@ -26,3 +26,20 @@ five launches from both the emulator and the model for one failing case (`case=1
 `TF_GLM_OVN_DECODE_INDEX` has never run on our tree: patch 0012's include was dropped in the re-seat, so the kernel the
 lever loads was compiled by nothing until 2026-11-24. The clean-room file is what makes the lever exist at all, which is
 why the correctness bar is the oracle's, not "it compiles".
+
+## The dump narrowed it (2026-11-25, `SPLIT_DUMP_CASE=119`)
+
+The emulator's output for the failing case is well-formed but NOT in ascending pool order:
+
+```
+ref: 4 65 312 333 356 385 443 543 ...
+got: 385 312 2564 2073 2959 3094 1189 839 ...
+```
+
+and `EMUTOK` holds clean consecutive 4-tuples (`6144 6145 6146 6147`, `5208 5209 5210 5211`, ...), so the picked pools
+and their tokens are right and the ORDER is not. The specification's output contract says "output order is pool order",
+which is what ref and the model produce.
+
+So the last defect is in the emitter's slot arithmetic, not in the counting: a pool's slot must equal the number of picked
+pools with a lower pool index, and the emulator is placing picks by a running count that is not monotonic in pool order.
+That is one function and one invariant, and it is the last thing between this file and a pass against the oracle.
