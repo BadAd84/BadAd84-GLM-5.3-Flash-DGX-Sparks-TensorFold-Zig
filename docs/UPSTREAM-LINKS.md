@@ -227,3 +227,14 @@ Three consequences:
   rank collides (`StateKept`) and that rank 0 then waits in the fence while its followers have exited.
 - `docs/UPSTREAM-LINKS.md`'s row for `0032` changes from "open as #4809" to merged, with `ea38fdcf8` as the commit that
   absorbed it, which is the retirement record the file asks for.
+
+## What upstream has, and what it still needs (2026-11-25)
+
+Upstream main `8d3f8f923` carries the resume case as `9423ecf9c`, which is its FIRST version: `grep` finds no `spent`
+field and no rank guard, so it is the version that failed at TP=3 with `StateKept` on ranks 1 and 2 and rank 0 waiting in
+the fence. Our two fixes (`022992f21` the spent guard, `22915d1af` the rank-0 keep) are not in it.
+
+That is a follow-up PR in exactly upstream's shape: one behaviour, two lines of logic and a comment, on a test file they
+already have. Branch `keep-seqs-resume-fix` is cut from `8d3f8f923` in `work/resume-fix`, eight insertions and one
+deletion, and its gate runs on a copy of upstream main (`~/pr/rf` on the gate host) rather than on the reseated tree,
+because `test-glm-keep-seqs-host` exists only in the newer tree.
